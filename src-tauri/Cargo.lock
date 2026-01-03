@@ -2377,6 +2377,7 @@ version = "0.1.0"
 dependencies = [
  "cocoa",
  "objc",
+ "raw-window-handle",
  "serde",
  "serde_json",
  "tauri",

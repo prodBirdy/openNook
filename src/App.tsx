@@ -11,6 +11,7 @@ function ReminderManager() {
 function App() {
   return (
     <NotificationProvider>
+
       <DynamicIslandAlert />
       <ReminderManager />
     </NotificationProvider>

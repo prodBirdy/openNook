@@ -1,29 +1,21 @@
 .dynamic-island-alert {
     position: fixed;
     top: 0;
-    left: 8px;
-    right: 8px;
+    left: 0;
+    right: 0;
     z-index: 9999;
-
-    /* Pill shape - adapts to window width */
+    /* Full width, no top border-radius to connect to notch */
     height: auto;
     padding: 10px 16px;
-    border-radius: 22px;
+    border-radius: 0 0 12px 12px;
+    border: transparent;
+    box-shadow: none;
 
-    /* Glassmorphism - darker for better contrast */
-    background: rgba(0, 0, 0, 0.92);
-    backdrop-filter: blur(40px) saturate(180%);
-    -webkit-backdrop-filter: blur(40px) saturate(180%);
-
-    /* Subtle border for depth */
-    border: 1px solid rgba(255, 255, 255, 0.1);
-    box-shadow:
-        0 4px 24px rgba(0, 0, 0, 0.4),
-        0 0 0 0.5px rgba(0, 0, 0, 0.9) inset;
-
+    background-color: rgba(0, 0, 0, 1);
     /* Content layout */
     display: flex;
     align-items: center;
+    justify-content: center;
     gap: 10px;
 
     /* Typography - SF Pro style */
@@ -39,9 +31,7 @@
     -webkit-user-select: none;
 }
 
-.dynamic-island-alert:hover {
-    background: rgba(0, 0, 0, 0.8);
-}
+
 
 .dynamic-island-alert__icon {
     font-size: 20px;
@@ -54,15 +44,4 @@
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
-}
-
-/* Light mode adaptation */
-@media (prefers-color-scheme: light) {
-    .dynamic-island-alert {
-        background: rgba(30, 30, 30, 0.85);
-    }
-
-    .dynamic-island-alert:hover {
-        background: rgba(30, 30, 30, 0.9);
-    }
 }

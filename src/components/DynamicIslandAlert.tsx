@@ -35,17 +35,17 @@ export function DynamicIslandAlert() {
                     initial={{
                         opacity: 0,
                         scale: 0.8,
-                        y: -30,
+                        y: -20,
                     }}
                     animate={{
                         opacity: 1,
                         scale: 1,
-                        y: 30, // Move down to be visible below the notch
+                        y: -1, // Just slightly below the notch edge
                     }}
                     exit={{
                         opacity: 0,
                         scale: 0.85,
-                        y: -20,
+                        y: -15,
                     }}
                     transition={{
                         type: 'spring',

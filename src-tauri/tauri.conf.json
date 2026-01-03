@@ -15,8 +15,8 @@
       {
         "title": "overdone",
         "label": "main",
-        "width": 220,
-        "height": 60,
+        "width": 250,
+        "height": 40,
         "x": 0,
         "y": 0,
         "decorations": false,

@@ -8,6 +8,8 @@ pub struct NotchInfo {
     pub has_notch: bool,
     /// Height of the notch/safe area inset from the top (typically 30-40px on notched MacBooks)
     pub notch_height: f64,
+    /// Width of the notch (the black area at the top center)
+    pub notch_width: f64,
     /// Full screen width
     pub screen_width: f64,
     /// Full screen height
@@ -16,9 +18,10 @@ pub struct NotchInfo {
     pub visible_height: f64,
 }
 
-/// Get screen dimensions on macOS
+/// Get screen dimensions on macOS including notch width
+/// Returns (screen_width, screen_height, notch_height, notch_width)
 #[cfg(target_os = "macos")]
-fn get_screen_info() -> (f64, f64, f64) {
+fn get_screen_info() -> (f64, f64, f64, f64) {
     use cocoa::foundation::NSRect;
     use objc::runtime::Object;
     use objc::*;
@@ -27,7 +30,7 @@ fn get_screen_info() -> (f64, f64, f64) {
         let main_screen: *mut Object = msg_send![class!(NSScreen), mainScreen];
 
         if main_screen.is_null() {
-            return (0.0, 0.0, 0.0);
+            return (0.0, 0.0, 0.0, 0.0);
         }
 
         // Get screen frame
@@ -46,25 +49,40 @@ fn get_screen_info() -> (f64, f64, f64) {
         }
 
         let insets: NSEdgeInsets = msg_send![main_screen, safeAreaInsets];
-        (screen_width, screen_height, insets.top)
+        let notch_height = insets.top;
+
+        // Calculate notch width
+        // The notch width on MacBooks is typically around 180-200px
+        // The Dynamic Island style expands beyond just the notch
+        // We use a wider calculation to match the expanded Island look
+        let notch_width = if notch_height > 0.0 {
+            // Approximate notch width based on screen width
+            // We use a slightly larger value for the Dynamic Island effect
+            (screen_width * 0.121).max(200.0).min(260.0)
+        } else {
+            0.0
+        };
+
+        (screen_width, screen_height, notch_height, notch_width)
     }
 }
 
 #[cfg(not(target_os = "macos"))]
-fn get_screen_info() -> (f64, f64, f64) {
-    (1920.0, 1080.0, 0.0)
+fn get_screen_info() -> (f64, f64, f64, f64) {
+    (1920.0, 1080.0, 0.0, 0.0)
 }
 
 /// Get notch information from the main screen using NSScreen.safeAreaInsets (macOS 12.0+)
 #[tauri::command]
 fn get_notch_info() -> NotchInfo {
-    let (screen_width, screen_height, notch_height) = get_screen_info();
+    let (screen_width, screen_height, notch_height, notch_width) = get_screen_info();
     let has_notch = notch_height > 0.0;
     let visible_height = screen_height - notch_height;
 
     NotchInfo {
         has_notch,
         notch_height,
+        notch_width,
         screen_width,
         screen_height,
         visible_height,
@@ -74,16 +92,17 @@ fn get_notch_info() -> NotchInfo {
 /// Position the window at the notch location (centered at top of screen)
 #[tauri::command]
 fn position_at_notch(window: tauri::Window) -> Result<(), String> {
-    let (screen_width, _screen_height, _notch_height) = get_screen_info();
+    let (screen_width, _screen_height, _notch_height, notch_width) = get_screen_info();
 
-    // Get current window size
-    let window_size = window.outer_size().map_err(|e| e.to_string())?;
-    let scale_factor = window.scale_factor().map_err(|e| e.to_string())?;
-
-    let window_width = window_size.width as f64 / scale_factor;
+    // Use notch width if available, otherwise fall back to current window width
+    let target_width = if notch_width > 0.0 { notch_width } else {
+        let window_size = window.outer_size().map_err(|e| e.to_string())?;
+        let scale_factor = window.scale_factor().map_err(|e| e.to_string())?;
+        window_size.width as f64 / scale_factor
+    };
 
     // Center horizontally, position at very top (y=0)
-    let x = (screen_width - window_width) / 2.0;
+    let x = (screen_width - target_width) / 2.0;
     let y = 0.0;
 
     window
@@ -94,22 +113,19 @@ fn position_at_notch(window: tauri::Window) -> Result<(), String> {
 }
 
 /// Resize and position window to fit the notch area
-/// The window is positioned so it starts behind the notch, allowing the notification to "grow out"
+/// The window is positioned at y=0 (top of screen) to overlap with the notch
 #[tauri::command]
 fn fit_to_notch(window: tauri::Window, width: f64, height: f64) -> Result<(), String> {
-    let (screen_width, _screen_height, notch_height) = get_screen_info();
+    let (screen_width, _screen_height, _notch_height, _notch_width) = get_screen_info();
 
     // Resize the window
     window
         .set_size(LogicalSize::new(width, height))
         .map_err(|e| e.to_string())?;
 
-    // Center horizontally, position so the top of the window is behind the notch
-    // This makes the notification appear to "grow out" of the notch
+    // Center horizontally, position at very top (y=0) to overlap with notch
     let x = (screen_width - width) / 2.0;
-    // Position the window so some of it is behind the notch (negative y)
-    // We want the "resting" state to be mostly hidden behind the notch
-    let y = -(notch_height.max(38.0) - 8.0); // Keep ~8px visible as the "pill"
+    let y = 0.0;
 
     window
         .set_position(LogicalPosition::new(x, y))
@@ -139,20 +155,59 @@ pub fn run() {
             set_click_through
         ])
         .setup(|app| {
-            // Auto-position window behind notch on startup
+            // Auto-position and resize window to match notch on startup
             if let Some(window) = app.get_webview_window("main") {
-                let (screen_width, _screen_height, notch_height) = get_screen_info();
+                let (screen_width, _screen_height, notch_height, notch_width) = get_screen_info();
 
-                if let Ok(window_size) = window.outer_size() {
-                    let scale_factor = window.scale_factor().unwrap_or(1.0);
-                    let window_width = window_size.width as f64 / scale_factor;
+                // Use notch width if available, otherwise use configured window width
+                let window_width = if notch_width > 0.0 {
+                    notch_width
+                } else {
+                    window.outer_size().map(|s| {
+                        let scale = window.scale_factor().unwrap_or(1.0);
+                        s.width as f64 / scale
+                    }).unwrap_or(250.0)
+                };
 
-                    // Center horizontally
-                    let x = (screen_width - window_width) / 2.0;
-                    // Position behind the notch (negative y)
-                    let y = -(notch_height.max(38.0) - 8.0);
-                    let _ = window.set_position(LogicalPosition::new(x, y));
+                // Use notch height for window height (plus a bit for the notification to grow into)
+                let window_height = notch_height.max(38.0) + 20.0;
+
+                // Resize window to match notch dimensions
+                let _ = window.set_size(LogicalSize::new(window_width, window_height));
+
+                // Set window level above menu bar on macOS
+                // This allows the window to be positioned over the notch
+                #[cfg(target_os = "macos")]
+                {
+                    use objc::runtime::Object;
+                    use objc::*;
+                    use raw_window_handle::HasWindowHandle;
+
+                    if let Ok(handle) = window.window_handle() {
+                        if let raw_window_handle::RawWindowHandle::AppKit(appkit_handle) = handle.as_raw() {
+                            unsafe {
+                                let ns_view = appkit_handle.ns_view.as_ptr() as *mut Object;
+                                let ns_win: *mut Object = msg_send![ns_view, window];
+
+                                // NSStatusWindowLevel = 25, which is above the menu bar (24)
+                                // This allows positioning in the notch area
+                                let _: () = msg_send![ns_win, setLevel: 25_i64];
+
+                                // Also set collection behavior to allow appearing on all spaces
+                                // NSWindowCollectionBehaviorCanJoinAllSpaces = 1 << 0
+                                // NSWindowCollectionBehaviorStationary = 1 << 4
+                                let _: () = msg_send![ns_win, setCollectionBehavior: 17_u64];
+                            }
+                        }
+                    }
                 }
+
+                // Center horizontally, position at top (now can go negative)
+                let x = (screen_width - window_width) / 2.0;
+                // Position window so it overlaps with the notch
+                // Negative y moves it up into the notch area
+                let y = (notch_height.max(38.0) - 10.0);
+                let _ = window.set_position(LogicalPosition::new(x, y));
 
                 // Enable click-through by default (no notification showing)
                 let _ = window.set_ignore_cursor_events(true);

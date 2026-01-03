@@ -9,6 +9,8 @@ export interface NotchInfo {
     has_notch: boolean;
     /** Height of the notch/safe area inset from the top (typically 30-40px on notched MacBooks) */
     notch_height: number;
+    /** Width of the notch (the black area at the top center) */
+    notch_width: number;
     /** Full screen width in points */
     screen_width: number;
     /** Full screen height in points */
@@ -30,6 +32,7 @@ export async function getNotchInfo(): Promise<NotchInfo> {
  */
 export async function positionAtNotch(): Promise<void> {
     return invoke('position_at_notch');
+
 }
 
 /**
