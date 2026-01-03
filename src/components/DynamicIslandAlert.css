@@ -1,0 +1,68 @@
+.dynamic-island-alert {
+    position: fixed;
+    top: 0;
+    left: 8px;
+    right: 8px;
+    z-index: 9999;
+
+    /* Pill shape - adapts to window width */
+    height: auto;
+    padding: 10px 16px;
+    border-radius: 22px;
+
+    /* Glassmorphism - darker for better contrast */
+    background: rgba(0, 0, 0, 0.92);
+    backdrop-filter: blur(40px) saturate(180%);
+    -webkit-backdrop-filter: blur(40px) saturate(180%);
+
+    /* Subtle border for depth */
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    box-shadow:
+        0 4px 24px rgba(0, 0, 0, 0.4),
+        0 0 0 0.5px rgba(0, 0, 0, 0.9) inset;
+
+    /* Content layout */
+    display: flex;
+    align-items: center;
+    gap: 10px;
+
+    /* Typography - SF Pro style */
+    font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'SF Pro Text', system-ui, sans-serif;
+    font-size: 13px;
+    font-weight: 500;
+    color: rgba(255, 255, 255, 0.95);
+    letter-spacing: -0.01em;
+
+    /* Interaction */
+    cursor: pointer;
+    user-select: none;
+    -webkit-user-select: none;
+}
+
+.dynamic-island-alert:hover {
+    background: rgba(0, 0, 0, 0.8);
+}
+
+.dynamic-island-alert__icon {
+    font-size: 20px;
+    line-height: 1;
+    flex-shrink: 0;
+}
+
+.dynamic-island-alert__message {
+    flex: 1;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+/* Light mode adaptation */
+@media (prefers-color-scheme: light) {
+    .dynamic-island-alert {
+        background: rgba(30, 30, 30, 0.85);
+    }
+
+    .dynamic-island-alert:hover {
+        background: rgba(30, 30, 30, 0.9);
+    }
+}
