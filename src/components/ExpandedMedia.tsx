@@ -1,7 +1,7 @@
 import { memo, useMemo, useState, useEffect } from 'react';
 import { motion } from 'motion/react';
-import { invoke } from '@tauri-apps/api/core';
 import { IconPlayerSkipBackFilled, IconPlayerPlayFilled, IconPlayerPauseFilled, IconPlayerSkipForwardFilled } from '@tabler/icons-react';
+import { getDominantColor } from '../utils/imageUtils';
 import './DynamicIsland.css';
 
 interface NowPlayingData {
@@ -40,6 +40,8 @@ export const ExpandedMedia = memo(function ExpandedMedia({
 
     const [isSeizing, setIsSeizing] = useState(false);
     const [localProgress, setLocalProgress] = useState(0);
+    const [glowColor, setGlowColor] = useState<string | null>(null);
+    const [glowOpacity, setGlowOpacity] = useState(0);
 
     const progress = useMemo(() => {
         if (!nowPlaying.duration || !nowPlaying.elapsed_time) return 0;
@@ -52,6 +54,24 @@ export const ExpandedMedia = memo(function ExpandedMedia({
             setLocalProgress(progress);
         }
     }, [progress, isSeizing]);
+
+    // Extract dominant color for glow
+    useEffect(() => {
+        if (nowPlaying.artwork_base64) {
+            const src = `data:image/png;base64,${nowPlaying.artwork_base64}`;
+            getDominantColor(src).then(rgb => {
+                if (rgb) {
+                    setGlowColor(`rgb(${rgb[0]}, ${rgb[1]}, ${rgb[2]})`);
+                    setGlowOpacity(1);
+                } else {
+                    setGlowOpacity(0);
+                }
+            });
+        } else {
+            setGlowOpacity(0);
+            setTimeout(() => setGlowColor(null), 300); // Clear after fade out
+        }
+    }, [nowPlaying.artwork_base64]);
 
     const handleSeek = async (e: React.PointerEvent<HTMLDivElement>) => {
         if (!nowPlaying.duration) {
@@ -86,7 +106,14 @@ export const ExpandedMedia = memo(function ExpandedMedia({
     return (
         <>
             <div className="media-top-row">
-                <div className="expanded-album-cover">
+                <div
+                    className="expanded-album-cover"
+                    style={{
+                        boxShadow: glowColor ? `0 8px 32px -4px ${glowColor}` : 'none',
+                        transition: 'box-shadow 0.5s ease',
+                        opacity: glowOpacity ? 1 : 1, // Keep element visible, just toggle shadow
+                    }}
+                >
                     {nowPlaying.artwork_base64 ? (
                         <img
                             src={`data:image/png;base64,${nowPlaying.artwork_base64}`}
@@ -129,7 +156,10 @@ export const ExpandedMedia = memo(function ExpandedMedia({
                             className="progress-bar-fill"
                             initial={{ width: 0 }}
                             animate={{ width: `${localProgress}%` }}
-                            transition={{ duration: 0 }}
+                            transition={{
+                                type: 'tween',
+                                duration: 0.3,
+                            }}
                         />
                     </div>
                     <div className="progress-times" style={{ marginTop: '6px' }}>

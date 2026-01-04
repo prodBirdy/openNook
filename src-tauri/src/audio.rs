@@ -15,9 +15,14 @@ static TRACK_CACHE: std::sync::OnceLock<
     std::sync::Mutex<(Option<String>, Option<String>, Option<String>)>,
 > = std::sync::OnceLock::new();
 
+/// Cache for the last played track to display when paused/idle
+static LAST_PLAYED: std::sync::OnceLock<std::sync::Mutex<Option<NowPlayingData>>> =
+    std::sync::OnceLock::new();
+
 pub fn init_audio_state() {
     let _ = AUDIO_LEVELS.set(std::sync::Mutex::new(vec![0.15; 6]));
     let _ = TRACK_CACHE.set(std::sync::Mutex::new((None, None, None)));
+    let _ = LAST_PLAYED.set(std::sync::Mutex::new(None));
 }
 
 fn get_audio_levels_internal() -> Vec<f64> {
@@ -57,6 +62,29 @@ fn is_track_changed(title: &Option<String>, artist: &Option<String>) -> bool {
     cached.0 != *title || cached.1 != *artist
 }
 
+fn save_last_played(data: &NowPlayingData) {
+    if let Some(m) = LAST_PLAYED.get() {
+        *m.lock().unwrap() = Some(data.clone());
+    }
+}
+
+fn get_last_played_or_default(levels: Vec<f64>) -> NowPlayingData {
+    if let Some(m) = LAST_PLAYED.get() {
+        if let Ok(guard) = m.lock() {
+            if let Some(last) = &*guard {
+                let mut data = last.clone();
+                data.is_playing = false;
+                data.audio_levels = Some(levels);
+                return data;
+            }
+        }
+    }
+    NowPlayingData {
+        audio_levels: Some(levels),
+        ..Default::default()
+    }
+}
+
 /// Get currently playing music information
 /// Tries multiple sources: Spotify, Music.app, Safari
 #[tauri::command]
@@ -92,10 +120,7 @@ pub async fn get_now_playing() -> NowPlayingData {
         // If no relevant apps are running, return early with no overhead
         if !spotify_running && !music_running && !safari_running {
             IS_PLAYING.store(false, Ordering::Relaxed);
-            return NowPlayingData {
-                audio_levels: Some(get_audio_levels()),
-                ..Default::default()
-            };
+            return get_last_played_or_default(get_audio_levels());
         }
 
         // Default to not playing before check
@@ -216,7 +241,7 @@ pub async fn get_now_playing() -> NowPlayingData {
                     set_cached_track(title.clone(), artist.clone(), artwork.clone());
                 }
 
-                return NowPlayingData {
+                let data = NowPlayingData {
                     title: if *app_id == "safari" {
                         // Clean YouTube title
                         title.map(|t| t.trim_end_matches(" - YouTube").to_string())
@@ -241,13 +266,13 @@ pub async fn get_now_playing() -> NowPlayingData {
                         _ => None,
                     },
                 };
+
+                save_last_played(&data);
+                return data;
             }
         }
 
-        NowPlayingData {
-            audio_levels: Some(get_audio_levels()),
-            ..Default::default()
-        }
+        get_last_played_or_default(get_audio_levels())
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -262,42 +287,69 @@ fn get_music_app_artwork() -> Option<String> {
     use std::fs;
     use std::process::Command;
 
-    let temp_path = "/tmp/overdone_artwork.png";
+    // Use a unique path to avoid conflicts
+    let temp_path = "/tmp/overdone_music_art_v3.data";
+    // Ensure cleanup
+    let _ = fs::remove_file(temp_path);
 
     // AppleScript to extract artwork to a file
+    // Tries 'data' first, then 'raw data' as fallback
     let script = format!(
         r#"
         tell application "Music"
             try
-                set currentTrack to current track
-                set artworks to artworks of currentTrack
-                if (count of artworks) > 0 then
-                    set artworkData to raw data of (item 1 of artworks)
-                    set fileRef to open for access POSIX file "{}" with write permission
-                    set eof fileRef to 0
-                    write artworkData to fileRef
-                    close access fileRef
-                    return "success"
-                else
-                    return "no_artwork"
+                if (count of artworks of current track) < 1 then return "no_artwork"
+
+                set artData to missing value
+
+                -- Try getting 'data' (image object/data) first
+                try
+                    set artData to data of artwork 1 of current track
+                end try
+
+                -- Fallback to 'raw data' if 'data' failed or is missing
+                if artData is missing value then
+                    try
+                        set artData to raw data of artwork 1 of current track
+                    end try
                 end if
-            on error
-                return "error"
+
+                if artData is missing value then return "no_data_found"
+
+                set dest to POSIX file "{}"
+                set f to open for access dest with write permission
+                set eof f to 0
+                write artData to f
+                close access f
+                return "success"
+            on error errStr
+                try
+                    close access (POSIX file "{}")
+                end try
+                return "error: " & errStr
             end try
         end tell
     "#,
-        temp_path
+        temp_path, temp_path
     );
 
     if let Ok(result) = Command::new("osascript").arg("-e").arg(&script).output() {
         let stdout = String::from_utf8_lossy(&result.stdout).trim().to_string();
+
+        // println!("Artwork fetch result: {}", stdout); // Uncomment for debugging
+
         if stdout == "success" {
             if let Ok(data) = fs::read(temp_path) {
                 let _ = fs::remove_file(temp_path);
-                return Some(base64_encode(&data));
+                if !data.is_empty() {
+                    return Some(base64_encode(&data));
+                }
             }
         }
     }
+
+    // Ensure cleanup on failure
+    let _ = fs::remove_file(temp_path);
     None
 }
 
