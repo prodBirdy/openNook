@@ -3,7 +3,7 @@
     position: relative;
     display: flex;
     justify-content: center;
-    align-items: center;
+    align-items: flex-start;
     /* Dimensions will be controlled by Framer Motion */
     width: 100%;
     padding: 0 16px 12px 16px;

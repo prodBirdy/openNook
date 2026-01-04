@@ -1,5 +1,5 @@
 use serde::Serialize;
-use tauri::{window::Color, LogicalPosition, LogicalSize, Manager};
+use tauri::{window::Color, Emitter, LogicalPosition, LogicalSize, Manager};
 
 /// Notch and screen information returned to the frontend
 #[derive(Debug, Serialize, Clone)]
@@ -207,6 +207,107 @@ fn activate_window(window: tauri::Window) -> Result<(), String> {
     Ok(())
 }
 
+/// Trigger haptic feedback on macOS
+#[tauri::command]
+fn trigger_haptics() {
+    #[cfg(target_os = "macos")]
+    unsafe {
+        use objc::runtime::Object;
+        use objc::*;
+
+        let manager: *mut Object = msg_send![class!(NSHapticFeedbackManager), defaultPerformer];
+        let _: () = msg_send![manager, performFeedbackPattern:0_i64 performanceTime:1_i64];
+    }
+}
+
+/// Setup global mouse monitoring for the window
+/// This uses a polling thread to detect mouse position and emits events
+/// to be handled on the main thread for window operations.
+#[cfg(target_os = "macos")]
+fn setup_mouse_monitoring(app_handle: tauri::AppHandle) {
+    use objc::runtime::Object;
+    use objc::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    // Track whether mouse is currently in the window area
+    let is_inside = Arc::new(AtomicBool::new(false));
+    let is_inside_clone = is_inside.clone();
+
+    // Get screen info for notch area detection
+    let (screen_width, _screen_height, notch_height, notch_width) = get_screen_info();
+
+    // Calculate notch area bounds
+    let notch_x_start = (screen_width - notch_width) / 2.0;
+    let notch_x_end = notch_x_start + notch_width;
+    let notch_y_end = notch_height + 40.0; // Extra margin for expanded state
+
+    // Spawn a thread to poll mouse position
+    std::thread::spawn(move || {
+        loop {
+            let in_notch_area = unsafe {
+                // Get current mouse location in screen coordinates
+                let mouse_loc: CGPoint = msg_send![class!(NSEvent), mouseLocation];
+
+                // macOS uses bottom-left origin, so we need to flip Y
+                // Get primary screen height for conversion
+                let screens: *mut Object = msg_send![class!(NSScreen), screens];
+                let primary_screen: *mut Object = msg_send![screens, objectAtIndex: 0_u64];
+                let screen_frame: CGRect = msg_send![primary_screen, frame];
+                let flipped_y = screen_frame.size.height - mouse_loc.y;
+
+                // Check if mouse is in the notch area
+                mouse_loc.x >= notch_x_start
+                    && mouse_loc.x <= notch_x_end
+                    && flipped_y >= 0.0
+                    && flipped_y <= notch_y_end
+            };
+
+            let was_inside = is_inside_clone.load(Ordering::Relaxed);
+
+            if in_notch_area && !was_inside {
+                // Mouse entered notch area
+                is_inside_clone.store(true, Ordering::Relaxed);
+                let _ = app_handle.emit("mouse-entered-notch", ());
+            } else if !in_notch_area && was_inside {
+                // Mouse exited notch area
+                is_inside_clone.store(false, Ordering::Relaxed);
+                let _ = app_handle.emit("mouse-exited-notch", ());
+            }
+
+            // Poll at ~60fps
+            std::thread::sleep(std::time::Duration::from_millis(16));
+        }
+    });
+
+    println!("Mouse monitoring thread started for notch area detection");
+}
+
+/// CGRect definition for mouse monitoring
+#[cfg(target_os = "macos")]
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+struct CGRect {
+    origin: CGPoint,
+    size: CGSize,
+}
+
+#[cfg(target_os = "macos")]
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+struct CGPoint {
+    x: f64,
+    y: f64,
+}
+
+#[cfg(target_os = "macos")]
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+struct CGSize {
+    width: f64,
+    height: f64,
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -216,7 +317,8 @@ pub fn run() {
             position_at_notch,
             fit_to_notch,
             set_click_through,
-            activate_window
+            activate_window,
+            trigger_haptics
         ])
         .setup(|app| {
             // Auto-position and resize window to match notch on startup
@@ -298,6 +400,10 @@ pub fn run() {
 
                 // Enable click-through by default (no notification showing)
                 let _ = window.set_ignore_cursor_events(true);
+
+                // Setup mouse monitoring to detect hover over notch area
+                #[cfg(target_os = "macos")]
+                setup_mouse_monitoring(app.handle().clone());
             }
             Ok(())
         })

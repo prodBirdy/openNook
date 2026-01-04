@@ -1,17 +1,41 @@
 import { motion, AnimatePresence } from 'motion/react';
+import { invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
 import { useEffect, useState } from 'react';
 import { useNotification } from '../context/NotificationContext';
-import { setClickThrough, useNotchInfo } from '../hooks/useNotchInfo';
+import { activateWindow, setClickThrough, useNotchInfo } from '../hooks/useNotchInfo';
 import './DynamicIslandAlert.css';
 
 export function DynamicIslandAlert() {
     const { notification, dismissNotification } = useNotification();
-    const { notchInfo, activateWindow } = useNotchInfo();
+    const { notchInfo } = useNotchInfo();
     const [isHovered, setIsHovered] = useState(false);
 
-    // Toggle click-through based on notification state
+    // Listen for mouse enter/exit events from Rust backend
     useEffect(() => {
-        setClickThrough(!notification).catch(console.error);
+        const unlistenEnter = listen('mouse-entered-notch', () => {
+            // Disable click-through so we can receive hover events
+            setClickThrough(false).catch(console.error);
+            activateWindow().catch(console.error);
+        });
+
+        const unlistenExit = listen('mouse-exited-notch', () => {
+            // Re-enable click-through when mouse leaves
+            setClickThrough(true).catch(console.error);
+            setIsHovered(false);
+        });
+
+        return () => {
+            unlistenEnter.then(fn => fn());
+            unlistenExit.then(fn => fn());
+        };
+    }, []);
+
+    // Toggle click-through based on notification state (still useful for when notification appears/disappears)
+    useEffect(() => {
+        if (!notification) {
+            setClickThrough(true).catch(console.error);
+        }
     }, [notification]);
 
     const notchHeight = notchInfo?.notch_height ? notchInfo.notch_height - 20 : 38;
@@ -27,6 +51,7 @@ export function DynamicIslandAlert() {
                     onHoverStart={() => {
                         setIsHovered(true);
                         activateWindow();
+                        invoke('trigger_haptics').catch(console.error);
                     }}
                     onHoverEnd={() => setIsHovered(false)}
                     initial={{
@@ -55,7 +80,7 @@ export function DynamicIslandAlert() {
                     <div
                         className="dynamic-island-alert__content"
                         style={{
-                            paddingTop: notchHeight,
+                            paddingTop: notchHeight + 5,
                             opacity: isHovered ? 1 : 0,
                             transform: `translateY(${isHovered ? 0 : -10}px)`,
                             transition: 'all 0.3s ease',

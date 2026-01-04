@@ -26,7 +26,7 @@ export function NotificationProvider({ children }: { children: ReactNode }) {
     const [notification, setNotification] = useState<Notification | null>({
         id: 'dev-hydration',
         type: 'hydration',
-        message: 'Time to drink some water!',
+        message: 'OpenNook is running!',
         icon: ICONS['hydration'],
     });
 
