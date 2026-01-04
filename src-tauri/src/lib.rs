@@ -4,6 +4,7 @@ pub mod models;
 pub mod notes;
 pub mod utils;
 pub mod window;
+pub mod files;
 
 use tauri::Manager;
 
@@ -21,6 +22,7 @@ pub fn run() {
             window::update_ui_bounds,
             window::get_window_settings,
             window::update_window_settings,
+            window::open_settings,
             audio::get_now_playing,
             audio::get_audio_levels,
             audio::media_play_pause,
@@ -32,7 +34,10 @@ pub fn run() {
             notes::load_notes,
             calendar::request_calendar_access,
             calendar::get_upcoming_events,
-            calendar::get_reminders
+            calendar::get_reminders,
+            files::open_file,
+            files::reveal_file,
+            files::on_file_drop
         ])
         .setup(|app| {
             // Auto-position and resize window to match notch on startup

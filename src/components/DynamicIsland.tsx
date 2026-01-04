@@ -4,14 +4,15 @@ import { listen } from '@tauri-apps/api/event';
 import { useEffect, useState, useCallback, useRef, useMemo } from 'react';
 import { useNotchInfo } from '../hooks/useNotchInfo';
 import { getDominantColor } from '../utils/imageUtils';
-import { IconSettings } from '@tabler/icons-react';
+import { IconSettings, IconLayoutGrid, IconFiles } from '@tabler/icons-react';
 import './DynamicIsland.css';
 import { CalendarWidget } from './widgets/CalendarWidget';
 import { RemindersWidget } from './widgets/RemindersWidget';
 import { SmartAudioVisualizer } from './SmartAudioVisualizer';
 import { AlbumCover } from './AlbumCover';
 import { ExpandedMedia } from './ExpandedMedia';
-import { WebviewWindow } from '@tauri-apps/api/webviewWindow';
+import { FileTray } from './FileTray';
+
 
 
 interface NowPlayingData {
@@ -35,7 +36,9 @@ export function DynamicIsland() {
     const [isHovered, setIsHovered] = useState(false);
     const [isCoverHovered, setIsCoverHovered] = useState(false);
     const [expanded, setExpanded] = useState(false);
+    const [isAnimating, setIsAnimating] = useState(false);
     const [notes, setNotes] = useState('');
+    const [activeTab, setActiveTab] = useState<'widgets' | 'files'>('widgets');
     const [windowSize, setWindowSize] = useState({ width: window.innerWidth, height: window.innerHeight });
 
     const islandRef = useRef<HTMLDivElement>(null);
@@ -75,23 +78,7 @@ export function DynamicIsland() {
 
     const handleSettingsClick = useCallback(async () => {
         try {
-            let settingsWin = await WebviewWindow.getByLabel('settings');
-
-            if (!settingsWin) {
-                // If window doesn't exist (e.g. was closed), create it again
-                settingsWin = new WebviewWindow('settings', {
-                    url: '/settings',
-                    title: 'Settings',
-                    width: 600,
-                    height: 450,
-                    decorations: true,
-                    resizable: false,
-                    visible: true,
-                });
-            } else {
-                await settingsWin.show();
-                await settingsWin.setFocus();
-            }
+            await invoke('open_settings');
         } catch (e) {
             console.error('Failed to open settings:', e);
         }
@@ -267,7 +254,10 @@ export function DynamicIsland() {
 
     // Toggle expanded mode
     const handleIslandClick = useCallback(() => {
-        setExpanded(prev => !prev);
+        setExpanded(prev => {
+            if (!prev) setIsAnimating(true);
+            return !prev;
+        });
     }, []);
 
     // Hover handlers for haptics
@@ -333,6 +323,24 @@ export function DynamicIsland() {
         };
     }, [fetchNowPlaying]);
 
+    // Drag and drop listener
+    useEffect(() => {
+        const handleDragEnter = () => {
+            setExpanded(true);
+            setActiveTab('files');
+            setIsAnimating(true);
+        };
+
+        const unlistenDragEnter = listen('tauri://drag-enter', handleDragEnter);
+        // Fallback for different Tauri versions/configs
+        const unlistenFileDropHover = listen('tauri://file-drop-hover', handleDragEnter);
+
+        return () => {
+            unlistenDragEnter.then(fn => fn());
+            unlistenFileDropHover.then(fn => fn());
+        };
+    }, []);
+
     // Update visualizer color when artwork changes (with caching)
     useEffect(() => {
         const artwork = nowPlaying?.artwork_base64;
@@ -367,12 +375,57 @@ export function DynamicIsland() {
         });
     }, [nowPlaying?.artwork_base64]);
 
-    // Close expanded view when cursor leaves
     useEffect(() => {
-        if (!isHovered && expanded) {
+        if (!isHovered && expanded && !isAnimating) {
             setExpanded(false);
         }
-    }, [isHovered, expanded]);
+    }, [isHovered, expanded, isAnimating]);
+
+    const handleWheel = useCallback((e: React.WheelEvent) => {
+        if (!isAnimating) {
+            if (!expanded && e.deltaY < -20) {
+                setExpanded(true);
+                setIsAnimating(true);
+            } else if (expanded && e.deltaY > 20) {
+                setExpanded(false);
+                // We don't necessarily need to set isAnimating to true here if we want immediate response,
+                // but for consistency with opening protection:
+                // However, closer logic might benefit from being immediate.
+                // Let's stick to the pattern:
+                setIsAnimating(true);
+            } else if (expanded) {
+                // Horizontal swipe for tabs
+                if (e.deltaX > 20 && activeTab === 'widgets') {
+                    setActiveTab('files');
+                } else if (e.deltaX < -20 && activeTab === 'files') {
+                    setActiveTab('widgets');
+                }
+            }
+        }
+    }, [expanded, isAnimating, activeTab]);
+
+    const handleChildWheel = useCallback((e: React.WheelEvent) => {
+        // If vertical scroll dominates, stop propagation to prevent closing the island
+        if (Math.abs(e.deltaY) > Math.abs(e.deltaX)) {
+            e.stopPropagation();
+            return;
+        }
+
+        // Check if we can scroll horizontally in the direction of the delta
+        const container = e.currentTarget;
+        const isScrollable = container.scrollWidth > container.clientWidth;
+
+        if (isScrollable) {
+            const canScrollRight = container.scrollLeft < (container.scrollWidth - container.clientWidth - 1);
+            const canScrollLeft = container.scrollLeft > 1;
+
+            // If we can scroll in the direction of the gesture, stop propagation
+            // so the parent doesn't switch tabs.
+            if ((e.deltaX > 0 && canScrollRight) || (e.deltaX < 0 && canScrollLeft)) {
+                e.stopPropagation();
+            }
+        }
+    }, []);
 
     // Update bounds - debounced
     useEffect(() => {
@@ -413,6 +466,7 @@ export function DynamicIsland() {
                 ref={islandRef}
                 className={`dynamic-island ${mode} ${expanded ? 'expanded' : ''}`}
                 initial={false}
+                onAnimationComplete={() => setIsAnimating(false)}
                 animate={{
                     width: targetWidth,
                     height: targetHeight,
@@ -421,6 +475,7 @@ export function DynamicIsland() {
                 transition={springTransition}
                 onHoverStart={handleHoverStart}
                 onClick={handleIslandClick}
+                onWheel={handleWheel}
                 style={{ cursor: 'pointer' }}
             >
                 <AnimatePresence mode="wait">
@@ -435,7 +490,28 @@ export function DynamicIsland() {
                         >
                             {/* Top Menu Bar */}
                             <div className="expanded-menu-bar" style={{ height: notchHeight }}>
-                                <div style={{ flex: 1 }} />
+                                <div className="tab-control-container">
+                                    <div className="tab-pill-background">
+                                        <div
+                                            className="tab-pill-active-bg"
+                                            style={{
+                                                transform: `translateX(${activeTab === 'widgets' ? '0%' : '100%'})`
+                                            }}
+                                        />
+                                        <div
+                                            className={`tab-pill-option ${activeTab === 'widgets' ? 'active' : ''}`}
+                                            onClick={(e) => { e.stopPropagation(); setActiveTab('widgets'); }}
+                                        >
+                                            <IconLayoutGrid size={16} />
+                                        </div>
+                                        <div
+                                            className={`tab-pill-option ${activeTab === 'files' ? 'active' : ''}`}
+                                            onClick={(e) => { e.stopPropagation(); setActiveTab('files'); }}
+                                        >
+                                            <IconFiles size={16} />
+                                        </div>
+                                    </div>
+                                </div>
                                 <div className="media-spacer" style={{ width: baseNotchWidth, height: '100%' }} />
                                 <div style={{ flex: 1, display: 'flex', justifyContent: 'flex-end', alignItems: 'center' }}>
                                     <div
@@ -451,48 +527,73 @@ export function DynamicIsland() {
                                 </div>
                             </div>
 
-                            {/* Widgets Container */}
-                            <div className="widgets-container">
-                                {settings.showMedia && (
-                                    <div
-                                        className={`expanded-media-player widget-card ${(!nowPlaying?.duration || nowPlaying.duration <= 0) ? 'no-progress' : ''}`}
-                                        onClick={(e) => e.stopPropagation()}
-                                    >
-                                        {nowPlaying ? (
-                                            <ExpandedMedia
-                                                nowPlaying={nowPlaying}
-                                                onPlayPause={handlePlayPause}
-                                                onNext={handleNextTrack}
-                                                onPrevious={handlePreviousTrack}
-                                                onSeek={handleSeek}
-                                            />
-                                        ) : (
-                                            <div className="no-media-message">No media playing</div>
-                                        )}
-                                    </div>
-                                )}
+                            {/* Main Content Area */}
+                            <div className="main-content-area">
+                                <AnimatePresence mode="wait">
+                                    {activeTab === 'widgets' ? (
+                                        <motion.div
+                                            key="widgets"
+                                            className="widgets-container"
+                                            initial={{ opacity: 0, x: -20 }}
+                                            animate={{ opacity: 1, x: 0 }}
+                                            exit={{ opacity: 0, x: -20 }}
+                                            transition={fadeTransition}
+                                            onWheel={handleChildWheel}
+                                        >
+                                            {settings.showMedia && (
+                                                <div
+                                                    className={`expanded-media-player widget-card ${(!nowPlaying?.duration || nowPlaying.duration <= 0) ? 'no-progress' : ''}`}
+                                                    onClick={(e) => e.stopPropagation()}
+                                                >
+                                                    {nowPlaying ? (
+                                                        <ExpandedMedia
+                                                            nowPlaying={nowPlaying}
+                                                            onPlayPause={handlePlayPause}
+                                                            onNext={handleNextTrack}
+                                                            onPrevious={handlePreviousTrack}
+                                                            onSeek={handleSeek}
+                                                        />
+                                                    ) : (
+                                                        <div className="no-media-message">No media playing</div>
+                                                    )}
+                                                </div>
+                                            )}
 
-                                {settings.showCalendar && (
-                                    <div className="widget-card" onClick={(e) => e.stopPropagation()} style={{ minWidth: 280 }}>
-                                        <CalendarWidget />
-                                    </div>
-                                )}
+                                            {settings.showCalendar && (
+                                                <div className="widget-card" onClick={(e) => e.stopPropagation()} style={{ minWidth: 280 }}>
+                                                    <CalendarWidget />
+                                                </div>
+                                            )}
 
-                                {settings.showReminders && (
-                                    <div className="widget-card" onClick={(e) => e.stopPropagation()} style={{ minWidth: 260 }}>
-                                        <RemindersWidget />
-                                    </div>
-                                )}
+                                            {settings.showReminders && (
+                                                <div className="widget-card" onClick={(e) => e.stopPropagation()} style={{ minWidth: 260 }}>
+                                                    <RemindersWidget />
+                                                </div>
+                                            )}
 
-                                <div className="expanded-notes-section widget-card" onClick={(e) => e.stopPropagation()}>
-                                    <textarea
-                                        className="notes-field"
-                                        placeholder="Type your notes here..."
-                                        value={notes}
-                                        onChange={handleNotesChange}
-                                        onClick={handleNotesClick}
-                                    />
-                                </div>
+                                            <div className="expanded-notes-section widget-card" onClick={(e) => e.stopPropagation()}>
+                                                <textarea
+                                                    className="notes-field"
+                                                    placeholder="Type your notes here..."
+                                                    value={notes}
+                                                    onChange={handleNotesChange}
+                                                    onClick={handleNotesClick}
+                                                />
+                                            </div>
+                                        </motion.div>
+                                    ) : (
+                                        <motion.div
+                                            key="files"
+                                            className="file-tray-wrapper"
+                                            initial={{ opacity: 0, x: 20 }}
+                                            animate={{ opacity: 1, x: 0 }}
+                                            exit={{ opacity: 0, x: 20 }}
+                                            transition={fadeTransition}
+                                        >
+                                            <FileTray />
+                                        </motion.div>
+                                    )}
+                                </AnimatePresence>
                             </div>
                         </motion.div>
                     ) : mode === 'media' && nowPlaying ? (
@@ -542,7 +643,7 @@ export function DynamicIsland() {
                         </motion.div>
                     ) : null}
                 </AnimatePresence>
-            </motion.div>
-        </div>
+            </motion.div >
+        </div >
     );
 }

@@ -2,7 +2,27 @@ use crate::models::NotchInfo;
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::RwLock;
-use tauri::{Emitter, LogicalPosition, LogicalSize, Manager, WebviewWindow, Window};
+use tauri::{
+    Emitter, LogicalPosition, LogicalSize, Manager, WebviewUrl, WebviewWindow,
+    WebviewWindowBuilder, Window,
+};
+
+#[tauri::command]
+pub fn open_settings(app_handle: tauri::AppHandle) -> Result<(), String> {
+    if let Some(window) = app_handle.get_webview_window("settings") {
+        window.show().map_err(|e| e.to_string())?;
+        window.set_focus().map_err(|e| e.to_string())?;
+    } else {
+        WebviewWindowBuilder::new(&app_handle, "settings", WebviewUrl::App("settings".into()))
+            .title("Settings")
+            .inner_size(600.0, 450.0)
+            .resizable(false)
+            .visible(true)
+            .build()
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
 
 #[cfg(target_os = "macos")]
 use objc2::{Encode, Encoding};
