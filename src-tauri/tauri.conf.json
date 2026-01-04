@@ -26,6 +26,19 @@
         "resizable": false,
         "focus": false,
         "visible": true
+      },
+      {
+        "title": "Settings",
+        "label": "settings",
+        "width": 600,
+        "height": 450,
+        "decorations": true,
+        "transparent": false,
+        "alwaysOnTop": false,
+        "skipTaskbar": false,
+        "resizable": false,
+        "visible": false,
+        "url": "/settings"
       }
     ],
     "security": {
@@ -43,6 +56,8 @@
       "icons/icon.ico"
     ],
     "macOS": {
+      "signingIdentity": "Apple Development: j.voegel@icloud.com (7QG5B8YYN7)",
+      "providerShortName": "7QG5B8YYN7",
       "infoPlist": "Info.plist",
       "entitlements": "Entitlements.plist"
     }

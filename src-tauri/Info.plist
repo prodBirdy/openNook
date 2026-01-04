@@ -4,7 +4,11 @@
 <dict>
 	<key>LSUIElement</key>
 	<true/>
-	<key>NSScreenCaptureUsageDescription</key>
-	<string>Required for audio visualizer to react to your music</string>
+    <key>NSAudioCaptureUsageDescription</key>
+    <string>Need audio access for visualization.</string>
+    <key>NSCalendarsUsageDescription</key>
+    <string>Need access to show upcoming events.</string>
+    <key>NSRemindersUsageDescription</key>
+    <string>Need access to show and manage reminders.</string>
 </dict>
 </plist>

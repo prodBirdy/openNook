@@ -18,14 +18,43 @@
 
     border-radius: 0px 0px 20px 20px;
     /* Base radius, dynamic in React */
-    overflow: hidden;
+    overflow: visible;
     display: flex;
     align-items: center;
     justify-content: center;
 
     /* Hardware acceleration */
     will-change: width, height, border-radius;
+    position: relative;
+    /* For ::before positioning */
+}
 
+/* Inset border radius for top corners to match notch */
+/* Inset border radius for top corners to match notch connection */
+.dynamic-island::before,
+.dynamic-island::after {
+    content: '';
+    position: absolute;
+    top: 0;
+    width: 6px;
+    height: 6px;
+    background: transparent;
+    z-index: 10;
+    pointer-events: none;
+}
+
+/* Left connection */
+.dynamic-island::before {
+    left: -6px;
+    /* Circle at bottom-left corner of the pseudo-element, creating a curve connecting top and right edges */
+    background: radial-gradient(circle at 0 100%, transparent 6px, black 6px);
+}
+
+/* Right connection */
+.dynamic-island::after {
+    right: -6px;
+    /* Circle at bottom-right corner of the pseudo-element, creating a curve connecting top and left edges */
+    background: radial-gradient(circle at 100% 100%, transparent 6px, black 6px);
 }
 
 /* Base content wrapper */
@@ -131,4 +160,519 @@
 .media-spacer {
     /* This empty div sits under the physical notch */
     flex-shrink: 0;
+}
+
+/* Album Cover Wrapper - for title tooltip positioning */
+.album-cover-wrapper {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    width: 100%;
+    height: 100%;
+}
+
+/* Title tooltip under album cover */
+/* Detailed album info reveal under cover */
+.album-info-reveal {
+    position: absolute;
+    top: 100%;
+    left: 50%;
+    /* transform handled by framer motion x: '-50%' */
+    margin-top: 4px;
+    /* Slight gap from cover */
+    padding: 8px 12px;
+    background: rgba(20, 20, 20, 0.90);
+    backdrop-filter: blur(12px);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 12px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    text-align: center;
+    min-width: 100px;
+    width: max-content;
+    max-width: 320px;
+    z-index: 100;
+    box-shadow:
+        0 4px 6px -1px rgba(0, 0, 0, 0.1),
+        0 10px 15px -3px rgba(0, 0, 0, 0.1),
+        0 0 0 1px rgba(255, 255, 255, 0.05);
+    pointer-events: none;
+}
+
+.album-info-title {
+    color: rgba(255, 255, 255, 0.95);
+    font-size: 13px;
+    font-weight: 600;
+    font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', sans-serif;
+    margin-bottom: 2px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    width: 100%;
+}
+
+.album-info-artist {
+    color: rgba(255, 255, 255, 0.6);
+    font-size: 11px;
+    font-weight: 500;
+    font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', sans-serif;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    width: 100%;
+}
+
+/* Fullscreen mode styles */
+/* Expanded mode styles */
+.dynamic-island-container.expanded {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    pointer-events: auto;
+    z-index: 10000;
+}
+
+.dynamic-island.expanded {
+    border-radius: 0px 0px 18px 18px;
+    overflow: visible;
+    flex-direction: column;
+    justify-content: flex-start;
+    background: #000;
+}
+
+/* Keep pseudo-elements visible in expanded mode */
+
+/* Expanded content layout */
+.expanded-content {
+    width: 100%;
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+    padding: 0;
+    box-sizing: border-box;
+    color: white;
+}
+
+/* Top Menu Bar */
+.expanded-menu-bar {
+    width: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 20px;
+    box-sizing: border-box;
+    /* Ensure it stays at top */
+    z-index: 20;
+}
+
+.settings-button {
+    /* Dimensions controlled by inline style now, but default here */
+    width: 44px;
+    height: 44px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 50%;
+    cursor: pointer;
+    background: rgba(255, 255, 255, 0.1);
+    transition: all 0.2s ease;
+    color: rgba(255, 255, 255, 0.8);
+    backdrop-filter: blur(10px);
+}
+
+.settings-button:hover {
+    background: rgba(255, 255, 255, 0.2);
+    color: #fff;
+    transform: scale(1.05);
+}
+
+.settings-button:active {
+    transform: scale(0.95);
+}
+
+/* Widgets Container */
+.widgets-container {
+    flex: 1;
+    display: flex;
+    flex-direction: row;
+    gap: 16px;
+    width: 100%;
+    padding: 20px;
+    box-sizing: border-box;
+    overflow-x: auto;
+    /* Optional: Snap scrolling or styles for scrollbar */
+    align-items: center;
+}
+
+/* Common Widget Card Style */
+.widget-card {
+    height: 100%;
+    max-height: 400px;
+    /* Constrain max height if needed, or let them fill */
+    flex: 1;
+    /* evenly distribute width or use specific widths */
+    min-width: 300px;
+    /* Minimum width for readability */
+    border-radius: 24px;
+    background: rgba(28, 28, 30, 0.6);
+    backdrop-filter: blur(20px);
+    border: 1px solid rgba(255, 255, 255, 0.05);
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.2);
+    display: flex;
+    flex-direction: column;
+}
+
+/* Hide scrollbar for cleaner look */
+.widgets-container::-webkit-scrollbar {
+    display: none;
+}
+
+.widgets-container {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+}
+
+
+/* Media Player Section */
+/* Media Player Section */
+.expanded-media-player {
+    display: flex;
+    flex-direction: column !important;
+    justify-content: center;
+    align-items: stretch;
+    gap: 8px;
+    padding: 20px;
+    height: 100%;
+    box-sizing: border-box;
+}
+
+.expanded-media-player.no-progress {
+    justify-content: space-between !important;
+}
+
+.media-top-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    width: 100%;
+}
+
+.expanded-album-cover {
+    width: 52px;
+    height: 52px;
+    border-radius: 10px;
+    overflow: hidden;
+    flex-shrink: 0;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+}
+
+.expanded-album-cover img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+}
+
+.expanded-album-placeholder {
+    width: 100%;
+    height: 100%;
+    background: linear-gradient(135deg, #2a2a2a, #1a1a1a);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.expanded-track-info {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    text-align: left;
+    overflow: hidden;
+}
+
+.expanded-track-info h3 {
+    font-size: 17px;
+    font-weight: 600;
+    margin: 0 0 3px 0;
+    padding-right: 4px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    color: white;
+    letter-spacing: -0.01em;
+}
+
+.expanded-track-info p {
+    font-size: 13px;
+    color: rgba(255, 255, 255, 0.6);
+    margin: 0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+/* Progress Bar */
+.progress-container {
+    width: 100%;
+    display: flex;
+    flex-direction: column;
+    margin-top: 4px;
+    /* Add invisible padding for hit area, but keep it tighter */
+    padding: 6px 0;
+    cursor: pointer;
+}
+
+.progress-bar-bg {
+    width: 100%;
+    height: 4px;
+    background: rgba(255, 255, 255, 0.15);
+    border-radius: 2px;
+    overflow: hidden;
+    cursor: pointer;
+}
+
+.progress-bar-fill {
+    height: 100%;
+    background: white;
+    border-radius: 2px;
+}
+
+.progress-times {
+    display: flex;
+    justify-content: space-between;
+    font-size: 11px;
+    font-family: 'SF Mono', SFMono-Regular, ui-monospace, monospace;
+    font-weight: 500;
+    color: rgba(255, 255, 255, 0.4);
+    letter-spacing: -0.02em;
+    padding: 2px 1px 0 1px;
+}
+
+/* Controls */
+.expanded-controls {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 36px;
+    padding: 0;
+    margin-top: 0;
+}
+
+.control-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    opacity: 0.9;
+    transition: all 0.2s cubic-bezier(0.25, 0.1, 0.25, 1);
+    color: white;
+    font-size: 20px;
+}
+
+.control-btn:hover {
+    opacity: 1;
+    transform: scale(1.1);
+}
+
+.control-btn:active {
+    transform: scale(0.92);
+}
+
+.control-btn.play-pause {
+    width: 48px;
+    height: 48px;
+    font-size: 24px;
+    background: white;
+    border-radius: 50%;
+    color: black;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
+}
+
+.control-btn.play-pause:hover {
+    transform: scale(1.08);
+    background: #f5f5f5;
+}
+
+.control-btn.play-pause:active {
+    transform: scale(0.95);
+}
+
+.no-media-message {
+    width: 100%;
+    height: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: rgba(255, 255, 255, 0.3);
+    font-weight: 500;
+}
+
+/* Notes Field */
+.expanded-notes-section {
+    padding: 24px;
+    /* Removed background/border logic as it's now .widget-card */
+}
+
+.notes-field {
+    width: 100%;
+    height: 100%;
+    background: transparent;
+    border: none;
+    resize: none;
+    color: rgba(255, 255, 255, 0.9);
+    font-size: 16px;
+    font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', sans-serif;
+    outline: none;
+    line-height: 1.6;
+}
+
+.notes-field::placeholder {
+    color: rgba(255, 255, 255, 0.3);
+}
+
+/* Widgets placeholder */
+/* Widgets placeholder */
+.widget-placeholder {
+    padding: 20px;
+    background: rgba(255, 255, 255, 0.05);
+    border-radius: 12px;
+    color: rgba(255, 255, 255, 0.4);
+    text-align: center;
+    font-size: 14px;
+    font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', sans-serif;
+    height: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+/* Widget Headers */
+.widget-header {
+    margin-bottom: 12px;
+    font-size: 14px;
+    color: rgba(255, 255, 255, 0.5);
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+/* Calendar Widget */
+.calendar-widget {
+    display: flex;
+    flex-direction: column;
+    padding: 20px;
+    height: 100%;
+    box-sizing: border-box;
+    overflow: hidden;
+}
+
+.events-list {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.event-item {
+    display: flex;
+    gap: 12px;
+    align-items: center;
+}
+
+.event-time-badge {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    min-width: 48px;
+    height: 48px;
+    border-radius: 8px;
+    background: #34c759;
+    color: white;
+    padding: 4px;
+}
+
+.event-date-text {
+    font-size: 10px;
+    text-transform: uppercase;
+    opacity: 0.9;
+    font-weight: 600;
+}
+
+.event-time-text {
+    font-size: 12px;
+    font-weight: 700;
+}
+
+.event-details {
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+
+.event-title {
+    font-size: 15px;
+    font-weight: 600;
+    color: white;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.event-location {
+    font-size: 12px;
+    color: rgba(255, 255, 255, 0.6);
+    margin-top: 2px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+/* Reminders Widget */
+.reminders-widget {
+    display: flex;
+    flex-direction: column;
+    padding: 20px;
+    height: 100%;
+    box-sizing: border-box;
+}
+
+.reminders-list {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.reminder-item {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 8px 0;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.reminder-item:last-child {
+    border-bottom: none;
+}
+
+.reminder-checkbox {
+    width: 20px;
+    height: 20px;
+    border: 2px solid #ff3b30;
+    border-radius: 50%;
+    cursor: pointer;
+    transition: background 0.2s;
+}
+
+.reminder-checkbox:hover {
+    background: rgba(255, 255, 255, 0.1);
+}
+
+.reminder-title {
+    font-size: 15px;
+    color: rgba(255, 255, 255, 0.9);
 }
