@@ -54,6 +54,13 @@ export async function setClickThrough(ignore: boolean): Promise<void> {
 }
 
 /**
+ * Activate the window (focus it)
+ */
+export async function activateWindow(): Promise<void> {
+    return invoke('activate_window');
+}
+
+/**
  * React hook to get notch information
  * Fetches notch info on mount and returns the current state
  */
@@ -87,5 +94,5 @@ export function useNotchInfo() {
         };
     }, []);
 
-    return { notchInfo, loading, error, positionAtNotch, fitToNotch, setClickThrough };
+    return { notchInfo, loading, error, positionAtNotch, fitToNotch, setClickThrough, activateWindow };
 }

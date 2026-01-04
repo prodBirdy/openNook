@@ -1,26 +1,27 @@
 .dynamic-island-alert {
-    position: fixed;
-    top: 0;
-    left: 0;
-    right: 0;
     z-index: 9999;
-    /* Full width, no top border-radius to connect to notch */
-    height: auto;
-    padding: 10px 16px;
-    border-radius: 0 0 12px 12px;
-    border: transparent;
-    box-shadow: none;
-
+    position: relative;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    /* Dimensions will be controlled by Framer Motion */
+    width: 100%;
+    padding: 0 16px 12px 16px;
+    border-radius: 0 0 20px 20px;
+    border: none;
     background-color: rgba(0, 0, 0, 1);
+
     /* Content layout */
     display: flex;
+    flex-direction: column;
     align-items: center;
-    justify-content: center;
-    gap: 10px;
+    justify-content: flex-start;
+    gap: 12px;
+    overflow: hidden;
 
     /* Typography - SF Pro style */
     font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'SF Pro Text', system-ui, sans-serif;
-    font-size: 13px;
+    font-size: 14px;
     font-weight: 500;
     color: rgba(255, 255, 255, 0.95);
     letter-spacing: -0.01em;
@@ -29,6 +30,15 @@
     cursor: pointer;
     user-select: none;
     -webkit-user-select: none;
+}
+
+.dynamic-island-alert__content {
+    display: flex;
+    align-items: flex-end;
+    justify-content: center;
+    gap: 12px;
+    width: 100%;
+    /* This will be pushed down by padding-top in the component */
 }
 
 

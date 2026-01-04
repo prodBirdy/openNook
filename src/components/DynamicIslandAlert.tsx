@@ -1,28 +1,21 @@
 import { motion, AnimatePresence } from 'motion/react';
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import { useNotification } from '../context/NotificationContext';
-import { setClickThrough } from '../hooks/useNotchInfo';
+import { setClickThrough, useNotchInfo } from '../hooks/useNotchInfo';
 import './DynamicIslandAlert.css';
 
 export function DynamicIslandAlert() {
     const { notification, dismissNotification } = useNotification();
+    const { notchInfo, activateWindow } = useNotchInfo();
+    const [isHovered, setIsHovered] = useState(false);
 
     // Toggle click-through based on notification state
     useEffect(() => {
-        // When notification appears, disable click-through so user can interact
-        // When notification disappears, enable click-through so clicks pass through
         setClickThrough(!notification).catch(console.error);
     }, [notification]);
 
-    // Auto-dismiss after timeout (disabled for dev purposes)
-    /*
-    useEffect(() => {
-        if (!notification) return;
-
-        const timer = setTimeout(dismissNotification, AUTO_DISMISS_MS);
-        return () => clearTimeout(timer);
-    }, [notification, dismissNotification]);
-    */
+    const notchHeight = notchInfo?.notch_height ? notchInfo.notch_height - 20 : 38;
+    const notchWidth = notchInfo?.notch_width ? notchInfo.notch_width - 40 : 200;
 
     return (
         <AnimatePresence mode="wait">
@@ -31,21 +24,26 @@ export function DynamicIslandAlert() {
                     key={notification.id}
                     className="dynamic-island-alert"
                     onClick={dismissNotification}
-                    // Slide down from behind the notch - grow out effect
+                    onHoverStart={() => {
+                        setIsHovered(true);
+                        activateWindow();
+                    }}
+                    onHoverEnd={() => setIsHovered(false)}
                     initial={{
+                        height: notchHeight,
+                        width: notchWidth,
                         opacity: 0,
-                        scale: 0.8,
-                        y: -20,
                     }}
                     animate={{
+                        height: isHovered ? notchHeight + 40 : notchHeight,
+                        width: isHovered ? notchWidth + 40 : notchWidth,
                         opacity: 1,
-                        scale: 1,
-                        y: -1, // Just slightly below the notch edge
                     }}
                     exit={{
-                        opacity: 0,
-                        scale: 0.85,
-                        y: -15,
+                        height: notchHeight,
+                        width: notchWidth,
+                        opacity: 1,
+                        transition: { duration: 0.2 }
                     }}
                     transition={{
                         type: 'spring',
@@ -53,16 +51,23 @@ export function DynamicIslandAlert() {
                         damping: 30,
                         mass: 0.8,
                     }}
-                    // Subtle hover interaction
-                    whileHover={{ scale: 1.02 }}
-                    whileTap={{ scale: 0.98 }}
                 >
-                    <span className="dynamic-island-alert__icon">
-                        {notification.icon}
-                    </span>
-                    <span className="dynamic-island-alert__message">
-                        {notification.message}
-                    </span>
+                    <div
+                        className="dynamic-island-alert__content"
+                        style={{
+                            paddingTop: notchHeight,
+                            opacity: isHovered ? 1 : 0,
+                            transform: `translateY(${isHovered ? 0 : -10}px)`,
+                            transition: 'all 0.3s ease',
+                        }}
+                    >
+                        <span className="dynamic-island-alert__icon">
+                            {notification.icon}
+                        </span>
+                        <span className="dynamic-island-alert__message">
+                            {notification.message}
+                        </span>
+                    </div>
                 </motion.div>
             )}
         </AnimatePresence>

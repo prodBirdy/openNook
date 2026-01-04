@@ -1,5 +1,5 @@
 use serde::Serialize;
-use tauri::{LogicalPosition, LogicalSize, Manager};
+use tauri::{window::Color, LogicalPosition, LogicalSize, Manager};
 
 /// Notch and screen information returned to the frontend
 #[derive(Debug, Serialize, Clone)]
@@ -22,7 +22,28 @@ pub struct NotchInfo {
 /// Returns (screen_width, screen_height, notch_height, notch_width)
 #[cfg(target_os = "macos")]
 fn get_screen_info() -> (f64, f64, f64, f64) {
-    use cocoa::foundation::NSRect;
+    // Define our own CGSize/CGRect to avoid deprecated cocoa crate fields
+    #[repr(C)]
+    #[derive(Debug, Copy, Clone)]
+    struct CGSize {
+        width: f64,
+        height: f64,
+    }
+
+    #[repr(C)]
+    #[derive(Debug, Copy, Clone)]
+    struct CGPoint {
+        x: f64,
+        y: f64,
+    }
+
+    #[repr(C)]
+    #[derive(Debug, Copy, Clone)]
+    struct CGRect {
+        origin: CGPoint,
+        size: CGSize,
+    }
+
     use objc::runtime::Object;
     use objc::*;
 
@@ -34,7 +55,7 @@ fn get_screen_info() -> (f64, f64, f64, f64) {
         }
 
         // Get screen frame
-        let frame: NSRect = msg_send![main_screen, frame];
+        let frame: CGRect = msg_send![main_screen, frame];
         let screen_width = frame.size.width;
         let screen_height = frame.size.height;
 
@@ -49,27 +70,33 @@ fn get_screen_info() -> (f64, f64, f64, f64) {
         }
 
         let insets: NSEdgeInsets = msg_send![main_screen, safeAreaInsets];
-        let notch_height = insets.top;
+        let safe_area_top = insets.top;
+
+        // Calculate notch height
+        // The notch height on MacBooks is typically around 30-40px
+        // The Dynamic Island style expands beyond just the notch
+        // We use a slightly larger value for the Dynamic Island effect
+        let notch_height = if safe_area_top > 0.0 {
+            // Approximate island height based on screen height
+            (screen_height * 0.07).max(38.0).min(52.0)
+        } else {
+            0.0
+        };
 
         // Calculate notch width
         // The notch width on MacBooks is typically around 180-200px
         // The Dynamic Island style expands beyond just the notch
         // We use a wider calculation to match the expanded Island look
-        let notch_width = if notch_height > 0.0 {
+        let notch_width = if safe_area_top > 0.0 {
             // Approximate notch width based on screen width
             // We use a slightly larger value for the Dynamic Island effect
-            (screen_width * 0.121).max(200.0).min(260.0)
+            (screen_width * 0.222).max(200.0).min(260.0)
         } else {
             0.0
         };
 
         (screen_width, screen_height, notch_height, notch_width)
     }
-}
-
-#[cfg(not(target_os = "macos"))]
-fn get_screen_info() -> (f64, f64, f64, f64) {
-    (1920.0, 1080.0, 0.0, 0.0)
 }
 
 /// Get notch information from the main screen using NSScreen.safeAreaInsets (macOS 12.0+)
@@ -95,7 +122,9 @@ fn position_at_notch(window: tauri::Window) -> Result<(), String> {
     let (screen_width, _screen_height, _notch_height, notch_width) = get_screen_info();
 
     // Use notch width if available, otherwise fall back to current window width
-    let target_width = if notch_width > 0.0 { notch_width } else {
+    let target_width = if notch_width > 0.0 {
+        notch_width
+    } else {
         let window_size = window.outer_size().map_err(|e| e.to_string())?;
         let scale_factor = window.scale_factor().map_err(|e| e.to_string())?;
         window_size.width as f64 / scale_factor
@@ -144,6 +173,40 @@ fn set_click_through(window: tauri::Window, ignore: bool) -> Result<(), String> 
     Ok(())
 }
 
+/// Activate the window (focus it)
+/// Uses native macOS APIs to properly activate an accessory app
+#[tauri::command]
+fn activate_window(window: tauri::Window) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        use objc::runtime::Object;
+        use objc::*;
+        use raw_window_handle::HasWindowHandle;
+
+        unsafe {
+            // Get NSApplication shared instance and activate it
+            let ns_app: *mut Object = msg_send![class!(NSApplication), sharedApplication];
+            let _: () = msg_send![ns_app, activateIgnoringOtherApps: true];
+
+            // Also make the window key and bring it to front
+            if let Ok(handle) = window.window_handle() {
+                if let raw_window_handle::RawWindowHandle::AppKit(appkit_handle) = handle.as_raw() {
+                    let ns_view = appkit_handle.ns_view.as_ptr() as *mut Object;
+                    let ns_win: *mut Object = msg_send![ns_view, window];
+                    let _: () = msg_send![ns_win, makeKeyAndOrderFront: std::ptr::null::<Object>()];
+                }
+            }
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        window.set_focus().map_err(|e| e.to_string())?;
+    }
+
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -152,7 +215,8 @@ pub fn run() {
             get_notch_info,
             position_at_notch,
             fit_to_notch,
-            set_click_through
+            set_click_through,
+            activate_window
         ])
         .setup(|app| {
             // Auto-position and resize window to match notch on startup
@@ -163,15 +227,22 @@ pub fn run() {
                 let window_width = if notch_width > 0.0 {
                     notch_width
                 } else {
-                    window.outer_size().map(|s| {
-                        let scale = window.scale_factor().unwrap_or(1.0);
-                        s.width as f64 / scale
-                    }).unwrap_or(250.0)
+                    window
+                        .outer_size()
+                        .map(|s| {
+                            let scale = window.scale_factor().unwrap_or(1.0);
+                            s.width as f64 / scale
+                        })
+                        .unwrap_or(250.0)
                 };
 
-                // Use notch height for window height (plus a bit for the notification to grow into)
-                let window_height = notch_height.max(38.0) + 20.0;
-
+                // Use notch height for window height (plus space for the notification to grow into)
+                let window_height = if notch_height > 0.0 {
+                    notch_height + 20.0
+                } else {
+                    40.0
+                };
+                println!("Window height: {}", window_height);
                 // Resize window to match notch dimensions
                 let _ = window.set_size(LogicalSize::new(window_width, window_height));
 
@@ -184,10 +255,19 @@ pub fn run() {
                     use raw_window_handle::HasWindowHandle;
 
                     if let Ok(handle) = window.window_handle() {
-                        if let raw_window_handle::RawWindowHandle::AppKit(appkit_handle) = handle.as_raw() {
+                        if let raw_window_handle::RawWindowHandle::AppKit(appkit_handle) =
+                            handle.as_raw()
+                        {
                             unsafe {
                                 let ns_view = appkit_handle.ns_view.as_ptr() as *mut Object;
                                 let ns_win: *mut Object = msg_send![ns_view, window];
+
+                                // Set activation policy to Accessory (1) to hide dock icon and menu bar
+                                // This is needed at runtime for tauri dev, Info.plist only works for bundled builds
+                                let ns_app: *mut Object =
+                                    msg_send![class!(NSApplication), sharedApplication];
+                                // NSApplicationActivationPolicyAccessory = 1
+                                let _: () = msg_send![ns_app, setActivationPolicy: 1_i64];
 
                                 // NSStatusWindowLevel = 25, which is above the menu bar (24)
                                 // This allows positioning in the notch area
@@ -197,6 +277,9 @@ pub fn run() {
                                 // NSWindowCollectionBehaviorCanJoinAllSpaces = 1 << 0
                                 // NSWindowCollectionBehaviorStationary = 1 << 4
                                 let _: () = msg_send![ns_win, setCollectionBehavior: 17_u64];
+
+                                // Remove window shadow to prevent border effect
+                                let _: () = msg_send![ns_win, setHasShadow: 0];
                             }
                         }
                     }
@@ -205,9 +288,13 @@ pub fn run() {
                 // Center horizontally, position at top (now can go negative)
                 let x = (screen_width - window_width) / 2.0;
                 // Position window so it overlaps with the notch
-                // Negative y moves it up into the notch area
-                let y = (notch_height.max(38.0) - 10.0);
+                // We use a slight negative y to ensure it covers the very top edge
+                // If there's no notch, we just place it at y=0
+                let y = if notch_height > 0.0 { -2.0 } else { 0.0 };
                 let _ = window.set_position(LogicalPosition::new(x, y));
+                // TODO: set bg color of main window to red for debugging
+                let _ = window.set_background_color(Some(Color(255, 0, 0, 0)));
+                let _ = window.set_decorations(false);
 
                 // Enable click-through by default (no notification showing)
                 let _ = window.set_ignore_cursor_events(true);
