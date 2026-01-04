@@ -1,5 +1,5 @@
+import { DynamicIsland } from './components/DynamicIsland';
 import { NotificationProvider } from './context/NotificationContext';
-import { DynamicIslandAlert } from './components/DynamicIslandAlert';
 import { useReminders } from './hooks/useReminders';
 import './App.css';
 
@@ -11,7 +11,7 @@ function ReminderManager() {
 function App() {
   return (
     <NotificationProvider>
-      <DynamicIslandAlert />
+      <DynamicIsland />
       <ReminderManager />
     </NotificationProvider>
   );

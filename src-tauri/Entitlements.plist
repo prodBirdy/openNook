@@ -2,9 +2,7 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<key>LSUIElement</key>
-	<true/>
-	<key>NSScreenCaptureUsageDescription</key>
-	<string>Required for audio visualizer to react to your music</string>
+    <key>com.apple.security.audio-input.capture-system</key>
+    <true/>
 </dict>
 </plist>

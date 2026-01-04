@@ -1,0 +1,134 @@
+.dynamic-island-container {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    display: flex;
+    justify-content: center;
+    align-items: flex-start;
+    pointer-events: none;
+    /* Let clicks pass through outside the island */
+    z-index: 9999;
+}
+
+.dynamic-island {
+    pointer-events: auto;
+    /* Capture clicks on the island */
+    background-color: black;
+
+    border-radius: 0px 0px 20px 20px;
+    /* Base radius, dynamic in React */
+    overflow: hidden;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+
+    /* Hardware acceleration */
+    will-change: width, height, border-radius;
+
+}
+
+/* Base content wrapper */
+.island-content {
+    width: 100%;
+    height: 100%;
+    display: flex;
+    align-items: center;
+}
+
+/* Notification Layout */
+.notification-content {
+    flex-direction: column;
+    justify-content: center;
+    gap: 8px;
+    padding: 12px;
+    color: white;
+}
+
+.island-icon {
+    font-size: 24px;
+}
+
+.island-message {
+    font-size: 14px;
+    font-weight: 500;
+    font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', sans-serif;
+    color: rgba(255, 255, 255, 0.9);
+    text-align: center;
+    white-space: nowrap;
+}
+
+/* Media Layout */
+.media-content {
+    flex-direction: row;
+    justify-content: space-between;
+    /* Push left/right to edges */
+    padding: 0 4px;
+    /* Small padding from pill edge */
+}
+
+/* Components */
+.media-left,
+.media-right {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+/* Album Cover */
+.album-cover {
+    width: 100%;
+    height: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    /* Add slight padding to not touch the very edge of the rounded corner */
+    padding-left: 2px;
+}
+
+.album-cover__image {
+    width: 26px;
+    /* Slightly smaller to fit nicely */
+    height: 26px;
+    border-radius: 5px;
+    object-fit: cover;
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.3);
+}
+
+.album-cover__placeholder {
+    width: 26px;
+    height: 26px;
+    border-radius: 5px;
+    background: linear-gradient(135deg, #333, #111);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: rgba(255, 255, 255, 0.5);
+    font-size: 14px;
+}
+
+/* Visualizer */
+.audio-visualizer {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 2.5px;
+    height: 20px;
+    padding-right: 4px;
+}
+
+.visualizer-bar {
+    width: 3.5px;
+    height: 100%;
+    /* Gradient from light grey to white to match the reference "active" look */
+    background: #e1e1e1;
+    border-radius: 4px;
+    opacity: 0.9;
+    box-shadow: 0 0 2px rgba(255, 255, 255, 0.1);
+}
+
+/* Spacer */
+.media-spacer {
+    /* This empty div sits under the physical notch */
+    flex-shrink: 0;
+}

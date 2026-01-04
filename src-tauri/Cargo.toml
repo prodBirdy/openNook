@@ -28,3 +28,6 @@ serde_json = "1"
 objc = "0.2"
 cocoa = "0.26"
 raw-window-handle = "0.6"
+coreaudio-sys = "0.2"    # Raw CoreAudio bindings for HAL Tap
+libc = "0.2"               # C types for raw bindings
+spectrum-analyzer = "1.5"  # FFT frequency analysis
