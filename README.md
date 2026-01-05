@@ -1,6 +1,12 @@
 # openNook
 
+
+
 openNook is an open-source dynamic island client inspired by [notchNook](https://lo.cafe/notchnook). It brings the utility and aesthetic of the dynamic island to your desktop, currently built with performance and design in mind.
+
+
+https://github.com/user-attachments/assets/53ddaf37-2576-4b62-b367-5ca2a96e9cb2
+
 
 ## About The Project
 
