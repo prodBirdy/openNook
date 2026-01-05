@@ -713,9 +713,7 @@ export function DynamicIsland() {
                             />
                         ) : mode === 'idle' ? (
                             <CompactIdle
-                                baseNotchWidth={baseNotchWidth}
-                                isHovered={isHovered}
-                                contentOpacity={contentOpacity}
+
                             />
                         ) : null}
                     </motion.div>
