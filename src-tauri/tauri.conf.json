@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "overdone",
+  "productName": "openNook",
   "version": "0.1.0",
-  "identifier": "com.jonasvogel.overdone",
+  "identifier": "com.jonasvogel.opennook",
   "build": {
     "beforeDevCommand": "bun run dev",
     "devUrl": "http://localhost:1420",
@@ -13,7 +13,7 @@
     "macOSPrivateApi": true,
     "windows": [
       {
-        "title": "overdone",
+        "title": "openNook",
         "label": "main",
         "width": 250,
         "height": 40,
