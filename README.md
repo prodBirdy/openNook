@@ -35,13 +35,13 @@ To run this project locally:
     ```bash
     npm install
     # or
-    bun install
+    bun i
     ```
 3.  Run the development server:
     ```bash
     npm run tauri dev
     # or
-    bun tauri dev
+    bun run tauri dev
     ```
 
 ## Contributing
