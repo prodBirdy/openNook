@@ -8,6 +8,7 @@ export interface FileItem {
     name: string;
     size: number;
     path?: string; // Optional, might not be available depending on browser security context in Tauri
+    resolvedPath?: string;
     type: string;
     lastModified: number;
 }
@@ -43,24 +44,33 @@ export function FileTray({ files, onUpdateFiles }: FileTrayProps) {
         setIsDragging(true);
     }, []);
 
-    const handleDrop = useCallback((e: React.DragEvent) => {
+    const handleDrop = useCallback(async (e: React.DragEvent) => {
         e.preventDefault();
         e.stopPropagation();
         setIsDragging(false);
 
-        const droppedFiles = Array.from(e.dataTransfer.files).map(file => {
+        const droppedFilesPromises = Array.from(e.dataTransfer.files).map(async file => {
             const path = (file as any).path;
+            let resolvedPath = path;
             if (path) {
                 invoke('on_file_drop', { path }).catch(console.error);
+                try {
+                    resolvedPath = await invoke('resolve_path', { path });
+                } catch (e) {
+                    console.error('Failed to resolve path', e);
+                }
             }
             return {
                 name: file.name,
                 size: file.size,
                 path: path, // Tauri/Electron often exposes path
+                resolvedPath: resolvedPath,
                 type: file.type,
                 lastModified: file.lastModified
             };
         });
+
+        const droppedFiles = await Promise.all(droppedFilesPromises);
 
         const updated = [...files, ...droppedFiles];
         onUpdateFiles(updated);
@@ -105,16 +115,17 @@ export function FileTray({ files, onUpdateFiles }: FileTrayProps) {
     }, []);
 
     const handleDragStart = useCallback((e: React.DragEvent, file: FileItem) => {
-        if (file.path) {
+        const path = file.resolvedPath || file.path;
+        if (path) {
             e.dataTransfer.effectAllowed = 'copyMove';
             // Try standard URI list
-            e.dataTransfer.setData('text/uri-list', `file://${file.path}`);
-            e.dataTransfer.setData('text/plain', file.path);
+            e.dataTransfer.setData('text/uri-list', `file://${path}`);
+            e.dataTransfer.setData('text/plain', path);
             // Try DownloadURL (Chrome specific, might not work in WKWebView but worth a shot)
-            e.dataTransfer.setData('DownloadURL', `${file.type}:${file.name}:file://${file.path}`);
+            e.dataTransfer.setData('DownloadURL', `${file.type}:${file.name}:file://${path}`);
 
             // Also invoke backend to see if we can trigger native drag
-            invoke('start_drag', { path: file.path }).catch(console.error);
+            invoke('start_drag', { path }).catch(console.error);
         }
     }, []);
 
@@ -166,13 +177,13 @@ export function FileTray({ files, onUpdateFiles }: FileTrayProps) {
                                 style={{ cursor: 'pointer' }}
                             >
                                 <div className="file-icon-wrapper">
-                                    {isImage(file) && file.path ? (
+                                    {isImage(file) && (file.resolvedPath || file.path) ? (
                                         <img
-                                            src={convertFileSrc(file.path)}
+                                            src={convertFileSrc(file.resolvedPath || file.path!)}
                                             alt={file.name}
                                             style={{ width: '100%', height: '100%', objectFit: 'cover', borderRadius: 6 }}
                                             onError={(e) => {
-                                                console.error(`Failed to load image: ${file.path}`, e);
+                                                console.error(`Failed to load image: ${file.resolvedPath || file.path}`, e);
                                                 // Fallback to icon
                                                 e.currentTarget.style.display = 'none';
                                                 e.currentTarget.parentElement?.classList.add('image-load-error');

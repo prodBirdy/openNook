@@ -62,7 +62,22 @@ export function DynamicIsland() {
     // Load files on mount
     useEffect(() => {
         invoke<FileItem[]>('load_file_tray')
-            .then(setFiles)
+            .then(async (loadedFiles) => {
+                // Resolve paths for loaded files
+                const resolvedFiles = await Promise.all(loadedFiles.map(async (file) => {
+                    if (file.path) {
+                        try {
+                            const resolvedPath = await invoke<string>('resolve_path', { path: file.path });
+                            return { ...file, resolvedPath };
+                        } catch (e) {
+                            console.error(`Failed to resolve path for ${file.name}:`, e);
+                            return file;
+                        }
+                    }
+                    return file;
+                }));
+                setFiles(resolvedFiles);
+            })
             .catch(err => console.error('Failed to load file tray:', err));
     }, []);
 
@@ -76,35 +91,48 @@ export function DynamicIsland() {
     // Process external files (from backend drop event)
     useEffect(() => {
         if (droppedFiles && droppedFiles.length > 0) {
-            const newFiles = droppedFiles.map(path => {
-                // Extract filename from path
-                const name = path.split(/[/\\]/).pop() || path;
-                // Simple extension check for type
-                const ext = name.split('.').pop()?.toLowerCase();
-                let type = 'unknown';
-                if (['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg'].includes(ext || '')) {
-                    type = `image/${ext}`;
-                }
+            const processFiles = async () => {
+                const newFilesPromises = droppedFiles.map(async path => {
+                    // Extract filename from path
+                    const name = path.split(/[/\\]/).pop() || path;
+                    // Simple extension check for type
+                    const ext = name.split('.').pop()?.toLowerCase();
+                    let type = 'unknown';
+                    if (['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg'].includes(ext || '')) {
+                        type = `image/${ext}`;
+                    }
 
-                return {
-                    name,
-                    size: 0, // We don't have size from backend event immediately, could fetch if needed
-                    path,
-                    type,
-                    lastModified: Date.now()
-                };
-            });
+                    let resolvedPath = path;
+                    try {
+                        resolvedPath = await invoke<string>('resolve_path', { path });
+                    } catch (e) {
+                        console.error('Failed to resolve path', e);
+                    }
 
-            setFiles(prev => {
-                // Avoid duplicates
-                const existingPaths = new Set(prev.map(f => f.path));
-                const uniqueNewFiles = newFiles.filter(f => !existingPaths.has(f.path));
-                const updated = [...prev, ...uniqueNewFiles];
-                // Save immediately
-                invoke('save_file_tray', { files: updated }).catch(console.error);
-                return updated;
-            });
+                    return {
+                        name,
+                        size: 0, // We don't have size from backend event immediately, could fetch if needed
+                        path,
+                        resolvedPath,
+                        type,
+                        lastModified: Date.now()
+                    };
+                });
 
+                const newFiles = await Promise.all(newFilesPromises);
+
+                setFiles(prev => {
+                    // Avoid duplicates
+                    const existingPaths = new Set(prev.map(f => f.path));
+                    const uniqueNewFiles = newFiles.filter(f => !existingPaths.has(f.path));
+                    const updated = [...prev, ...uniqueNewFiles];
+                    // Save immediately
+                    invoke('save_file_tray', { files: updated }).catch(console.error);
+                    return updated;
+                });
+            };
+
+            processFiles();
             setDroppedFiles([]);
         }
     }, [droppedFiles]);

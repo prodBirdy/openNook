@@ -12,6 +12,7 @@ use tauri::{Emitter, Manager};
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_fs::init())
         .invoke_handler(tauri::generate_handler![
             window::get_notch_info,
             window::position_at_notch,
@@ -40,7 +41,8 @@ pub fn run() {
             files::on_file_drop,
             files::save_file_tray,
             files::load_file_tray,
-            files::start_drag
+            files::start_drag,
+            files::resolve_path
         ])
         .setup(|app| {
             // Auto-position and resize window to match notch on startup

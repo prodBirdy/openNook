@@ -3,6 +3,13 @@ use std::process::Command;
 use serde::{Deserialize, Serialize};
 use std::fs;
 
+#[cfg(target_os = "macos")]
+use cocoa::base::{id, nil};
+#[cfg(target_os = "macos")]
+use cocoa::foundation::{NSPoint, NSRect, NSSize};
+#[cfg(target_os = "macos")]
+use objc::{msg_send, sel, sel_impl, class};
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct FileTrayItem {
     pub name: String,
@@ -63,9 +70,57 @@ pub fn on_file_drop(path: String) {
 }
 
 #[command]
-pub fn start_drag(_app_handle: AppHandle, path: String) -> Result<(), String> {
+pub fn start_drag(app_handle: AppHandle, path: String) -> Result<(), String> {
     println!("start_drag called for: {}", path);
-    // TODO: Implement native drag-out using macOS APIs
-    // This requires accessing the NSView and initiating a dragging session.
+    
+    #[cfg(target_os = "macos")]
+    unsafe {
+        let window = app_handle.get_webview_window("main").ok_or("Main window not found")?;
+        let ns_window = window.ns_window().map_err(|e| e.to_string())? as id;
+        
+        let content_view: id = msg_send![ns_window, contentView];
+        if content_view == nil {
+            return Err("Content view is nil".to_string());
+        }
+
+        // Create NSURL
+        let path_str = std::ffi::CString::new(path.clone()).unwrap();
+        let ns_string: id = msg_send![class!(NSString), stringWithUTF8String:path_str.as_ptr()];
+        let file_url: id = msg_send![class!(NSURL), fileURLWithPath:ns_string];
+        
+        // Create NSDraggingItem
+        let item_alloc: id = msg_send![class!(NSDraggingItem), alloc];
+        let item: id = msg_send![item_alloc, initWithPasteboardWriter:file_url];
+        
+        // Get mouse location from window (coordinates are relative to window bottom-left)
+        let mouse_loc: NSPoint = msg_send![ns_window, mouseLocationOutsideOfEventStream];
+        
+        // Create a rect centered at mouse
+        let rect = NSRect::new(
+            NSPoint::new(mouse_loc.x - 16.0, mouse_loc.y - 16.0),
+            NSSize::new(32.0, 32.0)
+        );
+        
+        // Set dragging frame
+        let _: () = msg_send![item, setDraggingFrame:rect contents:nil];
+        
+        // Create array of items
+        let items: id = msg_send![class!(NSArray), arrayWithObject:item];
+        
+        // Get current event
+        let app: id = msg_send![class!(NSApplication), sharedApplication];
+        let event: id = msg_send![app, currentEvent];
+        
+        // Begin dragging session
+        let _: id = msg_send![content_view, beginDraggingSessionWithItems:items event:event source:content_view];
+    }
+
     Ok(())
+}
+
+#[command]
+pub fn resolve_path(path: String) -> Result<String, String> {
+    fs::canonicalize(&path)
+        .map(|p| p.to_string_lossy().into_owned())
+        .map_err(|e| e.to_string())
 }
