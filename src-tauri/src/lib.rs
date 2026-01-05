@@ -1,10 +1,10 @@
 pub mod audio;
 pub mod calendar;
+pub mod files;
 pub mod models;
 pub mod notes;
 pub mod utils;
 pub mod window;
-pub mod files;
 
 use tauri::{Emitter, Manager};
 
@@ -12,6 +12,8 @@ use tauri::{Emitter, Manager};
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_fs::init())
+        .plugin(tauri_plugin_drag::init())
         .invoke_handler(tauri::generate_handler![
             window::get_notch_info,
             window::position_at_notch,
@@ -35,28 +37,35 @@ pub fn run() {
             calendar::request_calendar_access,
             calendar::get_upcoming_events,
             calendar::get_reminders,
+            calendar::complete_reminder,
+            calendar::create_reminder,
+            calendar::create_calendar_event,
+            calendar::open_calendar_event,
+            calendar::open_calendar_app,
+            calendar::open_reminders_app,
+            calendar::open_privacy_settings,
             files::open_file,
             files::reveal_file,
             files::on_file_drop,
             files::save_file_tray,
             files::load_file_tray,
-            files::start_drag
+            files::resolve_path,
+            files::save_drag_icon,
+            window::get_system_accent_color
         ])
         .setup(|app| {
             // Auto-position and resize window to match notch on startup
             if let Some(window) = app.get_webview_window("main") {
                 let window_clone = window.clone();
-                window.on_window_event(move |event| {
-                    match event {
-                        tauri::WindowEvent::DragDrop(tauri::DragDropEvent::Enter { paths, .. }) => {
-                            let _ = window_clone.set_ignore_cursor_events(false);
-                            let _ = window_clone.emit("drag-enter-event", paths);
-                        }
-                        tauri::WindowEvent::DragDrop(tauri::DragDropEvent::Drop { paths, .. }) => {
-                            let _ = window_clone.emit("file-drop-event", paths);
-                        }
-                        _ => {}
+                window.on_window_event(move |event| match event {
+                    tauri::WindowEvent::DragDrop(tauri::DragDropEvent::Enter { paths, .. }) => {
+                        let _ = window_clone.set_ignore_cursor_events(false);
+                        let _ = window_clone.emit("drag-enter-event", paths);
                     }
+                    tauri::WindowEvent::DragDrop(tauri::DragDropEvent::Drop { paths, .. }) => {
+                        let _ = window_clone.emit("file-drop-event", paths);
+                    }
+                    _ => {}
                 });
 
                 // Set window level above menu bar on macOS

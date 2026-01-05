@@ -193,21 +193,29 @@ fn get_screen_info() -> (f64, f64, f64, f64) {
     }
 }
 
+#[tauri::command]
+pub fn get_system_accent_color() -> String {
+    #[cfg(target_os = "macos")]
+    return crate::utils::get_macos_accent_color();
+    #[cfg(not(target_os = "macos"))]
+    return "#007AFF".to_string();
+}
+
 /// Get notch information from the main screen using NSScreen.safeAreaInsets (macOS 12.0+)
 #[tauri::command]
-pub fn get_notch_info() -> NotchInfo {
+pub fn get_notch_info() -> Option<NotchInfo> {
     let (screen_width, screen_height, notch_height, notch_width) = get_screen_info();
     let has_notch = notch_height > 0.0;
     let visible_height = screen_height - notch_height;
 
-    NotchInfo {
+    Some(NotchInfo {
         has_notch,
         notch_height,
         notch_width,
         screen_width,
         screen_height,
         visible_height,
-    }
+    })
 }
 
 /// Position the window at the notch location (centered at top of screen)

@@ -1,7 +1,7 @@
-use tauri::{command, AppHandle, Manager};
-use std::process::Command;
 use serde::{Deserialize, Serialize};
 use std::fs;
+use std::process::Command;
+use tauri::{command, AppHandle, Manager};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct FileTrayItem {
@@ -16,7 +16,10 @@ pub struct FileTrayItem {
 
 #[command]
 pub fn save_file_tray(app_handle: AppHandle, files: Vec<FileTrayItem>) -> Result<(), String> {
-    let app_dir = app_handle.path().app_data_dir().map_err(|e| e.to_string())?;
+    let app_dir = app_handle
+        .path()
+        .app_data_dir()
+        .map_err(|e| e.to_string())?;
     if !app_dir.exists() {
         fs::create_dir_all(&app_dir).map_err(|e| e.to_string())?;
     }
@@ -28,7 +31,11 @@ pub fn save_file_tray(app_handle: AppHandle, files: Vec<FileTrayItem>) -> Result
 
 #[command]
 pub fn load_file_tray(app_handle: AppHandle) -> Result<Vec<FileTrayItem>, String> {
-    let path = app_handle.path().app_data_dir().map_err(|e| e.to_string())?.join("file_tray.json");
+    let path = app_handle
+        .path()
+        .app_data_dir()
+        .map_err(|e| e.to_string())?
+        .join("file_tray.json");
     if !path.exists() {
         return Ok(Vec::new());
     }
@@ -63,9 +70,20 @@ pub fn on_file_drop(path: String) {
 }
 
 #[command]
-pub fn start_drag(_app_handle: AppHandle, path: String) -> Result<(), String> {
-    println!("start_drag called for: {}", path);
-    // TODO: Implement native drag-out using macOS APIs
-    // This requires accessing the NSView and initiating a dragging session.
-    Ok(())
+pub fn resolve_path(path: String) -> Result<String, String> {
+    fs::canonicalize(&path)
+        .map(|p| p.to_string_lossy().into_owned())
+        .map_err(|e| e.to_string())
+}
+
+#[command]
+pub fn save_drag_icon(_app_handle: AppHandle, icon_data: Vec<u8>) -> Result<String, String> {
+    use std::io::Write;
+    let temp_dir = std::env::temp_dir();
+    let file_path = temp_dir.join("temp_drag_icon.png");
+
+    let mut file = fs::File::create(&file_path).map_err(|e| e.to_string())?;
+    file.write_all(&icon_data).map_err(|e| e.to_string())?;
+
+    Ok(file_path.to_string_lossy().into_owned())
 }
