@@ -10,6 +10,7 @@
     "tauri": "tauri"
   },
   "dependencies": {
+    "@crabnebula/tauri-plugin-drag": "^2.1.0",
     "@tabler/icons-react": "^3.36.1",
     "@tauri-apps/api": "^2",
     "@tauri-apps/plugin-opener": "^2",

@@ -54,3 +54,52 @@ pub fn fetch_artwork_from_url(url: &str) -> Option<String> {
         None
     }
 }
+
+/// Get the system accent color on macOS
+#[cfg(target_os = "macos")]
+pub fn get_macos_accent_color() -> String {
+    use objc2::runtime::AnyObject;
+    use objc2::{class, msg_send};
+
+    // Default to Apple Blue if anything fails
+    let default_color = "#007AFF".to_string();
+
+    unsafe {
+        // Get NSColor.controlAccentColor
+        let color_class = class!(NSColor);
+        let accent_color: *mut AnyObject = msg_send![color_class, controlAccentColor];
+
+        if accent_color.is_null() {
+            return default_color;
+        }
+
+        // Convert to SRGB color space to ensure components are valid
+        // colorUsingColorSpace: [NSColorSpace sRGBColorSpace]
+        let color_space_class = class!(NSColorSpace);
+        let srgb_space: *mut AnyObject = msg_send![color_space_class, sRGBColorSpace];
+        let srgb_color: *mut AnyObject = msg_send![accent_color, colorUsingColorSpace: srgb_space];
+
+        if srgb_color.is_null() {
+            return default_color;
+        }
+
+        // Get RGB components
+        type CGFloat = f64;
+        let mut r: CGFloat = 0.0;
+        let mut g: CGFloat = 0.0;
+        let mut b: CGFloat = 0.0;
+        let mut a: CGFloat = 0.0;
+
+        // getRed:green:blue:alpha:
+        let _: () =
+            msg_send![srgb_color, getRed: &mut r, green: &mut g, blue: &mut b, alpha: &mut a];
+
+        // Format as hex string
+        return format!(
+            "#{:02X}{:02X}{:02X}",
+            (r * 255.0).round() as u8,
+            (g * 255.0).round() as u8,
+            (b * 255.0).round() as u8
+        );
+    }
+}

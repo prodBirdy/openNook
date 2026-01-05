@@ -1,5 +1,5 @@
-import { useState, useCallback, useRef, useEffect } from 'react';
-import { IconFile, IconX, IconUpload } from '@tabler/icons-react';
+import { useState, useCallback, useRef } from 'react';
+import { IconX, IconUpload } from '@tabler/icons-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { invoke, convertFileSrc } from '@tauri-apps/api/core';
 import './DynamicIsland.css'; // Reusing island CSS for now, will add specific styles later if needed
@@ -54,6 +54,7 @@ export function FileTray({ files, onUpdateFiles }: FileTrayProps) {
             let resolvedPath = path;
             if (path) {
                 invoke('on_file_drop', { path }).catch(console.error);
+                invoke('trigger_haptics').catch(console.error);
                 try {
                     resolvedPath = await invoke('resolve_path', { path });
                 } catch (e) {
@@ -114,20 +115,71 @@ export function FileTray({ files, onUpdateFiles }: FileTrayProps) {
         }
     }, []);
 
-    const handleDragStart = useCallback((e: React.DragEvent, file: FileItem) => {
+    const createResizedIcon = async (src: string): Promise<Uint8Array | null> => {
+        return new Promise((resolve) => {
+            const img = new Image();
+            img.crossOrigin = "Anonymous";
+            img.onload = () => {
+                try {
+                    const canvas = document.createElement('canvas');
+                    canvas.width = 30;
+                    canvas.height = 30;
+                    const ctx = canvas.getContext('2d');
+                    if (!ctx) { resolve(null); return; }
+
+                    // Draw image scaled to 30x30
+                    ctx.drawImage(img, 0, 0, 30, 30);
+
+                    canvas.toBlob((blob) => {
+                        if (!blob) { resolve(null); return; }
+                        blob.arrayBuffer().then(buf => resolve(new Uint8Array(buf)));
+                    }, 'image/png');
+                } catch (e) {
+                    console.error("Canvas error", e);
+                    resolve(null);
+                }
+            };
+            img.onerror = () => resolve(null);
+            img.src = src;
+        });
+    };
+
+    const handleNativeDrag = useCallback(async (_e: React.MouseEvent, file: FileItem, index: number) => {
         const path = file.resolvedPath || file.path;
         if (path) {
-            e.dataTransfer.effectAllowed = 'copyMove';
-            // Try standard URI list
-            e.dataTransfer.setData('text/uri-list', `file://${path}`);
-            e.dataTransfer.setData('text/plain', path);
-            // Try DownloadURL (Chrome specific, might not work in WKWebView but worth a shot)
-            e.dataTransfer.setData('DownloadURL', `${file.type}:${file.name}:file://${path}`);
+            invoke('trigger_haptics').catch(console.error);
+            try {
+                let dragIconPath = path;
 
-            // Also invoke backend to see if we can trigger native drag
-            invoke('start_drag', { path }).catch(console.error);
+                // Try to generate a small icon
+                const src = convertFileSrc(path);
+                const iconData = await createResizedIcon(src);
+
+                if (iconData) {
+                    try {
+                        dragIconPath = await invoke('save_drag_icon', { iconData: Array.from(iconData) });
+                    } catch (e) {
+                        console.error('Failed to save drag icon', e);
+                    }
+                }
+
+                // Use native drag plugin for proper file binary transfer
+                // This initiates an OS-level drag session
+                const { startDrag } = await import('@crabnebula/tauri-plugin-drag');
+                await startDrag({
+                    item: [path],
+                    icon: dragIconPath // Reverted to use path as icon is required. Note: may cause large drag image for high-res files.
+                });
+
+                // If we get here, drag completed successfully - remove file from tray
+                const updated = files.filter((_, i) => i !== index);
+                onUpdateFiles(updated);
+            } catch (error) {
+                // Drag was cancelled or failed - file stays in tray
+                console.log('Drag cancelled or failed:', error);
+            }
         }
-    }, []);
+    }, [files, onUpdateFiles]);
 
     const formatSize = (bytes: number) => {
         if (bytes === 0) return '';
@@ -137,10 +189,7 @@ export function FileTray({ files, onUpdateFiles }: FileTrayProps) {
         return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
     };
 
-    const isImage = (file: FileItem) => {
-        return file.type.startsWith('image/') ||
-            ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg'].some(ext => file.name.toLowerCase().endsWith(ext));
-    };
+
 
     return (
         <div
@@ -160,7 +209,7 @@ export function FileTray({ files, onUpdateFiles }: FileTrayProps) {
                 </div>
             ) : (
                 <div className="file-grid">
-                    <AnimatePresence>
+                    <AnimatePresence mode="popLayout">
                         {files.map((file, index) => (
                             <motion.div
                                 key={`${file.name}-${file.lastModified}-${index}`}
@@ -170,36 +219,38 @@ export function FileTray({ files, onUpdateFiles }: FileTrayProps) {
                                 animate={{ opacity: 1, scale: 1 }}
                                 exit={{ opacity: 0, scale: 0.8 }}
                                 transition={{ type: "spring", stiffness: 500, damping: 30 }}
-                                draggable
-                                onDragStart={(e) => handleDragStart(e, file)}
+                                onMouseDown={(e) => handleNativeDrag(e, file, index)}
                                 onClick={() => handleFileClick(file)}
                                 onContextMenu={(e) => handleFileContextMenu(e, file)}
                                 style={{ cursor: 'pointer' }}
                             >
-                                <div className="file-icon-wrapper">
-                                    {isImage(file) && (file.resolvedPath || file.path) ? (
-                                        <img
-                                            src={convertFileSrc(file.resolvedPath || file.path!)}
-                                            alt={file.name}
-                                            style={{ width: '100%', height: '100%', objectFit: 'cover', borderRadius: 6 }}
-                                            onError={(e) => {
-                                                console.error(`Failed to load image: ${file.resolvedPath || file.path}`, e);
-                                                // Fallback to icon
-                                                e.currentTarget.style.display = 'none';
-                                                e.currentTarget.parentElement?.classList.add('image-load-error');
-                                            }}
-                                        />
-                                    ) : (
-                                        <IconFile size={32} stroke={1.5} color="white" />
-                                    )}
-                                    {/* Show icon if image failed to load (handled via CSS/JS logic above, but simpler to just show icon if hidden) */}
-                                </div>
                                 <div className="file-info">
                                     <span className="file-name" title={file.name}>{file.name}</span>
                                     {file.size > 0 && <span className="file-size">{formatSize(file.size)}</span>}
                                 </div>
+                                <div className="file-icon-wrapper" >
+                                    {(file.resolvedPath || file.path) && (
+                                        <img
+                                            src={convertFileSrc(file.resolvedPath || file.path!)}
+                                            alt={file.name}
+                                            style={{
+                                                width: '100%',
+                                                height: '100%',
+                                                objectFit: 'scale-down',
+                                                borderRadius: 4
+                                            }}
+                                            onError={(e) => {
+                                                e.currentTarget.style.display = 'none';
+                                            }}
+                                        />
+                                    )}
+                                </div>
+
                                 <button
                                     className="remove-file-btn"
+                                    onMouseDown={(e) => {
+                                        e.stopPropagation();
+                                    }}
                                     onClick={(e) => {
                                         e.stopPropagation();
                                         removeFile(index);
@@ -219,7 +270,7 @@ export function FileTray({ files, onUpdateFiles }: FileTrayProps) {
                         initial={{ scale: 0.9, opacity: 0 }}
                         animate={{ scale: 1, opacity: 1 }}
                     >
-                        <IconUpload size={64} color="white" stroke={1.5} />
+                        <IconUpload size={32} color="white" stroke={1.5} />
                     </motion.div>
                 </div>
             )}

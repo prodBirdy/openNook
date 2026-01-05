@@ -4,28 +4,12 @@ import { listen } from '@tauri-apps/api/event';
 import { useEffect, useState, useCallback, useRef, useMemo } from 'react';
 import { useNotchInfo } from '../hooks/useNotchInfo';
 import { getDominantColor } from '../utils/imageUtils';
-import { IconSettings, IconLayoutGrid, IconFiles } from '@tabler/icons-react';
 import './DynamicIsland.css';
-import { CalendarWidget } from './widgets/CalendarWidget';
-import { RemindersWidget } from './widgets/RemindersWidget';
-import { SmartAudioVisualizer } from './SmartAudioVisualizer';
-import { AlbumCover } from './AlbumCover';
-import { ExpandedMedia } from './ExpandedMedia';
-import { FileTray, FileItem } from './FileTray';
-
-
-
-interface NowPlayingData {
-    title: string | null;
-    artist: string | null;
-    album: string | null;
-    artwork_base64: string | null;
-    duration: number | null;
-    elapsed_time: number | null;
-    is_playing: boolean;
-    audio_levels: number[] | null;
-    app_name: string | null;
-}
+import { FileItem } from './FileTray';
+import { CompactMedia } from './island/CompactMedia';
+import { CompactFiles } from './island/CompactFiles';
+import { ExpandedIsland } from './island/ExpandedIsland';
+import { NowPlayingData } from './island/types';
 
 const artworkColorCache = new Map<string, string | null>();
 
@@ -34,7 +18,7 @@ export function DynamicIsland() {
     const [nowPlaying, setNowPlaying] = useState<NowPlayingData | null>(null);
     const [visualizerColor, setVisualizerColor] = useState<string | null>(null);
     const [isHovered, setIsHovered] = useState(false);
-    const [isCoverHovered, setIsCoverHovered] = useState(false);
+    // isCoverHovered moved to CompactMedia
     const [expanded, setExpanded] = useState(false);
     const [isAnimating, setIsAnimating] = useState(false);
     const [notes, setNotes] = useState('');
@@ -42,6 +26,7 @@ export function DynamicIsland() {
     const [windowSize, setWindowSize] = useState({ width: window.innerWidth, height: window.innerHeight });
     const [droppedFiles, setDroppedFiles] = useState<string[]>([]);
     const [files, setFiles] = useState<FileItem[]>([]);
+    const [preferredMode, setPreferredMode] = useState<'media' | 'files' | null>(null);
 
     const islandRef = useRef<HTMLDivElement>(null);
     const notesTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -50,6 +35,9 @@ export function DynamicIsland() {
         showCalendar: false,
         showReminders: false,
         showMedia: true,
+        baseWidth: 160,
+        baseHeight: 38,
+        liquidGlassMode: false,
     });
     const lastArtworkRef = useRef<string | null | undefined>(null);
     const expandedRef = useRef(expanded);
@@ -143,7 +131,8 @@ export function DynamicIsland() {
             const saved = localStorage.getItem('app-settings');
             if (saved) {
                 try {
-                    setSettings(JSON.parse(saved));
+                    const parsed = JSON.parse(saved);
+                    setSettings(prev => ({ ...prev, ...parsed }));
                 } catch (e) { console.error(e); }
             }
         };
@@ -168,13 +157,42 @@ export function DynamicIsland() {
     // Determine mode - memoized
     const hasMedia = !!(nowPlaying && nowPlaying.is_playing);
     const hasFiles = files.length > 0;
-    const mode: 'media' | 'files' | 'idle' = hasMedia ? 'media' : (hasFiles ? 'files' : 'idle');
+
+    const availableModes = useMemo(() => {
+        const modes: ('media' | 'files')[] = [];
+        if (hasMedia) modes.push('media');
+        if (hasFiles) modes.push('files');
+        return modes;
+    }, [hasMedia, hasFiles]);
+
+    const mode: 'media' | 'files' | 'idle' = useMemo(() => {
+        if (availableModes.length === 0) return 'idle';
+        if (preferredMode && availableModes.includes(preferredMode)) return preferredMode;
+        // Default priority: Media > Files
+        return availableModes.includes('media') ? 'media' : 'files';
+    }, [availableModes, preferredMode]);
+
+    const cycleMode = useCallback((direction: 'next' | 'prev') => {
+        if (availableModes.length <= 1) return;
+
+        const currentIndex = availableModes.indexOf(mode as 'media' | 'files');
+        let nextIndex;
+        if (direction === 'next') {
+            nextIndex = (currentIndex + 1) % availableModes.length;
+        } else {
+            nextIndex = (currentIndex - 1 + availableModes.length) % availableModes.length;
+        }
+
+        const newMode = availableModes[nextIndex];
+        setPreferredMode(newMode);
+        invoke('trigger_haptics').catch(console.error);
+    }, [availableModes, mode]);
 
     // Memoize notch dimensions
     const { notchHeight, baseNotchWidth } = useMemo(() => ({
-        notchHeight: notchInfo?.notch_height ? notchInfo.notch_height - 20 : 38,
-        baseNotchWidth: notchInfo?.notch_width ? notchInfo.notch_width : 160,
-    }), [notchInfo?.notch_height, notchInfo?.notch_width]);
+        notchHeight: Math.max(settings.baseHeight, notchInfo?.notch_height ? notchInfo.notch_height - 20 : 38),
+        baseNotchWidth: Math.max(settings.baseWidth, notchInfo?.notch_width ? notchInfo.notch_width : 160),
+    }), [notchInfo?.notch_height, notchInfo?.notch_width, settings.baseHeight, settings.baseWidth]);
 
     // Memoize target dimensions
     const { targetWidth, targetHeight } = useMemo(() => {
@@ -342,24 +360,28 @@ export function DynamicIsland() {
     // Toggle expanded mode
     const handleIslandClick = useCallback(() => {
         setExpanded(prev => {
-            if (!prev) setIsAnimating(true);
+            if (!prev) {
+                // Expanding
+                setIsAnimating(true);
+                // Set initial tab based on current mode
+                if (mode === 'files') {
+                    setActiveTab('files');
+                } else {
+                    setActiveTab('widgets');
+                }
+                invoke('trigger_haptics').catch(console.error);
+
+            } else {
+                invoke('trigger_haptics').catch(console.error);
+            }
             return !prev;
         });
-    }, []);
+    }, [mode]);
 
     // Hover handlers for haptics
     const handleHoverStart = useCallback(() => {
         invoke('trigger_haptics').catch(console.error);
     }, []);
-
-    // Album click handler
-    const handleAlbumClick = useCallback((e: React.MouseEvent) => {
-        e.stopPropagation();
-        if (nowPlaying?.app_name) {
-            invoke('activate_media_app', { appName: nowPlaying.app_name })
-                .catch(err => console.error('Failed to open media app:', err));
-        }
-    }, [nowPlaying?.app_name]);
 
     // Combined initialization and cleanup effect
     useEffect(() => {
@@ -417,6 +439,7 @@ export function DynamicIsland() {
             setExpanded(true);
             setActiveTab('files');
             setIsAnimating(true);
+            invoke('trigger_haptics').catch(console.error);
         };
 
         const handleFileDrop = (event: any) => {
@@ -485,13 +508,11 @@ export function DynamicIsland() {
             if (!expanded && e.deltaY < -20) {
                 setExpanded(true);
                 setIsAnimating(true);
+                invoke('trigger_haptics').catch(console.error);
             } else if (expanded && e.deltaY > 20) {
                 setExpanded(false);
-                // We don't necessarily need to set isAnimating to true here if we want immediate response,
-                // but for consistency with opening protection:
-                // However, closer logic might benefit from being immediate.
-                // Let's stick to the pattern:
                 setIsAnimating(true);
+                invoke('trigger_haptics').catch(console.error);
             } else if (expanded) {
                 // Horizontal swipe for tabs
                 if (e.deltaX > 20 && activeTab === 'widgets') {
@@ -499,9 +520,15 @@ export function DynamicIsland() {
                 } else if (e.deltaX < -20 && activeTab === 'files') {
                     setActiveTab('widgets');
                 }
+            } else if (!expanded && mode !== 'idle') {
+                // Restore horizontal wheel for trackpad mode cycling
+                if (Math.abs(e.deltaX) > 20) {
+                    if (e.deltaX > 20) cycleMode('next');
+                    else cycleMode('prev');
+                }
             }
         }
-    }, [expanded, isAnimating, activeTab]);
+    }, [expanded, isAnimating, activeTab, mode, cycleMode]);
 
     const handleChildWheel = useCallback((e: React.WheelEvent) => {
         // If vertical scroll dominates, stop propagation to prevent closing the island
@@ -510,7 +537,7 @@ export function DynamicIsland() {
             return;
         }
 
-        // Check if we can scroll horizontally in the direction of the delta
+        // Check if we can scroll horizontally in the direction of the gesture
         const container = e.currentTarget;
         const isScrollable = container.scrollWidth > container.clientWidth;
 
@@ -563,7 +590,7 @@ export function DynamicIsland() {
         <div className={`dynamic-island-container ${expanded ? 'expanded' : ''}`}>
             <motion.div
                 ref={islandRef}
-                className={`dynamic-island ${mode} ${expanded ? 'expanded' : ''}`}
+                className={`dynamic-island ${mode} ${expanded ? 'expanded' : ''} ${settings.liquidGlassMode ? 'liquid-glass' : ''}`}
                 initial={false}
                 onAnimationComplete={() => setIsAnimating(false)}
                 animate={{
@@ -578,195 +605,56 @@ export function DynamicIsland() {
                 style={{ cursor: 'pointer' }}
             >
                 <AnimatePresence mode="wait">
-                    {expanded ? (
-                        <motion.div
-                            key="expanded-content"
-                            className="island-content expanded-content"
-                            initial={{ opacity: 0 }}
-                            animate={{ opacity: 1 }}
-                            exit={{ opacity: 0 }}
-                            transition={fadeTransition}
-                        >
-                            {/* Top Menu Bar */}
-                            <div className="expanded-menu-bar" style={{ height: notchHeight }}>
-                                <div className="tab-control-container">
-                                    <div className="tab-pill-background">
-                                        <div
-                                            className="tab-pill-active-bg"
-                                            style={{
-                                                transform: `translateX(${activeTab === 'widgets' ? '0%' : '100%'})`
-                                            }}
-                                        />
-                                        <div
-                                            className={`tab-pill-option ${activeTab === 'widgets' ? 'active' : ''}`}
-                                            onClick={(e) => { e.stopPropagation(); setActiveTab('widgets'); }}
-                                        >
-                                            <IconLayoutGrid size={16} />
-                                        </div>
-                                        <div
-                                            className={`tab-pill-option ${activeTab === 'files' ? 'active' : ''}`}
-                                            onClick={(e) => { e.stopPropagation(); setActiveTab('files'); }}
-                                        >
-                                            <IconFiles size={16} />
-                                        </div>
-                                    </div>
-                                </div>
-                                <div className="media-spacer" style={{ width: baseNotchWidth, height: '100%' }} />
-                                <div style={{ flex: 1, display: 'flex', justifyContent: 'flex-end', alignItems: 'center' }}>
-                                    <div
-                                        className="settings-button"
-                                        style={{ height: notchHeight - 4, width: notchHeight - 4 }}
-                                        onClick={(e) => {
-                                            e.stopPropagation();
-                                            handleSettingsClick();
-                                        }}
-                                    >
-                                        <IconSettings size={20} color="white" stroke={1.5} />
-                                    </div>
-                                </div>
-                            </div>
-
-                            {/* Main Content Area */}
-                            <div className="main-content-area">
-                                <AnimatePresence mode="wait">
-                                    {activeTab === 'widgets' ? (
-                                        <motion.div
-                                            key="widgets"
-                                            className="widgets-container"
-                                            initial={{ opacity: 0, x: -20 }}
-                                            animate={{ opacity: 1, x: 0 }}
-                                            exit={{ opacity: 0, x: -20 }}
-                                            transition={fadeTransition}
-                                            onWheel={handleChildWheel}
-                                        >
-                                            {settings.showMedia && (
-                                                <div
-                                                    className={`expanded-media-player widget-card ${(!nowPlaying?.duration || nowPlaying.duration <= 0) ? 'no-progress' : ''}`}
-                                                    onClick={(e) => e.stopPropagation()}
-                                                >
-                                                    {nowPlaying ? (
-                                                        <ExpandedMedia
-                                                            nowPlaying={nowPlaying}
-                                                            onPlayPause={handlePlayPause}
-                                                            onNext={handleNextTrack}
-                                                            onPrevious={handlePreviousTrack}
-                                                            onSeek={handleSeek}
-                                                        />
-                                                    ) : (
-                                                        <div className="no-media-message">No media playing</div>
-                                                    )}
-                                                </div>
-                                            )}
-
-                                            {settings.showCalendar && (
-                                                <div className="widget-card" onClick={(e) => e.stopPropagation()} style={{ minWidth: 280 }}>
-                                                    <CalendarWidget />
-                                                </div>
-                                            )}
-
-                                            {settings.showReminders && (
-                                                <div className="widget-card" onClick={(e) => e.stopPropagation()} style={{ minWidth: 260 }}>
-                                                    <RemindersWidget />
-                                                </div>
-                                            )}
-
-                                            <div className="expanded-notes-section widget-card" onClick={(e) => e.stopPropagation()}>
-                                                <textarea
-                                                    className="notes-field"
-                                                    placeholder="Type your notes here..."
-                                                    value={notes}
-                                                    onChange={handleNotesChange}
-                                                    onClick={handleNotesClick}
-                                                />
-                                            </div>
-                                        </motion.div>
-                                    ) : (
-                                        <motion.div
-                                            key="files"
-                                            className="file-tray-wrapper"
-                                            initial={{ opacity: 0, x: 20 }}
-                                            animate={{ opacity: 1, x: 0 }}
-                                            exit={{ opacity: 0, x: 20 }}
-                                            transition={fadeTransition}
-                                        >
-                                            <FileTray files={files} onUpdateFiles={setFiles} />
-                                        </motion.div>
-                                    )}
-                                </AnimatePresence>
-                            </div>
-                        </motion.div>
-                    ) : mode === 'media' && nowPlaying ? (
-                        <motion.div
-                            key="media-content"
-                            className="island-content media-content"
-                            initial={{ opacity: 0 }}
-                            animate={{ opacity: contentOpacity }}
-                            transition={fadeTransition}
-                            style={{ pointerEvents: isHovered ? 'auto' : 'none' }}
-                        >
-                            <div className="media-left" style={{ width: 60, height: '100%' }}>
-                                <div className="album-cover-wrapper">
-                                    <AlbumCover
-                                        artwork={nowPlaying.artwork_base64}
-                                        title={nowPlaying.title}
-                                        isPlaying={nowPlaying.is_playing}
-                                        onHoverChange={setIsCoverHovered}
-                                        onClick={handleAlbumClick}
-                                    />
-                                    <AnimatePresence>
-                                        {isCoverHovered && isHovered && (nowPlaying.title || nowPlaying.artist) && (
-                                            <motion.div
-                                                className="album-info-reveal"
-                                                initial={{ opacity: 0, y: -8, x: '-50%' }}
-                                                animate={{ opacity: 1, y: 4, x: '-50%' }}
-                                                exit={{ opacity: 0, y: -8, x: '-50%' }}
-                                                transition={{ type: 'spring', stiffness: 500, damping: 30 }}
-                                            >
-                                                <div className="album-info-title">{nowPlaying.title || 'Unknown Title'}</div>
-                                                <div className="album-info-artist">{nowPlaying.artist || 'Unknown Artist'}</div>
-                                            </motion.div>
-                                        )}
-                                    </AnimatePresence>
-                                </div>
-                            </div>
-
-                            <div className="media-spacer" style={{ width: baseNotchWidth }} />
-
-                            <div className="media-right" style={{ width: 60, height: '100%' }}>
-                                <SmartAudioVisualizer
-                                    isPlaying={nowPlaying.is_playing}
-                                    fallbackLevels={nowPlaying.audio_levels}
-                                    color={visualizerColor}
-                                />
-                            </div>
-                        </motion.div>
-                    ) : mode === 'files' ? (
-                        <motion.div
-                            key="files-content"
-                            className="island-content files-content"
-                            initial={{ opacity: 0 }}
-                            animate={{ opacity: contentOpacity }}
-                            transition={fadeTransition}
-                            style={{
-                                pointerEvents: isHovered ? 'auto' : 'none',
-                                display: 'flex',
-                                alignItems: 'center',
-                                justifyContent: 'space-between',
-                                width: '100%',
-                                padding: '0 12px'
-                            }}
-                        >
-                            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                                <IconFiles size={20} color="white" stroke={1.5} />
-                            </div>
-
-                            <div className="media-spacer" style={{ width: baseNotchWidth }} />
-
-                            <div style={{ display: 'flex', alignItems: 'center' }}>
-                                {files.length}
-                            </div>
-                        </motion.div>
-                    ) : null}
+                    <motion.div
+                        key={expanded ? 'island-expanded' : `island-${mode}-collapsed`}
+                        style={{
+                            width: '100%',
+                            height: '100%',
+                            display: 'flex',
+                            alignItems: 'center',
+                        }}
+                        initial={{ opacity: 0 }}
+                        animate={{ opacity: 1 }}
+                        exit={{ opacity: 0 }}
+                        transition={fadeTransition}
+                    >
+                        {expanded ? (
+                            <ExpandedIsland
+                                activeTab={activeTab}
+                                setActiveTab={setActiveTab}
+                                notchHeight={notchHeight}
+                                baseNotchWidth={baseNotchWidth}
+                                settings={settings}
+                                handleSettingsClick={handleSettingsClick}
+                                nowPlaying={nowPlaying}
+                                handlePlayPause={handlePlayPause}
+                                handleNextTrack={handleNextTrack}
+                                handlePreviousTrack={handlePreviousTrack}
+                                handleSeek={handleSeek}
+                                files={files}
+                                setFiles={setFiles}
+                                notes={notes}
+                                handleNotesChange={handleNotesChange}
+                                handleNotesClick={handleNotesClick}
+                                handleChildWheel={handleChildWheel}
+                            />
+                        ) : mode === 'media' && nowPlaying ? (
+                            <CompactMedia
+                                nowPlaying={nowPlaying}
+                                isHovered={isHovered}
+                                baseNotchWidth={baseNotchWidth}
+                                visualizerColor={visualizerColor}
+                                contentOpacity={contentOpacity}
+                            />
+                        ) : mode === 'files' ? (
+                            <CompactFiles
+                                files={files}
+                                isHovered={isHovered}
+                                baseNotchWidth={baseNotchWidth}
+                                contentOpacity={contentOpacity}
+                            />
+                        ) : null}
+                    </motion.div>
                 </AnimatePresence>
             </motion.div >
         </div >

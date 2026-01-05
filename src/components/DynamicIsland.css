@@ -63,6 +63,7 @@
     height: 100%;
     display: flex;
     align-items: center;
+    overflow: visible;
 }
 
 /* Notification Layout */
@@ -244,7 +245,18 @@
     background: #000;
 }
 
+
+/* Liquid Glass Mode */
+.dynamic-island.liquid-glass {
+    background-color: rgba(10, 10, 10, 0.65);
+    backdrop-filter: blur(25px) saturate(180%);
+    -webkit-backdrop-filter: blur(25px) saturate(180%);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    box-shadow: 0 10px 40px rgba(0, 0, 0, 0.5);
+}
+
 /* Keep pseudo-elements visible in expanded mode */
+
 
 /* Expanded content layout */
 .expanded-content {
@@ -590,7 +602,7 @@
     min-width: 48px;
     height: 48px;
     border-radius: 8px;
-    background: #34c759;
+    background: var(--accent-color);
     color: white;
     padding: 4px;
 }
@@ -638,12 +650,20 @@
     padding: 20px;
     height: 100%;
     box-sizing: border-box;
+    overflow: hidden;
 }
 
 .reminders-list {
     display: flex;
     flex-direction: column;
     gap: 10px;
+    overflow-y: auto;
+    flex: 1;
+    padding-right: 4px;
+}
+
+.reminders-list::-webkit-scrollbar {
+    display: none;
 }
 
 .reminder-item {
@@ -661,7 +681,7 @@
 .reminder-checkbox {
     width: 20px;
     height: 20px;
-    border: 2px solid #ff3b30;
+    border: 2px solid var(--accent-color);
     border-radius: 50%;
     cursor: pointer;
     transition: background 0.2s;
@@ -785,6 +805,7 @@
 
 .file-item {
     background: rgba(255, 255, 255, 0.08);
+    max-height: 100%;
     border-radius: 12px;
     padding: 12px;
     display: flex;
@@ -801,13 +822,14 @@
 }
 
 .file-icon-wrapper {
-    width: 40px;
-    height: 40px;
     display: flex;
     align-items: center;
     justify-content: center;
     background: rgba(255, 255, 255, 0.05);
     border-radius: 8px;
+    width: 100%;
+    aspect-ratio: 1;
+    overflow: hidden;
 }
 
 .file-info {
@@ -872,4 +894,553 @@
     justify-content: center;
     z-index: 10;
     pointer-events: none;
+}
+
+/* Apple-style Widget Enhancements */
+.apple-style .widget-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+}
+
+.refresh-button {
+    background: none;
+    border: none;
+    color: rgba(255, 255, 255, 0.4);
+    cursor: pointer;
+    padding: 4px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: all 0.2s ease;
+}
+
+.refresh-button:hover {
+    background: rgba(255, 255, 255, 0.1);
+    color: var(--accent-color);
+}
+
+.refresh-button.spinning {
+    animation: spin 1s linear infinite;
+    color: var(--accent-color);
+    cursor: default;
+}
+
+@keyframes spin {
+    from {
+        transform: rotate(0deg);
+    }
+
+    to {
+        transform: rotate(360deg);
+    }
+}
+
+/* Calendar Day Scroller */
+/* Calendar Day Scroller and Compact Mode */
+.scroller-container {
+    position: relative;
+    transition: all 0.3s cubic-bezier(0.25, 0.1, 0.25, 1);
+    z-index: 10;
+    margin-bottom: 8px;
+    background: rgba(0, 0, 0, 0.0);
+    border-radius: 12px;
+    overflow: hidden;
+}
+
+.scroller-container.compact {
+    height: 8px;
+}
+
+.scroller-container.compact .calendar-day-scroller {
+    height: 8px;
+    padding-bottom: 0;
+    overflow: hidden;
+    gap: 2px;
+    align-items: center;
+}
+
+/* Make day items look like small bars in compact mode */
+.scroller-container.compact .day-item {
+    background: rgba(255, 255, 255, 0.2);
+    opacity: 0.5;
+    height: 4px;
+    min-width: 12px;
+    /* Small width for bar representation */
+    flex: 1;
+    /* Stretch to fill width if needed, or keep discrete */
+    border-radius: 2px;
+    padding: 0;
+    margin: 0;
+    transition: height 0.2s ease, background 0.2s ease, opacity 0.2s ease;
+}
+
+.scroller-container.compact .day-item:hover {
+    background: rgba(255, 255, 255, 0.4);
+    opacity: 1;
+}
+
+.scroller-container.compact .day-item span {
+    display: none;
+}
+
+.scroller-container.compact .day-item.selected {
+    opacity: 1;
+    background: var(--accent-color);
+    color: transparent;
+    height: 8px;
+    box-shadow: none;
+}
+
+/* EXPANDED MODE: In-flow expansion */
+.scroller-container.expanded {
+    height: 60px;
+    /* Specific height to accommodate items */
+    background: rgba(255, 255, 255, 0.05);
+    margin-bottom: 12px;
+}
+
+.scroller-container.expanded .calendar-day-scroller {
+    height: 100%;
+    overflow-x: auto;
+    padding: 6px;
+    align-items: center;
+}
+
+/* Events list shouldn't be dimmed anymore as it's not being overlaid */
+.events-list-container.dimmed {
+    opacity: 1;
+    pointer-events: auto;
+}
+
+/* Original Scroller Styles */
+.calendar-day-scroller {
+    display: flex;
+    gap: 4px;
+    overflow-x: auto;
+    padding-bottom: 12px;
+    margin-bottom: 8px;
+    align-items: center;
+    scrollbar-width: none;
+    cursor: grab;
+    transition: all 0.2s ease;
+}
+
+.calendar-day-scroller::-webkit-scrollbar {
+    display: none;
+}
+
+.day-item {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    min-width: 28px;
+    height: 48px;
+    border-radius: 12px;
+    background: rgba(255, 255, 255, 0.05);
+    cursor: pointer;
+    transition: all 0.2s ease;
+    flex: 1;
+}
+
+.day-item:hover {
+    background: rgba(255, 255, 255, 0.1);
+}
+
+
+.day-item.selected {
+    background: var(--accent-color);
+    color: white;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
+    transform: scale(1.1);
+}
+
+.day-item.today {
+    background: var(--accent-color);
+    color: white;
+    box-shadow: inset 0 0 0 100px rgba(0, 0, 0, 0.2);
+}
+
+/* Ensure selected state overrides today if selected */
+.day-item.today.selected {
+    background: var(--accent-color);
+    transform: scale(1.1);
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
+}
+
+.scroller-container.compact .day-item.selected {
+    background: var(--accent-color);
+    box-shadow: none;
+    transform: none;
+    height: 8px;
+}
+
+.scroller-container.compact .day-item.has-event {
+    background: #ff3b30;
+    /* Red for events */
+    opacity: 1;
+}
+
+.scroller-container.compact .day-item.today {
+    background: var(--accent-color);
+    filter: brightness(0.7);
+    opacity: 1;
+    height: 8px;
+}
+
+.scroller-container.compact .event-dot {
+    display: none;
+}
+
+.event-dot {
+    width: 4px;
+    height: 4px;
+    background-color: #ff3b30;
+    /* Red for event indicator */
+    border-radius: 50%;
+    margin-top: 2px;
+}
+
+.day-item.today .day-number {
+    font-weight: 700;
+}
+
+.day-name {
+    font-size: 10px;
+    text-transform: uppercase;
+    opacity: 0.7;
+    margin-bottom: 2px;
+}
+
+.day-number {
+    font-size: 14px;
+    font-weight: 500;
+}
+
+.day-item.selected .day-name,
+.day-item.selected .day-number {
+    color: white;
+    opacity: 1;
+}
+
+/* Modern Events List */
+.events-list-container {
+    flex: 1;
+    overflow-y: auto;
+    padding-right: 4px;
+    /* for scroll bar if needed */
+}
+
+.events-list-container::-webkit-scrollbar {
+    display: none;
+}
+
+.event-item-modern {
+    display: flex;
+    align-items: center;
+    padding: 8px 0;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.event-item-modern:last-child {
+    border-bottom: none;
+}
+
+.event-time-column {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    width: 48px;
+    text-align: right;
+    padding-right: 8px;
+    flex-shrink: 0;
+}
+
+.event-start-time {
+    font-size: 13px;
+    font-weight: 500;
+    color: rgba(255, 255, 255, 0.9);
+}
+
+.all-day-label {
+    font-size: 10px;
+    text-transform: uppercase;
+    color: rgba(255, 255, 255, 0.6);
+    font-weight: 600;
+}
+
+.event-color-bar {
+    width: 3px;
+    height: 32px;
+    border-radius: 2px;
+    margin-right: 12px;
+    flex-shrink: 0;
+}
+
+.event-details-modern {
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    overflow: hidden;
+}
+
+.event-details-modern .event-title {
+    font-size: 14px;
+    font-weight: 600;
+}
+
+.event-details-modern .event-location {
+    font-size: 11px;
+    color: rgba(255, 255, 255, 0.5);
+    margin-top: 1px;
+}
+
+/* Modern Reminder Item */
+.reminder-item-modern {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 10px 0;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.reminder-item-modern:last-child {
+    border-bottom: none;
+}
+
+.reminder-checkbox-circle {
+    width: 20px;
+    height: 20px;
+    border-radius: 50%;
+    border: 2px solid;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    transition: all 0.2s;
+    background: rgba(255, 255, 255, 0.05);
+    flex-shrink: 0;
+}
+
+.reminder-checkbox-inner {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    opacity: 0;
+    transition: all 0.2s;
+}
+
+.reminder-checkbox-circle:hover {
+    background: rgba(255, 255, 255, 0.1);
+}
+
+.reminder-checkbox-circle:active .reminder-checkbox-inner {
+    opacity: 0.5;
+}
+
+.reminder-content {
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+
+.reminder-content .reminder-title {
+    font-size: 15px;
+    font-weight: 500;
+    color: rgba(255, 255, 255, 0.95);
+    margin-bottom: 2px;
+}
+
+.reminder-list-name {
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    opacity: 0.8;
+}
+
+/* Widget Dialog */
+.widget-dialog-overlay {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: rgba(0, 0, 0, 0.4);
+    backdrop-filter: blur(2px);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 20;
+    border-radius: 20px;
+}
+
+.widget-dialog {
+    background: rgba(30, 30, 32, 0.95);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    padding: 16px;
+    border-radius: 12px;
+    width: 80%;
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+}
+
+.dialog-title {
+    font-size: 14px;
+    font-weight: 600;
+    margin-bottom: 12px;
+    color: white;
+}
+
+.dialog-input {
+    width: 100%;
+    background: rgba(255, 255, 255, 0.1);
+    border: none;
+    border-radius: 6px;
+    padding: 8px;
+    color: white;
+    font-size: 13px;
+    outline: none;
+    margin-bottom: 12px;
+}
+
+.dialog-input:focus {
+    background: rgba(255, 255, 255, 0.15);
+}
+
+.dialog-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+}
+
+.dialog-btn {
+    background: none;
+    border: none;
+    font-size: 12px;
+    font-weight: 500;
+    cursor: pointer;
+    padding: 4px 8px;
+    border-radius: 4px;
+}
+
+.dialog-btn.cancel {
+    color: rgba(255, 255, 255, 0.6);
+}
+
+.dialog-btn.cancel:hover {
+    background: rgba(255, 255, 255, 0.1);
+}
+
+.dialog-btn.confirm {
+    background: var(--accent-color);
+    color: white;
+}
+
+
+/* Widget Overlay and Forms */
+.widget-overlay {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: rgba(30, 30, 30, 0.95);
+    backdrop-filter: blur(10px);
+    z-index: 100;
+    padding: 16px;
+    display: flex;
+    flex-direction: column;
+    border-radius: 20px;
+    /* Match widget border radius */
+    overflow-y: auto;
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+}
+
+.widget-overlay::-webkit-scrollbar {
+    display: none;
+}
+
+.creation-form {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    min-height: 100%;
+}
+
+.form-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 4px;
+}
+
+.form-title {
+    font-size: 14px;
+    font-weight: 600;
+    color: white;
+}
+
+.close-button {
+    background: none;
+    border: none;
+    color: var(--accent-color);
+    font-size: 13px;
+    cursor: pointer;
+    padding: 4px;
+}
+
+.form-input {
+    background: rgba(255, 255, 255, 0.1);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 8px;
+    padding: 8px;
+    color: white;
+    font-size: 13px;
+    outline: none;
+}
+
+.form-input:focus {
+    border-color: rgba(255, 255, 255, 0.3);
+}
+
+.form-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.form-row label {
+    font-size: 12px;
+    color: rgba(255, 255, 255, 0.6);
+    min-width: 40px;
+}
+
+.form-row input[type="datetime-local"] {
+    flex: 1;
+}
+
+.checkbox-row {
+    margin-top: 4px;
+}
+
+.submit-button {
+    margin-top: auto;
+    background: var(--accent-color);
+    color: white;
+    border: none;
+    border-radius: 8px;
+    padding: 8px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: opacity 0.2s;
+}
+
+.submit-button:hover {
+    opacity: 0.9;
+}
+
+.submit-button:active {
+    opacity: 0.8;
 }
