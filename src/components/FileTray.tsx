@@ -1,4 +1,4 @@
-import { useState, useCallback, useRef, useEffect } from 'react';
+import { useState, useCallback, useRef } from 'react';
 import { IconFile, IconX, IconUpload } from '@tabler/icons-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { invoke, convertFileSrc } from '@tauri-apps/api/core';
@@ -32,8 +32,12 @@ export function FileTray({ files, onUpdateFiles }: FileTrayProps) {
         e.stopPropagation();
 
         // Only set dragged to false if we're leaving the drop zone entirely
-        if (dropZoneRef.current && !dropZoneRef.current.contains(e.relatedTarget as Node)) {
+        // Check if relatedTarget is valid Node before checking containment
+        if (dropZoneRef.current && e.relatedTarget instanceof Node && !dropZoneRef.current.contains(e.relatedTarget)) {
             setIsDragging(false);
+        } else if (dropZoneRef.current && !e.relatedTarget) {
+             // If relatedTarget is null (dragging out of window), we should probably reset
+             setIsDragging(false);
         }
     }, []);
 
@@ -49,6 +53,7 @@ export function FileTray({ files, onUpdateFiles }: FileTrayProps) {
         setIsDragging(false);
 
         const droppedFiles = Array.from(e.dataTransfer.files).map(file => {
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
             const path = (file as any).path;
             if (path) {
                 invoke('on_file_drop', { path }).catch(console.error);
@@ -104,7 +109,7 @@ export function FileTray({ files, onUpdateFiles }: FileTrayProps) {
         }
     }, []);
 
-    const handleDragStart = useCallback((e: React.DragEvent, file: FileItem) => {
+    const handleDragStart = useCallback((e: React.DragEvent<HTMLDivElement>, file: FileItem) => {
         if (file.path) {
             e.dataTransfer.effectAllowed = 'copyMove';
             // Try standard URI list
@@ -160,7 +165,7 @@ export function FileTray({ files, onUpdateFiles }: FileTrayProps) {
                                 exit={{ opacity: 0, scale: 0.8 }}
                                 transition={{ type: "spring", stiffness: 500, damping: 30 }}
                                 draggable
-                                onDragStart={(e) => handleDragStart(e, file)}
+                                onDragStart={(e) => handleDragStart(e as unknown as React.DragEvent<HTMLDivElement>, file)}
                                 onClick={() => handleFileClick(file)}
                                 onContextMenu={(e) => handleFileContextMenu(e, file)}
                                 style={{ cursor: 'pointer' }}
