@@ -8,6 +8,9 @@ import './DynamicIsland.css';
 import { FileItem } from './FileTray';
 import { CompactMedia } from './island/CompactMedia';
 import { CompactFiles } from './island/CompactFiles';
+import { CompactIdle } from './island/CompactIdle';
+import { CompactOnboard } from './island/CompactOnboard';
+import { ModeIndicator } from './island/ModeIndicator';
 import { ExpandedIsland } from './island/ExpandedIsland';
 import { NowPlayingData } from './island/types';
 
@@ -26,7 +29,8 @@ export function DynamicIsland() {
     const [windowSize, setWindowSize] = useState({ width: window.innerWidth, height: window.innerHeight });
     const [droppedFiles, setDroppedFiles] = useState<string[]>([]);
     const [files, setFiles] = useState<FileItem[]>([]);
-    const [preferredMode, setPreferredMode] = useState<'media' | 'files' | null>(null);
+    const [preferredMode, setPreferredMode] = useState<'media' | 'files' | 'onboard' | 'idle' | null>('onboard');
+    const [isInitialLaunch, setIsInitialLaunch] = useState(true);
 
     const islandRef = useRef<HTMLDivElement>(null);
     const notesTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -41,11 +45,23 @@ export function DynamicIsland() {
     });
     const lastArtworkRef = useRef<string | null | undefined>(null);
     const expandedRef = useRef(expanded);
+    const lastModeCycleRef = useRef<number>(0);
+    const prevHasMediaRef = useRef<boolean>(false);
+    const prevHasFilesRef = useRef<boolean>(false);
 
     // Update expandedRef whenever expanded changes
     useEffect(() => {
         expandedRef.current = expanded;
     }, [expanded]);
+
+    // Initial launch: keep onboard mode for 10 seconds
+    useEffect(() => {
+        const timer = setTimeout(() => {
+            setIsInitialLaunch(false);
+        }, 10000); // 10 seconds
+
+        return () => clearTimeout(timer);
+    }, []);
 
     // Load files on mount
     useEffect(() => {
@@ -159,23 +175,27 @@ export function DynamicIsland() {
     const hasFiles = files.length > 0;
 
     const availableModes = useMemo(() => {
-        const modes: ('media' | 'files')[] = [];
+        const modes: ('media' | 'files' | 'onboard' | 'idle')[] = [];
         if (hasMedia) modes.push('media');
         if (hasFiles) modes.push('files');
+        modes.push('onboard'); // Always include onboard as an option
+        modes.push('idle'); // Always include idle as an option
         return modes;
     }, [hasMedia, hasFiles]);
 
-    const mode: 'media' | 'files' | 'idle' = useMemo(() => {
-        if (availableModes.length === 0) return 'idle';
+    const mode: 'media' | 'files' | 'onboard' | 'idle' = useMemo(() => {
         if (preferredMode && availableModes.includes(preferredMode)) return preferredMode;
-        // Default priority: Media > Files
-        return availableModes.includes('media') ? 'media' : 'files';
+        // Default priority: Media > Files > Onboard > Idle
+        if (availableModes.includes('media')) return 'media';
+        if (availableModes.includes('files')) return 'files';
+        if (availableModes.includes('onboard')) return 'onboard';
+        return 'idle';
     }, [availableModes, preferredMode]);
 
     const cycleMode = useCallback((direction: 'next' | 'prev') => {
         if (availableModes.length <= 1) return;
 
-        const currentIndex = availableModes.indexOf(mode as 'media' | 'files');
+        const currentIndex = availableModes.indexOf(mode);
         let nextIndex;
         if (direction === 'next') {
             nextIndex = (currentIndex + 1) % availableModes.length;
@@ -188,10 +208,37 @@ export function DynamicIsland() {
         invoke('trigger_haptics').catch(console.error);
     }, [availableModes, mode]);
 
+    // Auto-switch to new modes when they become available (but not during initial launch)
+    useEffect(() => {
+        const prevMedia = prevHasMediaRef.current;
+        const prevFiles = prevHasFilesRef.current;
+
+        // Don't auto-switch during initial 10-second onboarding period
+        if (isInitialLaunch) {
+            // Update refs but don't switch modes
+            prevHasMediaRef.current = hasMedia;
+            prevHasFilesRef.current = hasFiles;
+            return;
+        }
+
+        // Media started playing - switch to it
+        if (!prevMedia && hasMedia) {
+            setPreferredMode('media');
+        }
+        // Files were added - switch to them (but only if not playing media)
+        else if (!prevFiles && hasFiles && !hasMedia) {
+            setPreferredMode('files');
+        }
+
+        // Update refs for next comparison
+        prevHasMediaRef.current = hasMedia;
+        prevHasFilesRef.current = hasFiles;
+    }, [hasMedia, hasFiles, isInitialLaunch]);
+
     // Memoize notch dimensions
     const { notchHeight, baseNotchWidth } = useMemo(() => ({
         notchHeight: Math.max(settings.baseHeight, notchInfo?.notch_height ? notchInfo.notch_height - 20 : 38),
-        baseNotchWidth: Math.max(settings.baseWidth, notchInfo?.notch_width ? notchInfo.notch_width : 160),
+        baseNotchWidth: Math.max(notchInfo?.notch_width ? notchInfo.notch_width : 160),
     }), [notchInfo?.notch_height, notchInfo?.notch_width, settings.baseHeight, settings.baseWidth]);
 
     // Memoize target dimensions
@@ -203,20 +250,20 @@ export function DynamicIsland() {
             width = windowSize.width - 40;
             height = windowSize.height;
         } else if (isHovered) {
-            if (mode === 'media') {
-                width = baseNotchWidth + 125;
-                height = notchHeight + 15;
-            } else if (mode === 'files') {
-                width = baseNotchWidth + 125;
-                height = notchHeight + 15;
-            } else {
+            if (mode === 'idle') {
                 width = baseNotchWidth + 30;
                 height = notchHeight + 10;
+            } else {
+                // media, files, onboard all have the same dimensions
+                width = baseNotchWidth + 125;
+                height = notchHeight + 15;
             }
-        } else if (mode === 'media') {
-            width = baseNotchWidth + 120;
-            height = notchHeight + 8;
-        } else if (mode === 'files') {
+        } else if (mode === 'idle') {
+            // idle is smaller
+            width = baseNotchWidth;
+            height = notchHeight;
+        } else {
+            // media, files, onboard all have the same dimensions
             width = baseNotchWidth + 120;
             height = notchHeight + 8;
         }
@@ -224,7 +271,7 @@ export function DynamicIsland() {
         return { targetWidth: width, targetHeight: height };
     }, [expanded, isHovered, mode, baseNotchWidth, notchHeight, windowSize.width, windowSize.height]);
 
-    const contentOpacity = (hasMedia || hasFiles) ? 1 : 0;
+    const contentOpacity = (mode === 'onboard' || mode === 'idle' || hasMedia || hasFiles) ? 1 : 0;
 
     // Stable fetch function
     const fetchNowPlaying = useCallback(async () => {
@@ -520,9 +567,14 @@ export function DynamicIsland() {
                 } else if (e.deltaX < -20 && activeTab === 'files') {
                     setActiveTab('widgets');
                 }
-            } else if (!expanded && mode !== 'idle') {
-                // Restore horizontal wheel for trackpad mode cycling
-                if (Math.abs(e.deltaX) > 20) {
+            } else if (!expanded) {
+                // Horizontal wheel for trackpad mode cycling
+                // Add cooldown to prevent overshooting (500ms between cycles)
+                const now = Date.now();
+                const timeSinceLastCycle = now - lastModeCycleRef.current;
+
+                if (Math.abs(e.deltaX) > 20 && timeSinceLastCycle > 500) {
+                    lastModeCycleRef.current = now;
                     if (e.deltaX > 20) cycleMode('next');
                     else cycleMode('prev');
                 }
@@ -653,9 +705,29 @@ export function DynamicIsland() {
                                 baseNotchWidth={baseNotchWidth}
                                 contentOpacity={contentOpacity}
                             />
+                        ) : mode === 'onboard' ? (
+                            <CompactOnboard
+                                baseNotchWidth={baseNotchWidth}
+                                isHovered={isHovered}
+                                contentOpacity={contentOpacity}
+                            />
+                        ) : mode === 'idle' ? (
+                            <CompactIdle
+                                baseNotchWidth={baseNotchWidth}
+                                isHovered={isHovered}
+                                contentOpacity={contentOpacity}
+                            />
                         ) : null}
                     </motion.div>
                 </AnimatePresence>
+
+                {/* Mode indicator dots - only show when not expanded */}
+                {!expanded && (
+                    <ModeIndicator
+                        availableModes={availableModes}
+                        currentMode={mode}
+                    />
+                )}
             </motion.div >
         </div >
     );

@@ -32,8 +32,7 @@ export function CompactWrapper({
                 display: 'flex',
                 alignItems: 'center',
                 justifyContent: 'space-between',
-                width: '100%',
-                padding: '0 12px'
+                padding: '0 12px',
             }}
         >
             <div className="media-left" style={{ flex: 1, minWidth: 0, height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'flex-start' }}>
