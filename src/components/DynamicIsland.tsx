@@ -11,7 +11,7 @@ import { RemindersWidget } from './widgets/RemindersWidget';
 import { SmartAudioVisualizer } from './SmartAudioVisualizer';
 import { AlbumCover } from './AlbumCover';
 import { ExpandedMedia } from './ExpandedMedia';
-import { FileTray } from './FileTray';
+import { FileTray, FileItem } from './FileTray';
 
 
 
@@ -40,6 +40,8 @@ export function DynamicIsland() {
     const [notes, setNotes] = useState('');
     const [activeTab, setActiveTab] = useState<'widgets' | 'files'>('widgets');
     const [windowSize, setWindowSize] = useState({ width: window.innerWidth, height: window.innerHeight });
+    const [droppedFiles, setDroppedFiles] = useState<string[]>([]);
+    const [files, setFiles] = useState<FileItem[]>([]);
 
     const islandRef = useRef<HTMLDivElement>(null);
     const notesTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -56,6 +58,56 @@ export function DynamicIsland() {
     useEffect(() => {
         expandedRef.current = expanded;
     }, [expanded]);
+
+    // Load files on mount
+    useEffect(() => {
+        invoke<FileItem[]>('load_file_tray')
+            .then(setFiles)
+            .catch(err => console.error('Failed to load file tray:', err));
+    }, []);
+
+    // Save files whenever they change
+    useEffect(() => {
+        if (files.length > 0) {
+            invoke('save_file_tray', { files }).catch(err => console.error('Failed to save file tray:', err));
+        }
+    }, [files]);
+
+    // Process external files (from backend drop event)
+    useEffect(() => {
+        if (droppedFiles && droppedFiles.length > 0) {
+            const newFiles = droppedFiles.map(path => {
+                // Extract filename from path
+                const name = path.split(/[/\\]/).pop() || path;
+                // Simple extension check for type
+                const ext = name.split('.').pop()?.toLowerCase();
+                let type = 'unknown';
+                if (['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg'].includes(ext || '')) {
+                    type = `image/${ext}`;
+                }
+
+                return {
+                    name,
+                    size: 0, // We don't have size from backend event immediately, could fetch if needed
+                    path,
+                    type,
+                    lastModified: Date.now()
+                };
+            });
+
+            setFiles(prev => {
+                // Avoid duplicates
+                const existingPaths = new Set(prev.map(f => f.path));
+                const uniqueNewFiles = newFiles.filter(f => !existingPaths.has(f.path));
+                const updated = [...prev, ...uniqueNewFiles];
+                // Save immediately
+                invoke('save_file_tray', { files: updated }).catch(console.error);
+                return updated;
+            });
+
+            setDroppedFiles([]);
+        }
+    }, [droppedFiles]);
 
     // Load settings
     useEffect(() => {
@@ -87,7 +139,8 @@ export function DynamicIsland() {
 
     // Determine mode - memoized
     const hasMedia = !!(nowPlaying && nowPlaying.is_playing);
-    const mode: 'media' | 'idle' = hasMedia ? 'media' : 'idle';
+    const hasFiles = files.length > 0;
+    const mode: 'media' | 'files' | 'idle' = hasMedia ? 'media' : (hasFiles ? 'files' : 'idle');
 
     // Memoize notch dimensions
     const { notchHeight, baseNotchWidth } = useMemo(() => ({
@@ -107,6 +160,9 @@ export function DynamicIsland() {
             if (mode === 'media') {
                 width = baseNotchWidth + 125;
                 height = notchHeight + 15;
+            } else if (mode === 'files') {
+                width = baseNotchWidth + 125;
+                height = notchHeight + 15;
             } else {
                 width = baseNotchWidth + 30;
                 height = notchHeight + 10;
@@ -114,12 +170,15 @@ export function DynamicIsland() {
         } else if (mode === 'media') {
             width = baseNotchWidth + 120;
             height = notchHeight + 8;
+        } else if (mode === 'files') {
+            width = baseNotchWidth + 120;
+            height = notchHeight + 8;
         }
 
         return { targetWidth: width, targetHeight: height };
     }, [expanded, isHovered, mode, baseNotchWidth, notchHeight, windowSize.width, windowSize.height]);
 
-    const contentOpacity = hasMedia ? 1 : 0;
+    const contentOpacity = (hasMedia || hasFiles) ? 1 : 0;
 
     // Stable fetch function
     const fetchNowPlaying = useCallback(async () => {
@@ -325,18 +384,30 @@ export function DynamicIsland() {
 
     // Drag and drop listener
     useEffect(() => {
-        const handleDragEnter = () => {
+        const handleDragEnter = (event: any) => {
+            console.log('Drag enter detected:', event);
             setExpanded(true);
             setActiveTab('files');
             setIsAnimating(true);
         };
 
+        const handleFileDrop = (event: any) => {
+            console.log('File drop detected (backend):', event);
+            if (event.payload && Array.isArray(event.payload)) {
+                setDroppedFiles(prev => [...prev, ...event.payload]);
+            }
+        };
+
         const unlistenDragEnter = listen('tauri://drag-enter', handleDragEnter);
+        const unlistenBackendDragEnter = listen('drag-enter-event', handleDragEnter);
+        const unlistenBackendFileDrop = listen('file-drop-event', handleFileDrop);
         // Fallback for different Tauri versions/configs
         const unlistenFileDropHover = listen('tauri://file-drop-hover', handleDragEnter);
 
         return () => {
             unlistenDragEnter.then(fn => fn());
+            unlistenBackendDragEnter.then(fn => fn());
+            unlistenBackendFileDrop.then(fn => fn());
             unlistenFileDropHover.then(fn => fn());
         };
     }, []);
@@ -590,7 +661,7 @@ export function DynamicIsland() {
                                             exit={{ opacity: 0, x: 20 }}
                                             transition={fadeTransition}
                                         >
-                                            <FileTray />
+                                            <FileTray files={files} onUpdateFiles={setFiles} />
                                         </motion.div>
                                     )}
                                 </AnimatePresence>
@@ -639,6 +710,32 @@ export function DynamicIsland() {
                                     fallbackLevels={nowPlaying.audio_levels}
                                     color={visualizerColor}
                                 />
+                            </div>
+                        </motion.div>
+                    ) : mode === 'files' ? (
+                        <motion.div
+                            key="files-content"
+                            className="island-content files-content"
+                            initial={{ opacity: 0 }}
+                            animate={{ opacity: contentOpacity }}
+                            transition={fadeTransition}
+                            style={{
+                                pointerEvents: isHovered ? 'auto' : 'none',
+                                display: 'flex',
+                                alignItems: 'center',
+                                justifyContent: 'space-between',
+                                width: '100%',
+                                padding: '0 12px'
+                            }}
+                        >
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                                <IconFiles size={20} color="white" stroke={1.5} />
+                            </div>
+
+                            <div className="media-spacer" style={{ width: baseNotchWidth }} />
+
+                            <div style={{ display: 'flex', alignItems: 'center' }}>
+                                {files.length}
                             </div>
                         </motion.div>
                     ) : null}

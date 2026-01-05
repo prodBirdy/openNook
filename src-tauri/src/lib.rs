@@ -6,7 +6,7 @@ pub mod utils;
 pub mod window;
 pub mod files;
 
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -37,11 +37,28 @@ pub fn run() {
             calendar::get_reminders,
             files::open_file,
             files::reveal_file,
-            files::on_file_drop
+            files::on_file_drop,
+            files::save_file_tray,
+            files::load_file_tray,
+            files::start_drag
         ])
         .setup(|app| {
             // Auto-position and resize window to match notch on startup
             if let Some(window) = app.get_webview_window("main") {
+                let window_clone = window.clone();
+                window.on_window_event(move |event| {
+                    match event {
+                        tauri::WindowEvent::DragDrop(tauri::DragDropEvent::Enter { paths, .. }) => {
+                            let _ = window_clone.set_ignore_cursor_events(false);
+                            let _ = window_clone.emit("drag-enter-event", paths);
+                        }
+                        tauri::WindowEvent::DragDrop(tauri::DragDropEvent::Drop { paths, .. }) => {
+                            let _ = window_clone.emit("file-drop-event", paths);
+                        }
+                        _ => {}
+                    }
+                });
+
                 // Set window level above menu bar on macOS
                 // This allows the window to be positioned over the notch
                 #[cfg(target_os = "macos")]

@@ -409,8 +409,8 @@ pub fn setup_mouse_monitoring(app_handle: tauri::AppHandle) {
         let mut refresh_counter: u16 = 0;
 
         // Hysteresis to prevent flicker
-        const PADDING_ENTER: f64 = 3.0;
-        const PADDING_EXIT: f64 = 8.0;
+        const PADDING_ENTER: f64 = 20.0;
+        const PADDING_EXIT: f64 = 30.0;
 
         // Fast polling for low latency
         const POLL_MS: u64 = 20; // ~50fps
