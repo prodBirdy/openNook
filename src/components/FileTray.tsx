@@ -1,4 +1,4 @@
-import { useState, useCallback, useRef, useEffect } from 'react';
+import { useState, useCallback, useRef } from 'react';
 import { IconFile, IconX, IconUpload } from '@tabler/icons-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { invoke, convertFileSrc } from '@tauri-apps/api/core';
@@ -104,16 +104,10 @@ export function FileTray({ files, onUpdateFiles }: FileTrayProps) {
         }
     }, []);
 
-    const handleDragStart = useCallback((e: React.DragEvent, file: FileItem) => {
+    const handleDragStart = useCallback((e: any, file: FileItem) => {
         if (file.path) {
-            e.dataTransfer.effectAllowed = 'copyMove';
-            // Try standard URI list
-            e.dataTransfer.setData('text/uri-list', `file://${file.path}`);
-            e.dataTransfer.setData('text/plain', file.path);
-            // Try DownloadURL (Chrome specific, might not work in WKWebView but worth a shot)
-            e.dataTransfer.setData('DownloadURL', `${file.type}:${file.name}:file://${file.path}`);
-
-            // Also invoke backend to see if we can trigger native drag
+            // Prevent default drag behavior to allow backend to handle it natively
+            e.preventDefault();
             invoke('start_drag', { path: file.path }).catch(console.error);
         }
     }, []);

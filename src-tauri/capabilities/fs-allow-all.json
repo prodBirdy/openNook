@@ -1,0 +1,20 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "fs-allow-all",
+  "description": "Allow reading all files",
+  "windows": [
+    "main"
+  ],
+  "permissions": [
+    "fs:allow-read-file",
+    "fs:allow-exists"
+  ],
+  "platforms": [
+    "macOS"
+  ],
+  "scope": {
+    "allow": [
+      "**"
+    ]
+  }
+}

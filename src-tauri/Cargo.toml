@@ -29,6 +29,8 @@ objc2-core-audio = "0.3.2"
 objc2-event-kit = { version = "0.3.2", features = ["EKEventStore", "EKEvent", "EKReminder", "EKCalendar"] }
 block2 = "0.6"
 tokio = { version = "1.49.0", features = ["full"] }
+tauri-plugin-fs = "2.4.4"
+objc2-app-kit = { version = "0.3.2", features = ["NSDragging", "NSPasteboard", "NSView", "NSWindow", "NSApplication", "NSEvent", "NSImage", "NSWorkspace"] }
 
 
 # macOS-specific dependencies for notch detection
