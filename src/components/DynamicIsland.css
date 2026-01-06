@@ -1444,3 +1444,308 @@
 .submit-button:active {
     opacity: 0.8;
 }
+
+/* Timer Widget */
+.timer-widget {
+    display: flex;
+    flex-direction: column;
+    padding: 20px;
+    height: 100%;
+    box-sizing: border-box;
+    overflow: hidden;
+}
+
+.timer-presets {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 12px;
+    flex-wrap: wrap;
+}
+
+.preset-button {
+    background: rgba(255, 255, 255, 0.1);
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    border-radius: 16px;
+    padding: 8px 16px;
+    color: white;
+    font-size: 13px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.2s ease;
+}
+
+.preset-button:hover {
+    background: rgba(255, 255, 255, 0.2);
+    border-color: rgba(255, 255, 255, 0.3);
+}
+
+.timers-list {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    overflow-y: auto;
+    flex: 1;
+}
+
+.timers-list::-webkit-scrollbar {
+    display: none;
+}
+
+.timer-item {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 12px;
+    background: rgba(255, 255, 255, 0.05);
+    border-radius: 12px;
+    transition: all 0.2s ease;
+}
+
+.timer-item.running {
+    background: rgba(var(--accent-color-rgb, 0, 122, 255), 0.15);
+    border: 1px solid rgba(var(--accent-color-rgb, 0, 122, 255), 0.3);
+}
+
+.timer-item.complete {
+    background: rgba(52, 199, 89, 0.15);
+    border: 1px solid rgba(52, 199, 89, 0.3);
+}
+
+.timer-progress-ring {
+    width: 36px;
+    height: 36px;
+    flex-shrink: 0;
+}
+
+.timer-progress-ring svg {
+    width: 100%;
+    height: 100%;
+    transform: rotate(-90deg);
+}
+
+.timer-ring-bg {
+    stroke: rgba(255, 255, 255, 0.1);
+}
+
+.timer-ring-progress {
+    stroke: var(--accent-color, #007AFF);
+    transition: stroke-dasharray 0.3s ease;
+}
+
+.timer-content {
+    flex: 1;
+    min-width: 0;
+}
+
+.timer-name {
+    font-size: 13px;
+    color: rgba(255, 255, 255, 0.6);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.timer-time {
+    font-size: 20px;
+    font-weight: 600;
+    color: white;
+    font-variant-numeric: tabular-nums;
+}
+
+.timer-controls {
+    display: flex;
+    gap: 8px;
+}
+
+.timer-control-btn {
+    width: 32px;
+    height: 32px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(255, 255, 255, 0.1);
+    border: none;
+    border-radius: 8px;
+    color: white;
+    cursor: pointer;
+    transition: all 0.2s ease;
+}
+
+.timer-control-btn:hover {
+    background: rgba(255, 255, 255, 0.2);
+}
+
+.timer-control-btn.delete:hover {
+    background: rgba(255, 59, 48, 0.3);
+    color: #FF3B30;
+}
+
+/* Compact Timer */
+.compact-timer-indicator {
+    width: 24px;
+    height: 24px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(255, 255, 255, 0.15);
+    border-radius: 6px;
+    color: white;
+}
+
+.compact-timer-indicator.pulsing {
+    animation: pulse 1.5s ease-in-out infinite;
+}
+
+@keyframes pulse {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50% { opacity: 0.7; transform: scale(0.95); }
+}
+
+/* Session Widget */
+.session-widget {
+    display: flex;
+    flex-direction: column;
+    padding: 20px;
+    height: 100%;
+    box-sizing: border-box;
+    overflow: hidden;
+}
+
+.sessions-section {
+    margin-bottom: 16px;
+}
+
+.sessions-section.active {
+    margin-bottom: 20px;
+}
+
+.sessions-section .section-label {
+    font-size: 11px;
+    color: rgba(255, 255, 255, 0.4);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin-bottom: 8px;
+}
+
+.session-item {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 12px;
+    background: rgba(255, 255, 255, 0.05);
+    border-radius: 12px;
+    margin-bottom: 8px;
+    transition: all 0.2s ease;
+}
+
+.session-item.active {
+    background: rgba(52, 199, 89, 0.15);
+    border: 1px solid rgba(52, 199, 89, 0.3);
+}
+
+.session-item.completed {
+    opacity: 0.7;
+}
+
+.session-indicator {
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    background: rgba(255, 255, 255, 0.3);
+    flex-shrink: 0;
+}
+
+.session-indicator.recording {
+    background: #34C759;
+    animation: recording-pulse 1.5s ease-in-out infinite;
+}
+
+@keyframes recording-pulse {
+    0%, 100% { box-shadow: 0 0 0 0 rgba(52, 199, 89, 0.4); }
+    50% { box-shadow: 0 0 0 6px rgba(52, 199, 89, 0); }
+}
+
+.session-content {
+    flex: 1;
+    min-width: 0;
+}
+
+.session-name {
+    font-size: 15px;
+    font-weight: 500;
+    color: white;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.session-elapsed {
+    font-size: 20px;
+    font-weight: 600;
+    color: white;
+    font-variant-numeric: tabular-nums;
+    margin-top: 2px;
+}
+
+.session-meta {
+    display: flex;
+    gap: 8px;
+    font-size: 12px;
+    color: rgba(255, 255, 255, 0.5);
+    margin-top: 2px;
+}
+
+.session-duration {
+    color: rgba(255, 255, 255, 0.7);
+}
+
+.session-stop-btn {
+    width: 36px;
+    height: 36px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(255, 59, 48, 0.2);
+    border: 1px solid rgba(255, 59, 48, 0.3);
+    border-radius: 10px;
+    color: #FF3B30;
+    cursor: pointer;
+    transition: all 0.2s ease;
+}
+
+.session-stop-btn:hover {
+    background: rgba(255, 59, 48, 0.3);
+}
+
+.session-delete-btn {
+    width: 28px;
+    height: 28px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: transparent;
+    border: none;
+    border-radius: 6px;
+    color: rgba(255, 255, 255, 0.4);
+    cursor: pointer;
+    transition: all 0.2s ease;
+}
+
+.session-delete-btn:hover {
+    background: rgba(255, 59, 48, 0.2);
+    color: #FF3B30;
+}
+
+/* Compact Session */
+.compact-session-indicator {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: rgba(255, 255, 255, 0.3);
+    flex-shrink: 0;
+}
+
+.compact-session-indicator.recording {
+    background: #34C759;
+    animation: recording-pulse 1.5s ease-in-out infinite;
+}

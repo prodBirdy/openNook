@@ -1,6 +1,7 @@
 import { useEffect, useState, useMemo } from 'react';
 import { invoke } from '@tauri-apps/api/core';
-import { IconRefresh, IconPlus } from '@tabler/icons-react';
+import { IconRefresh, IconPlus, IconCalendar } from '@tabler/icons-react';
+import { registerWidget } from './WidgetRegistry';
 
 interface CalendarEvent {
     id: string;
@@ -242,3 +243,16 @@ export function CalendarWidget() {
         </div>
     );
 }
+
+// Register the calendar widget
+registerWidget({
+    id: 'calendar',
+    name: 'Calendar',
+    description: 'Show upcoming events',
+    icon: IconCalendar,
+    ExpandedComponent: CalendarWidget,
+    defaultEnabled: false,
+    category: 'productivity',
+    minWidth: 280,
+    hasCompactMode: false
+});

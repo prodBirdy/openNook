@@ -1,10 +1,9 @@
 import { motion, AnimatePresence } from 'motion/react';
 import { IconSettings, IconLayoutGrid, IconFiles } from '@tabler/icons-react';
 import { ExpandedMedia } from '../ExpandedMedia';
-import { CalendarWidget } from '../widgets/CalendarWidget';
-import { RemindersWidget } from '../widgets/RemindersWidget';
 import { FileTray, FileItem } from '../FileTray';
 import { NowPlayingData } from './types';
+import { useWidgets } from '../../context/WidgetContext';
 
 interface ExpandedIslandProps {
     activeTab: 'widgets' | 'files';
@@ -52,6 +51,8 @@ export function ExpandedIsland({
     handleNotesClick,
     handleChildWheel
 }: ExpandedIslandProps) {
+    const { enabledWidgets } = useWidgets();
+
     return (
         <motion.div
             key="expanded-content"
@@ -113,6 +114,7 @@ export function ExpandedIsland({
                             transition={{ duration: 0.3 }}
                             onWheel={handleChildWheel}
                         >
+                            {/* Media player is a special case - needs props */}
                             {settings.showMedia && (
                                 <div
                                     className={`expanded-media-player widget-card ${(!nowPlaying?.duration || nowPlaying.duration <= 0) ? 'no-progress' : ''}`}
@@ -132,17 +134,17 @@ export function ExpandedIsland({
                                 </div>
                             )}
 
-                            {settings.showCalendar && (
-                                <div className="widget-card" onClick={(e) => e.stopPropagation()} style={{ minWidth: 280 }}>
-                                    <CalendarWidget />
+                            {/* Dynamically render enabled widgets from the registry */}
+                            {enabledWidgets.map(widget => (
+                                <div
+                                    key={widget.id}
+                                    className="widget-card"
+                                    onClick={(e) => e.stopPropagation()}
+                                    style={{ minWidth: widget.minWidth || 240 }}
+                                >
+                                    <widget.ExpandedComponent />
                                 </div>
-                            )}
-
-                            {settings.showReminders && (
-                                <div className="widget-card" onClick={(e) => e.stopPropagation()} style={{ minWidth: 260 }}>
-                                    <RemindersWidget />
-                                </div>
-                            )}
+                            ))}
 
                             <div className="expanded-notes-section widget-card" onClick={(e) => e.stopPropagation()}>
                                 <textarea

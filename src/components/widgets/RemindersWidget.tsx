@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
-import { IconRefresh, IconPlus } from '@tabler/icons-react';
+import { IconRefresh, IconPlus, IconChecklist } from '@tabler/icons-react';
+import { registerWidget } from './WidgetRegistry';
 
 interface Reminder {
     id: string;
@@ -130,3 +131,16 @@ export function RemindersWidget() {
         </div>
     );
 }
+
+// Register the reminders widget
+registerWidget({
+    id: 'reminders',
+    name: 'Reminders',
+    description: 'Show incomplete reminders',
+    icon: IconChecklist,
+    ExpandedComponent: RemindersWidget,
+    defaultEnabled: false,
+    category: 'productivity',
+    minWidth: 260,
+    hasCompactMode: false
+});
