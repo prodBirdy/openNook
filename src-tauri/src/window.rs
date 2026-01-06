@@ -139,57 +139,73 @@ pub fn update_ui_bounds(x: f64, y: f64, width: f64, height: f64) -> Result<(), S
     Ok(())
 }
 
-/// Get screen dimensions on macOS including notch width
+/// Get screen dimensions
 /// Returns (screen_width, screen_height, notch_height, notch_width)
-#[cfg(target_os = "macos")]
-fn get_screen_info() -> (f64, f64, f64, f64) {
-    // Define our own CGSize/CGRect to avoid deprecated cocoa crate fields
+fn get_screen_info(app_handle: Option<&tauri::AppHandle>) -> (f64, f64, f64, f64) {
+    #[cfg(target_os = "macos")]
+    {
+        // Define our own CGSize/CGRect to avoid deprecated cocoa crate fields
 
-    use objc2::runtime::AnyObject;
-    use objc2::*;
+        use objc2::runtime::AnyObject;
+        use objc2::*;
 
-    unsafe {
-        let main_screen: *mut AnyObject = msg_send![class!(NSScreen), mainScreen];
+        unsafe {
+            let main_screen: *mut AnyObject = msg_send![class!(NSScreen), mainScreen];
 
-        if main_screen.is_null() {
-            return (0.0, 0.0, 0.0, 0.0);
+            if main_screen.is_null() {
+                return (0.0, 0.0, 0.0, 0.0);
+            }
+
+            // Get screen frame
+            let frame: CGRect = msg_send![main_screen, frame];
+            let screen_width = frame.size.width;
+            let screen_height = frame.size.height;
+
+            // Get safeAreaInsets (macOS 12.0+)
+
+            let insets: NSEdgeInsets = msg_send![main_screen, safeAreaInsets];
+            let safe_area_top = insets.top;
+
+            let notch_height = if safe_area_top >= 0.0 {
+                (screen_height * 0.1).max(38.0).min(52.0)
+            } else {
+                0.0
+            };
+
+            let notch_width = if safe_area_top > 0.0 {
+                (screen_width * 0.1).max(200.0).min(260.0)
+            } else {
+                180.0
+            };
+
+            (screen_width, screen_height, notch_height, notch_width)
         }
+    }
 
-        // Get screen frame
-        let frame: CGRect = msg_send![main_screen, frame];
-        let screen_width = frame.size.width;
-        let screen_height = frame.size.height;
+    #[cfg(target_os = "windows")]
+    {
+        use windows::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN};
 
-        // Get safeAreaInsets (macOS 12.0+)
+        unsafe {
+            let width = GetSystemMetrics(SM_CXSCREEN) as f64;
+            let height = GetSystemMetrics(SM_CYSCREEN) as f64;
+            (width, height, 0.0, 0.0)
+        }
+    }
 
-        let insets: NSEdgeInsets = msg_send![main_screen, safeAreaInsets];
-        let safe_area_top = insets.top;
-        // safe_area_bottom unused
-
-        // Calculate notch height
-        // The notch height on MacBooks is typically around 30-40px
-        // The Dynamic Island style expands beyond just the notch
-        // We use a slightly larger value for the Dynamic Island effect
-        let notch_height = if safe_area_top >= 0.0 {
-            // Approximate island height based on screen height
-            (screen_height * 0.1).max(38.0).min(52.0)
-        } else {
-            0.0
-        };
-        // Calculate notch width
-        // The notch width on MacBooks is typically around 180-200px
-        // The Dynamic Island style expands beyond just the notch
-        // We use a wider calculation to match the expanded Island look
-        let notch_width = if safe_area_top > 0.0 {
-            // Approximate notch width based on screen width
-            // We use a slightly larger value for the Dynamic Island effect
-            (screen_width * 0.1).max(200.0).min(260.0)
-        } else {
-            // Fallback width
-            180.0
-        };
-
-        (screen_width, screen_height, notch_height, notch_width)
+    #[cfg(target_os = "linux")]
+    {
+        // Try to get from app handle if available
+        if let Some(handle) = app_handle {
+             if let Ok(Some(monitor)) = handle.primary_monitor() {
+                 let size = monitor.size();
+                 let scale_factor = monitor.scale_factor();
+                 let width = size.width as f64 / scale_factor;
+                 let height = size.height as f64 / scale_factor;
+                 return (width, height, 0.0, 0.0);
+             }
+        }
+        (1920.0, 1080.0, 0.0, 0.0)
     }
 }
 
@@ -197,14 +213,22 @@ fn get_screen_info() -> (f64, f64, f64, f64) {
 pub fn get_system_accent_color() -> String {
     #[cfg(target_os = "macos")]
     return crate::utils::get_macos_accent_color();
-    #[cfg(not(target_os = "macos"))]
+
+    #[cfg(target_os = "windows")]
+    {
+        // Fallback to blue for now, retrieving registry value is a bit more involved
+        // and dwmapi GetWindowAttribute uses BGR which needs conversion
+        "#007AFF".to_string()
+    }
+
+    #[cfg(target_os = "linux")]
     return "#007AFF".to_string();
 }
 
 /// Get notch information from the main screen using NSScreen.safeAreaInsets (macOS 12.0+)
 #[tauri::command]
-pub fn get_notch_info() -> Option<NotchInfo> {
-    let (screen_width, screen_height, notch_height, notch_width) = get_screen_info();
+pub fn get_notch_info(app_handle: tauri::AppHandle) -> Option<NotchInfo> {
+    let (screen_width, screen_height, notch_height, notch_width) = get_screen_info(Some(&app_handle));
     let has_notch = notch_height > 0.0;
     let visible_height = screen_height - notch_height;
 
@@ -221,7 +245,7 @@ pub fn get_notch_info() -> Option<NotchInfo> {
 /// Position the window at the notch location (centered at top of screen)
 #[tauri::command]
 pub fn position_at_notch(window: Window) -> Result<(), String> {
-    let (screen_width, _screen_height, _notch_height, notch_width) = get_screen_info();
+    let (screen_width, _screen_height, _notch_height, notch_width) = get_screen_info(Some(window.app_handle()));
 
     // Use notch width if available, otherwise fall back to current window width
     let target_width = if notch_width > 0.0 {
@@ -247,7 +271,7 @@ pub fn position_at_notch(window: Window) -> Result<(), String> {
 /// The window is positioned at y=0 (top of screen) to overlap with the notch
 #[tauri::command]
 pub fn fit_to_notch(window: Window, width: f64, height: f64) -> Result<(), String> {
-    let (screen_width, _screen_height, _notch_height, _notch_width) = get_screen_info();
+    let (screen_width, _screen_height, _notch_height, _notch_width) = get_screen_info(Some(window.app_handle()));
 
     // Resize the window
     window
@@ -304,7 +328,7 @@ pub fn update_window_settings(
 /// Set up the window with a fixed size based on notch dimensions and settings.
 /// The window always uses: width = (notch_width + 160) + extra_width, height = notch_height + extra_height
 pub fn setup_fixed_window_size(window: &WebviewWindow) -> Result<(), String> {
-    let (screen_width, _screen_height, notch_height, notch_width) = get_screen_info();
+    let (screen_width, _screen_height, notch_height, notch_width) = get_screen_info(Some(window.app_handle()));
     let settings = get_window_settings();
 
     // Calculate fixed window dimensions
@@ -367,7 +391,24 @@ pub fn activate_window(window: Window) -> Result<(), String> {
         }
     }
 
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
+    {
+        use windows::Win32::UI::WindowsAndMessaging::SetForegroundWindow;
+        use windows::Win32::Foundation::HWND;
+        use raw_window_handle::HasWindowHandle;
+
+        if let Ok(handle) = window.window_handle() {
+            if let raw_window_handle::RawWindowHandle::Win32(win32_handle) = handle.as_raw() {
+                unsafe {
+                    // Non-zero handle
+                    let hwnd = HWND(win32_handle.hwnd.get() as _);
+                    SetForegroundWindow(hwnd);
+                }
+            }
+        }
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
         window.set_focus().map_err(|e| e.to_string())?;
     }
@@ -399,7 +440,7 @@ pub fn setup_mouse_monitoring(app_handle: tauri::AppHandle) {
     static IS_INSIDE: AtomicBool = AtomicBool::new(false);
 
     // Get initial screen info
-    let (screen_width, screen_height, notch_height, notch_width) = get_screen_info();
+    let (screen_width, screen_height, notch_height, notch_width) = get_screen_info(Some(&app_handle));
 
     // Pre-compute window position (window is centered at top)
     let settings = get_window_settings();
@@ -431,14 +472,8 @@ pub fn setup_mouse_monitoring(app_handle: tauri::AppHandle) {
                 // Refresh screen height occasionally
                 refresh_counter = refresh_counter.wrapping_add(1);
                 if refresh_counter % 500 == 0 {
-                    let screens: *mut AnyObject = msg_send![class!(NSScreen), screens];
-                    if !screens.is_null() {
-                        let primary: *mut AnyObject = msg_send![screens, objectAtIndex: 0_u64];
-                        if !primary.is_null() {
-                            let frame: CGRect = msg_send![primary, frame];
-                            cached_screen_height = frame.size.height;
-                        }
-                    }
+                    let (_, height, _, _) = get_screen_info(None);
+                    cached_screen_height = height;
                 }
 
                 (mouse_loc.x, cached_screen_height - mouse_loc.y)
@@ -522,4 +557,104 @@ pub fn setup_mouse_monitoring(app_handle: tauri::AppHandle) {
             std::thread::sleep(std::time::Duration::from_millis(POLL_MS));
         }
     });
+}
+
+#[cfg(target_os = "windows")]
+pub fn setup_mouse_monitoring(app_handle: tauri::AppHandle) {
+    use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
+    use windows::Win32::Foundation::POINT;
+
+    // Track whether mouse is currently in the UI area
+    static IS_INSIDE: AtomicBool = AtomicBool::new(false);
+
+    let (screen_width, _screen_height, notch_height, notch_width) = get_screen_info(Some(&app_handle));
+
+    // Pre-compute window position (window is centered at top)
+    let settings = get_window_settings();
+    let win_width = if notch_width > 0.0 { notch_width + 160.0 + settings.extra_width } else { 800.0 + settings.extra_width }; // Fallback width
+    let window_x = (screen_width - win_width) / 2.0;
+
+    std::thread::spawn(move || {
+        const POLL_MS: u64 = 20;
+
+        loop {
+            let mut point = POINT::default();
+            let success = unsafe { GetCursorPos(&mut point) };
+
+            if success.is_ok() {
+                let mouse_x = point.x as f64;
+                let mouse_y = point.y as f64;
+
+                let was_inside = IS_INSIDE.load(Ordering::Relaxed);
+
+                // Logic adapted from macOS version
+                 let padding = if was_inside {
+                    30.0
+                } else {
+                    20.0
+                };
+
+                let in_ui_area = if let Ok(guard) = get_ui_bounds_store().try_read() {
+                    if let Some(bounds) = *guard {
+                        let sx = window_x + bounds.x;
+                        let sy = bounds.y;
+                        mouse_x >= (sx - padding)
+                            && mouse_x <= (sx + bounds.width + padding)
+                            && mouse_y >= (sy - padding)
+                            && mouse_y <= (sy + bounds.height + padding)
+                    } else {
+                        // Fallback zone at top center
+                         mouse_x >= (window_x - padding)
+                            && mouse_x <= (window_x + win_width + padding)
+                            && mouse_y >= 0.0
+                            && mouse_y <= (100.0 + padding)
+                    }
+                } else {
+                     mouse_x >= (window_x - padding)
+                        && mouse_x <= (window_x + win_width + padding)
+                        && mouse_y >= 0.0
+                        && mouse_y <= (100.0 + padding)
+                };
+
+                if in_ui_area && !was_inside {
+                    IS_INSIDE.store(true, Ordering::Relaxed);
+                    let _ = app_handle.emit("mouse-entered-notch", ());
+
+                    if let Some(window) = app_handle.get_webview_window("main") {
+                        let _ = window.set_ignore_cursor_events(false);
+                         // Activate window
+                         use windows::Win32::UI::WindowsAndMessaging::SetForegroundWindow;
+                         use windows::Win32::Foundation::HWND;
+                         use raw_window_handle::HasWindowHandle;
+
+                         if let Ok(handle) = window.window_handle() {
+                             if let raw_window_handle::RawWindowHandle::Win32(win32_handle) = handle.as_raw() {
+                                 unsafe {
+                                     let hwnd = HWND(win32_handle.hwnd.get() as _);
+                                     SetForegroundWindow(hwnd);
+                                 }
+                             }
+                         }
+                    }
+
+                } else if !in_ui_area && was_inside {
+                    IS_INSIDE.store(false, Ordering::Relaxed);
+                    let _ = app_handle.emit("mouse-exited-notch", ());
+                     if let Some(window) = app_handle.get_webview_window("main") {
+                        let _ = window.set_ignore_cursor_events(true);
+                    }
+                }
+            }
+
+            std::thread::sleep(std::time::Duration::from_millis(POLL_MS));
+        }
+    });
+}
+
+#[cfg(target_os = "linux")]
+pub fn setup_mouse_monitoring(app_handle: tauri::AppHandle) {
+    // Mouse monitoring on Linux (Wayland/X11) is complex to do globally without heavy dependencies.
+    // For now, we will rely on window events if possible, or disable the hover feature.
+    // To avoid busy looping or useless threads, we just log a message.
+    println!("Global mouse monitoring not implemented for Linux yet.");
 }
