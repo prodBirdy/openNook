@@ -50,7 +50,8 @@ export const SmartAudioVisualizer = memo(function SmartAudioVisualizer({
     // Animation Loop
     useEffect(() => {
         const animate = () => {
-            const barColor = color || '#e1e1e1';
+            // OPTIMIZATION: Background color is handled by React via the style prop.
+            // We removed the redundant style assignment from this loop to save DOM operations per frame.
 
             // Interpolation factor (0.0 to 1.0)
             // Higher = snappier, Lower = smoother
@@ -76,7 +77,6 @@ export const SmartAudioVisualizer = memo(function SmartAudioVisualizer({
                 const scale = Math.max(0.15, Math.min(1, next));
 
                 bar.style.transform = `scaleY(${scale})`;
-                bar.style.backgroundColor = barColor;
             }
 
             animationFrameRef.current = requestAnimationFrame(animate);
