@@ -32,7 +32,6 @@ pub fn base64_encode(data: &[u8]) -> String {
 }
 
 /// Fetch artwork from a URL (used for Spotify)
-#[cfg(target_os = "macos")]
 pub fn fetch_artwork_from_url(url: &str) -> Option<String> {
     use std::process::Command;
 
@@ -41,6 +40,8 @@ pub fn fetch_artwork_from_url(url: &str) -> Option<String> {
     }
 
     // Use curl to fetch the image and convert to base64
+    // curl is generally available on Linux and macOS, and often on Windows (Git Bash or native in recent versions)
+    // For a more robust solution, a reqwest dependency could be used, but this keeps dependencies light for now.
     let output = Command::new("curl")
         .args(["-s", "-L", "--max-time", "2", url])
         .output()

@@ -107,22 +107,38 @@ pub fn run() {
                     }
                 }
 
+                #[cfg(target_os = "windows")]
+                {
+                    // Windows specific setup
+                    // Set window to be topmost
+                    window.set_always_on_top(true).unwrap();
+                    window.set_decorations(false).unwrap();
+                    window.set_skip_taskbar(true).unwrap();
+                }
+
+                #[cfg(target_os = "linux")]
+                {
+                    // Linux specific setup
+                     window.set_always_on_top(true).unwrap();
+                     window.set_decorations(false).unwrap();
+                     window.set_skip_taskbar(true).unwrap();
+                }
+
+                #[cfg(not(target_os = "windows"))]
                 let _ = window.set_decorations(false);
+
                 // Enable click-through by default (no notification showing)
                 let _ = window.set_ignore_cursor_events(true);
 
                 // Setup monitors
-                #[cfg(target_os = "macos")]
-                {
-                    // Initialize audio caches
-                    audio::init_audio_state();
+                // Initialize audio caches
+                audio::init_audio_state();
 
-                    // Initial positioning and sizing - window is always fixed size
-                    let _ = window::setup_fixed_window_size(&window);
+                // Initial positioning and sizing - window is always fixed size
+                let _ = window::setup_fixed_window_size(&window);
 
-                    window::setup_mouse_monitoring(app.handle().clone());
-                    audio::setup_audio_monitoring(app.handle().clone());
-                }
+                window::setup_mouse_monitoring(app.handle().clone());
+                audio::setup_audio_monitoring(app.handle().clone());
             }
             Ok(())
         })

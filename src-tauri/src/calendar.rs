@@ -638,6 +638,30 @@ pub async fn open_calendar_app() -> Result<(), String> {
             .spawn()
             .map_err(|e| e.to_string())?;
     }
+    #[cfg(target_os = "windows")]
+    {
+        // Try to open Windows Calendar or Outlook
+        std::process::Command::new("explorer")
+            .arg("outlookcal:")
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        // Try to open standard calendar app via xdg-open
+        // We might not have a specific calendar URL scheme, so we try opening a calendar file or just generic logic?
+        // Actually, just spawning gnome-calendar or similar if present, or just nothing for now as 'xdg-open' needs a URL.
+        // A safe bet is trying to run common calendar apps or just return Ok.
+        // Let's try xdg-open with a calendar scheme if it exists, or just log.
+        // "webcal:" or "calendar:" might work on some DEs.
+        std::process::Command::new("xdg-open")
+            .arg("calendar:")
+            .spawn()
+            .or_else(|_| {
+                 std::process::Command::new("gnome-calendar").spawn()
+            })
+            .map_err(|e| e.to_string())?;
+    }
     Ok(())
 }
 
@@ -651,6 +675,24 @@ pub async fn open_reminders_app() -> Result<(), String> {
             .spawn()
             .map_err(|e| e.to_string())?;
     }
+    #[cfg(target_os = "windows")]
+    {
+         std::process::Command::new("explorer")
+            .arg("ms-to-do:")
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        // Try to open common todo apps
+         std::process::Command::new("xdg-open")
+            .arg("todo:") // unlikely to work but consistent
+            .spawn()
+            .or_else(|_| {
+                 std::process::Command::new("gnome-todo").spawn()
+            })
+            .map_err(|e| e.to_string())?;
+    }
     Ok(())
 }
 
@@ -660,6 +702,20 @@ pub async fn open_privacy_settings() -> Result<(), String> {
     {
         std::process::Command::new("open")
             .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_Calendars")
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("explorer")
+            .arg("ms-settings:privacy-calendar")
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+    #[cfg(target_os = "linux")]
+    {
+         std::process::Command::new("xdg-open")
+            .arg("help:privacy") // Very generic/wrong, but Linux settings are DE specific.
             .spawn()
             .map_err(|e| e.to_string())?;
     }

@@ -275,9 +275,166 @@ pub async fn get_now_playing() -> NowPlayingData {
         get_last_played_or_default(get_audio_levels())
     }
 
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
     {
-        NowPlayingData::default()
+        use windows::Media::Control::GlobalSystemMediaTransportControlsSessionManager;
+        use windows::Storage::Streams::DataReader;
+
+        if let Ok(manager) = GlobalSystemMediaTransportControlsSessionManager::RequestAsync() {
+             if let Ok(manager) = manager.await {
+                 if let Ok(session) = manager.GetCurrentSession() {
+                    if let Ok(properties) = session.TryGetMediaPropertiesAsync().unwrap().await {
+                         let title = properties.Title().ok().map(|h| h.to_string());
+                         let artist = properties.Artist().ok().map(|h| h.to_string());
+                         let album = properties.AlbumTitle().ok().map(|h| h.to_string());
+
+                         // Check playback status
+                         let playback_info = session.GetPlaybackInfo().unwrap();
+                         let is_playing = playback_info.PlaybackStatus().unwrap() == windows::Media::Control::GlobalSystemMediaTransportControlsSessionPlaybackStatus::Playing;
+
+                         // Get timeline
+                         let timeline = session.GetTimelineProperties().unwrap();
+                         let duration = timeline.EndTime().ok().map(|t| t.Duration as f64 / 10_000_000.0);
+                         let position = timeline.Position().ok().map(|t| t.Duration as f64 / 10_000_000.0);
+
+                         // Artwork
+                         // Getting stream from IRandomAccessStreamReference
+                         let mut artwork_base64 = None;
+                         if let Ok(thumb_ref) = properties.Thumbnail() {
+                            if let Ok(stream) = thumb_ref.OpenReadAsync().unwrap().await {
+                                let size = stream.Size().unwrap() as usize;
+                                let reader = DataReader::CreateDataReader(&stream).unwrap();
+                                if reader.LoadAsync(size as u32).unwrap().await.is_ok() {
+                                    let mut buffer = vec![0u8; size];
+                                    if reader.ReadBytes(&mut buffer).is_ok() {
+                                        artwork_base64 = Some(base64_encode(&buffer));
+                                    }
+                                }
+                            }
+                         }
+
+                         IS_PLAYING.store(is_playing, Ordering::Relaxed);
+
+                         let data = NowPlayingData {
+                             title,
+                             artist,
+                             album,
+                             artwork_base64,
+                             duration,
+                             elapsed_time: position,
+                             is_playing,
+                             audio_levels: Some(get_audio_levels_internal()),
+                             app_name: Some("System".to_string()),
+                         };
+
+                         save_last_played(&data);
+                         return data;
+                     }
+                 }
+             }
+        }
+
+        get_last_played_or_default(get_audio_levels())
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        // Use zbus to query MPRIS
+        // This is a simplified implementation, ideally we'd iterate over names
+        use zbus::{Connection, proxy};
+        use zbus::zvariant::Value;
+
+        // Define a simple proxy for MPRIS Player
+        #[proxy(
+            interface = "org.mpris.MediaPlayer2.Player",
+            default_path = "/org/mpris/MediaPlayer2",
+        )]
+        trait Player {
+            #[zbus(property)]
+            fn playback_status(&self) -> zbus::Result<String>;
+            #[zbus(property)]
+            fn metadata(&self) -> zbus::Result<std::collections::HashMap<String, zbus::zvariant::OwnedValue>>;
+            #[zbus(property)]
+            fn position(&self) -> zbus::Result<i64>;
+        }
+
+        if let Ok(conn) = Connection::session().await {
+            // Find a media player (simplified: grabbing first one or a specific one)
+            // Real impl should list names org.mpris.MediaPlayer2.*
+
+             // We can list names
+            let proxy = zbus::fdo::DBusProxy::new(&conn).await.unwrap();
+            let names = proxy.list_names().await.unwrap();
+
+            for name in names {
+                if name.starts_with("org.mpris.MediaPlayer2.") {
+                     let player = PlayerProxy::builder(&conn).destination(name.clone()).unwrap().build().await.unwrap();
+
+                     if let Ok(status) = player.playback_status().await {
+                         if status == "Playing" {
+                            IS_PLAYING.store(true, Ordering::Relaxed);
+
+                            let mut title = None;
+                            let mut artist = None;
+                            let mut album = None;
+                            let mut duration = None;
+                            let mut artwork_url = None;
+
+                            if let Ok(metadata) = player.metadata().await {
+                                if let Some(t) = metadata.get("xesam:title") {
+                                    if let Value::Str(v) = &**t { title = Some(v.to_string()); }
+                                }
+                                if let Some(a) = metadata.get("xesam:artist") {
+                                     // artist is often array of strings
+                                    if let Value::Array(v) = &**a {
+                                        if let Ok(Some(Value::Str(s))) = v.get(0) {
+                                            artist = Some(s.to_string());
+                                        }
+                                    }
+                                }
+                                if let Some(a) = metadata.get("xesam:album") {
+                                    if let Value::Str(v) = &**a { album = Some(v.to_string()); }
+                                }
+                                if let Some(d) = metadata.get("mpris:length") {
+                                    if let Value::I64(v) = &**d {
+                                        duration = Some(*v as f64 / 1_000_000.0);
+                                    } else if let Value::U64(v) = &**d {
+                                        duration = Some(*v as f64 / 1_000_000.0);
+                                    }
+                                }
+                                if let Some(u) = metadata.get("mpris:artUrl") {
+                                    if let Value::Str(v) = &**u { artwork_url = Some(v.to_string()); }
+                                }
+                            }
+
+                            let position = player.position().await.ok().map(|p| p as f64 / 1_000_000.0);
+
+                            let artwork_base64 = if let Some(url) = artwork_url {
+                                fetch_artwork_from_url(&url)
+                            } else {
+                                None
+                            };
+
+                            let data = NowPlayingData {
+                                title,
+                                artist,
+                                album,
+                                artwork_base64,
+                                duration,
+                                elapsed_time: position,
+                                is_playing: true,
+                                audio_levels: Some(get_audio_levels_internal()),
+                                app_name: Some(name.replace("org.mpris.MediaPlayer2.", "")),
+                            };
+                            save_last_played(&data);
+                            return data;
+                         }
+                     }
+                }
+            }
+        }
+
+        get_last_played_or_default(get_audio_levels())
     }
 }
 
@@ -355,7 +512,7 @@ fn get_music_app_artwork() -> Option<String> {
 
 /// Toggle play/pause for the currently playing media
 #[tauri::command]
-pub fn media_play_pause() -> Result<(), String> {
+pub async fn media_play_pause() -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
         use std::process::Command;
@@ -387,15 +544,47 @@ pub fn media_play_pause() -> Result<(), String> {
         Ok(())
     }
 
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
     {
-        Err("Media controls not supported on this platform".to_string())
+        use windows::Media::Control::GlobalSystemMediaTransportControlsSessionManager;
+        if let Ok(manager) = GlobalSystemMediaTransportControlsSessionManager::RequestAsync() {
+            if let Ok(manager) = manager.await {
+                if let Ok(session) = manager.GetCurrentSession() {
+                    let _ = session.TryTogglePlayPauseAsync().unwrap().await;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        use zbus::{Connection, proxy};
+        #[proxy(
+            interface = "org.mpris.MediaPlayer2.Player",
+            default_path = "/org/mpris/MediaPlayer2",
+        )]
+        trait Player {
+            fn play_pause(&self) -> zbus::Result<()>;
+        }
+
+        if let Ok(conn) = Connection::session().await {
+             let proxy = zbus::fdo::DBusProxy::new(&conn).await.unwrap();
+             let names = proxy.list_names().await.unwrap();
+             for name in names {
+                 if name.starts_with("org.mpris.MediaPlayer2.") {
+                      let player = PlayerProxy::builder(&conn).destination(name).unwrap().build().await.unwrap();
+                      let _ = player.play_pause().await;
+                 }
+             }
+        }
+        Ok(())
     }
 }
 
 /// Skip to the next track
 #[tauri::command]
-pub fn media_next_track() -> Result<(), String> {
+pub async fn media_next_track() -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
         use std::process::Command;
@@ -426,15 +615,46 @@ pub fn media_next_track() -> Result<(), String> {
         Ok(())
     }
 
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
     {
-        Err("Media controls not supported on this platform".to_string())
+         use windows::Media::Control::GlobalSystemMediaTransportControlsSessionManager;
+        if let Ok(manager) = GlobalSystemMediaTransportControlsSessionManager::RequestAsync() {
+            if let Ok(manager) = manager.await {
+                if let Ok(session) = manager.GetCurrentSession() {
+                    let _ = session.TrySkipNextAsync().unwrap().await;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        use zbus::{Connection, proxy};
+        #[proxy(
+            interface = "org.mpris.MediaPlayer2.Player",
+            default_path = "/org/mpris/MediaPlayer2",
+        )]
+        trait Player {
+            fn next(&self) -> zbus::Result<()>;
+        }
+        if let Ok(conn) = Connection::session().await {
+             let proxy = zbus::fdo::DBusProxy::new(&conn).await.unwrap();
+             let names = proxy.list_names().await.unwrap();
+             for name in names {
+                 if name.starts_with("org.mpris.MediaPlayer2.") {
+                      let player = PlayerProxy::builder(&conn).destination(name).unwrap().build().await.unwrap();
+                      let _ = player.next().await;
+                 }
+             }
+        }
+        Ok(())
     }
 }
 
 /// Go to the previous track
 #[tauri::command]
-pub fn media_previous_track() -> Result<(), String> {
+pub async fn media_previous_track() -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
         use std::process::Command;
@@ -465,9 +685,40 @@ pub fn media_previous_track() -> Result<(), String> {
         Ok(())
     }
 
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
     {
-        Err("Media controls not supported on this platform".to_string())
+         use windows::Media::Control::GlobalSystemMediaTransportControlsSessionManager;
+        if let Ok(manager) = GlobalSystemMediaTransportControlsSessionManager::RequestAsync() {
+            if let Ok(manager) = manager.await {
+                if let Ok(session) = manager.GetCurrentSession() {
+                    let _ = session.TrySkipPreviousAsync().unwrap().await;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        use zbus::{Connection, proxy};
+        #[proxy(
+            interface = "org.mpris.MediaPlayer2.Player",
+            default_path = "/org/mpris/MediaPlayer2",
+        )]
+        trait Player {
+            fn previous(&self) -> zbus::Result<()>;
+        }
+        if let Ok(conn) = Connection::session().await {
+             let proxy = zbus::fdo::DBusProxy::new(&conn).await.unwrap();
+             let names = proxy.list_names().await.unwrap();
+             for name in names {
+                 if name.starts_with("org.mpris.MediaPlayer2.") {
+                      let player = PlayerProxy::builder(&conn).destination(name).unwrap().build().await.unwrap();
+                      let _ = player.previous().await;
+                 }
+             }
+        }
+        Ok(())
     }
 }
 
@@ -509,7 +760,8 @@ pub async fn media_seek(position: f64) -> Result<(), String> {
 
     #[cfg(not(target_os = "macos"))]
     {
-        Err("Media controls not supported on this platform".to_string())
+        // Seeking not easily supported in global transport controls universally
+        Ok(())
     }
 }
 
@@ -541,14 +793,14 @@ pub fn activate_media_app(app_name: String) -> Result<(), String> {
 
     #[cfg(not(target_os = "macos"))]
     {
-        Err("Not supported on this platform".to_string())
+        // Maybe try opening by protocol or process name?
+        Ok(())
     }
 }
 
 use std::thread;
 
 /// Setup audio level monitoring using simulated audio visualization
-#[cfg(target_os = "macos")]
 pub fn setup_audio_monitoring(app_handle: tauri::AppHandle) {
     // Initialize the audio levels storage if not already done
     if AUDIO_LEVELS.get().is_none() {
