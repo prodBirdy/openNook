@@ -125,9 +125,9 @@ pub fn run() {
                 #[cfg(target_os = "linux")]
                 {
                     // Linux specific setup
-                    window.set_always_on_top(true).unwrap();
-                    window.set_decorations(false).unwrap();
-                    window.set_skip_taskbar(true).unwrap();
+                     window.set_always_on_top(true).unwrap();
+                     window.set_decorations(false).unwrap();
+                     window.set_skip_taskbar(true).unwrap();
                 }
 
                 #[cfg(not(target_os = "windows"))]
@@ -145,8 +145,6 @@ pub fn run() {
 
                 window::setup_mouse_monitoring(app.handle().clone());
                 audio::setup_audio_monitoring(app.handle().clone());
-                let _ = database::init_db(app.handle());
-                window::initialize_window_settings_from_db(app.handle());
             }
             Ok(())
         })
