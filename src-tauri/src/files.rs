@@ -1,18 +1,19 @@
 use crate::database::{get_connection, log_sql};
 use serde::{Deserialize, Serialize};
 use std::fs;
+#[cfg(target_os = "macos")]
 use std::process::Command;
 use tauri::{command, AppHandle};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct FileTrayItem {
     pub name: String,
-    pub size: u64,
+    pub size: i64,
     pub path: String,
     #[serde(rename = "type")]
     pub mime_type: String,
     #[serde(rename = "lastModified")]
-    pub last_modified: u64,
+    pub last_modified: i64,
 }
 
 #[command]
@@ -77,6 +78,7 @@ pub fn load_file_tray(app_handle: AppHandle) -> Result<Vec<FileTrayItem>, String
 }
 
 #[command]
+#[allow(unused_variables)]
 pub fn open_file(path: String) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     Command::new("open")
@@ -87,6 +89,7 @@ pub fn open_file(path: String) -> Result<(), String> {
 }
 
 #[command]
+#[allow(unused_variables)]
 pub fn reveal_file(path: String) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     Command::new("open")

@@ -1,5 +1,5 @@
 use crate::database::{get_connection, log_sql};
-use tauri::{AppHandle, Manager};
+use tauri::AppHandle;
 
 /// Save notes to the database (settings table)
 #[tauri::command]
