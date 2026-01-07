@@ -311,7 +311,7 @@ export function DynamicIsland() {
         } else {
             // Standard expanded width for active widgets
             width = baseNotchWidth + 120;
-            height = notchHeight + 8;
+            height = notchHeight;
         }
 
         return { targetWidth: width, targetHeight: height };
