@@ -1,9 +1,11 @@
 pub mod audio;
 pub mod calendar;
+pub mod database;
 pub mod files;
 pub mod models;
 pub mod notes;
 pub mod utils;
+pub mod widgets;
 pub mod window;
 
 use tauri::{Emitter, Manager};
@@ -32,6 +34,8 @@ pub fn run() {
             audio::media_previous_track,
             audio::media_seek,
             audio::activate_media_app,
+            database::db_execute,
+            database::db_select,
             notes::save_notes,
             notes::load_notes,
             calendar::request_calendar_access,
@@ -51,7 +55,9 @@ pub fn run() {
             files::load_file_tray,
             files::resolve_path,
             files::save_drag_icon,
-            window::get_system_accent_color
+            window::get_system_accent_color,
+            widgets::save_widget_state,
+            widgets::load_widget_state
         ])
         .setup(|app| {
             // Auto-position and resize window to match notch on startup
@@ -119,9 +125,9 @@ pub fn run() {
                 #[cfg(target_os = "linux")]
                 {
                     // Linux specific setup
-                     window.set_always_on_top(true).unwrap();
-                     window.set_decorations(false).unwrap();
-                     window.set_skip_taskbar(true).unwrap();
+                    window.set_always_on_top(true).unwrap();
+                    window.set_decorations(false).unwrap();
+                    window.set_skip_taskbar(true).unwrap();
                 }
 
                 #[cfg(not(target_os = "windows"))]
@@ -139,6 +145,8 @@ pub fn run() {
 
                 window::setup_mouse_monitoring(app.handle().clone());
                 audio::setup_audio_monitoring(app.handle().clone());
+                let _ = database::init_db(app.handle());
+                window::initialize_window_settings_from_db(app.handle());
             }
             Ok(())
         })

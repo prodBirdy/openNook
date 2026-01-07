@@ -2,6 +2,8 @@ import { useEffect, useState, useMemo } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { IconRefresh, IconPlus, IconCalendar } from '@tabler/icons-react';
 import { registerWidget } from './WidgetRegistry';
+import { WidgetWrapper } from './WidgetWrapper';
+import { WidgetAddDialog } from './WidgetAddDialog';
 
 interface CalendarEvent {
     id: string;
@@ -116,64 +118,66 @@ export function CalendarWidget() {
         </div>
     );
 
+    const headerActions = [
+        <div style={{ display: 'flex', gap: 4 }}>
+            <button
+                className="icon-button"
+                onClick={(e) => { e.stopPropagation(); setShowAddDialog(true); }}
+            >
+                <IconPlus size={18} />
+            </button>
+            <button
+                className={`icon-button ${isRefreshing ? 'spinning' : ''}`}
+                onClick={(e) => { e.stopPropagation(); fetchEvents(true); }}
+            >
+                <IconRefresh size={18} />
+            </button>
+        </div>
+    ];
+
     return (
-        <div className="calendar-widget apple-style" style={{ position: 'relative' }}>
+        <WidgetWrapper title="Calendar" headerActions={headerActions} className="calendar-widget" >
             {showAddDialog ? (
-                <div className="widget-overlay">
-                    <form onSubmit={handleCreateEvent} className="creation-form">
-                        <div className="form-header">
-                            <span className="form-title">New Event</span>
-                            <button type="button" className="close-button" onClick={() => setShowAddDialog(false)}>Cancel</button>
-                        </div>
-                        <input name="title" placeholder="Title" required className="form-input" autoFocus />
-                        <input name="location" placeholder="Location" className="form-input" />
-                        <div className="form-row">
-                            <label>Start</label>
-                            <input
-                                name="start"
-                                type="datetime-local"
-                                required
-                                className="form-input"
-                                defaultValue={new Date().toISOString().slice(0, 16)}
-                            />
-                        </div>
-                        <div className="form-row">
-                            <label>End</label>
-                            <input
-                                name="end"
-                                type="datetime-local"
-                                required
-                                className="form-input"
-                                defaultValue={new Date(Date.now() + 3600000).toISOString().slice(0, 16)}
-                            />
-                        </div>
-                        <div className="form-row checkbox-row">
-                            <label htmlFor="isAllDay">All Day</label>
-                            <input name="isAllDay" id="isAllDay" type="checkbox" />
-                        </div>
-                        <button type="submit" className="submit-button">Add</button>
-                    </form>
-                </div>
+                <WidgetAddDialog
+                    title="New Event"
+                    onClose={() => setShowAddDialog(false)}
+                    onSubmit={handleCreateEvent}
+                    submitLabel="Add"
+                    mainInput={{
+                        name: "title",
+                        placeholder: "Title",
+                        required: true,
+                        icon: <IconCalendar size={18} color="var(--accent-color)" />
+                    }}
+                >
+                    <input name="location" placeholder="Location" className="form-input" />
+                    <div className="form-row">
+                        <label>Start</label>
+                        <input
+                            name="start"
+                            type="datetime-local"
+                            required
+                            className="form-input"
+                            defaultValue={new Date().toISOString().slice(0, 16)}
+                        />
+                    </div>
+                    <div className="form-row">
+                        <label>End</label>
+                        <input
+                            name="end"
+                            type="datetime-local"
+                            required
+                            className="form-input"
+                            defaultValue={new Date(Date.now() + 3600000).toISOString().slice(0, 16)}
+                        />
+                    </div>
+                    <div className="form-row checkbox-row">
+                        <label htmlFor="isAllDay">All Day</label>
+                        <input name="isAllDay" id="isAllDay" type="checkbox" />
+                    </div>
+                </WidgetAddDialog>
             ) : (
                 <>
-                    <div className="widget-header">
-                        <span className="widget-title">Calendar</span>
-                        <div style={{ display: 'flex', gap: 4 }}>
-                            <button
-                                className="refresh-button"
-                                onClick={(e) => { e.stopPropagation(); setShowAddDialog(true); }}
-                            >
-                                <IconPlus size={14} />
-                            </button>
-                            <button
-                                className={`refresh-button ${isRefreshing ? 'spinning' : ''}`}
-                                onClick={(e) => { e.stopPropagation(); fetchEvents(true); }}
-                            >
-                                <IconRefresh size={14} />
-                            </button>
-                        </div>
-                    </div>
-
                     {/* Scroller Container with Hover Logic */}
                     <div
                         className={`scroller-container ${isScrollerHovered ? 'expanded' : 'compact'}`}
@@ -240,7 +244,9 @@ export function CalendarWidget() {
                     </div>
                 </>
             )}
-        </div>
+
+        </WidgetWrapper>
+
     );
 }
 

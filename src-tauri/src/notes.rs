@@ -1,33 +1,35 @@
-use std::fs;
-use std::path::PathBuf;
+use crate::database::{get_connection, log_sql};
+use tauri::{AppHandle, Manager};
 
-/// Get the path to the notes file in the user's home directory
-fn get_notes_path() -> PathBuf {
-    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-    home.join(".overdone").join("notes.txt")
+/// Save notes to the database (settings table)
+#[tauri::command]
+pub fn save_notes(app_handle: AppHandle, notes: String) -> Result<(), String> {
+    let conn = get_connection(&app_handle).map_err(|e| e.to_string())?;
+
+    let sql = "INSERT OR REPLACE INTO settings (key, value) VALUES ('notes', ?1)";
+    log_sql(sql);
+
+    conn.execute(sql, rusqlite::params![notes])
+        .map_err(|e| e.to_string())?;
+
+    Ok(())
 }
 
-/// Save notes to a file
+/// Load notes from the database
 #[tauri::command]
-pub fn save_notes(notes: String) -> Result<(), String> {
-    let path = get_notes_path();
+pub fn load_notes(app_handle: AppHandle) -> Result<String, String> {
+    let conn = get_connection(&app_handle).map_err(|e| e.to_string())?;
 
-    // Ensure parent directory exists
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    }
+    let sql = "SELECT value FROM settings WHERE key = 'notes'";
+    log_sql(sql);
 
-    fs::write(&path, notes).map_err(|e| e.to_string())
-}
+    let mut stmt = conn.prepare(sql).map_err(|e| e.to_string())?;
 
-/// Load notes from a file
-#[tauri::command]
-pub fn load_notes() -> Result<String, String> {
-    let path = get_notes_path();
+    let notes: Result<String, _> = stmt.query_row([], |row| row.get(0));
 
-    if path.exists() {
-        fs::read_to_string(&path).map_err(|e| e.to_string())
-    } else {
-        Ok(String::new())
+    match notes {
+        Ok(n) => Ok(n),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(String::new()),
+        Err(e) => Err(e.to_string()),
     }
 }

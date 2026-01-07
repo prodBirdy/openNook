@@ -1,8 +1,8 @@
 import { motion } from 'motion/react';
 
 interface ModeIndicatorProps {
-    availableModes: ('media' | 'files' | 'onboard' | 'idle')[];
-    currentMode: 'media' | 'files' | 'onboard' | 'idle';
+    availableModes: string[];
+    currentMode: string;
 }
 
 export function ModeIndicator({ availableModes, currentMode }: ModeIndicatorProps) {

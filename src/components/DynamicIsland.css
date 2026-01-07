@@ -323,18 +323,19 @@
 /* Common Widget Card Style */
 .widget-card {
     height: 100%;
-    /* Constrain max height if needed, or let them fill */
     flex: 1;
-    /* evenly distribute width or use specific widths */
     min-width: 300px;
-    /* Minimum width for readability */
-    border-radius: 24px;
-    background: rgba(28, 28, 30, 0.6);
-    backdrop-filter: blur(20px);
-    border: 1px solid rgba(255, 255, 255, 0.05);
-    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.2);
+    border-radius: 28px;
+    background: linear-gradient(135deg, rgba(30, 30, 32, 0.7) 0%, rgba(20, 20, 22, 0.8) 100%);
+    backdrop-filter: blur(30px) saturate(200%);
+    -webkit-backdrop-filter: blur(30px) saturate(200%);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    box-shadow:
+        0 8px 32px rgba(0, 0, 0, 0.4),
+        inset 0 0 0 1px rgba(255, 255, 255, 0.05);
     display: flex;
     flex-direction: column;
+    overflow: hidden;
 }
 
 /* Hide scrollbar for cleaner look */
@@ -564,12 +565,15 @@
 
 /* Widget Headers */
 .widget-header {
-    margin-bottom: 12px;
-    font-size: 14px;
-    color: rgba(255, 255, 255, 0.5);
+    margin-bottom: 0px;
+    font-size: 17px;
+    color: rgba(255, 255, 255, 0.95);
     font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.5px;
+    font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', sans-serif;
+    letter-spacing: -0.01em;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
 }
 
 /* Calendar Widget */
@@ -647,7 +651,6 @@
 .reminders-widget {
     display: flex;
     flex-direction: column;
-    padding: 20px;
     height: 100%;
     box-sizing: border-box;
     overflow: hidden;
@@ -659,7 +662,6 @@
     gap: 10px;
     overflow-y: auto;
     flex: 1;
-    padding-right: 4px;
 }
 
 .reminders-list::-webkit-scrollbar {
@@ -897,28 +899,14 @@
 }
 
 /* Apple-style Widget Enhancements */
+.apple-style {
+    font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', sans-serif;
+}
+
 .apple-style .widget-header {
     display: flex;
     align-items: center;
     justify-content: space-between;
-}
-
-.refresh-button {
-    background: none;
-    border: none;
-    color: rgba(255, 255, 255, 0.4);
-    cursor: pointer;
-    padding: 4px;
-    border-radius: 50%;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    transition: all 0.2s ease;
-}
-
-.refresh-button:hover {
-    background: rgba(255, 255, 255, 0.1);
-    color: var(--accent-color);
 }
 
 .refresh-button.spinning {
@@ -1137,6 +1125,16 @@
     display: none;
 }
 
+.no-events-message {
+    height: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: rgba(255, 255, 255, 0.4);
+    font-size: 14px;
+    font-weight: 500;
+}
+
 .event-item-modern {
     display: flex;
     align-items: center;
@@ -1345,8 +1343,10 @@
     left: 0;
     right: 0;
     bottom: 0;
-    background: rgba(30, 30, 30, 0.95);
-    backdrop-filter: blur(10px);
+    bottom: 0;
+    background: rgba(30, 30, 30, 0.65);
+    backdrop-filter: blur(25px) saturate(180%);
+    -webkit-backdrop-filter: blur(25px) saturate(180%);
     z-index: 100;
     padding: 16px;
     display: flex;
@@ -1392,17 +1392,27 @@
 }
 
 .form-input {
-    background: rgba(255, 255, 255, 0.1);
-    border: 1px solid rgba(255, 255, 255, 0.1);
-    border-radius: 8px;
-    padding: 8px;
+    background: rgba(118, 118, 128, 0.24);
+    border: none;
+    border-radius: 10px;
+    padding: 0 12px;
+    height: 36px;
     color: white;
-    font-size: 13px;
+    font-size: 16px;
+    font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', sans-serif;
     outline: none;
+    transition: all 0.2s ease;
+    width: 100%;
+    box-sizing: border-box;
 }
 
 .form-input:focus {
-    border-color: rgba(255, 255, 255, 0.3);
+    background: rgba(118, 118, 128, 0.32);
+}
+
+.form-input::placeholder {
+    color: rgba(235, 235, 245, 0.3);
+    /* Apple placeholder color */
 }
 
 .form-row {
@@ -1430,22 +1440,29 @@
     background: var(--accent-color);
     color: white;
     border: none;
-    border-radius: 8px;
-    padding: 8px;
+    border-radius: 12px;
+    height: 44px;
+    font-size: 16px;
     font-weight: 600;
     cursor: pointer;
-    transition: opacity 0.2s;
+    transition: all 0.2s cubic-bezier(0.25, 0.1, 0.25, 1);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', sans-serif;
 }
 
 .submit-button:hover {
-    opacity: 0.9;
+    transform: scale(1.02);
+    filter: brightness(1.1);
 }
 
 .submit-button:active {
-    opacity: 0.8;
+    transform: scale(0.96);
+    filter: brightness(0.9);
 }
 
-/* Timer Widget */
+/* Timer Widget - Minimal Redesign */
 .timer-widget {
     display: flex;
     flex-direction: column;
@@ -1455,129 +1472,233 @@
     overflow: hidden;
 }
 
-.timer-presets {
+/* Minimal Header */
+.widget-header.minimal {
     display: flex;
-    gap: 8px;
-    margin-bottom: 12px;
-    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 20px;
 }
 
-.preset-button {
+.icon-button {
+    background: transparent;
+    border: none;
+    color: rgba(255, 255, 255, 0.4);
+    cursor: pointer;
+    padding: 6px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: all 0.2s ease;
+}
+
+.icon-button:hover {
     background: rgba(255, 255, 255, 0.1);
-    border: 1px solid rgba(255, 255, 255, 0.2);
-    border-radius: 16px;
+    color: white;
+}
+
+/* Empty State */
+.empty-state {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+    color: rgba(255, 255, 255, 0.3);
+    font-size: 14px;
+}
+
+.text-button {
+    background: rgba(255, 255, 255, 0.1);
+    border: none;
     padding: 8px 16px;
+    border-radius: 20px;
     color: white;
     font-size: 13px;
     font-weight: 500;
     cursor: pointer;
-    transition: all 0.2s ease;
+    transition: background 0.2s;
 }
 
-.preset-button:hover {
+.text-button:hover {
     background: rgba(255, 255, 255, 0.2);
-    border-color: rgba(255, 255, 255, 0.3);
 }
 
-.timers-list {
+/* Minimal List */
+.timers-list.minimal-list {
     display: flex;
     flex-direction: column;
-    gap: 12px;
-    overflow-y: auto;
+    gap: 4px;
+    /* Tighter gap */
     flex: 1;
+    overflow-y: auto;
+    min-height: 0;
+    padding-right: 4px;
+    -ms-overflow-style: none;
+    /* IE and Edge */
+    scrollbar-width: none;
+    /* Firefox */
 }
 
-.timers-list::-webkit-scrollbar {
+.timers-list.minimal-list::-webkit-scrollbar {
     display: none;
 }
 
-.timer-item {
+.timer-item-minimal {
     display: flex;
     align-items: center;
-    gap: 12px;
-    padding: 12px;
+    gap: 8px;
+    padding: 12px 16px;
+    border-radius: 20px;
+    background: transparent;
+    transition: background 0.2s ease;
+    cursor: default;
+}
+
+.timer-item-minimal:hover {
     background: rgba(255, 255, 255, 0.05);
-    border-radius: 12px;
-    transition: all 0.2s ease;
 }
 
-.timer-item.running {
-    background: rgba(var(--accent-color-rgb, 0, 122, 255), 0.15);
-    border: 1px solid rgba(var(--accent-color-rgb, 0, 122, 255), 0.3);
+.timer-item-minimal.finished {
+    background: rgba(255, 69, 58, 0.1);
+    /* Subtle red tint when finished */
 }
 
-.timer-item.complete {
-    background: rgba(52, 199, 89, 0.15);
-    border: 1px solid rgba(52, 199, 89, 0.3);
-}
-
-.timer-progress-ring {
-    width: 36px;
-    height: 36px;
+/* Ring & Play Control */
+.timer-ring-container {
+    position: relative;
+    width: 44px;
+    height: 44px;
     flex-shrink: 0;
+    cursor: pointer;
+    border-radius: 50%;
+    transition: transform 0.1s ease;
 }
 
-.timer-progress-ring svg {
+.timer-ring-container:active {
+    transform: scale(0.95);
+}
+
+.ring-svg {
     width: 100%;
     height: 100%;
     transform: rotate(-90deg);
 }
 
-.timer-ring-bg {
+.ring-bg {
     stroke: rgba(255, 255, 255, 0.1);
 }
 
-.timer-ring-progress {
-    stroke: var(--accent-color, #007AFF);
+.ring-progress {
+    stroke: var(--accent-color, #0A84FF);
     transition: stroke-dasharray 0.3s ease;
 }
 
-.timer-content {
-    flex: 1;
-    min-width: 0;
+.finished .ring-progress {
+    stroke: #FF453A;
 }
 
-.timer-name {
-    font-size: 13px;
-    color: rgba(255, 255, 255, 0.6);
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-}
-
-.timer-time {
-    font-size: 20px;
-    font-weight: 600;
-    color: white;
-    font-variant-numeric: tabular-nums;
-}
-
-.timer-controls {
-    display: flex;
-    gap: 8px;
-}
-
-.timer-control-btn {
-    width: 32px;
-    height: 32px;
+.ring-icon-overlay {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
     display: flex;
     align-items: center;
     justify-content: center;
-    background: rgba(255, 255, 255, 0.1);
-    border: none;
-    border-radius: 8px;
     color: white;
+}
+
+.control-icon {
+    opacity: 0;
+    /* Hidden by default for ultra-minimal look? Or maybe visible? */
+    transition: opacity 0.2s ease, transform 0.2s ease;
+}
+
+/* Logic: Show pause when hovering running timer. Show play always if paused. */
+.timer-ring-container:hover .control-icon {
+    opacity: 1;
+}
+
+/* If it's paused (showing play icon), make it visible but dim, full on hover */
+.control-icon.offset {
+    margin-left: 2px;
+    /* Visual center correction for Play triangle */
+    opacity: 0.5;
+}
+
+.timer-item-minimal:hover .control-icon.offset {
+    opacity: 1;
+}
+
+/* Timer Info */
+.timer-info {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+}
+
+.time-display {
+    font-size: 26px;
+    /* Big, readable */
+    font-weight: 500;
+    /* Regular/Medium weight looks cleaner than bold */
+    color: rgba(255, 255, 255, 0.95);
+    font-family: 'SF Pro Display', -apple-system, sans-serif;
+    font-variant-numeric: tabular-nums;
+    letter-spacing: -0.5px;
+    line-height: 1;
+}
+
+.timer-label {
+    font-size: 13px;
+    color: rgba(255, 255, 255, 0.4);
+    margin-top: 2px;
+    font-weight: 500;
+}
+
+/* Actions */
+.timer-actions-minimal {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    opacity: 0;
+    /* Hidden by default */
+    transform: translateX(10px);
+    transition: all 0.2s cubic-bezier(0.25, 0.1, 0.25, 1);
+}
+
+.timer-item-minimal:hover .timer-actions-minimal {
+    opacity: 1;
+    transform: translateX(0);
+}
+
+.action-btn-minimal {
+    width: 32px;
+    height: 32px;
+    border-radius: 50%;
+    border: none;
+    background: rgba(255, 255, 255, 0.1);
+    color: white;
+    display: flex;
+    align-items: center;
+    justify-content: center;
     cursor: pointer;
-    transition: all 0.2s ease;
+    transition: all 0.2s;
 }
 
-.timer-control-btn:hover {
+.action-btn-minimal:hover {
     background: rgba(255, 255, 255, 0.2);
+    transform: scale(1.1);
 }
 
-.timer-control-btn.delete:hover {
-    background: rgba(255, 59, 48, 0.3);
-    color: #FF3B30;
+.action-btn-minimal.destructive:hover {
+    background: rgba(255, 69, 58, 0.2);
+    color: #FF453A;
 }
 
 /* Compact Timer */
@@ -1597,8 +1718,17 @@
 }
 
 @keyframes pulse {
-    0%, 100% { opacity: 1; transform: scale(1); }
-    50% { opacity: 0.7; transform: scale(0.95); }
+
+    0%,
+    100% {
+        opacity: 1;
+        transform: scale(1);
+    }
+
+    50% {
+        opacity: 0.7;
+        transform: scale(0.95);
+    }
 }
 
 /* Session Widget */
@@ -1620,36 +1750,66 @@
 }
 
 .sessions-section .section-label {
-    font-size: 11px;
+    font-size: 13px;
     color: rgba(255, 255, 255, 0.4);
+    font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.5px;
-    margin-bottom: 8px;
+    letter-spacing: 0.05em;
+    margin-bottom: 12px;
+    padding-left: 4px;
 }
 
 .session-item {
-    display: flex;
+    display: grid;
+    grid-template-columns: 36px 1fr auto;
     align-items: center;
-    gap: 12px;
-    padding: 12px;
+    gap: 16px;
+    padding: 12px 16px;
     background: rgba(255, 255, 255, 0.05);
-    border-radius: 12px;
-    margin-bottom: 8px;
-    transition: all 0.2s ease;
+    border: 0.5px solid rgba(255, 255, 255, 0.1);
+    border-radius: 16px;
+    margin-bottom: 10px;
+    box-sizing: border-box;
 }
 
 .session-item.active {
-    background: rgba(52, 199, 89, 0.15);
-    border: 1px solid rgba(52, 199, 89, 0.3);
+    grid-template-columns: 48px 1fr auto;
+    padding: 16px 20px;
+    background: rgba(52, 199, 89, 0.08);
+    border-color: rgba(52, 199, 89, 0.2);
+}
+
+.session-item.active .session-indicator-wrapper {
+    width: 44px;
+    height: 44px;
+    background: rgba(52, 199, 89, 0.2);
+    color: #34C759;
 }
 
 .session-item.completed {
     opacity: 0.7;
 }
 
+.session-indicator-wrapper {
+    width: 32px;
+    height: 32px;
+    border-radius: 50%;
+    background: rgba(255, 255, 255, 0.1);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: rgba(255, 255, 255, 0.6);
+    flex-shrink: 0;
+}
+
+.session-indicator-wrapper.history {
+    background: rgba(255, 255, 255, 0.08);
+    color: rgba(255, 255, 255, 0.4);
+}
+
 .session-indicator {
-    width: 12px;
-    height: 12px;
+    width: 10px;
+    height: 10px;
     border-radius: 50%;
     background: rgba(255, 255, 255, 0.3);
     flex-shrink: 0;
@@ -1661,79 +1821,99 @@
 }
 
 @keyframes recording-pulse {
-    0%, 100% { box-shadow: 0 0 0 0 rgba(52, 199, 89, 0.4); }
-    50% { box-shadow: 0 0 0 6px rgba(52, 199, 89, 0); }
+
+    0%,
+    100% {
+        box-shadow: 0 0 0 0 rgba(52, 199, 89, 0.4);
+    }
+
+    50% {
+        box-shadow: 0 0 0 6px rgba(52, 199, 89, 0);
+    }
 }
 
 .session-content {
-    flex: 1;
+    display: flex;
+    flex-direction: column;
     min-width: 0;
 }
 
 .session-name {
     font-size: 15px;
-    font-weight: 500;
+    font-weight: 600;
     color: white;
+    margin-bottom: 2px;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
 }
 
 .session-elapsed {
-    font-size: 20px;
+    font-size: 26px;
     font-weight: 600;
     color: white;
+    font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', sans-serif;
     font-variant-numeric: tabular-nums;
-    margin-top: 2px;
+    letter-spacing: -0.02em;
+    line-height: 1;
 }
 
 .session-meta {
     display: flex;
+    align-items: center;
     gap: 8px;
-    font-size: 12px;
-    color: rgba(255, 255, 255, 0.5);
-    margin-top: 2px;
+    font-size: 11px;
+    color: rgba(255, 255, 255, 0.4);
+    font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', sans-serif;
+    margin-top: 4px;
 }
 
 .session-duration {
-    color: rgba(255, 255, 255, 0.7);
+    font-weight: 500;
+    color: rgba(255, 255, 255, 0.6);
+    font-variant-numeric: tabular-nums;
 }
 
 .session-stop-btn {
-    width: 36px;
-    height: 36px;
+    width: 44px;
+    height: 44px;
     display: flex;
     align-items: center;
     justify-content: center;
-    background: rgba(255, 59, 48, 0.2);
-    border: 1px solid rgba(255, 59, 48, 0.3);
-    border-radius: 10px;
-    color: #FF3B30;
+    background: rgba(255, 59, 48, 0.15);
+    border: none;
+    border-radius: 50%;
+    color: #FF453A;
     cursor: pointer;
-    transition: all 0.2s ease;
+    transition: all 0.2s cubic-bezier(0.25, 0.1, 0.25, 1);
 }
 
 .session-stop-btn:hover {
-    background: rgba(255, 59, 48, 0.3);
+    background: rgba(255, 59, 48, 0.25);
+    transform: scale(1.05);
+}
+
+.session-stop-btn:active {
+    transform: scale(0.95);
 }
 
 .session-delete-btn {
-    width: 28px;
-    height: 28px;
+    width: 32px;
+    height: 32px;
     display: flex;
     align-items: center;
     justify-content: center;
-    background: transparent;
+    background: rgba(255, 255, 255, 0.08);
     border: none;
-    border-radius: 6px;
-    color: rgba(255, 255, 255, 0.4);
+    border-radius: 50%;
+    color: rgba(255, 255, 255, 0.5);
     cursor: pointer;
     transition: all 0.2s ease;
 }
 
 .session-delete-btn:hover {
-    background: rgba(255, 59, 48, 0.2);
-    color: #FF3B30;
+    background: rgba(255, 255, 255, 0.15);
+    color: white;
 }
 
 /* Compact Session */
@@ -1748,4 +1928,82 @@
 .compact-session-indicator.recording {
     background: #34C759;
     animation: recording-pulse 1.5s ease-in-out infinite;
+}
+
+/* Compact Session Icon Refactor */
+.compact-session-icon-wrapper {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 26px;
+    height: 26px;
+    border-radius: 50%;
+    background: rgba(255, 255, 255, 0.15);
+    cursor: pointer;
+    transition: all 0.2s cubic-bezier(0.25, 0.1, 0.25, 1);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.compact-session-icon-wrapper:hover {
+    background: rgba(255, 255, 255, 0.25);
+    transform: scale(1.05);
+    border-color: rgba(255, 255, 255, 0.3);
+}
+
+.compact-session-icon-wrapper:active {
+    transform: scale(0.95);
+}
+
+.compact-session-icon {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: white;
+}
+
+/* ===== Widget Wrapper Styles ===== */
+.widget-wrapper {
+    display: flex;
+    flex-direction: column;
+    padding: 12px;
+    height: 100%;
+    box-sizing: border-box;
+    overflow: hidden;
+    position: relative;
+}
+
+.widget-wrapper .widget-header-actions {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+}
+
+.widget-wrapper .widget-body {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    min-height: 0;
+}
+
+.timers-list.minimal-list .section-label {
+    font-size: 13px;
+    color: rgba(255, 255, 255, 0.4);
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    margin-bottom: 12px;
+    padding-left: 4px;
+}
+
+.timer-icon {
+    width: 44px;
+    height: 44px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    background: rgba(255, 255, 255, 0.05);
+    border-radius: 50%;
+    color: white;
 }

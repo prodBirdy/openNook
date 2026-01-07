@@ -3,6 +3,7 @@ import { motion } from 'motion/react';
 import { IconPlayerSkipBackFilled, IconPlayerPlayFilled, IconPlayerPauseFilled, IconPlayerSkipForwardFilled } from '@tabler/icons-react';
 import { getDominantColor } from '../utils/imageUtils';
 import './DynamicIsland.css';
+import { WidgetWrapper } from './widgets/WidgetWrapper';
 
 interface NowPlayingData {
     title: string | null;
@@ -103,75 +104,80 @@ export const ExpandedMedia = memo(function ExpandedMedia({
         }
     }
 
-    return (
+    const headerActions = [
         <>
-            <div className="media-top-row">
-                <div
-                    className="expanded-album-cover"
-                    style={{
-                        boxShadow: glowColor ? `0 8px 32px -4px ${glowColor}` : 'none',
-                        transition: 'box-shadow 0.5s ease',
-                        opacity: glowOpacity ? 1 : 1, // Keep element visible, just toggle shadow
-                    }}
-                >
-                    {nowPlaying.artwork_base64 ? (
-                        <img
-                            src={`data:image/png;base64,${nowPlaying.artwork_base64}`}
-                            alt={nowPlaying.title || 'Album cover'}
-                            style={{ width: '100%', height: '100%', objectFit: 'cover', borderRadius: '12px' }}
-                        />
-                    ) : (
-                        <div className="expanded-album-placeholder" />
-                    )}
+            <div
+                className="expanded-album-cover"
+                style={{
+                    boxShadow: glowColor ? `0 8px 32px -4px ${glowColor}` : 'none',
+                    transition: 'box-shadow 0.5s ease',
+                    opacity: glowOpacity ? 1 : 1, // Keep element visible, just toggle shadow
+                }}
+            >
+                {nowPlaying.artwork_base64 ? (
+                    <img
+                        src={`data:image/png;base64,${nowPlaying.artwork_base64}`}
+                        alt={nowPlaying.title || 'Album cover'}
+                        style={{ width: '100%', height: '100%', objectFit: 'cover', borderRadius: '12px' }}
+                    />
+                ) : (
+                    <div className="expanded-album-placeholder" />
+                )}
+            </div>
+            <div className="expanded-track-info">
+                <h3>{nowPlaying.title || 'Unknown Title'}</h3>
+                <p>{nowPlaying.artist || 'Unknown Artist'}</p>
+            </div>
+        </>
+    ]
+
+    return (
+
+        <WidgetWrapper headerActions={headerActions} className="calendar-widget" >
+            <div
+                style={{
+                    marginTop: '16px',
+                    cursor: (nowPlaying.duration && nowPlaying.duration > 0) ? 'pointer' : 'default',
+                    opacity: (nowPlaying.duration && nowPlaying.duration > 0) ? 1 : 0.5
+                }}
+                onPointerDown={(e) => {
+                    if (!nowPlaying.duration || nowPlaying.duration <= 0) return;
+                    e.stopPropagation();
+                    e.currentTarget.setPointerCapture(e.pointerId);
+                    setIsSeizing(true);
+                    handleMouseMove(e);
+                }}
+                onPointerUp={(e) => {
+                    if (!nowPlaying.duration || nowPlaying.duration <= 0) return;
+                    e.stopPropagation();
+                    e.currentTarget.releasePointerCapture(e.pointerId);
+                    // Do NOT setIsSeizing(false) here - handleSeek depends on it blocking updates
+                    handleSeek(e); // Commit seek
+                }}
+                onPointerMove={(e) => {
+                    if (isSeizing) handleMouseMove(e);
+                }}
+            >
+                <div className="progress-bar-bg">
+                    <motion.div
+                        className="progress-bar-fill"
+                        initial={{ width: 0 }}
+                        animate={{ width: `${localProgress}%` }}
+                        transition={{
+                            type: 'tween',
+                            duration: 0.3,
+                        }}
+                    />
                 </div>
-                <div className="expanded-track-info">
-                    <h3>{nowPlaying.title || 'Unknown Title'}</h3>
-                    <p>{nowPlaying.artist || 'Unknown Artist'}</p>
+                <div className="progress-times" style={{ marginTop: '6px' }}>
+                    <span className="time-current">
+                        {formatTime(isSeizing && nowPlaying.duration
+                            ? (localProgress / 100) * nowPlaying.duration
+                            : nowPlaying.elapsed_time || 0)}
+                    </span>
+                    <span className="time-duration">{formatTime(nowPlaying.duration || 0)}</span>
                 </div>
             </div>
-
-            {(nowPlaying.duration && nowPlaying.duration > 0) && (
-                <div
-                    className="progress-container"
-                    // Inline padding removed for CSS handling
-                    onPointerDown={(e) => {
-                        e.stopPropagation();
-                        // Capture pointer to track drag even if mouse leaves element bounds
-                        e.currentTarget.setPointerCapture(e.pointerId);
-                        setIsSeizing(true);
-                        handleMouseMove(e); // Snap immediately to click position
-                    }}
-                    onPointerUp={(e) => {
-                        e.stopPropagation();
-                        e.currentTarget.releasePointerCapture(e.pointerId);
-                        // Do NOT setIsSeizing(false) here - handleSeek depends on it blocking updates
-                        handleSeek(e); // Commit seek
-                    }}
-                    onPointerMove={(e) => {
-                        if (isSeizing) handleMouseMove(e);
-                    }}
-                >
-                    <div className="progress-bar-bg">
-                        <motion.div
-                            className="progress-bar-fill"
-                            initial={{ width: 0 }}
-                            animate={{ width: `${localProgress}%` }}
-                            transition={{
-                                type: 'tween',
-                                duration: 0.3,
-                            }}
-                        />
-                    </div>
-                    <div className="progress-times" style={{ marginTop: '6px' }}>
-                        <span className="time-current">
-                            {formatTime(isSeizing && nowPlaying.duration
-                                ? (localProgress / 100) * nowPlaying.duration
-                                : nowPlaying.elapsed_time || 0)}
-                        </span>
-                        <span className="time-duration">{formatTime(nowPlaying.duration)}</span>
-                    </div>
-                </div>
-            )}
 
             <div className="expanded-controls" onClick={(e) => e.stopPropagation()}>
                 <div className="control-btn" onClick={(e) => { e.stopPropagation(); onPrevious(e); }}>
@@ -188,6 +194,7 @@ export const ExpandedMedia = memo(function ExpandedMedia({
                     <IconPlayerSkipForwardFilled size={28} />
                 </div>
             </div>
-        </>
+        </WidgetWrapper>
+
     );
 });

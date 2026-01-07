@@ -1,9 +1,11 @@
-import { createContext, useContext, useState, useEffect, ReactNode, useCallback } from 'react';
+import { createContext, useContext, useState, useEffect, ReactNode, useCallback, useRef } from 'react';
+import { invoke } from '@tauri-apps/api/core';
+import { listen, emit } from '@tauri-apps/api/event';
 import { WidgetManifest, WidgetEnabledState, WidgetInstanceState } from '../components/widgets/WidgetTypes';
-import { WidgetRegistry } from '../components/widgets/WidgetRegistry';
+import { WidgetRegistry, widgetsReady } from '../components/widgets';
 
-const STORAGE_KEY = 'widget-enabled-state';
 const INSTANCES_STORAGE_KEY = 'widget-instances';
+const WIDGET_STATE_CHANGED_EVENT = 'widget-state-changed';
 
 interface WidgetContextValue {
     /** All registered widgets */
@@ -42,58 +44,98 @@ export function WidgetProvider({ children }: WidgetProviderProps) {
     const [widgets, setWidgets] = useState<WidgetManifest[]>([]);
     const [enabledState, setEnabledState] = useState<WidgetEnabledState>({});
     const [instances, setInstances] = useState<WidgetInstanceState[]>([]);
+    const [isLoaded, setIsLoaded] = useState(false);
+    const isExternalUpdate = useRef(false);
+    const senderId = useRef(Math.random().toString(36).substring(7));
 
-    // Load widgets from registry and enabled state from storage
+    // Load widgets from registry and enabled state from Rust backend
     useEffect(() => {
-        const allWidgets = WidgetRegistry.getAll();
-        setWidgets(allWidgets);
+        const loadWidgets = async () => {
+            // Wait for built-in widgets to be registered
+            await widgetsReady;
 
-        // Load saved enabled state
-        const saved = localStorage.getItem(STORAGE_KEY);
-        if (saved) {
+            const allWidgets = WidgetRegistry.getAll();
+            setWidgets(allWidgets);
+
+            // Load saved enabled state from Rust backend
             try {
-                const parsed = JSON.parse(saved) as WidgetEnabledState;
+                const saved = await invoke<{ enabled: WidgetEnabledState }>('load_widget_state');
                 // Merge with defaults for any new widgets
                 const merged: WidgetEnabledState = {};
                 allWidgets.forEach(w => {
-                    merged[w.id] = parsed[w.id] ?? w.defaultEnabled;
+                    merged[w.id] = saved.enabled[w.id] ?? w.defaultEnabled;
                 });
                 setEnabledState(merged);
             } catch (e) {
-                console.error('Failed to parse widget enabled state:', e);
+                console.error('Failed to load widget state from backend:', e);
                 // Fall back to defaults
                 const defaults: WidgetEnabledState = {};
                 allWidgets.forEach(w => {
                     defaults[w.id] = w.defaultEnabled;
                 });
                 setEnabledState(defaults);
+            } finally {
+                setIsLoaded(true);
             }
-        } else {
-            // Use defaults
-            const defaults: WidgetEnabledState = {};
-            allWidgets.forEach(w => {
-                defaults[w.id] = w.defaultEnabled;
-            });
-            setEnabledState(defaults);
-        }
 
-        // Load saved instances
-        const savedInstances = localStorage.getItem(INSTANCES_STORAGE_KEY);
-        if (savedInstances) {
-            try {
-                setInstances(JSON.parse(savedInstances));
-            } catch (e) {
-                console.error('Failed to parse widget instances:', e);
+            // Load saved instances from localStorage (keeping instances local for now)
+            const savedInstances = localStorage.getItem(INSTANCES_STORAGE_KEY);
+            if (savedInstances) {
+                try {
+                    setInstances(JSON.parse(savedInstances));
+                } catch (e) {
+                    console.error('Failed to parse widget instances:', e);
+                }
             }
-        }
+        };
+
+        loadWidgets();
     }, []);
 
-    // Save enabled state when it changes
+    // Listen for widget state changes from other windows
     useEffect(() => {
+        const unlisten = listen<{ enabled: WidgetEnabledState, senderId: string }>(WIDGET_STATE_CHANGED_EVENT, async (event) => {
+            // Ignore updates from ourselves
+            if (event.payload.senderId === senderId.current) {
+                return;
+            }
+
+            console.log('Received widget state update from other window');
+            isExternalUpdate.current = true;
+            setEnabledState(prev => {
+                // Merge with current widgets
+                const merged: WidgetEnabledState = {};
+                widgets.forEach(w => {
+                    merged[w.id] = event.payload.enabled[w.id] ?? prev[w.id];
+                });
+                return merged;
+            });
+            // Reset flag after state update
+            setTimeout(() => { isExternalUpdate.current = false; }, 100);
+        });
+
+        return () => {
+            unlisten.then(fn => fn());
+        };
+    }, [widgets]);
+
+    // Save enabled state to Rust backend when it changes and emit event
+    useEffect(() => {
+        if (!isLoaded) return;
+
         if (Object.keys(enabledState).length > 0) {
-            localStorage.setItem(STORAGE_KEY, JSON.stringify(enabledState));
+            invoke('save_widget_state', { state: { enabled: enabledState } })
+                .catch(e => console.error('Failed to save widget state:', e));
+
+            // Emit event to other windows (skip if this was triggered by external update)
+            if (!isExternalUpdate.current) {
+                emit(WIDGET_STATE_CHANGED_EVENT, {
+                    enabled: enabledState,
+                    senderId: senderId.current
+                }).catch(e => console.error('Failed to emit widget state event:', e));
+            }
         }
-    }, [enabledState]);
+    }, [enabledState, isLoaded]);
 
     // Save instances when they change
     useEffect(() => {

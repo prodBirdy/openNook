@@ -1,5 +1,6 @@
-import { memo, useMemo, useCallback } from 'react';
-import { motion } from 'motion/react';
+import { memo, useMemo, useCallback, useState } from 'react';
+import { motion, AnimatePresence } from 'motion/react';
+import { IconPlayerPlayFilled, IconPlayerPauseFilled } from '@tabler/icons-react';
 import './DynamicIsland.css'; // Assuming CSS is shared or moved. Ideally specific CSS should be here.
 
 interface AlbumCoverProps {
@@ -31,9 +32,19 @@ export const AlbumCover = memo(function AlbumCover({
         opacity: 1,
     }), [isPlaying]);
 
+    // Local hover state for overlay
+    const [isHovered, setIsHovered] = useState(false);
+
     // Stable callbacks
-    const handleHoverStart = useCallback(() => onHoverChange?.(true), [onHoverChange]);
-    const handleHoverEnd = useCallback(() => onHoverChange?.(false), [onHoverChange]);
+    const handleHoverStart = useCallback(() => {
+        setIsHovered(true);
+        onHoverChange?.(true);
+    }, [onHoverChange]);
+
+    const handleHoverEnd = useCallback(() => {
+        setIsHovered(false);
+        onHoverChange?.(false);
+    }, [onHoverChange]);
 
     return (
         <motion.div
@@ -56,6 +67,34 @@ export const AlbumCover = memo(function AlbumCover({
                     <span className="album-cover__icon"></span>
                 </div>
             )}
+
+            <AnimatePresence>
+                {isHovered && (
+                    <motion.div
+                        className="album-cover-overlay"
+                        initial={{ opacity: 0 }}
+                        animate={{ opacity: 1 }}
+                        exit={{ opacity: 0 }}
+                        transition={{ duration: 0.2 }}
+                        style={{
+                            position: 'absolute',
+                            inset: 0,
+                            backgroundColor: 'rgba(0,0,0,0.3)',
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            borderRadius: 'inherit',
+                            backdropFilter: 'blur(1px)'
+                        }}
+                    >
+                        {isPlaying ? (
+                            <IconPlayerPauseFilled size={16} color="white" />
+                        ) : (
+                            <IconPlayerPlayFilled size={16} color="white" />
+                        )}
+                    </motion.div>
+                )}
+            </AnimatePresence>
         </motion.div>
     );
 });

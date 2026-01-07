@@ -4,6 +4,7 @@ import { ExpandedMedia } from '../ExpandedMedia';
 import { FileTray, FileItem } from '../FileTray';
 import { NowPlayingData } from './types';
 import { useWidgets } from '../../context/WidgetContext';
+import { WidgetWrapper } from '../widgets/WidgetWrapper';
 
 interface ExpandedIslandProps {
     activeTab: 'widgets' | 'files';
@@ -116,10 +117,7 @@ export function ExpandedIsland({
                         >
                             {/* Media player is a special case - needs props */}
                             {settings.showMedia && (
-                                <div
-                                    className={`expanded-media-player widget-card ${(!nowPlaying?.duration || nowPlaying.duration <= 0) ? 'no-progress' : ''}`}
-                                    onClick={(e) => e.stopPropagation()}
-                                >
+                                <>
                                     {nowPlaying ? (
                                         <ExpandedMedia
                                             nowPlaying={nowPlaying}
@@ -131,22 +129,17 @@ export function ExpandedIsland({
                                     ) : (
                                         <div className="no-media-message">No media playing</div>
                                     )}
-                                </div>
+                                </>
                             )}
 
                             {/* Dynamically render enabled widgets from the registry */}
                             {enabledWidgets.map(widget => (
-                                <div
-                                    key={widget.id}
-                                    className="widget-card"
-                                    onClick={(e) => e.stopPropagation()}
-                                    style={{ minWidth: widget.minWidth || 240 }}
-                                >
-                                    <widget.ExpandedComponent />
-                                </div>
-                            ))}
 
-                            <div className="expanded-notes-section widget-card" onClick={(e) => e.stopPropagation()}>
+                                <widget.ExpandedComponent />
+
+                            ))}
+                            <WidgetWrapper title="Notes" className="widget-card">
+
                                 <textarea
                                     className="notes-field"
                                     placeholder="Type your notes here..."
@@ -154,7 +147,9 @@ export function ExpandedIsland({
                                     onChange={handleNotesChange}
                                     onClick={handleNotesClick}
                                 />
-                            </div>
+
+                            </WidgetWrapper>
+
                         </motion.div>
                     ) : (
                         <motion.div

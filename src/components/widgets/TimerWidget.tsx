@@ -1,136 +1,18 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState } from 'react';
 import { IconPlayerPlay, IconPlayerPause, IconRefresh, IconPlus, IconTrash, IconClock } from '@tabler/icons-react';
 import { registerWidget } from './WidgetRegistry';
 import { CompactWidgetProps } from './WidgetTypes';
 import { CompactWrapper } from '../island/CompactWrapper';
+import { useTimerContext } from '../../context/TimerContext';
+import { WidgetWrapper } from './WidgetWrapper';
+import { WidgetAddDialog } from './WidgetAddDialog';
 
-interface TimerInstance {
-    id: string;
-    name: string;
-    duration: number; // Total duration in seconds
-    remaining: number; // Remaining time in seconds
-    isRunning: boolean;
-    createdAt: number;
-}
-
-const TIMER_STORAGE_KEY = 'timer-instances';
 const PRESETS = [
     { label: '5m', seconds: 5 * 60 },
     { label: '15m', seconds: 15 * 60 },
     { label: '25m', seconds: 25 * 60 },
     { label: '1h', seconds: 60 * 60 },
 ];
-
-function useTimers() {
-    const [timers, setTimers] = useState<TimerInstance[]>([]);
-    const intervalRefs = useRef<Map<string, ReturnType<typeof setInterval>>>(new Map());
-
-    // Load timers from storage
-    useEffect(() => {
-        const saved = localStorage.getItem(TIMER_STORAGE_KEY);
-        if (saved) {
-            try {
-                const parsed = JSON.parse(saved) as TimerInstance[];
-                // Don't auto-resume running timers on reload for simplicity
-                setTimers(parsed.map(t => ({ ...t, isRunning: false })));
-            } catch (e) {
-                console.error('Failed to load timers:', e);
-            }
-        }
-    }, []);
-
-    // Save timers to storage (excluding running state which resets on reload)
-    useEffect(() => {
-        localStorage.setItem(TIMER_STORAGE_KEY, JSON.stringify(timers));
-    }, [timers]);
-
-    const addTimer = useCallback((name: string, durationSeconds: number) => {
-        const id = `timer-${Date.now()}`;
-        const newTimer: TimerInstance = {
-            id,
-            name: name || `Timer ${timers.length + 1}`,
-            duration: durationSeconds,
-            remaining: durationSeconds,
-            isRunning: false,
-            createdAt: Date.now()
-        };
-        setTimers(prev => [...prev, newTimer]);
-        return id;
-    }, [timers.length]);
-
-    const removeTimer = useCallback((id: string) => {
-        // Clear interval if running
-        const interval = intervalRefs.current.get(id);
-        if (interval) {
-            clearInterval(interval);
-            intervalRefs.current.delete(id);
-        }
-        setTimers(prev => prev.filter(t => t.id !== id));
-    }, []);
-
-    const toggleTimer = useCallback((id: string) => {
-        setTimers(prev => prev.map(timer => {
-            if (timer.id !== id) return timer;
-
-            const newIsRunning = !timer.isRunning;
-
-            if (newIsRunning) {
-                // Start the timer
-                const interval = setInterval(() => {
-                    setTimers(current => current.map(t => {
-                        if (t.id !== id || !t.isRunning) return t;
-                        const newRemaining = t.remaining - 1;
-                        if (newRemaining <= 0) {
-                            // Timer complete
-                            clearInterval(intervalRefs.current.get(id)!);
-                            intervalRefs.current.delete(id);
-                            // Play notification sound
-                            try {
-                                const audio = new Audio('/notification.mp3');
-                                audio.play().catch(() => { });
-                            } catch { }
-                            return { ...t, remaining: 0, isRunning: false };
-                        }
-                        return { ...t, remaining: newRemaining };
-                    }));
-                }, 1000);
-                intervalRefs.current.set(id, interval);
-            } else {
-                // Pause the timer
-                const interval = intervalRefs.current.get(id);
-                if (interval) {
-                    clearInterval(interval);
-                    intervalRefs.current.delete(id);
-                }
-            }
-
-            return { ...timer, isRunning: newIsRunning };
-        }));
-    }, []);
-
-    const resetTimer = useCallback((id: string) => {
-        // Clear interval if running
-        const interval = intervalRefs.current.get(id);
-        if (interval) {
-            clearInterval(interval);
-            intervalRefs.current.delete(id);
-        }
-        setTimers(prev => prev.map(timer =>
-            timer.id === id
-                ? { ...timer, remaining: timer.duration, isRunning: false }
-                : timer
-        ));
-    }, []);
-
-    // Cleanup intervals on unmount
-    useEffect(() => {
-        return () => {
-            intervalRefs.current.forEach(interval => clearInterval(interval));
-        };
-    }, []);
-
-    return { timers, addTimer, removeTimer, toggleTimer, resetTimer };
-}
 
 function formatTime(seconds: number): string {
     const h = Math.floor(seconds / 3600);
@@ -143,7 +25,7 @@ function formatTime(seconds: number): string {
 }
 
 export function TimerWidget() {
-    const { timers, addTimer, removeTimer, toggleTimer, resetTimer } = useTimers();
+    const { timers, addTimer, removeTimer, toggleTimer, resetTimer } = useTimerContext();
     const [showAddDialog, setShowAddDialog] = useState(false);
     const [customMinutes, setCustomMinutes] = useState('');
     const [timerName, setTimerName] = useState('');
@@ -156,133 +38,145 @@ export function TimerWidget() {
     };
 
     return (
-        <div className="timer-widget apple-style" style={{ position: 'relative' }}>
+        <WidgetWrapper
+            title="Timers"
+            className="timer-widget"
+            headerActions={[
+                !showAddDialog && (
+                    <button
+                        key="add"
+                        className="icon-button"
+                        onClick={(e) => { e.stopPropagation(); setShowAddDialog(true); }}
+                    >
+                        <IconPlus size={18} />
+                    </button>
+                )
+            ].filter(Boolean)}
+        >
             {showAddDialog ? (
-                <div className="widget-overlay">
-                    <div className="creation-form">
-                        <div className="form-header">
-                            <span className="form-title">New Timer</span>
-                            <button type="button" className="close-button" onClick={() => setShowAddDialog(false)}>Cancel</button>
-                        </div>
-                        <input
-                            value={timerName}
-                            onChange={e => setTimerName(e.target.value)}
-                            placeholder="Timer name (optional)"
-                            className="form-input"
-                            autoFocus
-                        />
-                        <div className="timer-presets">
-                            {PRESETS.map(preset => (
-                                <button
-                                    key={preset.label}
-                                    className="preset-button"
-                                    onClick={() => handleAddTimer(preset.seconds)}
-                                >
-                                    {preset.label}
-                                </button>
-                            ))}
-                        </div>
-                        <div className="form-row">
-                            <input
-                                type="number"
-                                value={customMinutes}
-                                onChange={e => setCustomMinutes(e.target.value)}
-                                placeholder="Custom (minutes)"
-                                className="form-input"
-                                min="1"
-                            />
+                <WidgetAddDialog
+                    title="New Timer"
+                    onClose={() => setShowAddDialog(false)}
+                    onSubmit={(e) => {
+                        e.preventDefault();
+                        handleAddTimer(customMinutes ? parseInt(customMinutes) * 60 : 0);
+                    }}
+                    submitLabel="Start Timer"
+                    submitDisabled={!customMinutes || parseInt(customMinutes) < 1}
+                    mainInput={{
+                        value: timerName,
+                        onChange: e => setTimerName(e.target.value),
+                        placeholder: "Timer Label",
+                        icon: <IconClock size={18} color="var(--accent-color)" />
+                    }}
+                >
+
+                    <div className="timer-presets">
+                        {PRESETS.map(preset => (
                             <button
-                                className="submit-button"
-                                onClick={() => handleAddTimer(parseInt(customMinutes) * 60)}
-                                disabled={!customMinutes || parseInt(customMinutes) < 1}
+                                key={preset.label}
+                                type="button"
+                                className="preset-button"
+                                onClick={() => handleAddTimer(preset.seconds)}
                             >
-                                Add
+                                {preset.label}
                             </button>
-                        </div>
+                        ))}
                     </div>
+
+                    <div className="form-row">
+                        <label style={{ minWidth: '60px' }}>Duration</label>
+                        <input
+                            type="number"
+                            value={customMinutes}
+                            onChange={e => setCustomMinutes(e.target.value)}
+                            placeholder="Minutes"
+                            className="form-input"
+                            min="1"
+                            style={{ flex: 1 }}
+                        />
+                    </div>
+                </WidgetAddDialog>
+            ) : timers.length === 0 ? (
+                <div className="empty-state">
+                    <span>No active timers</span>
+                    <button className="text-button" onClick={() => setShowAddDialog(true)}>Create Timer</button>
                 </div>
             ) : (
-                <>
-                    <div className="widget-header">
-                        <span className="widget-title">Timers</span>
-                        <button
-                            className="refresh-button"
-                            onClick={(e) => { e.stopPropagation(); setShowAddDialog(true); }}
-                        >
-                            <IconPlus size={14} />
-                        </button>
-                    </div>
+                <div className="timers-list minimal-list" style={{ overflowY: 'auto' }}>
+                    {timers.map(timer => {
+                        const progress = timer.duration > 0
+                            ? ((timer.duration - timer.remaining) / timer.duration) * 100
+                            : 0;
 
-                    {timers.length === 0 ? (
-                        <div className="no-events-message">No timers</div>
-                    ) : (
-                        <div className="timers-list">
-                            {timers.map(timer => {
-                                const progress = timer.duration > 0
-                                    ? ((timer.duration - timer.remaining) / timer.duration) * 100
-                                    : 0;
-
-                                return (
-                                    <div className={`timer-item ${timer.isRunning ? 'running' : ''} ${timer.remaining === 0 ? 'complete' : ''}`} key={timer.id}>
-                                        <div className="timer-progress-ring">
-                                            <svg viewBox="0 0 36 36">
-                                                <circle
-                                                    className="timer-ring-bg"
-                                                    cx="18" cy="18" r="15.915"
-                                                    fill="none"
-                                                    strokeWidth="2"
-                                                />
-                                                <circle
-                                                    className="timer-ring-progress"
-                                                    cx="18" cy="18" r="15.915"
-                                                    fill="none"
-                                                    strokeWidth="2"
-                                                    strokeDasharray={`${progress} 100`}
-                                                    strokeLinecap="round"
-                                                />
-                                            </svg>
-                                        </div>
-                                        <div className="timer-content">
-                                            <div className="timer-name">{timer.name}</div>
-                                            <div className="timer-time">{formatTime(timer.remaining)}</div>
-                                        </div>
-                                        <div className="timer-controls">
-                                            <button
-                                                className="timer-control-btn"
-                                                onClick={(e) => { e.stopPropagation(); toggleTimer(timer.id); }}
-                                            >
-                                                {timer.isRunning ? <IconPlayerPause size={16} /> : <IconPlayerPlay size={16} />}
-                                            </button>
-                                            <button
-                                                className="timer-control-btn"
-                                                onClick={(e) => { e.stopPropagation(); resetTimer(timer.id); }}
-                                            >
-                                                <IconRefresh size={16} />
-                                            </button>
-                                            <button
-                                                className="timer-control-btn delete"
-                                                onClick={(e) => { e.stopPropagation(); removeTimer(timer.id); }}
-                                            >
-                                                <IconTrash size={16} />
-                                            </button>
-                                        </div>
+                        return (
+                            <div className={`timer-item-minimal ${timer.remaining === 0 ? 'finished' : ''}`} key={timer.id}>
+                                <div
+                                    className="timer-ring-container"
+                                    onClick={(e) => { e.stopPropagation(); toggleTimer(timer.id); }}
+                                >
+                                    <svg viewBox="0 0 44 44" className="ring-svg">
+                                        <circle
+                                            className="ring-bg"
+                                            cx="22" cy="22" r="20"
+                                            fill="none"
+                                            strokeWidth="3"
+                                        />
+                                        <circle
+                                            className="ring-progress"
+                                            cx="22" cy="22" r="20"
+                                            fill="none"
+                                            strokeWidth="3"
+                                            strokeDasharray={`${(progress / 100) * (2 * Math.PI * 20)} ${2 * Math.PI * 20}`}
+                                            strokeLinecap="round"
+                                        />
+                                    </svg>
+                                    <div className="ring-icon-overlay">
+                                        {timer.isRunning ? (
+                                            <IconPlayerPause size={16} fill="currentColor" className="control-icon" />
+                                        ) : (
+                                            <IconPlayerPlay size={16} fill="currentColor" className="control-icon offset" />
+                                        )}
                                     </div>
-                                );
-                            })}
-                        </div>
-                    )}
-                </>
+                                </div>
+
+                                <div className="timer-info">
+                                    <div className="time-display">{formatTime(timer.remaining)}</div>
+                                    {timer.name && <div className="timer-label">{timer.name}</div>}
+                                </div>
+
+                                <div className="timer-actions-minimal">
+                                    <button
+                                        className="action-btn-minimal"
+                                        onClick={(e) => { e.stopPropagation(); resetTimer(timer.id); }}
+                                        title="Reset"
+                                    >
+                                        <IconRefresh size={18} />
+                                    </button>
+                                    <button
+                                        className="action-btn-minimal destructive"
+                                        onClick={(e) => { e.stopPropagation(); removeTimer(timer.id); }}
+                                        title="Delete"
+                                    >
+                                        <IconTrash size={18} />
+                                    </button>
+                                </div>
+                            </div>
+                        );
+                    })}
+                </div>
             )}
-        </div>
+        </WidgetWrapper>
     );
 }
 
 // Compact Timer Component
 export function CompactTimer({ baseNotchWidth, isHovered, contentOpacity }: CompactWidgetProps) {
-    const { timers, toggleTimer } = useTimers();
+    const { timers, toggleTimer } = useTimerContext();
 
-    // Show the first running timer, or the first timer if none running
-    const activeTimer = timers.find(t => t.isRunning) || timers[0];
+    // Prioritize showing a completed timer so the user sees it immediately
+    const completedTimer = timers.find(t => t.remaining === 0 && t.duration > 0);
+    const activeTimer = completedTimer || timers.find(t => t.isRunning) || timers[0];
 
     if (!activeTimer) {
         return (
@@ -301,6 +195,15 @@ export function CompactTimer({ baseNotchWidth, isHovered, contentOpacity }: Comp
         );
     }
 
+    const calcProgress = activeTimer.duration > 0
+        ? ((activeTimer.duration - activeTimer.remaining) / activeTimer.duration) * 100
+        : 0;
+    const progress = Math.min(100, Math.max(0, Number.isFinite(calcProgress) ? calcProgress : 0));
+
+    const radius = 5;
+    const circumference = 2 * Math.PI * radius;
+    const strokeLength = (progress / 100) * circumference;
+
     return (
         <CompactWrapper
             id="timer-compact"
@@ -312,17 +215,30 @@ export function CompactTimer({ baseNotchWidth, isHovered, contentOpacity }: Comp
                     style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}
                     onClick={(e) => { e.stopPropagation(); toggleTimer(activeTimer.id); }}
                 >
-                    <div className={`compact-timer-indicator ${activeTimer.isRunning ? 'pulsing' : ''}`}>
-                        {activeTimer.isRunning ? <IconPlayerPause size={16} /> : <IconPlayerPlay size={16} />}
+
+                    <div className="timer-ring-container" style={{ width: 24, height: 24 }}>
+                        <svg viewBox="0 0 12 12" className="ring-svg">
+                            <circle
+                                className="ring-bg"
+                                cx="6" cy="6" r="5"
+                                fill="none"
+                                strokeWidth="2"
+                            />
+                            <circle
+                                className="ring-progress"
+                                cx="6" cy="6" r="5"
+                                fill="none"
+                                strokeWidth="2"
+                                strokeDasharray={`${strokeLength} ${circumference}`}
+                                strokeLinecap="round"
+                            />
+                        </svg>
                     </div>
-                    <span style={{ color: 'white', fontSize: 14, fontVariantNumeric: 'tabular-nums' }}>
-                        {formatTime(activeTimer.remaining)}
-                    </span>
                 </div>
             }
             right={
-                <span style={{ color: 'rgba(255,255,255,0.6)', fontSize: 12 }}>
-                    {activeTimer.name}
+                <span style={{ color: 'white', fontSize: 14, fontVariantNumeric: 'tabular-nums' }}>
+                    {formatTime(activeTimer.remaining)}
                 </span>
             }
         />

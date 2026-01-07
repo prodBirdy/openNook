@@ -25,11 +25,9 @@ export function CompactMedia({
 
     const handleAlbumClick = useCallback((e: React.MouseEvent) => {
         e.stopPropagation();
-        if (nowPlaying?.app_name) {
-            invoke('activate_media_app', { appName: nowPlaying.app_name })
-                .catch(err => console.error('Failed to open media app:', err));
-        }
-    }, [nowPlaying?.app_name]);
+        invoke('media_play_pause')
+            .catch(err => console.error('Failed to toggle play/pause:', err));
+    }, []);
 
     return (
         <CompactWrapper

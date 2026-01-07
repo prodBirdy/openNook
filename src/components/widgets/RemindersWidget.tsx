@@ -2,6 +2,8 @@ import { useEffect, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { IconRefresh, IconPlus, IconChecklist } from '@tabler/icons-react';
 import { registerWidget } from './WidgetRegistry';
+import { WidgetWrapper } from './WidgetWrapper';
+import { WidgetAddDialog } from './WidgetAddDialog';
 
 interface Reminder {
     id: string;
@@ -31,7 +33,9 @@ export function RemindersWidget() {
     };
 
     useEffect(() => {
-        fetchReminders();
+        invoke('request_calendar_access')
+            .then(() => fetchReminders())
+            .catch(console.error);
     }, []);
 
     const toggleReminder = (id: string) => {
@@ -53,62 +57,73 @@ export function RemindersWidget() {
             dueDate = new Date(dueDateStr).getTime() / 1000;
         }
 
-        invoke('create_reminder', { title, dueDate })
+        console.log("Creating reminder:", { title, dueDate });
+
+        // Ensure we match the Rust argument names strictly (snake_case)
+        invoke('create_reminder', { title, dueDate: dueDate })
             .then(() => {
+                console.log("Reminder created successfully");
                 setShowAddDialog(false);
                 fetchReminders(true);
             })
-            .catch(console.error);
+            .catch(err => {
+                console.error("Failed to create reminder:", err);
+                alert(`Failed to create reminder: ${err}`);
+            });
     };
 
     if (loading && !isRefreshing && reminders.length === 0) return <div className="widget-placeholder">Loading...</div>;
 
+    const headerActions = [
+        <div style={{ display: 'flex', gap: 4 }}>
+            <button
+                className="icon-button"
+                onClick={(e) => { e.stopPropagation(); setShowAddDialog(true); }}
+            >
+                <IconPlus size={18} />
+            </button>
+            <button
+                className={`icon-button ${isRefreshing ? 'spinning' : ''}`}
+                onClick={(e) => { e.stopPropagation(); fetchReminders(true); }}
+            >
+                <IconRefresh size={18} />
+            </button>
+        </div>
+    ]
+
+
     return (
-        <div className="reminders-widget apple-style" style={{ position: 'relative' }}>
+        <WidgetWrapper title="Reminders" headerActions={headerActions} className="reminders-widget" >
             {showAddDialog ? (
-                <div className="widget-overlay">
-                    <form onSubmit={handleCreateReminder} className="creation-form">
-                        <div className="form-header">
-                            <span className="form-title">New Reminder</span>
-                            <button type="button" className="close-button" onClick={() => setShowAddDialog(false)}>Cancel</button>
-                        </div>
-                        <input name="title" placeholder="Title" required className="form-input" autoFocus />
-                        <div className="form-row">
-                            <label>Due</label>
-                            <input
-                                name="due_date"
-                                type="datetime-local"
-                                className="form-input"
-                                defaultValue={new Date().toISOString().slice(0, 16)}
-                            />
-                        </div>
-                        <button type="submit" className="submit-button">Add</button>
-                    </form>
-                </div>
+                <WidgetAddDialog
+                    title="New Reminder"
+                    onClose={() => setShowAddDialog(false)}
+                    onSubmit={handleCreateReminder}
+                    submitLabel="Add"
+                    mainInput={{
+                        name: "title",
+                        placeholder: "Title",
+                        required: true,
+                        icon: <IconChecklist size={18} color="var(--accent-color)" />
+                    }}
+                >
+                    <div className="form-row">
+                        <label>Due</label>
+                        <input
+                            name="due_date"
+                            type="datetime-local"
+                            className="form-input"
+                            defaultValue={new Date().toISOString().slice(0, 16)}
+                        />
+                    </div>
+                </WidgetAddDialog>
             ) : (
                 <>
-                    <div className="widget-header">
-                        <span className="widget-title">Reminders</span>
-                        <div style={{ display: 'flex', gap: 4 }}>
-                            <button
-                                className="refresh-button"
-                                onClick={(e) => { e.stopPropagation(); setShowAddDialog(true); }}
-                            >
-                                <IconPlus size={14} />
-                            </button>
-                            <button
-                                className={`refresh-button ${isRefreshing ? 'spinning' : ''}`}
-                                onClick={(e) => { e.stopPropagation(); fetchReminders(true); }}
-                            >
-                                <IconRefresh size={14} />
-                            </button>
-                        </div>
-                    </div>
 
                     {reminders.length === 0 ? (
                         <div className="no-events-message">No reminders</div>
                     ) : (
-                        <div className="reminders-list">
+                        <div className="reminders-list" >
                             {reminders.slice(0, 10).map(rem => (
                                 <div className="reminder-item-modern" key={rem.id}>
                                     <div
@@ -128,7 +143,7 @@ export function RemindersWidget() {
                     )}
                 </>
             )}
-        </div>
+        </WidgetWrapper>
     );
 }
 

@@ -2,6 +2,8 @@ import { DynamicIsland } from './components/DynamicIsland';
 import Settings from './windows/Settings/Settings';
 import { NotificationProvider } from './context/NotificationContext';
 import { WidgetProvider } from './context/WidgetContext';
+import { TimerProvider } from './context/TimerContext';
+import { SessionProvider } from './context/SessionContext';
 import { useReminders } from './hooks/useReminders';
 import './App.css';
 
@@ -33,17 +35,25 @@ function App() {
   if (isSettings) {
     return (
       <WidgetProvider>
-        <Settings />
+        <TimerProvider>
+          <SessionProvider>
+            <Settings />
+          </SessionProvider>
+        </TimerProvider>
       </WidgetProvider>
     );
   }
 
   return (
     <WidgetProvider>
-      <NotificationProvider>
-        <DynamicIsland />
-        <ReminderManager />
-      </NotificationProvider>
+      <TimerProvider>
+        <SessionProvider>
+          <NotificationProvider>
+            <DynamicIsland />
+            <ReminderManager />
+          </NotificationProvider>
+        </SessionProvider>
+      </TimerProvider>
     </WidgetProvider>
   );
 }
