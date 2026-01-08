@@ -23,25 +23,24 @@ export function CompactWrapper({
     return (
         <motion.div
             key={id}
-            className={className}
+            className={`${className} flex items-center justify-between`}
             initial={{ opacity: 0 }}
             animate={{ opacity: contentOpacity }}
             transition={{ duration: 0.3 }}
             style={{
                 pointerEvents: isHovered ? 'auto' : 'none',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'space-between',
                 padding: '0 12px',
             }}
         >
-            <div className="media-left" style={{ flex: 1, minWidth: 0, height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'flex-start' }}>
+            <div className=" flex-1 min-w-0 h-full flex items-center justify-start">
                 {left}
             </div>
 
-            <div className="media-spacer" style={{ width: baseNotchWidth }} />
+            <div className="media-spacer text-accent text-sm" style={{ width: baseNotchWidth }} >
 
-            <div className="media-right" style={{ flex: 1, minWidth: 0, height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'flex-end' }}>
+            </div>
+
+            <div className=" flex-1 min-w-0 h-full flex items-center justify-end">
                 {right}
             </div>
         </motion.div>

@@ -1,10 +1,10 @@
 import { useState, useEffect } from 'react';
+import { useWidgets } from '../../context/WidgetContext';
+import { PluginStore } from '../../components/PluginStore';
 import './Settings.css';
 
 
 interface SettingsState {
-    showCalendar: boolean;
-    showReminders: boolean;
     showMedia: boolean;
     baseWidth: number;
     baseHeight: number;
@@ -12,9 +12,8 @@ interface SettingsState {
 }
 
 export default function Settings() {
+    const { widgets, enabledState, toggleWidget } = useWidgets();
     const [settings, setSettings] = useState<SettingsState>({
-        showCalendar: false,
-        showReminders: false,
         showMedia: true,
         baseWidth: 160,
         baseHeight: 38,
@@ -28,8 +27,6 @@ export default function Settings() {
                 const parsed = JSON.parse(saved);
                 // Ensure defaults for new settings
                 setSettings({
-                    showCalendar: false,
-                    showReminders: false,
                     showMedia: true,
                     baseWidth: 160,
                     baseHeight: 38,
@@ -56,8 +53,13 @@ export default function Settings() {
     };
 
     const toggleSetting = (key: keyof SettingsState) => {
-        updateSetting(key, !settings[key]);
+        updateSetting(key, !settings[key] as SettingsState[typeof key]);
     };
+
+    // Group widgets by category
+    const productivityWidgets = widgets.filter(w => w.category === 'productivity');
+    const utilityWidgets = widgets.filter(w => w.category === 'utility');
+    const mediaWidgets = widgets.filter(w => w.category === 'media');
 
     return (
         <div className="settings-window">
@@ -120,38 +122,8 @@ export default function Settings() {
             </div>
 
             <div className="settings-section">
-                <div className="section-title">Widgets</div>
+                <div className="section-title">Media</div>
                 <div className="settings-group">
-                    <div className="setting-item">
-                        <div className="setting-info">
-                            <span className="setting-label">Calendar</span>
-                            <span className="setting-desc">Show upcoming events in expanded view</span>
-                        </div>
-                        <label className="switch">
-                            <input
-                                type="checkbox"
-                                checked={settings.showCalendar}
-                                onChange={() => toggleSetting('showCalendar')}
-                            />
-                            <span className="slider round"></span>
-                        </label>
-                    </div>
-
-                    <div className="setting-item">
-                        <div className="setting-info">
-                            <span className="setting-label">Reminders</span>
-                            <span className="setting-desc">Show incomplete reminders</span>
-                        </div>
-                        <label className="switch">
-                            <input
-                                type="checkbox"
-                                checked={settings.showReminders}
-                                onChange={() => toggleSetting('showReminders')}
-                            />
-                            <span className="slider round"></span>
-                        </label>
-                    </div>
-
                     <div className="setting-item">
                         <div className="setting-info">
                             <span className="setting-label">Media Controls</span>
@@ -167,6 +139,65 @@ export default function Settings() {
                         </label>
                     </div>
                 </div>
+            </div>
+
+            <div className="settings-section">
+                <div className="section-title">Widgets</div>
+                <div className="settings-group">
+                    {productivityWidgets.map(widget => (
+                        <div className="setting-item" key={widget.id}>
+                            <div className="setting-info">
+                                <span className="setting-label">{widget.name}</span>
+                                <span className="setting-desc">{widget.description}</span>
+                            </div>
+                            <label className="switch">
+                                <input
+                                    type="checkbox"
+                                    checked={enabledState[widget.id] ?? widget.defaultEnabled}
+                                    onChange={() => toggleWidget(widget.id)}
+                                />
+                                <span className="slider round"></span>
+                            </label>
+                        </div>
+                    ))}
+                    {mediaWidgets.map(widget => (
+                        <div className="setting-item" key={widget.id}>
+                            <div className="setting-info">
+                                <span className="setting-label">{widget.name}</span>
+                                <span className="setting-desc">{widget.description}</span>
+                            </div>
+                            <label className="switch">
+                                <input
+                                    type="checkbox"
+                                    checked={enabledState[widget.id] ?? widget.defaultEnabled}
+                                    onChange={() => toggleWidget(widget.id)}
+                                />
+                                <span className="slider round"></span>
+                            </label>
+                        </div>
+                    ))}
+                    {utilityWidgets.map(widget => (
+                        <div className="setting-item" key={widget.id}>
+                            <div className="setting-info">
+                                <span className="setting-label">{widget.name}</span>
+                                <span className="setting-desc">{widget.description}</span>
+                            </div>
+                            <label className="switch">
+                                <input
+                                    type="checkbox"
+                                    checked={enabledState[widget.id] ?? widget.defaultEnabled}
+                                    onChange={() => toggleWidget(widget.id)}
+                                />
+                                <span className="slider round"></span>
+                            </label>
+                        </div>
+                    ))}
+                </div>
+            </div>
+
+            <div className="settings-section">
+                <div className="section-title">External Plugins</div>
+                <PluginStore />
             </div>
 
             <div className="settings-section">

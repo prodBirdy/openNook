@@ -1,6 +1,10 @@
 import { useEffect, useState, useMemo } from 'react';
 import { invoke } from '@tauri-apps/api/core';
-import { IconRefresh, IconPlus } from '@tabler/icons-react';
+import { IconRefresh, IconPlus, IconCalendar, IconMapPin } from '@tabler/icons-react';
+import { z } from 'zod';
+import { registerWidget } from './WidgetRegistry';
+import { WidgetWrapper } from './WidgetWrapper';
+import { WidgetAddDialog } from './WidgetAddDialog';
 
 interface CalendarEvent {
     id: string;
@@ -11,6 +15,16 @@ interface CalendarEvent {
     is_all_day: boolean;
     color: string;
 }
+
+// Zod schema for calendar event form
+const eventFormSchema = z.object({
+    title: z.string().min(1, "Title is required"),
+    location: z.string().optional(),
+    start: z.string().min(1, "Start date is required"),
+    end: z.string().min(1, "End date is required"),
+});
+
+type EventFormValues = z.infer<typeof eventFormSchema>;
 
 export function CalendarWidget() {
     const [events, setEvents] = useState<CalendarEvent[]>([]);
@@ -72,36 +86,35 @@ export function CalendarWidget() {
         invoke('open_privacy_settings').catch(console.error);
     };
 
-    const handleCreateEvent = (e: React.FormEvent) => {
-        e.preventDefault();
-        const form = e.target as HTMLFormElement;
-        const formData = new FormData(form);
-        const title = formData.get('title') as string;
-        const location = formData.get('location') as string;
-        const isAllDay = formData.get('isAllDay') === 'on';
-        const startStr = formData.get('start') as string;
-        const endStr = formData.get('end') as string;
+    // Get default date-time for the form
+    const getDefaultDateTime = () => {
+        const now = new Date();
+        now.setMinutes(now.getMinutes() - now.getTimezoneOffset());
+        return now.toISOString().slice(0, 16);
+    };
 
-        // Parse local time strings to timestamps
-        // Input type="datetime-local" returns "YYYY-MM-DDTHH:mm"
-        const startDate = new Date(startStr);
-        const endDate = new Date(endStr);
+    const getDefaultEndDateTime = () => {
+        const later = new Date(Date.now() + 3600000);
+        later.setMinutes(later.getMinutes() - later.getTimezoneOffset());
+        return later.toISOString().slice(0, 16);
+    };
+
+    const handleCreateEvent = async (data: EventFormValues) => {
+        const startDate = new Date(data.start);
+        const endDate = new Date(data.end);
 
         const startTs = startDate.getTime() / 1000;
         const endTs = endDate.getTime() / 1000;
 
-        invoke('create_calendar_event', {
-            title,
+        await invoke('create_calendar_event', {
+            title: data.title,
             startDate: startTs,
             endDate: endTs,
-            isAllDay,
-            location: location || null
-        })
-            .then(() => {
-                setShowAddDialog(false);
-                fetchEvents(true);
-            })
-            .catch(console.error);
+            isAllDay: false,
+            location: data.location || null
+        });
+
+        fetchEvents(true);
     };
 
     const handleEventClick = (event: CalendarEvent) => {
@@ -115,130 +128,146 @@ export function CalendarWidget() {
         </div>
     );
 
-    return (
-        <div className="calendar-widget apple-style" style={{ position: 'relative' }}>
-            {showAddDialog ? (
-                <div className="widget-overlay">
-                    <form onSubmit={handleCreateEvent} className="creation-form">
-                        <div className="form-header">
-                            <span className="form-title">New Event</span>
-                            <button type="button" className="close-button" onClick={() => setShowAddDialog(false)}>Cancel</button>
-                        </div>
-                        <input name="title" placeholder="Title" required className="form-input" autoFocus />
-                        <input name="location" placeholder="Location" className="form-input" />
-                        <div className="form-row">
-                            <label>Start</label>
-                            <input
-                                name="start"
-                                type="datetime-local"
-                                required
-                                className="form-input"
-                                defaultValue={new Date().toISOString().slice(0, 16)}
-                            />
-                        </div>
-                        <div className="form-row">
-                            <label>End</label>
-                            <input
-                                name="end"
-                                type="datetime-local"
-                                required
-                                className="form-input"
-                                defaultValue={new Date(Date.now() + 3600000).toISOString().slice(0, 16)}
-                            />
-                        </div>
-                        <div className="form-row checkbox-row">
-                            <label htmlFor="isAllDay">All Day</label>
-                            <input name="isAllDay" id="isAllDay" type="checkbox" />
-                        </div>
-                        <button type="submit" className="submit-button">Add</button>
-                    </form>
-                </div>
-            ) : (
-                <>
-                    <div className="widget-header">
-                        <span className="widget-title">Calendar</span>
-                        <div style={{ display: 'flex', gap: 4 }}>
-                            <button
-                                className="refresh-button"
-                                onClick={(e) => { e.stopPropagation(); setShowAddDialog(true); }}
-                            >
-                                <IconPlus size={14} />
-                            </button>
-                            <button
-                                className={`refresh-button ${isRefreshing ? 'spinning' : ''}`}
-                                onClick={(e) => { e.stopPropagation(); fetchEvents(true); }}
-                            >
-                                <IconRefresh size={14} />
-                            </button>
-                        </div>
-                    </div>
-
-                    {/* Scroller Container with Hover Logic */}
-                    <div
-                        className={`scroller-container ${isScrollerHovered ? 'expanded' : 'compact'}`}
-                        onMouseEnter={() => setIsScrollerHovered(true)}
-                        onMouseLeave={() => setIsScrollerHovered(false)}
-                        onWheel={(e) => {
-                            if (isScrollerHovered) e.stopPropagation();
-                        }}
-                    >
-                        {/* Horizontal Day Scroller */}
-                        <div className="calendar-day-scroller">
-                            {days.map((date, i) => {
-                                const isSelected = date.toDateString() === selectedDate.toDateString();
-                                const isToday = date.toDateString() === new Date().toDateString();
-                                return (
-                                    <div
-                                        key={i}
-                                        className={`day-item ${isSelected ? 'selected' : ''} ${isToday ? 'today' : ''} ${events.some(e => new Date(e.start_date * 1000).toDateString() === date.toDateString()) ? 'has-event' : ''}`}
-                                        onClick={(e) => { e.stopPropagation(); setSelectedDate(date); }}
-                                    >
-                                        <span className="day-name">{date.toLocaleDateString('en-US', { weekday: 'short' }).charAt(0)}</span>
-                                        <span className="day-number">{date.getDate()}</span>
-                                        {events.some(e => new Date(e.start_date * 1000).toDateString() === date.toDateString()) && (
-                                            <div className="event-dot" />
-                                        )}
-                                    </div>
-                                );
-                            })}
-                        </div>
-                    </div>
-
-                    {/* Events List */}
-                    <div className={`events-list-container ${isScrollerHovered ? 'dimmed' : ''}`}>
-                        {filteredEvents.length === 0 ? (
-                            <div className="no-events-message">No events</div>
-                        ) : (
-                            <div className="events-list">
-                                {filteredEvents.map((event, i) => (
-                                    <div
-                                        className="event-item-modern"
-                                        key={i}
-                                        onClick={(e) => { e.stopPropagation(); handleEventClick(event); }}
-                                        style={{ cursor: 'pointer' }}
-                                    >
-                                        <div className="event-time-column">
-                                            {event.is_all_day ? (
-                                                <span className="all-day-label">All Day</span>
-                                            ) : (
-                                                <>
-                                                    <span className="event-start-time">{formatTime(event.start_date)}</span>
-                                                    {/* <span className="event-duration">1h</span> */}
-                                                </>
-                                            )}
-                                        </div>
-                                        <div className="event-color-bar" style={{ backgroundColor: 'var(--accent-color)' }} />
-                                        <div className="event-details-modern">
-                                            <div className="event-title">{event.title}</div>
-                                            {event.location && <div className="event-location">{event.location}</div>}
-                                        </div>
-                                    </div>
-                                ))}
-                            </div>
-                        )}
-                    </div>
-                </>
-            )}
+    const headerActions = [
+        <div key="actions" style={{ display: 'flex', gap: 4 }}>
+            <button
+                className="icon-button"
+                onClick={(e) => { e.stopPropagation(); setShowAddDialog(true); }}
+            >
+                <IconPlus size={18} />
+            </button>
+            <button
+                className={`icon-button ${isRefreshing ? 'spinning' : ''}`}
+                onClick={(e) => { e.stopPropagation(); fetchEvents(true); }}
+            >
+                <IconRefresh size={18} />
+            </button>
         </div>
+    ];
+
+    return (
+        <WidgetWrapper title="Calendar" headerActions={headerActions} className="calendar-widget" >
+            <WidgetAddDialog
+                open={showAddDialog}
+                onOpenChange={setShowAddDialog}
+                title="New Event"
+                schema={eventFormSchema}
+                defaultValues={{
+                    title: '',
+                    location: '',
+                    start: getDefaultDateTime(),
+                    end: getDefaultEndDateTime(),
+                }}
+                onSubmit={handleCreateEvent}
+                fields={[
+                    {
+                        name: 'title',
+                        label: 'Title',
+                        placeholder: 'Event title',
+                        icon: <IconCalendar size={18} className="text-primary" />,
+                        autoFocus: true,
+                        required: true,
+                    },
+                    {
+                        name: 'location',
+                        label: 'Location',
+                        placeholder: 'Location (optional)',
+                        icon: <IconMapPin size={18} className="text-muted-foreground" />,
+                    },
+                    {
+                        name: 'start',
+                        label: 'Start',
+                        type: 'datetime-local',
+                        required: true,
+                    },
+                    {
+                        name: 'end',
+                        label: 'End',
+                        type: 'datetime-local',
+                        required: true,
+                    },
+                ]}
+                submitLabel="Add Event"
+            />
+
+            {/* Scroller Container with Hover Logic */}
+            <div
+                className={`scroller-container ${isScrollerHovered ? 'expanded' : 'compact'}`}
+                onMouseEnter={() => setIsScrollerHovered(true)}
+                onMouseLeave={() => setIsScrollerHovered(false)}
+                onWheel={(e) => {
+                    if (isScrollerHovered) e.stopPropagation();
+                }}
+            >
+                {/* Horizontal Day Scroller */}
+                <div className="calendar-day-scroller">
+                    {days.map((date, i) => {
+                        const isSelected = date.toDateString() === selectedDate.toDateString();
+                        const isToday = date.toDateString() === new Date().toDateString();
+                        return (
+                            <div
+                                key={i}
+                                className={`day-item ${isSelected ? 'selected' : ''} ${isToday ? 'today' : ''} ${events.some(e => new Date(e.start_date * 1000).toDateString() === date.toDateString()) ? 'has-event' : ''}`}
+                                onClick={(e) => { e.stopPropagation(); setSelectedDate(date); }}
+                            >
+                                <span className="day-name">{date.toLocaleDateString('en-US', { weekday: 'short' }).charAt(0)}</span>
+                                <span className="day-number">{date.getDate()}</span>
+                                {events.some(e => new Date(e.start_date * 1000).toDateString() === date.toDateString()) && (
+                                    <div className="event-dot" />
+                                )}
+                            </div>
+                        );
+                    })}
+                </div>
+            </div>
+
+            {/* Events List */}
+            <div className={`events-list-container ${isScrollerHovered ? 'dimmed' : ''}`}>
+                {filteredEvents.length === 0 ? (
+                    <div className="no-events-message">No events</div>
+                ) : (
+                    <div className="events-list">
+                        {filteredEvents.map((event, i) => (
+                            <div
+                                className="event-item-modern"
+                                key={i}
+                                onClick={(e) => { e.stopPropagation(); handleEventClick(event); }}
+                                style={{ cursor: 'pointer' }}
+                            >
+                                <div className="event-time-column">
+                                    {event.is_all_day ? (
+                                        <span className="all-day-label">All Day</span>
+                                    ) : (
+                                        <>
+                                            <span className="event-start-time">{formatTime(event.start_date)}</span>
+                                            {/* <span className="event-duration">1h</span> */}
+                                        </>
+                                    )}
+                                </div>
+                                <div className="event-color-bar" style={{ backgroundColor: 'var(--accent-color)' }} />
+                                <div className="event-details-modern">
+                                    <div className="event-title">{event.title}</div>
+                                    {event.location && <div className="event-location">{event.location}</div>}
+                                </div>
+                            </div>
+                        ))}
+                    </div>
+                )}
+            </div>
+        </WidgetWrapper>
+
     );
 }
+
+// Register the calendar widget
+registerWidget({
+    id: 'calendar',
+    name: 'Calendar',
+    description: 'Show upcoming events',
+    icon: IconCalendar,
+    ExpandedComponent: CalendarWidget,
+    defaultEnabled: false,
+    category: 'productivity',
+    minWidth: 280,
+    hasCompactMode: false
+});

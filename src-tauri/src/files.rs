@@ -1,50 +1,84 @@
+use crate::database::{get_connection, log_sql};
 use serde::{Deserialize, Serialize};
 use std::fs;
+#[cfg(target_os = "macos")]
 use std::process::Command;
-use tauri::{command, AppHandle, Manager};
+use tauri::{command, AppHandle};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct FileTrayItem {
     pub name: String,
-    pub size: u64,
+    pub size: i64,
     pub path: String,
     #[serde(rename = "type")]
     pub mime_type: String,
     #[serde(rename = "lastModified")]
-    pub last_modified: u64,
+    pub last_modified: i64,
 }
 
 #[command]
 pub fn save_file_tray(app_handle: AppHandle, files: Vec<FileTrayItem>) -> Result<(), String> {
-    let app_dir = app_handle
-        .path()
-        .app_data_dir()
+    let conn = get_connection(&app_handle).map_err(|e| e.to_string())?;
+
+    conn.execute_batch("BEGIN TRANSACTION;")
         .map_err(|e| e.to_string())?;
-    if !app_dir.exists() {
-        fs::create_dir_all(&app_dir).map_err(|e| e.to_string())?;
+
+    // Clear existing (simpler than syncing for now)
+    conn.execute("DELETE FROM file_tray", [])
+        .map_err(|e| e.to_string())?;
+
+    for file in files {
+        let sql = "INSERT INTO file_tray (path, name, size, mime_type, last_modified) VALUES (?1, ?2, ?3, ?4, ?5)";
+        log_sql(&format!("{} [{}]", sql, file.path));
+
+        conn.execute(
+            sql,
+            rusqlite::params![
+                file.path,
+                file.name,
+                file.size,
+                file.mime_type,
+                file.last_modified
+            ],
+        )
+        .map_err(|e| e.to_string())?;
     }
-    let path = app_dir.join("file_tray.json");
-    let json = serde_json::to_string(&files).map_err(|e| e.to_string())?;
-    fs::write(path, json).map_err(|e| e.to_string())?;
+
+    conn.execute_batch("COMMIT;").map_err(|e| e.to_string())?;
     Ok(())
 }
 
 #[command]
 pub fn load_file_tray(app_handle: AppHandle) -> Result<Vec<FileTrayItem>, String> {
-    let path = app_handle
-        .path()
-        .app_data_dir()
-        .map_err(|e| e.to_string())?
-        .join("file_tray.json");
-    if !path.exists() {
-        return Ok(Vec::new());
+    let conn = get_connection(&app_handle).map_err(|e| e.to_string())?;
+
+    let sql = "SELECT path, name, size, mime_type, last_modified FROM file_tray";
+    log_sql(sql);
+
+    let mut stmt = conn.prepare(sql).map_err(|e| e.to_string())?;
+
+    let rows = stmt
+        .query_map([], |row| {
+            Ok(FileTrayItem {
+                path: row.get(0)?,
+                name: row.get(1)?,
+                size: row.get(2)?,
+                mime_type: row.get(3)?,
+                last_modified: row.get(4)?,
+            })
+        })
+        .map_err(|e| e.to_string())?;
+
+    let mut files = Vec::new();
+    for row in rows {
+        files.push(row.map_err(|e| e.to_string())?);
     }
-    let json = fs::read_to_string(path).map_err(|e| e.to_string())?;
-    let files: Vec<FileTrayItem> = serde_json::from_str(&json).map_err(|e| e.to_string())?;
+
     Ok(files)
 }
 
 #[command]
+#[allow(unused_variables)]
 pub fn open_file(path: String) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     Command::new("open")
@@ -55,6 +89,7 @@ pub fn open_file(path: String) -> Result<(), String> {
 }
 
 #[command]
+#[allow(unused_variables)]
 pub fn reveal_file(path: String) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     Command::new("open")

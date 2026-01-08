@@ -2,7 +2,7 @@ import { memo, useMemo, useState, useEffect } from 'react';
 import { motion } from 'motion/react';
 import { IconPlayerSkipBackFilled, IconPlayerPlayFilled, IconPlayerPauseFilled, IconPlayerSkipForwardFilled } from '@tabler/icons-react';
 import { getDominantColor } from '../utils/imageUtils';
-import './DynamicIsland.css';
+import { WidgetWrapper } from './widgets/WidgetWrapper';
 
 interface NowPlayingData {
     title: string | null;
@@ -41,7 +41,6 @@ export const ExpandedMedia = memo(function ExpandedMedia({
     const [isSeizing, setIsSeizing] = useState(false);
     const [localProgress, setLocalProgress] = useState(0);
     const [glowColor, setGlowColor] = useState<string | null>(null);
-    const [glowOpacity, setGlowOpacity] = useState(0);
 
     const progress = useMemo(() => {
         if (!nowPlaying.duration || !nowPlaying.elapsed_time) return 0;
@@ -62,13 +61,11 @@ export const ExpandedMedia = memo(function ExpandedMedia({
             getDominantColor(src).then(rgb => {
                 if (rgb) {
                     setGlowColor(`rgb(${rgb[0]}, ${rgb[1]}, ${rgb[2]})`);
-                    setGlowOpacity(1);
                 } else {
-                    setGlowOpacity(0);
+                    setGlowColor(null);
                 }
             });
         } else {
-            setGlowOpacity(0);
             setTimeout(() => setGlowColor(null), 300); // Clear after fade out
         }
     }, [nowPlaying.artwork_base64]);
@@ -103,91 +100,91 @@ export const ExpandedMedia = memo(function ExpandedMedia({
         }
     }
 
-    return (
+    const headerActions = [
         <>
-            <div className="media-top-row">
-                <div
-                    className="expanded-album-cover"
-                    style={{
-                        boxShadow: glowColor ? `0 8px 32px -4px ${glowColor}` : 'none',
-                        transition: 'box-shadow 0.5s ease',
-                        opacity: glowOpacity ? 1 : 1, // Keep element visible, just toggle shadow
-                    }}
-                >
-                    {nowPlaying.artwork_base64 ? (
-                        <img
-                            src={`data:image/png;base64,${nowPlaying.artwork_base64}`}
-                            alt={nowPlaying.title || 'Album cover'}
-                            style={{ width: '100%', height: '100%', objectFit: 'cover', borderRadius: '12px' }}
-                        />
-                    ) : (
-                        <div className="expanded-album-placeholder" />
-                    )}
-                </div>
-                <div className="expanded-track-info">
-                    <h3>{nowPlaying.title || 'Unknown Title'}</h3>
-                    <p>{nowPlaying.artist || 'Unknown Artist'}</p>
-                </div>
+            <div
+                className="w-[52px] h-[52px] rounded-[10px] overflow-hidden shrink-0 shadow-[0_4px_12px_rgba(0,0,0,0.4),0_8px_32px_-4px_var(--glow-color,transparent)] transition-shadow duration-500 ease-in-out"
+                style={{
+                    '--glow-color': glowColor || 'transparent',
+                } as React.CSSProperties}
+            >
+                {nowPlaying.artwork_base64 ? (
+                    <img
+                        src={`data:image/png;base64,${nowPlaying.artwork_base64}`}
+                        alt={nowPlaying.title || 'Album cover'}
+                        className="w-full h-full object-cover rounded-[12px]"
+                    />
+                ) : (
+                    <div className="w-full h-full bg-linear-to-br from-[#2a2a2a] to-[#1a1a1a] flex items-center justify-center border border-white/10" />
+                )}
             </div>
-
-            {(nowPlaying.duration && nowPlaying.duration > 0) && (
-                <div
-                    className="progress-container"
-                    // Inline padding removed for CSS handling
-                    onPointerDown={(e) => {
-                        e.stopPropagation();
-                        // Capture pointer to track drag even if mouse leaves element bounds
-                        e.currentTarget.setPointerCapture(e.pointerId);
-                        setIsSeizing(true);
-                        handleMouseMove(e); // Snap immediately to click position
-                    }}
-                    onPointerUp={(e) => {
-                        e.stopPropagation();
-                        e.currentTarget.releasePointerCapture(e.pointerId);
-                        // Do NOT setIsSeizing(false) here - handleSeek depends on it blocking updates
-                        handleSeek(e); // Commit seek
-                    }}
-                    onPointerMove={(e) => {
-                        if (isSeizing) handleMouseMove(e);
-                    }}
-                >
-                    <div className="progress-bar-bg">
-                        <motion.div
-                            className="progress-bar-fill"
-                            initial={{ width: 0 }}
-                            animate={{ width: `${localProgress}%` }}
-                            transition={{
-                                type: 'tween',
-                                duration: 0.3,
-                            }}
-                        />
-                    </div>
-                    <div className="progress-times" style={{ marginTop: '6px' }}>
-                        <span className="time-current">
-                            {formatTime(isSeizing && nowPlaying.duration
-                                ? (localProgress / 100) * nowPlaying.duration
-                                : nowPlaying.elapsed_time || 0)}
-                        </span>
-                        <span className="time-duration">{formatTime(nowPlaying.duration)}</span>
-                    </div>
-                </div>
-            )}
-
-            <div className="expanded-controls" onClick={(e) => e.stopPropagation()}>
-                <div className="control-btn" onClick={(e) => { e.stopPropagation(); onPrevious(e); }}>
-                    <IconPlayerSkipBackFilled size={28} />
-                </div>
-                <div className="control-btn play-pause" onClick={(e) => { e.stopPropagation(); onPlayPause(e); }}>
-                    {nowPlaying.is_playing ? (
-                        <IconPlayerPauseFilled size={32} color="black" />
-                    ) : (
-                        <IconPlayerPlayFilled size={32} color="black" />
-                    )}
-                </div>
-                <div className="control-btn" onClick={(e) => { e.stopPropagation(); onNext(e); }}>
-                    <IconPlayerSkipForwardFilled size={28} />
-                </div>
+            <div className="flex-1 flex flex-col justify-center text-left overflow-hidden">
+                <h3 className="text-[17px] font-semibold mb-[3px] pr-[4px] whitespace-nowrap overflow-hidden text-ellipsis text-white tracking-[-0.01em]">{nowPlaying.title || 'Unknown Title'}</h3>
+                <p className="text-[13px] text-white/60 m-0 whitespace-nowrap overflow-hidden text-ellipsis">{nowPlaying.artist || 'Unknown Artist'}</p>
             </div>
         </>
+    ]
+
+    return (
+
+        <WidgetWrapper headerActions={headerActions} className="flex flex-col gap-3 h-full overflow-hidden " >
+            <div
+                className={` ${nowPlaying.duration && nowPlaying.duration > 0 ? 'cursor-pointer opacity-100' : 'cursor-default opacity-50'} `}
+                onPointerDown={(e) => {
+                    if (!nowPlaying.duration || nowPlaying.duration <= 0) return;
+                    e.stopPropagation();
+                    e.currentTarget.setPointerCapture(e.pointerId);
+                    setIsSeizing(true);
+                    handleMouseMove(e);
+                }}
+                onPointerUp={(e) => {
+                    if (!nowPlaying.duration || nowPlaying.duration <= 0) return;
+                    e.stopPropagation();
+                    e.currentTarget.releasePointerCapture(e.pointerId);
+                    // Do NOT setIsSeizing(false) here - handleSeek depends on it blocking updates
+                    handleSeek(e); // Commit seek
+                }}
+                onPointerMove={(e) => {
+                    if (isSeizing) handleMouseMove(e);
+                }}
+            >
+                <div className="w-full h-1 bg-white/15 rounded-[2px] overflow-hidden cursor-pointer ">
+                    <motion.div
+                        className="h-full bg-white rounded-[2px]"
+                        initial={{ width: 0 }}
+                        animate={{ width: `${localProgress}%` }}
+                        transition={{
+                            type: 'tween',
+                            duration: 0.1,
+                        }}
+                    />
+                </div>
+                <div className="flex justify-between text-[11px] font-mono font-medium text-white/40 tracking-[-0.02em] pt-[2px] px-[1px] mt-[6px]">
+                    <span>
+                        {formatTime(isSeizing && nowPlaying.duration
+                            ? (localProgress / 100) * nowPlaying.duration
+                            : nowPlaying.elapsed_time || 0)}
+                    </span>
+                    <span>{formatTime(nowPlaying.duration || 0)}</span>
+                </div>
+            </div>
+
+            <div className="flex items-center justify-center gap-[36px] p-0 mt-0" onClick={(e) => e.stopPropagation()}>
+                <div className="flex items-center justify-center cursor-pointer opacity-90 transition-all duration-200 ease-[cubic-bezier(0.25,0.1,0.25,1)] text-white text-[20px] hover:opacity-100 hover:scale-110 active:scale-[0.92]" onClick={(e) => { e.stopPropagation(); onPrevious(e); }}>
+                    <IconPlayerSkipBackFilled size={24} />
+                </div>
+                <div className="flex items-center justify-center cursor-pointer opacity-90 transition-all duration-200 ease-[cubic-bezier(0.25,0.1,0.25,1)] w-10 h-10 text-[24px] bg-white rounded-full text-black  hover:opacity-100 hover:scale-[1.08] hover:bg-[#f5f5f5] active:scale-[0.95]" onClick={(e) => { e.stopPropagation(); onPlayPause(e); }}>
+                    {nowPlaying.is_playing ? (
+                        <IconPlayerPauseFilled size={24} className="text-black" />
+                    ) : (
+                        <IconPlayerPlayFilled size={24} className="text-black" />
+                    )}
+                </div>
+                <div className="flex items-center justify-center cursor-pointer opacity-90 transition-all duration-200 ease-[cubic-bezier(0.25,0.1,0.25,1)] text-white text-[20px] hover:opacity-100 hover:scale-110 active:scale-[0.92]" onClick={(e) => { e.stopPropagation(); onNext(e); }}>
+                    <IconPlayerSkipForwardFilled size={24} />
+                </div>
+            </div>
+        </WidgetWrapper>
+
     );
 });

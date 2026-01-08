@@ -1,5 +1,6 @@
 import { memo, useEffect, useRef } from 'react';
 import { listen } from '@tauri-apps/api/event';
+import { motion } from 'motion/react';
 
 interface SmartAudioVisualizerProps {
     isPlaying: boolean;
@@ -90,18 +91,17 @@ export const SmartAudioVisualizer = memo(function SmartAudioVisualizer({
     }, [isPlaying, color]);
 
     return (
-        <div className="audio-visualizer">
+        <div className="flex items-center justify-center gap-[2.5px] h-5 pr-1">
             {[...Array(6)].map((_, i) => (
-                <div
+                <motion.div
                     key={i}
-                    ref={el => { barsRef.current[i] = el; }}
-                    className="visualizer-bar"
+                    ref={el => { barsRef.current[i] = el as HTMLDivElement; }}
+                    className="w-[3.5px] h-full bg-[#e1e1e1] rounded-full  will-change-transform"
                     style={{
                         transform: 'scaleY(0.15)',
                         backgroundColor: color || '#e1e1e1',
-                        // CSS transition removed for transform to avoid fighting with JS loop
+                        // CSS transition for background color, but transform is managed by loop
                         transition: 'background-color 0.5s ease',
-                        willChange: 'transform', // Hardware accelerate
                     }}
                 />
             ))}

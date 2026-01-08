@@ -2,7 +2,7 @@ import { useState, useCallback, useRef } from 'react';
 import { IconX, IconUpload } from '@tabler/icons-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { invoke, convertFileSrc } from '@tauri-apps/api/core';
-import './DynamicIsland.css'; // Reusing island CSS for now, will add specific styles later if needed
+import { Button } from './ui/button';
 
 export interface FileItem {
     name: string;
@@ -193,7 +193,7 @@ export function FileTray({ files, onUpdateFiles }: FileTrayProps) {
 
     return (
         <div
-            className={`file-tray-container ${isDragging ? 'dragging' : ''}`}
+            className={`flex-1 bg-white/5 rounded-[16px] border-2 border-dashed border-white/10 relative overflow-hidden transition-all duration-200 `}
             ref={dropZoneRef}
             onDragEnter={handleDragEnter}
             onDragOver={handleDragOver}
@@ -201,19 +201,20 @@ export function FileTray({ files, onUpdateFiles }: FileTrayProps) {
             onDrop={handleDrop}
             onWheel={handleWheel}
             onClick={handleClick}
+
         >
             {files.length === 0 ? (
-                <div className="empty-tray-state">
+                <div className="w-full h-full flex flex-col items-center justify-center text-white/40 gap-3">
                     <IconUpload size={48} stroke={1} color="rgba(255,255,255,0.3)" />
-                    <p>Drop files here to store them temporarily</p>
+                    <p className="text-sm m-0">Drop files here to store them temporarily</p>
                 </div>
             ) : (
-                <div className="file-grid">
+                <div className="grid grid-cols-[repeat(auto-fill,minmax(100px,1fr))] gap-3 overflow-y-auto h-full box-border" style={{ padding: '12px' }}>
                     <AnimatePresence mode="popLayout">
                         {files.map((file, index) => (
                             <motion.div
                                 key={`${file.name}-${file.lastModified}-${index}`}
-                                className="file-item"
+                                className="group bg-white/8 max-h-full rounded-xl  flex flex-col items-center gap-2 relative cursor-grab transition-colors duration-200 hover:bg-white/12"
                                 layout
                                 initial={{ opacity: 0, scale: 0.8 }}
                                 animate={{ opacity: 1, scale: 1 }}
@@ -222,13 +223,13 @@ export function FileTray({ files, onUpdateFiles }: FileTrayProps) {
                                 onMouseDown={(e) => handleNativeDrag(e, file, index)}
                                 onClick={() => handleFileClick(file)}
                                 onContextMenu={(e) => handleFileContextMenu(e, file)}
-                                style={{ cursor: 'pointer' }}
+                                style={{ cursor: 'pointer', padding: '12px' }}
                             >
-                                <div className="file-info">
-                                    <span className="file-name" title={file.name}>{file.name}</span>
-                                    {file.size > 0 && <span className="file-size">{formatSize(file.size)}</span>}
+                                <div className="flex flex-col items-center w-full gap-[2px]">
+                                    <span className="text-[12px] text-white/90 whitespace-nowrap overflow-hidden text-ellipsis w-full text-center" title={file.name}>{file.name}</span>
+                                    {file.size > 0 && <span className="text-[10px] text-white/50">{formatSize(file.size)}</span>}
                                 </div>
-                                <div className="file-icon-wrapper" >
+                                <div className="flex items-center justify-center bg-white/5 rounded-lg w-full aspect-square overflow-hidden" >
                                     {(file.resolvedPath || file.path) && (
                                         <img
                                             src={convertFileSrc(file.resolvedPath || file.path!)}
@@ -246,8 +247,10 @@ export function FileTray({ files, onUpdateFiles }: FileTrayProps) {
                                     )}
                                 </div>
 
-                                <button
-                                    className="remove-file-btn"
+                                <Button
+                                    variant="ghost"
+                                    size="icon"
+                                    className="absolute top-1 right-1 w-5 h-5 rounded-full "
                                     onMouseDown={(e) => {
                                         e.stopPropagation();
                                     }}
@@ -257,7 +260,7 @@ export function FileTray({ files, onUpdateFiles }: FileTrayProps) {
                                     }}
                                 >
                                     <IconX size={14} />
-                                </button>
+                                </Button>
                             </motion.div>
                         ))}
                     </AnimatePresence>
@@ -265,7 +268,7 @@ export function FileTray({ files, onUpdateFiles }: FileTrayProps) {
             )}
 
             {isDragging && (
-                <div className="drag-overlay">
+                <div className="absolute inset-0 bg-black/60 backdrop-blur-xs flex items-center justify-center z-10 pointer-events-none">
                     <motion.div
                         initial={{ scale: 0.9, opacity: 0 }}
                         animate={{ scale: 1, opacity: 1 }}

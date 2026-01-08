@@ -1,10 +1,10 @@
 import { motion, AnimatePresence } from 'motion/react';
 import { IconSettings, IconLayoutGrid, IconFiles } from '@tabler/icons-react';
 import { ExpandedMedia } from '../ExpandedMedia';
-import { CalendarWidget } from '../widgets/CalendarWidget';
-import { RemindersWidget } from '../widgets/RemindersWidget';
 import { FileTray, FileItem } from '../FileTray';
 import { NowPlayingData } from './types';
+import { useWidgets } from '../../context/WidgetContext';
+import { WidgetWrapper } from '../widgets/WidgetWrapper';
 
 interface ExpandedIslandProps {
     activeTab: 'widgets' | 'files';
@@ -52,6 +52,8 @@ export function ExpandedIsland({
     handleNotesClick,
     handleChildWheel
 }: ExpandedIslandProps) {
+    const { enabledWidgets } = useWidgets();
+
     return (
         <motion.div
             key="expanded-content"
@@ -113,11 +115,9 @@ export function ExpandedIsland({
                             transition={{ duration: 0.3 }}
                             onWheel={handleChildWheel}
                         >
+                            {/* Media player is a special case - needs props */}
                             {settings.showMedia && (
-                                <div
-                                    className={`expanded-media-player widget-card ${(!nowPlaying?.duration || nowPlaying.duration <= 0) ? 'no-progress' : ''}`}
-                                    onClick={(e) => e.stopPropagation()}
-                                >
+                                <>
                                     {nowPlaying ? (
                                         <ExpandedMedia
                                             nowPlaying={nowPlaying}
@@ -129,22 +129,17 @@ export function ExpandedIsland({
                                     ) : (
                                         <div className="no-media-message">No media playing</div>
                                     )}
-                                </div>
+                                </>
                             )}
 
-                            {settings.showCalendar && (
-                                <div className="widget-card" onClick={(e) => e.stopPropagation()} style={{ minWidth: 280 }}>
-                                    <CalendarWidget />
-                                </div>
-                            )}
+                            {/* Dynamically render enabled widgets from the registry */}
+                            {enabledWidgets.map(widget => (
 
-                            {settings.showReminders && (
-                                <div className="widget-card" onClick={(e) => e.stopPropagation()} style={{ minWidth: 260 }}>
-                                    <RemindersWidget />
-                                </div>
-                            )}
+                                <widget.ExpandedComponent />
 
-                            <div className="expanded-notes-section widget-card" onClick={(e) => e.stopPropagation()}>
+                            ))}
+                            <WidgetWrapper title="Notes">
+
                                 <textarea
                                     className="notes-field"
                                     placeholder="Type your notes here..."
@@ -152,12 +147,15 @@ export function ExpandedIsland({
                                     onChange={handleNotesChange}
                                     onClick={handleNotesClick}
                                 />
-                            </div>
+
+                            </WidgetWrapper>
+
                         </motion.div>
                     ) : (
                         <motion.div
                             key="files"
-                            className="file-tray-wrapper"
+                            className="flex-1 flex flex-col  overflow-hidden"
+                            style={{ padding: '20px' }}
                             initial={{ opacity: 0, x: 20 }}
                             animate={{ opacity: 1, x: 0 }}
                             exit={{ opacity: 0, x: 20 }}
