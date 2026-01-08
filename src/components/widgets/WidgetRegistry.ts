@@ -1,11 +1,14 @@
 import { WidgetManifest } from './WidgetTypes';
 
+type RegistryListener = () => void;
+
 /**
  * Central registry for all available widgets.
  * Widgets register themselves on import.
  */
 class WidgetRegistryClass {
     private widgets: Map<string, WidgetManifest> = new Map();
+    private listeners: Set<RegistryListener> = new Set();
 
     /**
      * Register a widget with the system
@@ -15,13 +18,18 @@ class WidgetRegistryClass {
             console.warn(`Widget "${manifest.id}" is already registered. Overwriting.`);
         }
         this.widgets.set(manifest.id, manifest);
+        this.notifyListeners();
     }
 
     /**
      * Unregister a widget from the system
      */
     unregister(id: string): boolean {
-        return this.widgets.delete(id);
+        const result = this.widgets.delete(id);
+        if (result) {
+            this.notifyListeners();
+        }
+        return result;
     }
 
     /**
@@ -64,6 +72,23 @@ class WidgetRegistryClass {
      */
     get count(): number {
         return this.widgets.size;
+    }
+
+    /**
+     * Subscribe to registry changes
+     */
+    subscribe(listener: RegistryListener): () => void {
+        this.listeners.add(listener);
+        return () => {
+            this.listeners.delete(listener);
+        };
+    }
+
+    /**
+     * Notify all listeners of changes
+     */
+    private notifyListeners(): void {
+        this.listeners.forEach(listener => listener());
     }
 }
 

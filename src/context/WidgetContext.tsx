@@ -90,6 +90,26 @@ export function WidgetProvider({ children }: WidgetProviderProps) {
         };
 
         loadWidgets();
+
+        // Subscribe to registry changes for hot-loaded plugins
+        const unsubscribe = WidgetRegistry.subscribe(() => {
+            const allWidgets = WidgetRegistry.getAll();
+            setWidgets(allWidgets);
+            // Add default enabled state for new widgets
+            setEnabledState(prev => {
+                const updated = { ...prev };
+                allWidgets.forEach(w => {
+                    if (!(w.id in updated)) {
+                        updated[w.id] = w.defaultEnabled;
+                    }
+                });
+                return updated;
+            });
+        });
+
+        return () => {
+            unsubscribe();
+        };
     }, []);
 
     // Listen for widget state changes from other windows

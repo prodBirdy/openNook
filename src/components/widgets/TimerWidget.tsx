@@ -26,10 +26,21 @@ const timerFormSchema = z.object({
 
 type TimerFormValues = z.infer<typeof timerFormSchema>;
 
-function formatTime(seconds: number): string {
+function formatTime(seconds: number, compact = false): string {
     const h = Math.floor(seconds / 3600);
     const m = Math.floor((seconds % 3600) / 60);
     const s = seconds % 60;
+
+    if (compact) {
+        if (h > 0) {
+            return m > 0 ? `${h}h${m.toString().padStart(2, '0')}` : `${h}h`;
+        }
+        if (m > 0) {
+            return `${m}m${s.toString().padStart(2, '0')}`;
+        }
+        return `${s}s`;
+    }
+
     if (h > 0) {
         return `${h}:${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
     }
@@ -266,7 +277,7 @@ export function CompactTimer({ baseNotchWidth, isHovered, contentOpacity }: Comp
             }
             right={
                 <span style={{ color: 'white', fontSize: 14, fontVariantNumeric: 'tabular-nums' }}>
-                    {formatTime(activeTimer.remaining)}
+                    {formatTime(activeTimer.remaining, true)}
                 </span>
             }
         />

@@ -5,7 +5,6 @@ import { WidgetProvider } from './context/WidgetContext';
 import { TimerProvider } from './context/TimerContext';
 import { SessionProvider } from './context/SessionContext';
 import { PopoverStateProvider } from './context/PopoverStateContext';
-import { useReminders } from './hooks/useReminders';
 import './App.css';
 
 // Import widget index to trigger all widget registrations
@@ -13,11 +12,7 @@ import './components/widgets';
 
 import { invoke } from '@tauri-apps/api/core';
 import { useEffect } from 'react';
-
-function ReminderManager() {
-  useReminders();
-  return null;
-}
+import { listenForPluginChanges } from './services/pluginLoader';
 
 function App() {
   useEffect(() => {
@@ -29,6 +24,17 @@ function App() {
         }
       })
       .catch(err => console.error('Failed to get accent color:', err));
+
+    // Listen for plugin changes from other windows (Settings)
+    // This allows hot-reload when plugins are installed/deleted
+    let unlistenPlugins: (() => void) | undefined;
+    listenForPluginChanges().then(unlisten => {
+      unlistenPlugins = unlisten;
+    });
+
+    return () => {
+      if (unlistenPlugins) unlistenPlugins();
+    };
   }, []);
 
   const isSettings = window.location.pathname === '/settings';
@@ -52,7 +58,6 @@ function App() {
           <NotificationProvider>
             <PopoverStateProvider>
               <DynamicIsland />
-              <ReminderManager />
               <div id="popover-mount" style={{ position: 'fixed', inset: 0, zIndex: 99999, pointerEvents: 'none' }} />
             </PopoverStateProvider>
           </NotificationProvider>

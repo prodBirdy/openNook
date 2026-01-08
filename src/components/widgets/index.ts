@@ -3,11 +3,11 @@
  * This file should be imported once at app startup.
  */
 
-import { loadBuiltinWidgets } from './widgetConfig';
+import { loadAllWidgets } from './widgetConfig';
 
-// Load built-in widgets via dynamic imports
+// Load all widgets (built-in + external plugins)
 // This promise resolves when all widgets are registered
-export const widgetsReady = loadBuiltinWidgets();
+export const widgetsReady = loadAllWidgets();
 
 // Re-export registry and types for convenience
 export { WidgetRegistry, registerWidget, unregisterWidget } from './WidgetRegistry';

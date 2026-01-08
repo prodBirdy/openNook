@@ -181,3 +181,197 @@ input:checked+.slider:before {
 .settings-slider::-webkit-slider-thumb:active {
     transform: scale(0.95);
 }
+
+/* Plugin Store */
+.plugin-store {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.plugin-list {
+    display: flex;
+    flex-direction: column;
+}
+
+.plugin-loading,
+.plugin-empty {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    padding: 24px;
+    color: rgba(255, 255, 255, 0.5);
+    font-size: 13px;
+}
+
+.plugin-hint {
+    font-size: 11px;
+    opacity: 0.6;
+    word-break: break-all;
+    text-align: center;
+}
+
+.plugin-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 12px 16px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.plugin-item:last-child {
+    border-bottom: none;
+}
+
+.plugin-info {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    flex: 1;
+    min-width: 0;
+}
+
+.plugin-name {
+    font-size: 14px;
+    font-weight: 500;
+    color: rgba(255, 255, 255, 0.9);
+}
+
+.plugin-meta {
+    font-size: 11px;
+    color: rgba(255, 255, 255, 0.4);
+}
+
+.plugin-desc {
+    font-size: 12px;
+    color: rgba(255, 255, 255, 0.5);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.plugin-actions {
+    display: flex;
+    gap: 4px;
+    margin-left: 12px;
+}
+
+.plugin-action-btn {
+    background: rgba(255, 255, 255, 0.1);
+    border: none;
+    border-radius: 6px;
+    padding: 6px;
+    cursor: pointer;
+    color: rgba(255, 255, 255, 0.6);
+    transition: all 0.2s;
+}
+
+.plugin-action-btn:hover {
+    background: rgba(255, 255, 255, 0.15);
+    color: rgba(255, 255, 255, 0.9);
+}
+
+.plugin-action-btn.danger:hover {
+    background: rgba(255, 59, 48, 0.2);
+    color: #ff3b30;
+}
+
+.plugin-error {
+    background: rgba(255, 59, 48, 0.15);
+    border: 1px solid rgba(255, 59, 48, 0.3);
+    border-radius: 8px;
+    padding: 10px 12px;
+    color: #ff6b6b;
+    font-size: 12px;
+}
+
+.git-input-container {
+    display: flex;
+    gap: 8px;
+    padding: 12px;
+    background: rgba(255, 255, 255, 0.05);
+    border-radius: 8px;
+}
+
+.git-input {
+    flex: 1;
+    background: rgba(0, 0, 0, 0.3);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 6px;
+    padding: 8px 12px;
+    color: white;
+    font-size: 13px;
+    outline: none;
+}
+
+.git-input:focus {
+    border-color: var(--accent-color, #34c759);
+}
+
+.git-submit-btn,
+.git-cancel-btn {
+    background: rgba(255, 255, 255, 0.1);
+    border: none;
+    border-radius: 6px;
+    padding: 8px 16px;
+    color: white;
+    font-size: 12px;
+    cursor: pointer;
+    transition: background 0.2s;
+}
+
+.git-submit-btn:hover {
+    background: var(--accent-color, #34c759);
+}
+
+.git-cancel-btn:hover {
+    background: rgba(255, 255, 255, 0.15);
+}
+
+.plugin-install-buttons {
+    display: flex;
+    gap: 8px;
+}
+
+.plugin-install-btn {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    background: rgba(255, 255, 255, 0.1);
+    border: none;
+    border-radius: 8px;
+    padding: 10px 16px;
+    color: white;
+    font-size: 13px;
+    cursor: pointer;
+    transition: all 0.2s;
+}
+
+.plugin-install-btn:hover:not(:disabled) {
+    background: rgba(255, 255, 255, 0.15);
+}
+
+.plugin-install-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+.plugin-install-btn.secondary {
+    padding: 10px;
+}
+
+.spinning {
+    animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+    from {
+        transform: rotate(0deg);
+    }
+
+    to {
+        transform: rotate(360deg);
+    }
+}

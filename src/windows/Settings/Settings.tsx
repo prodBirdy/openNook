@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { useWidgets } from '../../context/WidgetContext';
+import { PluginStore } from '../../components/PluginStore';
 import './Settings.css';
 
 
@@ -192,6 +193,11 @@ export default function Settings() {
                         </div>
                     ))}
                 </div>
+            </div>
+
+            <div className="settings-section">
+                <div className="section-title">External Plugins</div>
+                <PluginStore />
             </div>
 
             <div className="settings-section">

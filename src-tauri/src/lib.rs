@@ -4,6 +4,7 @@ pub mod database;
 pub mod files;
 pub mod models;
 pub mod notes;
+pub mod plugins;
 pub mod utils;
 pub mod widgets;
 pub mod window;
@@ -16,6 +17,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_drag::init())
+        .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             window::get_notch_info,
             window::position_at_notch,
@@ -57,7 +59,13 @@ pub fn run() {
             files::save_drag_icon,
             window::get_system_accent_color,
             widgets::save_widget_state,
-            widgets::load_widget_state
+            widgets::load_widget_state,
+            plugins::scan_plugins_directory,
+            plugins::read_plugin_bundle,
+            plugins::get_plugins_directory_path,
+            plugins::install_plugin_from_folder,
+            plugins::install_plugin_from_git,
+            plugins::delete_plugin
         ])
         .setup(|app| {
             // Auto-position and resize window to match notch on startup
@@ -125,9 +133,9 @@ pub fn run() {
                 #[cfg(target_os = "linux")]
                 {
                     // Linux specific setup
-                     window.set_always_on_top(true).unwrap();
-                     window.set_decorations(false).unwrap();
-                     window.set_skip_taskbar(true).unwrap();
+                    window.set_always_on_top(true).unwrap();
+                    window.set_decorations(false).unwrap();
+                    window.set_skip_taskbar(true).unwrap();
                 }
 
                 #[cfg(not(target_os = "windows"))]

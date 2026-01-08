@@ -34,10 +34,21 @@ const sessionFormSchema = z.object({
 
 type SessionFormValues = z.infer<typeof sessionFormSchema>;
 
-function formatElapsed(seconds: number): string {
+function formatElapsed(seconds: number, compact = false): string {
     const h = Math.floor(seconds / 3600);
     const m = Math.floor((seconds % 3600) / 60);
     const s = seconds % 60;
+
+    if (compact) {
+        if (h > 0) {
+            return m > 0 ? `${h}h${m.toString().padStart(2, '0')}` : `${h}h`;
+        }
+        if (m > 0) {
+            return `${m}m${s.toString().padStart(2, '0')}`;
+        }
+        return `${s}s`;
+    }
+
     if (h > 0) {
         return `${h}:${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
     }
@@ -291,7 +302,7 @@ export function CompactSession({ baseNotchWidth, isHovered, contentOpacity }: Co
             right={
                 <div className="flex items-center gap-2">
                     <span className="text-white text-sm tabular-nums">
-                        {formatElapsed(getElapsedTime(activeSession))}
+                        {formatElapsed(getElapsedTime(activeSession), true)}
                     </span>
                 </div>
             }
