@@ -1,20 +1,19 @@
 import { CompactWrapper } from './CompactWrapper';
-import { IconFiles } from '@tabler/icons-react';
-import { FileItem } from '../FileTray';
+import { IconPhoto } from '@tabler/icons-react';
+import { useFileTrayStore } from '../../stores/useFileTrayStore';
 
 interface CompactFilesProps {
-    files: FileItem[];
     isHovered: boolean;
     baseNotchWidth: number;
     contentOpacity: number;
 }
 
 export function CompactFiles({
-    files,
     isHovered,
     baseNotchWidth,
     contentOpacity
 }: CompactFilesProps) {
+    const files = useFileTrayStore(state => state.files);
     return (
         <CompactWrapper
             id="files-content"
@@ -24,7 +23,7 @@ export function CompactFiles({
             contentOpacity={contentOpacity}
             left={
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                    <IconFiles size={20} color="white" stroke={1.5} />
+                    <IconPhoto size={20} color="white" stroke={1.5} />
                 </div>
             }
             right={

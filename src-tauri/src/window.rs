@@ -10,9 +10,10 @@ use tauri::{
 
 #[tauri::command]
 pub fn open_settings(app_handle: tauri::AppHandle) -> Result<(), String> {
-    if let Some(window) = app_handle.get_webview_window("settings") {
+    let window = if let Some(window) = app_handle.get_webview_window("settings") {
         window.show().map_err(|e| e.to_string())?;
         window.set_focus().map_err(|e| e.to_string())?;
+        window
     } else {
         WebviewWindowBuilder::new(&app_handle, "settings", WebviewUrl::App("settings".into()))
             .title("Settings")
@@ -20,8 +21,22 @@ pub fn open_settings(app_handle: tauri::AppHandle) -> Result<(), String> {
             .resizable(false)
             .visible(true)
             .build()
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| e.to_string())?
+    };
+
+    // Activate the app to ensure the new window is visible and focused
+    #[cfg(target_os = "macos")]
+    {
+        use objc2::runtime::AnyObject;
+        use objc2::*;
+
+        unsafe {
+            // Get NSApplication shared instance and activate it
+            let ns_app: *mut AnyObject = msg_send![class!(NSApplication), sharedApplication];
+            let _: () = msg_send![ns_app, activateIgnoringOtherApps: true];
+        }
     }
+
     Ok(())
 }
 
@@ -99,6 +114,9 @@ pub struct WindowSettings {
     pub extra_width: f64,
     /// Extra height added to the base window size (default: 200.0)
     pub extra_height: f64,
+    /// Whether "non notch mode" is active (hides wings, tighter collision)
+    #[serde(default)]
+    pub non_notch_mode: bool,
 }
 
 impl Default for WindowSettings {
@@ -106,6 +124,7 @@ impl Default for WindowSettings {
         Self {
             extra_width: 400.0,
             extra_height: 800.0,
+            non_notch_mode: false,
         }
     }
 }
@@ -353,6 +372,7 @@ pub fn update_window_settings(
     window: WebviewWindow,
     extra_width: f64,
     extra_height: f64,
+    non_notch_mode: bool,
 ) -> Result<(), String> {
     // Update the stored settings
     {
@@ -360,12 +380,17 @@ pub fn update_window_settings(
         let mut settings = store.write().map_err(|e| e.to_string())?;
         settings.extra_width = extra_width;
         settings.extra_height = extra_height;
+        settings.non_notch_mode = non_notch_mode;
 
         persist_window_settings(window.app_handle(), &settings);
     }
 
-    // Apply the new window size
-    setup_fixed_window_size(&window)
+    // Apply the new window size to the MAIN window, not the settings window
+    if let Some(main_window) = window.app_handle().get_webview_window("main") {
+        setup_fixed_window_size(&main_window)?;
+    }
+
+    Ok(())
 }
 
 /// Set up the window with a fixed size based on notch dimensions and settings.
@@ -376,6 +401,9 @@ pub fn setup_fixed_window_size(window: &WebviewWindow) -> Result<(), String> {
     let settings = get_window_settings();
 
     // Calculate fixed window dimensions
+    // In non-notch mode, we might want a smaller fixed window if possible, but keeping it consistent is safer for now
+    // unless the "too big" comment refers to the window size itself blocking things?
+    // If the window is transparent and click-through, size shouldn't matter much visually, but might block clicks if implementation is wrong.
     let target_width = (notch_width + 160.0) + settings.extra_width;
     let target_height = notch_height + settings.extra_height;
 
@@ -395,19 +423,6 @@ pub fn setup_fixed_window_size(window: &WebviewWindow) -> Result<(), String> {
     Ok(())
 }
 
-/// Legacy function for backwards compatibility - now just sets up fixed window size
-#[deprecated(note = "Window is now always fixed size. Use setup_fixed_window_size instead.")]
-pub fn resize_window_for_hover(window: &WebviewWindow, _is_hovered: bool) -> Result<(), String> {
-    setup_fixed_window_size(window)
-}
-
-/// Resize window to fixed size (Tauri command wrapper)
-/// Note: is_hovered parameter is ignored - window is always fixed size now
-#[tauri::command]
-pub fn resize_for_hover(window: WebviewWindow, _is_hovered: bool) -> Result<(), String> {
-    setup_fixed_window_size(&window)
-}
-
 /// Activate the window (focus it)
 /// Uses native macOS APIs to properly activate an accessory app
 #[tauri::command]
@@ -421,7 +436,26 @@ pub fn activate_window(window: Window) -> Result<(), String> {
         unsafe {
             // Get NSApplication shared instance and activate it
             let ns_app: *mut AnyObject = msg_send![class!(NSApplication), sharedApplication];
+            // NSApplicationActivationPolicyRegular = 0
+            // Ensure the app is in Regular mode so it appears in the Dock and App Switcher
+            let _: () = msg_send![ns_app, setActivationPolicy: 0_i64];
             let _: () = msg_send![ns_app, activateIgnoringOtherApps: true];
+
+            // Re-apply styles to the main notch window to prevent it from disappearing/resetting
+            if let Some(main_window) = window.app_handle().get_webview_window("main") {
+                if let Ok(handle) = main_window.window_handle() {
+                    if let raw_window_handle::RawWindowHandle::AppKit(appkit_handle) =
+                        handle.as_raw()
+                    {
+                        let ns_view = appkit_handle.ns_view.as_ptr() as *mut AnyObject;
+                        let ns_win: *mut AnyObject = msg_send![ns_view, window];
+
+                        // Re-apply level and collection behavior
+                        let _: () = msg_send![ns_win, setLevel: 25_i64];
+                        let _: () = msg_send![ns_win, setCollectionBehavior: 17_u64];
+                    }
+                }
+            }
 
             // Also make the window key and bring it to front
             if let Ok(handle) = window.window_handle() {
@@ -439,13 +473,17 @@ pub fn activate_window(window: Window) -> Result<(), String> {
     {
         use raw_window_handle::HasWindowHandle;
         use windows::Win32::Foundation::HWND;
-        use windows::Win32::UI::WindowsAndMessaging::SetForegroundWindow;
+        use windows::Win32::UI::WindowsAndMessaging::{
+            SetForegroundWindow, ShowWindow, SW_RESTORE,
+        };
 
         if let Ok(handle) = window.window_handle() {
             if let raw_window_handle::RawWindowHandle::Win32(win32_handle) = handle.as_raw() {
                 unsafe {
                     // Non-zero handle
                     let hwnd = HWND(win32_handle.hwnd.get() as _);
+                    // Force restore if minimized and bring to front
+                    ShowWindow(hwnd, SW_RESTORE);
                     SetForegroundWindow(hwnd);
                 }
             }
@@ -455,6 +493,42 @@ pub fn activate_window(window: Window) -> Result<(), String> {
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
         window.set_focus().map_err(|e| e.to_string())?;
+    }
+
+    Ok(())
+}
+
+/// Deactivate the window and reset activation policy (hide from dock)
+#[tauri::command]
+pub fn deactivate_window(window: Window) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        use objc2::runtime::AnyObject;
+        use objc2::*;
+        use raw_window_handle::HasWindowHandle;
+
+        unsafe {
+            // Get NSApplication shared instance
+            let ns_app: *mut AnyObject = msg_send![class!(NSApplication), sharedApplication];
+            // NSApplicationActivationPolicyAccessory = 1
+            // Revert to Accessory mode so it hides from Dock
+            let _: () = msg_send![ns_app, setActivationPolicy: 1_i64];
+
+            // Re-apply styles to the main notch window explicitly
+            if let Some(main_window) = window.app_handle().get_webview_window("main") {
+                if let Ok(handle) = main_window.window_handle() {
+                    if let raw_window_handle::RawWindowHandle::AppKit(appkit_handle) =
+                        handle.as_raw()
+                    {
+                        let ns_view = appkit_handle.ns_view.as_ptr() as *mut AnyObject;
+                        let ns_win: *mut AnyObject = msg_send![ns_view, window];
+
+                        let _: () = msg_send![ns_win, setLevel: 25_i64];
+                        let _: () = msg_send![ns_win, setCollectionBehavior: 17_u64];
+                    }
+                }
+            }
+        }
     }
 
     Ok(())
@@ -493,9 +567,19 @@ pub fn setup_mouse_monitoring(app_handle: tauri::AppHandle) {
     let window_x = (screen_width - win_width) / 2.0;
 
     // Compute fallback detection area
-    let fallback_x_start = (screen_width - notch_width) / 2.0;
-    let fallback_x_end = fallback_x_start + notch_width;
-    let fallback_y_end = notch_height;
+    let effective_notch_width = if settings.non_notch_mode {
+        0.0
+    } else {
+        notch_width
+    };
+
+    let fallback_x_start = (screen_width - effective_notch_width) / 2.0;
+    let fallback_x_end = fallback_x_start + effective_notch_width;
+    let fallback_y_end = if settings.non_notch_mode {
+        1.0
+    } else {
+        notch_height
+    };
 
     // Spawn monitoring thread
     std::thread::spawn(move || {
@@ -510,6 +594,22 @@ pub fn setup_mouse_monitoring(app_handle: tauri::AppHandle) {
         const POLL_MS: u64 = 20; // ~50fps
 
         loop {
+            // Refresh settings and dimensions on every iteration to handle runtime toggles
+            let settings = get_window_settings();
+            let effective_notch_width = if settings.non_notch_mode {
+                0.0
+            } else {
+                notch_width
+            };
+
+            let fallback_x_start = (screen_width - effective_notch_width) / 2.0;
+            let fallback_x_end = fallback_x_start + effective_notch_width;
+            let fallback_y_end = if settings.non_notch_mode {
+                1.0
+            } else {
+                notch_height
+            };
+
             // Get mouse position
             let (mouse_x, flipped_y) = unsafe {
                 let mouse_loc: CGPoint = msg_send![class!(NSEvent), mouseLocation];
@@ -528,9 +628,10 @@ pub fn setup_mouse_monitoring(app_handle: tauri::AppHandle) {
 
             // OPTIMIZATION: Broad interaction zone check.
             // Only perform precise bounds checks if the mouse is roughly in the top-middle area.
-            // If we're far away and not already "inside", skip the heavy logic.
-            let broad_padding_x = 300.0;
-            let broad_limit_y = 250.0;
+            // In non-notch mode, we want a much tighter broad check to avoid accidental triggers.
+            let broad_padding_x = if settings.non_notch_mode { 60.0 } else { 300.0 };
+            let broad_limit_y = if settings.non_notch_mode { 50.0 } else { 250.0 };
+
             let is_in_interaction_zone = mouse_x >= (fallback_x_start - broad_padding_x)
                 && mouse_x <= (fallback_x_end + broad_padding_x)
                 && flipped_y <= broad_limit_y;
@@ -617,11 +718,18 @@ pub fn setup_mouse_monitoring(app_handle: tauri::AppHandle) {
 
     // Pre-compute window position (window is centered at top)
     let settings = get_window_settings();
-    let win_width = if notch_width > 0.0 {
-        notch_width + 160.0 + settings.extra_width
+    let effective_notch_width = if settings.non_notch_mode {
+        0.0
+    } else {
+        notch_width
+    };
+
+    let win_width = if effective_notch_width > 0.0 {
+        effective_notch_width + 160.0 + settings.extra_width
     } else {
         800.0 + settings.extra_width
     }; // Fallback width
+
     let window_x = (screen_width - win_width) / 2.0;
 
     std::thread::spawn(move || {
@@ -650,16 +758,21 @@ pub fn setup_mouse_monitoring(app_handle: tauri::AppHandle) {
                             && mouse_y <= (sy + bounds.height + padding)
                     } else {
                         // Fallback zone at top center
+                        // In non-notch mode we use a very small height for fallback
+                        let fallback_height = if settings.non_notch_mode { 1.0 } else { 100.0 };
+
                         mouse_x >= (window_x - padding)
                             && mouse_x <= (window_x + win_width + padding)
                             && mouse_y >= 0.0
-                            && mouse_y <= (100.0 + padding)
+                            && mouse_y <= (fallback_height + padding)
                     }
                 } else {
+                    let fallback_height = if settings.non_notch_mode { 1.0 } else { 100.0 };
+
                     mouse_x >= (window_x - padding)
                         && mouse_x <= (window_x + win_width + padding)
                         && mouse_y >= 0.0
-                        && mouse_y <= (100.0 + padding)
+                        && mouse_y <= (fallback_height + padding)
                 };
 
                 if in_ui_area && !was_inside {

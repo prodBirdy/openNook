@@ -18,7 +18,7 @@ import {
 import { Button } from '@/components/ui/button';
 import { XIcon } from 'lucide-react';
 import { DatePicker } from '@/components/ui/date-picker';
-import { usePopoverStateOptional } from '@/context/PopoverStateContext';
+import { usePopoverContext } from '@/context/PopoverContext';
 
 // Generic form field configuration
 export interface FormFieldConfig {
@@ -58,7 +58,7 @@ export function WidgetAddDialog<TSchema extends z.ZodSchema>({
     children,
 }: WidgetAddDialogProps<TSchema>) {
     type FormData = z.infer<TSchema>;
-    const { setPopoverOpen } = usePopoverStateOptional();
+    const { setIsPopoverOpen } = usePopoverContext();
 
     const form = useForm<FormData>({
         resolver: zodResolver(schema),
@@ -133,7 +133,7 @@ export function WidgetAddDialog<TSchema extends z.ZodSchema>({
                                                     }}
                                                     placeholder={fieldConfig.placeholder}
                                                     showTime={fieldConfig.type === 'datetime-local'}
-                                                    onOpenChange={setPopoverOpen}
+                                                    onOpenChange={setIsPopoverOpen}
                                                 />
                                             ) : (
                                                 <InputGroup >

@@ -3,7 +3,7 @@ import { CompactWrapper } from './CompactWrapper';
 import { useState, useCallback } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { AlbumCover } from '../AlbumCover';
-import { SmartAudioVisualizer } from '../SmartAudioVisualizer';
+import { SmartAudioVisualizer } from '../AudioVisualizer';
 import { NowPlayingData } from './types';
 
 interface CompactMediaProps {

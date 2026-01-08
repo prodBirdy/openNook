@@ -32,13 +32,15 @@
         "label": "settings",
         "width": 600,
         "height": 450,
-        "decorations": true,
-        "transparent": false,
+        "transparent": true,
         "alwaysOnTop": false,
         "skipTaskbar": false,
         "resizable": false,
         "visible": false,
-        "url": "/settings"
+        "url": "/settings",
+        "decorations": true,
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true
       }
     ],
     "security": {

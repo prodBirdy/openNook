@@ -1,114 +1,36 @@
-import { useState, useEffect } from 'react';
-import { open } from '@tauri-apps/plugin-dialog';
-import { emit } from '@tauri-apps/api/event';
+import { useEffect } from 'react';
 import { IconFolder, IconBrandGit, IconTrash, IconRefresh, IconPlug, IconLoader2 } from '@tabler/icons-react';
-import {
-    getInstalledPlugins,
-    installPluginFromFolder,
-    installPluginFromGit,
-    deletePlugin,
-    getPluginsDirectoryPath,
-    PluginInfo
-} from '../services/pluginLoader';
-
-const PLUGIN_CHANGED_EVENT = 'plugin-changed';
+import { usePluginStore } from '../stores/usePluginStore';
 
 interface PluginStoreProps {
     onPluginChange?: () => void;
 }
 
 export function PluginStore({ onPluginChange }: PluginStoreProps) {
-    const [plugins, setPlugins] = useState<PluginInfo[]>([]);
-    const [loading, setLoading] = useState(true);
-    const [installing, setInstalling] = useState(false);
-    const [gitUrl, setGitUrl] = useState('');
-    const [showGitInput, setShowGitInput] = useState(false);
-    const [error, setError] = useState<string | null>(null);
-    const [pluginsDir, setPluginsDir] = useState<string>('');
-
-    // Load installed plugins
-    const loadPlugins = async () => {
-        try {
-            setLoading(true);
-            const installed = await getInstalledPlugins();
-            setPlugins(installed);
-            setError(null);
-        } catch (e) {
-            setError(`Failed to load plugins: ${e}`);
-        } finally {
-            setLoading(false);
-        }
-    };
+    const {
+        plugins,
+        loading,
+        installing,
+        gitUrl,
+        showGitInput,
+        error,
+        pluginsDir,
+        setGitUrl,
+        setShowGitInput,
+        loadPlugins,
+        installFromFolder,
+        installFromGit,
+        deletePlugin: deletePluginAction,
+        initialize
+    } = usePluginStore();
 
     useEffect(() => {
-        loadPlugins();
-        getPluginsDirectoryPath().then(setPluginsDir);
-    }, []);
+        initialize();
+    }, [initialize]);
 
-    // Install from folder
-    const handleInstallFromFolder = async () => {
-        try {
-            setInstalling(true);
-            setError(null);
-
-            const selected = await open({
-                directory: true,
-                multiple: false,
-                title: 'Select Plugin Folder'
-            });
-
-            if (selected && typeof selected === 'string') {
-                const pluginInfo = await installPluginFromFolder(selected);
-                await loadPlugins();
-                // Notify main window to reload plugins
-                await emit(PLUGIN_CHANGED_EVENT, { action: 'install', pluginId: pluginInfo.manifest.id });
-                onPluginChange?.();
-            }
-        } catch (e) {
-            setError(`Failed to install: ${e}`);
-        } finally {
-            setInstalling(false);
-        }
-    };
-
-    // Install from Git
-    const handleInstallFromGit = async () => {
-        if (!gitUrl.trim()) {
-            setError('Please enter a Git repository URL');
-            return;
-        }
-
-        try {
-            setInstalling(true);
-            setError(null);
-            setShowGitInput(false);
-
-            const pluginInfo = await installPluginFromGit(gitUrl.trim());
-            setGitUrl('');
-            await loadPlugins();
-            // Notify main window to reload plugins
-            await emit(PLUGIN_CHANGED_EVENT, { action: 'install', pluginId: pluginInfo.manifest.id });
-            onPluginChange?.();
-        } catch (e) {
-            setError(`Failed to install: ${e}`);
-        } finally {
-            setInstalling(false);
-        }
-    };
-
-    // Delete plugin
-    const handleDelete = async (pluginId: string) => {
-        try {
-            setError(null);
-            await deletePlugin(pluginId);
-            await loadPlugins();
-            // Notify main window to reload plugins
-            await emit(PLUGIN_CHANGED_EVENT, { action: 'delete', pluginId });
-            onPluginChange?.();
-        } catch (e) {
-            setError(`Failed to delete: ${e}`);
-        }
-    };
+    const handleInstallFromFolder = () => installFromFolder(onPluginChange);
+    const handleInstallFromGit = () => installFromGit(onPluginChange);
+    const handleDelete = (pluginId: string) => deletePluginAction(pluginId, onPluginChange);
 
     return (
         <div className="plugin-store">

@@ -5,7 +5,7 @@ import { z } from 'zod';
 import { registerWidget } from './WidgetRegistry';
 import { CompactWidgetProps } from './WidgetTypes';
 import { CompactWrapper } from '../island/CompactWrapper';
-import { useSessionContext } from '../../context/SessionContext';
+import { useSessionStore, useSessionsWithElapsed } from '../../stores/useSessionStore';
 import { WidgetWrapper } from './WidgetWrapper';
 import { WidgetAddDialog } from './WidgetAddDialog';
 import { cn } from '@/lib/utils';
@@ -71,7 +71,8 @@ function getSessionIcon(session: { name: string, icon?: string }) {
 }
 
 export function SessionWidget() {
-    const { sessions, startSession, stopSession, resumeSession, removeSession, getElapsedTime } = useSessionContext();
+    const { sessions, getElapsedTime } = useSessionsWithElapsed();
+    const { startSession, stopSession, resumeSession, removeSession } = useSessionStore();
     const [showAddDialog, setShowAddDialog] = useState(false);
     const [selectedIcon, setSelectedIcon] = useState('activity');
 
@@ -251,7 +252,8 @@ export function SessionWidget() {
 
 // Compact Session Component
 export function CompactSession({ baseNotchWidth, isHovered, contentOpacity }: CompactWidgetProps) {
-    const { sessions, stopSession, getElapsedTime } = useSessionContext();
+    const { sessions, getElapsedTime } = useSessionsWithElapsed();
+    const stopSession = useSessionStore(state => state.stopSession);
     const [, forceUpdate] = useState(0);
 
     // Force re-render every second for elapsed time
@@ -322,5 +324,5 @@ registerWidget({
     category: 'productivity',
     minWidth: 260,
     hasCompactMode: true,
-    compactPriority: 15
+    compactPriority: 3
 });

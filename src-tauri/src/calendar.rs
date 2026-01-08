@@ -90,7 +90,6 @@ mod macos {
     pub async fn request_access() -> Result<bool, String> {
         // If already requested, return immediately
         if ACCESS_ALREADY_REQUESTED.load(Ordering::SeqCst) {
-            println!("Calendar/Reminders access already requested, skipping");
             return Ok(true);
         }
 
@@ -99,7 +98,6 @@ mod macos {
             .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
             .is_err()
         {
-            println!("Calendar access request already in progress, skipping");
             return Ok(true);
         }
 
@@ -208,7 +206,6 @@ mod macos {
                 if let Ok(cache) = cache_mutex.lock() {
                     if cache.is_valid(Duration::from_secs(600)) {
                         // 10 minutes
-                        println!("Using cached calendar events");
                         return cache.data.clone();
                     }
                 }
@@ -302,7 +299,6 @@ mod macos {
                 if let Ok(cache) = cache_mutex.lock() {
                     if cache.is_valid(Duration::from_secs(600)) {
                         // 10 minutes
-                        println!("Using cached reminders");
                         return cache.data.clone();
                     }
                 }
@@ -657,9 +653,7 @@ pub async fn open_calendar_app() -> Result<(), String> {
         std::process::Command::new("xdg-open")
             .arg("calendar:")
             .spawn()
-            .or_else(|_| {
-                 std::process::Command::new("gnome-calendar").spawn()
-            })
+            .or_else(|_| std::process::Command::new("gnome-calendar").spawn())
             .map_err(|e| e.to_string())?;
     }
     Ok(())
@@ -677,7 +671,7 @@ pub async fn open_reminders_app() -> Result<(), String> {
     }
     #[cfg(target_os = "windows")]
     {
-         std::process::Command::new("explorer")
+        std::process::Command::new("explorer")
             .arg("ms-to-do:")
             .spawn()
             .map_err(|e| e.to_string())?;
@@ -685,12 +679,10 @@ pub async fn open_reminders_app() -> Result<(), String> {
     #[cfg(target_os = "linux")]
     {
         // Try to open common todo apps
-         std::process::Command::new("xdg-open")
+        std::process::Command::new("xdg-open")
             .arg("todo:") // unlikely to work but consistent
             .spawn()
-            .or_else(|_| {
-                 std::process::Command::new("gnome-todo").spawn()
-            })
+            .or_else(|_| std::process::Command::new("gnome-todo").spawn())
             .map_err(|e| e.to_string())?;
     }
     Ok(())
@@ -714,7 +706,7 @@ pub async fn open_privacy_settings() -> Result<(), String> {
     }
     #[cfg(target_os = "linux")]
     {
-         std::process::Command::new("xdg-open")
+        std::process::Command::new("xdg-open")
             .arg("help:privacy") // Very generic/wrong, but Linux settings are DE specific.
             .spawn()
             .map_err(|e| e.to_string())?;

@@ -1,5 +1,5 @@
 import { useEffect, useRef } from 'react';
-import { useNotification } from '../context/NotificationContext';
+import { useNotificationStore } from '../stores/useNotificationStore';
 
 // Reminder intervals (commented out for dev purposes)
 /*
@@ -8,7 +8,7 @@ const SCREEN_BREAK_INTERVAL_MS = 20 * 60 * 1000; // 20 minutes
 */
 
 export function useReminders() {
-    const { showNotification } = useNotification();
+    const showNotification = useNotificationStore(state => state.showNotification);
     const hydrationTimer = useRef<number | null>(null);
     const screenBreakTimer = useRef<number | null>(null);
 

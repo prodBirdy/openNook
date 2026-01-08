@@ -43,6 +43,11 @@
     pointer-events: none;
 }
 
+.dynamic-island.no-wings.idle:not(.hovered):not(.expanded)::before,
+.dynamic-island.no-wings.idle:not(.hovered):not(.expanded)::after {
+    display: none;
+}
+
 /* Left connection */
 .dynamic-island::before {
     left: -6px;

@@ -1,33 +1,39 @@
 import { motion, AnimatePresence } from 'motion/react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
-import { useEffect, useCallback, useRef, useMemo } from 'react';
-import { useNotchInfo } from '../hooks/useNotchInfo';
-import { CompactMedia } from './island/CompactMedia';
-import { CompactFiles } from './island/CompactFiles';
-import { CompactIdle } from './island/CompactIdle';
-import { CompactOnboard } from './island/CompactOnboard';
-import { ModeIndicator } from './island/ModeIndicator';
-import { ExpandedIsland } from './island/ExpandedIsland';
-import { useWidgets } from '../context/WidgetContext';
-import { useTimerContext } from '../context/TimerContext';
-import { useSessionContext } from '../context/SessionContext';
-import { usePopoverStateOptional } from '../context/PopoverStateContext';
+import { useEffect, useCallback, useRef, useMemo, useState } from 'react';
+import { useNotchInfo } from '../../hooks/useNotchInfo';
+import { CompactMedia } from './CompactMedia';
+import { CompactFiles } from './CompactFiles';
+import { CompactIdle } from './CompactIdle';
+import { CompactOnboard } from './CompactOnboard';
+import { ModeIndicator } from './ModeIndicator';
+import { ExpandedIsland } from './ExpandedIsland';
 
-import { useFileTray } from '../hooks/useFileTray';
-import { useMediaPlayer } from '../hooks/useMediaPlayer';
-import { useDynamicIslandStore } from '../stores/useDynamicIslandStore';
+import { useMediaPlayerStore } from '../../stores/useMediaPlayerStore';
+import { useDynamicIslandStore } from '../../stores/useDynamicIslandStore';
+import { useWidgetStore } from '../../stores/useWidgetStore';
+import { useDerivedTimers } from '../../stores/useTimerStore';
+import { useSessionsWithElapsed } from '../../stores/useSessionStore';
+import { useFileTrayStore } from '../../stores/useFileTrayStore';
 
 export function DynamicIsland() {
     const { notchInfo } = useNotchInfo();
-    const {
-        enabledCompactWidgets,
-        hasActiveInstance,
-    } = useWidgets();
+    const widgets = useWidgetStore(state => state.widgets);
+    const enabledState = useWidgetStore(state => state.enabledState);
+    const hasActiveInstance = useWidgetStore(state => state.hasActiveInstance);
 
-    const { timers } = useTimerContext();
-    const { sessions } = useSessionContext();
-    const { isPopoverOpen } = usePopoverStateOptional();
+    // Compute enabled compact widgets outside the selector to avoid infinite loops
+    const enabledCompactWidgets = useMemo(() =>
+        widgets.filter(w => enabledState[w.id] && w.hasCompactMode && w.CompactComponent),
+        [widgets, enabledState]
+    );
+
+    const timers = useDerivedTimers();
+    const { sessions } = useSessionsWithElapsed();
+
+    // Track if a popover is open to pause auto-collapse
+    const [isPopoverOpen, setIsPopoverOpen] = useState(false);
 
     // Zustand store
     const {
@@ -60,21 +66,15 @@ export function DynamicIsland() {
     const prevHasMediaRef = useRef<boolean>(false);
     const prevHasFilesRef = useRef<boolean>(false);
 
-    // Extracted Hooks
-    const {
-        nowPlaying,
-        visualizerColor,
-        hasMedia,
-        handlePlayPause,
-        handleNextTrack,
-        handlePreviousTrack,
-        handleSeek
-    } = useMediaPlayer(expanded, settings.showMedia);
+    // Media player state from Zustand
+    const nowPlaying = useMediaPlayerStore(state => state.nowPlaying);
+    const visualizerColor = useMediaPlayerStore(state => state.visualizerColor);
+    const fetchNowPlaying = useMediaPlayerStore(state => state.fetchNowPlaying);
+    const hasMedia = useMediaPlayerStore(state => state.hasMedia(settings.showMedia));
 
-    const { files, setFiles } = useFileTray(setExpanded, setActiveTab, setIsAnimating);
 
     // Determine mode - memoized
-    const hasFiles = files.length > 0;
+    const hasFiles = useFileTrayStore(state => state.files.length > 0);
 
     // System modes that aren't strict widgets but behave like one
     const availableModes = useMemo(() => {
@@ -104,8 +104,8 @@ export function DynamicIsland() {
         if (hasMedia) modes.push({ id: 'media', priority: 50 });
         if (hasFiles) modes.push({ id: 'files', priority: 80 });
 
-        modes.push({ id: 'onboard', priority: 200 });
-        modes.push({ id: 'idle', priority: 999 });
+        modes.push({ id: 'onboard', priority: 999 });
+        modes.push({ id: 'idle', priority: 200 });
 
         // Sort by priority (lower is better)
         return modes.sort((a, b) => a.priority - b.priority).map(m => m.id);
@@ -225,6 +225,28 @@ export function DynamicIsland() {
         return () => window.removeEventListener('storage', handleStorage);
     }, [loadSettings]);
 
+    // Media player polling
+    useEffect(() => {
+        fetchNowPlaying(expanded);
+        const trackInterval = setInterval(() => fetchNowPlaying(expanded), 1000);
+
+        const handleKeyDown = (e: KeyboardEvent) => {
+            const mediaKeys = ['MediaPlayPause', 'MediaTrackNext', 'MediaTrackPrevious'];
+            const fnKeys = ['F7', 'F8', 'F9'];
+
+            if (mediaKeys.includes(e.key) || fnKeys.includes(e.key)) {
+                setTimeout(() => fetchNowPlaying(expanded), 150);
+                setTimeout(() => fetchNowPlaying(expanded), 500);
+            }
+        };
+        window.addEventListener('keydown', handleKeyDown);
+
+        return () => {
+            clearInterval(trackInterval);
+            window.removeEventListener('keydown', handleKeyDown);
+        };
+    }, [fetchNowPlaying, expanded]);
+
     const handleSettingsClick = useCallback(async () => {
         try {
             await invoke('open_settings');
@@ -281,19 +303,24 @@ export function DynamicIsland() {
             }
         } else if (mode === 'idle') {
             width = baseNotchWidth;
-            height = notchHeight;
+            // If in non-notch mode, collapse to 1px
+            if (settings.nonNotchMode) {
+                height = 1;
+            } else {
+                height = notchHeight;
+            }
         } else {
             width = baseNotchWidth + 120;
             height = notchHeight;
         }
 
         return { targetWidth: width, targetHeight: height };
-    }, [expanded, isHovered, mode, baseNotchWidth, notchHeight, windowSize.width, windowSize.height]);
+    }, [expanded, isHovered, mode, baseNotchWidth, notchHeight, windowSize.width, windowSize.height, settings.nonNotchMode]);
 
     const contentOpacity = (mode === 'idle' || mode === 'onboard' || hasMedia || hasFiles || mode !== 'idle') ? 1 : 0;
 
     useEffect(() => {
-        // Don't auto-collapse if a popover (like date picker) is open
+        // Auto-collapse when not hovered, but pause if a popover is open
         if (!isHovered && expanded && !isAnimating && !isPopoverOpen) {
             setExpanded(false);
         }
@@ -356,7 +383,7 @@ export function DynamicIsland() {
             const totalWidth = rect.width + 40;
             const x = rect.left - 20;
 
-            const extraHeight = isPopoverOpen ? 420 : 0;
+            const extraHeight = 0; // Previously was: isPopoverOpen ? 420 : 0
 
             invoke('update_ui_bounds', {
                 x,
@@ -368,7 +395,7 @@ export function DynamicIsland() {
 
         const timeoutId = setTimeout(updateBounds, 350);
         return () => clearTimeout(timeoutId);
-    }, [targetWidth, targetHeight, isPopoverOpen]);
+    }, [targetWidth, targetHeight]);
 
     // Memoize spring transition
     const springTransition = useMemo(() => ({
@@ -385,7 +412,7 @@ export function DynamicIsland() {
         <div className={`dynamic-island-container ${expanded ? 'expanded' : ''}`}>
             <motion.div
                 ref={islandRef}
-                className={`dynamic-island ${mode} ${expanded ? 'expanded' : ''} ${settings.liquidGlassMode ? 'liquid-glass' : ''}`}
+                className={`dynamic-island ${mode} ${expanded ? 'expanded' : ''} ${settings.liquidGlassMode ? 'liquid-glass' : ''} ${settings.nonNotchMode ? 'no-wings' : ''} ${isHovered ? 'hovered' : ''}`}
                 initial={false}
                 onAnimationComplete={() => setIsAnimating(false)}
                 animate={{
@@ -422,17 +449,11 @@ export function DynamicIsland() {
                                 baseNotchWidth={baseNotchWidth}
                                 settings={settings}
                                 handleSettingsClick={handleSettingsClick}
-                                nowPlaying={nowPlaying}
-                                handlePlayPause={handlePlayPause}
-                                handleNextTrack={handleNextTrack}
-                                handlePreviousTrack={handlePreviousTrack}
-                                handleSeek={handleSeek}
-                                files={files}
-                                setFiles={setFiles}
                                 notes={notes}
                                 handleNotesChange={handleNotesChange}
                                 handleNotesClick={handleNotesClick}
                                 handleChildWheel={handleChildWheel}
+                                setIsPopoverOpen={setIsPopoverOpen}
                             />
                         ) : mode === 'media' && nowPlaying ? (
                             <CompactMedia
@@ -444,7 +465,6 @@ export function DynamicIsland() {
                             />
                         ) : mode === 'files' ? (
                             <CompactFiles
-                                files={files}
                                 isHovered={isHovered}
                                 baseNotchWidth={baseNotchWidth}
                                 contentOpacity={contentOpacity}

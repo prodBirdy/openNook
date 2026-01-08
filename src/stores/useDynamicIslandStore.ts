@@ -8,6 +8,7 @@ interface Settings {
     baseWidth: number;
     baseHeight: number;
     liquidGlassMode: boolean;
+    nonNotchMode: boolean;
 }
 
 interface DynamicIslandState {
@@ -74,6 +75,7 @@ const DEFAULT_SETTINGS: Settings = {
     baseWidth: 160,
     baseHeight: 38,
     liquidGlassMode: false,
+    nonNotchMode: false,
 };
 
 export const useDynamicIslandStore = create<DynamicIslandStore>((set, get) => ({

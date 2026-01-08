@@ -178,15 +178,52 @@ pub async fn get_now_playing() -> NowPlayingData {
                                             set jsResult to do JavaScript "
                                                 (function() {
                                                     var video = document.querySelector('video');
-                                                    if (video && !video.paused && !video.ended) return 'playing';
                                                     var audio = document.querySelector('audio');
-                                                    if (audio && !audio.paused && !audio.ended) return 'playing';
-                                                    return 'paused';
+                                                    var activeMedia = (video && !video.paused && !video.ended) ? video : (audio && !audio.paused && !audio.ended) ? audio : null;
+
+                                                    if (!activeMedia) return 'paused';
+
+                                                    var duration = activeMedia.duration || '';
+                                                    var currentTime = activeMedia.currentTime || '';
+
+                                                    var art = '';
+                                                    try {
+                                                        if (location.hostname.includes('spotify')) {
+                                                            var img = document.querySelector('img[alt^=\"Now playing\"]') || document.querySelector('img[data-testid=\"cover-art-image\"]');
+                                                            if (img) art = img.src;
+                                                        } else if (location.hostname.includes('music.youtube')) {
+                                                            var img = document.querySelector('.ytmusic-player-bar.style-scope img');
+                                                            if (img) art = img.src;
+                                                        }
+
+                                                        if (!art) {
+                                                            var icon = document.querySelector('link[rel*=\"icon\"]');
+                                                            if (icon) art = icon.href;
+                                                        }
+                                                    } catch (e) {}
+
+                                                    return 'playing|' + art + '|' + duration + '|' + currentTime;
                                                 })();
                                             " in t
 
-                                            if jsResult is "playing" then
-                                                return "playing|" & tabName & "|Safari|" & tabURL & "|||safari"
+                                            if jsResult starts with "playing" then
+                                                set AppleScript's text item delimiters to "|"
+                                                set jsParts to text items of jsResult
+                                                set artUrl to ""
+                                                set trackDuration to ""
+                                                set trackPosition to ""
+
+                                                if (count of jsParts) > 1 then
+                                                    set artUrl to item 2 of jsParts
+                                                end if
+                                                if (count of jsParts) > 2 then
+                                                    set trackDuration to item 3 of jsParts
+                                                end if
+                                                if (count of jsParts) > 3 then
+                                                    set trackPosition to item 4 of jsParts
+                                                end if
+
+                                                return "playing|" & tabName & "|Safari|" & tabURL & "|" & trackDuration & "|" & trackPosition & "|" & artUrl & "|safari"
                                             end if
                                         on error
                                             if tabName starts with "▶" then
@@ -281,26 +318,32 @@ pub async fn get_now_playing() -> NowPlayingData {
         use windows::Storage::Streams::DataReader;
 
         if let Ok(manager) = GlobalSystemMediaTransportControlsSessionManager::RequestAsync() {
-             if let Ok(manager) = manager.await {
-                 if let Ok(session) = manager.GetCurrentSession() {
+            if let Ok(manager) = manager.await {
+                if let Ok(session) = manager.GetCurrentSession() {
                     if let Ok(properties) = session.TryGetMediaPropertiesAsync().unwrap().await {
-                         let title = properties.Title().ok().map(|h| h.to_string());
-                         let artist = properties.Artist().ok().map(|h| h.to_string());
-                         let album = properties.AlbumTitle().ok().map(|h| h.to_string());
+                        let title = properties.Title().ok().map(|h| h.to_string());
+                        let artist = properties.Artist().ok().map(|h| h.to_string());
+                        let album = properties.AlbumTitle().ok().map(|h| h.to_string());
 
-                         // Check playback status
-                         let playback_info = session.GetPlaybackInfo().unwrap();
-                         let is_playing = playback_info.PlaybackStatus().unwrap() == windows::Media::Control::GlobalSystemMediaTransportControlsSessionPlaybackStatus::Playing;
+                        // Check playback status
+                        let playback_info = session.GetPlaybackInfo().unwrap();
+                        let is_playing = playback_info.PlaybackStatus().unwrap() == windows::Media::Control::GlobalSystemMediaTransportControlsSessionPlaybackStatus::Playing;
 
-                         // Get timeline
-                         let timeline = session.GetTimelineProperties().unwrap();
-                         let duration = timeline.EndTime().ok().map(|t| t.Duration as f64 / 10_000_000.0);
-                         let position = timeline.Position().ok().map(|t| t.Duration as f64 / 10_000_000.0);
+                        // Get timeline
+                        let timeline = session.GetTimelineProperties().unwrap();
+                        let duration = timeline
+                            .EndTime()
+                            .ok()
+                            .map(|t| t.Duration as f64 / 10_000_000.0);
+                        let position = timeline
+                            .Position()
+                            .ok()
+                            .map(|t| t.Duration as f64 / 10_000_000.0);
 
-                         // Artwork
-                         // Getting stream from IRandomAccessStreamReference
-                         let mut artwork_base64 = None;
-                         if let Ok(thumb_ref) = properties.Thumbnail() {
+                        // Artwork
+                        // Getting stream from IRandomAccessStreamReference
+                        let mut artwork_base64 = None;
+                        if let Ok(thumb_ref) = properties.Thumbnail() {
                             if let Ok(stream) = thumb_ref.OpenReadAsync().unwrap().await {
                                 let size = stream.Size().unwrap() as usize;
                                 let reader = DataReader::CreateDataReader(&stream).unwrap();
@@ -311,27 +354,27 @@ pub async fn get_now_playing() -> NowPlayingData {
                                     }
                                 }
                             }
-                         }
+                        }
 
-                         IS_PLAYING.store(is_playing, Ordering::Relaxed);
+                        IS_PLAYING.store(is_playing, Ordering::Relaxed);
 
-                         let data = NowPlayingData {
-                             title,
-                             artist,
-                             album,
-                             artwork_base64,
-                             duration,
-                             elapsed_time: position,
-                             is_playing,
-                             audio_levels: Some(get_audio_levels_internal()),
-                             app_name: Some("System".to_string()),
-                         };
+                        let data = NowPlayingData {
+                            title,
+                            artist,
+                            album,
+                            artwork_base64,
+                            duration,
+                            elapsed_time: position,
+                            is_playing,
+                            audio_levels: Some(get_audio_levels_internal()),
+                            app_name: Some("System".to_string()),
+                        };
 
-                         save_last_played(&data);
-                         return data;
-                     }
-                 }
-             }
+                        save_last_played(&data);
+                        return data;
+                    }
+                }
+            }
         }
 
         get_last_played_or_default(get_audio_levels())
@@ -341,19 +384,21 @@ pub async fn get_now_playing() -> NowPlayingData {
     {
         // Use zbus to query MPRIS
         // This is a simplified implementation, ideally we'd iterate over names
-        use zbus::{Connection, proxy};
         use zbus::zvariant::Value;
+        use zbus::{proxy, Connection};
 
         // Define a simple proxy for MPRIS Player
         #[proxy(
             interface = "org.mpris.MediaPlayer2.Player",
-            default_path = "/org/mpris/MediaPlayer2",
+            default_path = "/org/mpris/MediaPlayer2"
         )]
         trait Player {
             #[zbus(property)]
             fn playback_status(&self) -> zbus::Result<String>;
             #[zbus(property)]
-            fn metadata(&self) -> zbus::Result<std::collections::HashMap<String, zbus::zvariant::OwnedValue>>;
+            fn metadata(
+                &self,
+            ) -> zbus::Result<std::collections::HashMap<String, zbus::zvariant::OwnedValue>>;
             #[zbus(property)]
             fn position(&self) -> zbus::Result<i64>;
         }
@@ -362,16 +407,21 @@ pub async fn get_now_playing() -> NowPlayingData {
             // Find a media player (simplified: grabbing first one or a specific one)
             // Real impl should list names org.mpris.MediaPlayer2.*
 
-             // We can list names
+            // We can list names
             let proxy = zbus::fdo::DBusProxy::new(&conn).await.unwrap();
             let names = proxy.list_names().await.unwrap();
 
             for name in names {
                 if name.starts_with("org.mpris.MediaPlayer2.") {
-                     let player = PlayerProxy::builder(&conn).destination(name.clone()).unwrap().build().await.unwrap();
+                    let player = PlayerProxy::builder(&conn)
+                        .destination(name.clone())
+                        .unwrap()
+                        .build()
+                        .await
+                        .unwrap();
 
-                     if let Ok(status) = player.playback_status().await {
-                         if status == "Playing" {
+                    if let Ok(status) = player.playback_status().await {
+                        if status == "Playing" {
                             IS_PLAYING.store(true, Ordering::Relaxed);
 
                             let mut title = None;
@@ -382,10 +432,12 @@ pub async fn get_now_playing() -> NowPlayingData {
 
                             if let Ok(metadata) = player.metadata().await {
                                 if let Some(t) = metadata.get("xesam:title") {
-                                    if let Value::Str(v) = &**t { title = Some(v.to_string()); }
+                                    if let Value::Str(v) = &**t {
+                                        title = Some(v.to_string());
+                                    }
                                 }
                                 if let Some(a) = metadata.get("xesam:artist") {
-                                     // artist is often array of strings
+                                    // artist is often array of strings
                                     if let Value::Array(v) = &**a {
                                         if let Ok(Some(Value::Str(s))) = v.get(0) {
                                             artist = Some(s.to_string());
@@ -393,7 +445,9 @@ pub async fn get_now_playing() -> NowPlayingData {
                                     }
                                 }
                                 if let Some(a) = metadata.get("xesam:album") {
-                                    if let Value::Str(v) = &**a { album = Some(v.to_string()); }
+                                    if let Value::Str(v) = &**a {
+                                        album = Some(v.to_string());
+                                    }
                                 }
                                 if let Some(d) = metadata.get("mpris:length") {
                                     if let Value::I64(v) = &**d {
@@ -403,11 +457,14 @@ pub async fn get_now_playing() -> NowPlayingData {
                                     }
                                 }
                                 if let Some(u) = metadata.get("mpris:artUrl") {
-                                    if let Value::Str(v) = &**u { artwork_url = Some(v.to_string()); }
+                                    if let Value::Str(v) = &**u {
+                                        artwork_url = Some(v.to_string());
+                                    }
                                 }
                             }
 
-                            let position = player.position().await.ok().map(|p| p as f64 / 1_000_000.0);
+                            let position =
+                                player.position().await.ok().map(|p| p as f64 / 1_000_000.0);
 
                             let artwork_base64 = if let Some(url) = artwork_url {
                                 fetch_artwork_from_url(&url)
@@ -428,8 +485,8 @@ pub async fn get_now_playing() -> NowPlayingData {
                             };
                             save_last_played(&data);
                             return data;
-                         }
-                     }
+                        }
+                    }
                 }
             }
         }
@@ -522,8 +579,60 @@ pub async fn media_play_pause() -> Result<(), String> {
             tell application "System Events"
                 set spotifyRunning to (name of processes) contains "Spotify"
                 set musicRunning to (name of processes) contains "Music"
+                set safariRunning to (name of processes) contains "Safari"
             end tell
 
+            if spotifyRunning then
+                tell application "Spotify"
+                    if player state is playing then
+                        playpause
+                        return "spotify"
+                    end if
+                end tell
+            end if
+
+            if musicRunning then
+                tell application "Music"
+                    if player state is playing then
+                        playpause
+                        return "music"
+                    end if
+                end tell
+            end if
+
+            if safariRunning then
+                tell application "Safari"
+                    try
+                        repeat with w in windows
+                            repeat with t in tabs of w
+                                try
+                                    set tabURL to URL of t
+                                    if tabURL contains "youtube.com" or tabURL contains "music.youtube.com" or tabURL contains "open.spotify.com" or tabURL contains "soundcloud.com" then
+                                        do JavaScript "
+                                            (function() {
+                                                var video = document.querySelector('video');
+                                                var audio = document.querySelector('audio');
+                                                var activeMedia = (video && !video.paused && !video.ended) ? video : (audio && !audio.paused && !audio.ended) ? audio : null;
+                                                // Fallback if paused but visible
+                                                if (!activeMedia) activeMedia = video || audio;
+
+                                                if (activeMedia) {
+                                                    if (activeMedia.paused) { activeMedia.play(); } else { activeMedia.pause(); }
+                                                    return 'success';
+                                                }
+                                                return 'no_media';
+                                            })();
+                                        " in t
+                                        return "safari"
+                                    end if
+                                end try
+                            end repeat
+                        end repeat
+                    end try
+                end tell
+            end if
+
+            -- Fallback: If nothing was specifically playing, just try to toggle Spotify then Music
             if spotifyRunning then
                 tell application "Spotify" to playpause
                 return "spotify"
@@ -559,24 +668,29 @@ pub async fn media_play_pause() -> Result<(), String> {
 
     #[cfg(target_os = "linux")]
     {
-        use zbus::{Connection, proxy};
+        use zbus::{proxy, Connection};
         #[proxy(
             interface = "org.mpris.MediaPlayer2.Player",
-            default_path = "/org/mpris/MediaPlayer2",
+            default_path = "/org/mpris/MediaPlayer2"
         )]
         trait Player {
             fn play_pause(&self) -> zbus::Result<()>;
         }
 
         if let Ok(conn) = Connection::session().await {
-             let proxy = zbus::fdo::DBusProxy::new(&conn).await.unwrap();
-             let names = proxy.list_names().await.unwrap();
-             for name in names {
-                 if name.starts_with("org.mpris.MediaPlayer2.") {
-                      let player = PlayerProxy::builder(&conn).destination(name).unwrap().build().await.unwrap();
-                      let _ = player.play_pause().await;
-                 }
-             }
+            let proxy = zbus::fdo::DBusProxy::new(&conn).await.unwrap();
+            let names = proxy.list_names().await.unwrap();
+            for name in names {
+                if name.starts_with("org.mpris.MediaPlayer2.") {
+                    let player = PlayerProxy::builder(&conn)
+                        .destination(name)
+                        .unwrap()
+                        .build()
+                        .await
+                        .unwrap();
+                    let _ = player.play_pause().await;
+                }
+            }
         }
         Ok(())
     }
@@ -593,7 +707,66 @@ pub async fn media_next_track() -> Result<(), String> {
             tell application "System Events"
                 set spotifyRunning to (name of processes) contains "Spotify"
                 set musicRunning to (name of processes) contains "Music"
+                set safariRunning to (name of processes) contains "Safari"
             end tell
+
+            if spotifyRunning then
+                tell application "Spotify"
+                    if player state is playing then
+                        next track
+                        return "spotify"
+                    end if
+                end tell
+            end if
+
+            if musicRunning then
+                tell application "Music"
+                    if player state is playing then
+                        next track
+                        return "music"
+                    end if
+                end tell
+            end if
+
+            if safariRunning then
+                tell application "Safari"
+                    try
+                        repeat with w in windows
+                            repeat with t in tabs of w
+                                try
+                                    set tabURL to URL of t
+                                    if tabURL contains "youtube.com" or tabURL contains "music.youtube.com" then
+                                        do JavaScript "
+                                            (function() {
+                                                // YouTube specific next button
+                                                var nextBtn = document.querySelector('.ytp-next-button') || document.querySelector('[title=\"Next button\"]') || document.querySelector('.next-button');
+                                                if (nextBtn) {
+                                                    nextBtn.click();
+                                                    return 'success';
+                                                }
+                                                return 'no_btn';
+                                            })();
+                                        " in t
+                                        return "safari"
+                                    else if tabURL contains "open.spotify.com" then
+                                        do JavaScript "
+                                            (function() {
+                                                var nextBtn = document.querySelector('[data-testid=\"control-button-skip-forward\"]');
+                                                if (nextBtn) {
+                                                    nextBtn.click();
+                                                    return 'success';
+                                                }
+                                                return 'no_btn';
+                                            })();
+                                        " in t
+                                        return "safari"
+                                    end if
+                                end try
+                            end repeat
+                        end repeat
+                    end try
+                end tell
+            end if
 
             if spotifyRunning then
                 tell application "Spotify" to next track
@@ -617,7 +790,7 @@ pub async fn media_next_track() -> Result<(), String> {
 
     #[cfg(target_os = "windows")]
     {
-         use windows::Media::Control::GlobalSystemMediaTransportControlsSessionManager;
+        use windows::Media::Control::GlobalSystemMediaTransportControlsSessionManager;
         if let Ok(manager) = GlobalSystemMediaTransportControlsSessionManager::RequestAsync() {
             if let Ok(manager) = manager.await {
                 if let Ok(session) = manager.GetCurrentSession() {
@@ -630,23 +803,28 @@ pub async fn media_next_track() -> Result<(), String> {
 
     #[cfg(target_os = "linux")]
     {
-        use zbus::{Connection, proxy};
+        use zbus::{proxy, Connection};
         #[proxy(
             interface = "org.mpris.MediaPlayer2.Player",
-            default_path = "/org/mpris/MediaPlayer2",
+            default_path = "/org/mpris/MediaPlayer2"
         )]
         trait Player {
             fn next(&self) -> zbus::Result<()>;
         }
         if let Ok(conn) = Connection::session().await {
-             let proxy = zbus::fdo::DBusProxy::new(&conn).await.unwrap();
-             let names = proxy.list_names().await.unwrap();
-             for name in names {
-                 if name.starts_with("org.mpris.MediaPlayer2.") {
-                      let player = PlayerProxy::builder(&conn).destination(name).unwrap().build().await.unwrap();
-                      let _ = player.next().await;
-                 }
-             }
+            let proxy = zbus::fdo::DBusProxy::new(&conn).await.unwrap();
+            let names = proxy.list_names().await.unwrap();
+            for name in names {
+                if name.starts_with("org.mpris.MediaPlayer2.") {
+                    let player = PlayerProxy::builder(&conn)
+                        .destination(name)
+                        .unwrap()
+                        .build()
+                        .await
+                        .unwrap();
+                    let _ = player.next().await;
+                }
+            }
         }
         Ok(())
     }
@@ -663,7 +841,63 @@ pub async fn media_previous_track() -> Result<(), String> {
             tell application "System Events"
                 set spotifyRunning to (name of processes) contains "Spotify"
                 set musicRunning to (name of processes) contains "Music"
+                set safariRunning to (name of processes) contains "Safari"
             end tell
+
+            if spotifyRunning then
+                tell application "Spotify"
+                    if player state is playing then
+                        previous track
+                        return "spotify"
+                    end if
+                end tell
+            end if
+
+            if musicRunning then
+                tell application "Music"
+                    if player state is playing then
+                        back track
+                        return "music"
+                    end if
+                end tell
+            end if
+
+            if safariRunning then
+                tell application "Safari"
+                    try
+                        repeat with w in windows
+                            repeat with t in tabs of w
+                                try
+                                    set tabURL to URL of t
+                                    if tabURL contains "youtube.com" or tabURL contains "music.youtube.com" then
+                                        do JavaScript "
+                                            (function() {
+                                                // Try to go back ~10s or restart video usually, or strictly prev button if playlist
+                                                // For now, let's try history back or restart
+                                                window.history.back();
+                                                return 'success';
+                                            })();
+                                        " in t
+                                        return "safari"
+                                    else if tabURL contains "open.spotify.com" then
+                                        do JavaScript "
+                                            (function() {
+                                                var prevBtn = document.querySelector('[data-testid=\"control-button-skip-back\"]');
+                                                if (prevBtn) {
+                                                    prevBtn.click();
+                                                    return 'success';
+                                                }
+                                                return 'no_btn';
+                                            })();
+                                        " in t
+                                        return "safari"
+                                    end if
+                                end try
+                            end repeat
+                        end repeat
+                    end try
+                end tell
+            end if
 
             if spotifyRunning then
                 tell application "Spotify" to previous track
@@ -687,7 +921,7 @@ pub async fn media_previous_track() -> Result<(), String> {
 
     #[cfg(target_os = "windows")]
     {
-         use windows::Media::Control::GlobalSystemMediaTransportControlsSessionManager;
+        use windows::Media::Control::GlobalSystemMediaTransportControlsSessionManager;
         if let Ok(manager) = GlobalSystemMediaTransportControlsSessionManager::RequestAsync() {
             if let Ok(manager) = manager.await {
                 if let Ok(session) = manager.GetCurrentSession() {
@@ -700,23 +934,28 @@ pub async fn media_previous_track() -> Result<(), String> {
 
     #[cfg(target_os = "linux")]
     {
-        use zbus::{Connection, proxy};
+        use zbus::{proxy, Connection};
         #[proxy(
             interface = "org.mpris.MediaPlayer2.Player",
-            default_path = "/org/mpris/MediaPlayer2",
+            default_path = "/org/mpris/MediaPlayer2"
         )]
         trait Player {
             fn previous(&self) -> zbus::Result<()>;
         }
         if let Ok(conn) = Connection::session().await {
-             let proxy = zbus::fdo::DBusProxy::new(&conn).await.unwrap();
-             let names = proxy.list_names().await.unwrap();
-             for name in names {
-                 if name.starts_with("org.mpris.MediaPlayer2.") {
-                      let player = PlayerProxy::builder(&conn).destination(name).unwrap().build().await.unwrap();
-                      let _ = player.previous().await;
-                 }
-             }
+            let proxy = zbus::fdo::DBusProxy::new(&conn).await.unwrap();
+            let names = proxy.list_names().await.unwrap();
+            for name in names {
+                if name.starts_with("org.mpris.MediaPlayer2.") {
+                    let player = PlayerProxy::builder(&conn)
+                        .destination(name)
+                        .unwrap()
+                        .build()
+                        .await
+                        .unwrap();
+                    let _ = player.previous().await;
+                }
+            }
         }
         Ok(())
     }
@@ -734,19 +973,62 @@ pub async fn media_seek(position: f64) -> Result<(), String> {
             tell application "System Events"
                 set spotifyRunning to (name of processes) contains "Spotify"
                 set musicRunning to (name of processes) contains "Music"
+                set safariRunning to (name of processes) contains "Safari"
             end tell
 
             if spotifyRunning then
-                tell application "Spotify" to set player position to {}
-                return "spotify"
-            else if musicRunning then
-                tell application "Music" to set player position to {}
-                return "music"
-            else
-                return "no_app"
+                tell application "Spotify"
+                    if player state is playing then
+                        set player position to {}
+                        return "spotify"
+                    end if
+                end tell
             end if
+
+            if musicRunning then
+                tell application "Music"
+                    if player state is playing then
+                        set player position to {}
+                        return "music"
+                    end if
+                end tell
+            end if
+
+            if safariRunning then
+                tell application "Safari"
+                    try
+                        repeat with w in windows
+                            repeat with t in tabs of w
+                                try
+                                    set tabURL to URL of t
+                                    if tabURL contains "youtube.com" or tabURL contains "music.youtube.com" or tabURL contains "open.spotify.com" or tabURL contains "soundcloud.com" then
+                                        do JavaScript "
+                                            (function() {{
+                                                var video = document.querySelector('video');
+                                                var audio = document.querySelector('audio');
+                                                var activeMedia = (video && !video.paused && !video.ended) ? video : (audio && !audio.paused && !audio.ended) ? audio : null;
+                                                // Fallback if paused but visible
+                                                if (!activeMedia) activeMedia = video || audio;
+
+                                                if (activeMedia) {{
+                                                    activeMedia.currentTime = {};
+                                                    return 'success';
+                                                }}
+                                                return 'no_media';
+                                            }})();
+                                        " in t
+                                        return "safari"
+                                    end if
+                                end try
+                            end repeat
+                        end repeat
+                    end try
+                end tell
+            end if
+
+            return "no_app"
             "#,
-            position, position
+            position, position, position
         );
 
         Command::new("osascript")

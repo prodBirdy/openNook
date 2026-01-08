@@ -3,6 +3,7 @@ import { IconX, IconUpload } from '@tabler/icons-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { invoke, convertFileSrc } from '@tauri-apps/api/core';
 import { Button } from './ui/button';
+import { useFileTrayStore } from '../stores/useFileTrayStore';
 
 export interface FileItem {
     name: string;
@@ -13,12 +14,10 @@ export interface FileItem {
     lastModified: number;
 }
 
-interface FileTrayProps {
-    files: FileItem[];
-    onUpdateFiles: (files: FileItem[]) => void;
-}
-
-export function FileTray({ files, onUpdateFiles }: FileTrayProps) {
+export function FileTray() {
+    const files = useFileTrayStore(state => state.files);
+    const addFiles = useFileTrayStore(state => state.addFiles);
+    const removeFileByPath = useFileTrayStore(state => state.removeFile);
     const [isDragging, setIsDragging] = useState(false);
     const dropZoneRef = useRef<HTMLDivElement>(null);
 
@@ -72,10 +71,8 @@ export function FileTray({ files, onUpdateFiles }: FileTrayProps) {
         });
 
         const droppedFiles = await Promise.all(droppedFilesPromises);
-
-        const updated = [...files, ...droppedFiles];
-        onUpdateFiles(updated);
-    }, [files, onUpdateFiles]);
+        addFiles(droppedFiles);
+    }, [addFiles]);
 
     const handleWheel = useCallback((e: React.WheelEvent) => {
         // Stop propagation of vertical scroll to prevent closing the island
@@ -88,10 +85,11 @@ export function FileTray({ files, onUpdateFiles }: FileTrayProps) {
         e.stopPropagation();
     }, []);
 
-    const removeFile = useCallback((indexToRemove: number) => {
-        const updated = files.filter((_, index) => index !== indexToRemove);
-        onUpdateFiles(updated);
-    }, [files, onUpdateFiles]);
+    const removeFile = useCallback((file: FileItem) => {
+        if (file.path) {
+            removeFileByPath(file.path);
+        }
+    }, [removeFileByPath]);
 
 
     const handleFileClick = useCallback(async (file: FileItem) => {
@@ -144,7 +142,7 @@ export function FileTray({ files, onUpdateFiles }: FileTrayProps) {
         });
     };
 
-    const handleNativeDrag = useCallback(async (_e: React.MouseEvent, file: FileItem, index: number) => {
+    const handleNativeDrag = useCallback(async (_e: React.MouseEvent, file: FileItem) => {
         const path = file.resolvedPath || file.path;
         if (path) {
             invoke('trigger_haptics').catch(console.error);
@@ -172,14 +170,13 @@ export function FileTray({ files, onUpdateFiles }: FileTrayProps) {
                 });
 
                 // If we get here, drag completed successfully - remove file from tray
-                const updated = files.filter((_, i) => i !== index);
-                onUpdateFiles(updated);
+                removeFileByPath(path);
             } catch (error) {
                 // Drag was cancelled or failed - file stays in tray
                 console.log('Drag cancelled or failed:', error);
             }
         }
-    }, [files, onUpdateFiles]);
+    }, [removeFileByPath]);
 
     const formatSize = (bytes: number) => {
         if (bytes === 0) return '';
@@ -188,8 +185,6 @@ export function FileTray({ files, onUpdateFiles }: FileTrayProps) {
         const i = Math.floor(Math.log(bytes) / Math.log(k));
         return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
     };
-
-
 
     return (
         <div
@@ -220,7 +215,7 @@ export function FileTray({ files, onUpdateFiles }: FileTrayProps) {
                                 animate={{ opacity: 1, scale: 1 }}
                                 exit={{ opacity: 0, scale: 0.8 }}
                                 transition={{ type: "spring", stiffness: 500, damping: 30 }}
-                                onMouseDown={(e) => handleNativeDrag(e, file, index)}
+                                onMouseDown={(e) => handleNativeDrag(e, file)}
                                 onClick={() => handleFileClick(file)}
                                 onContextMenu={(e) => handleFileContextMenu(e, file)}
                                 style={{ cursor: 'pointer', padding: '12px' }}
@@ -256,7 +251,7 @@ export function FileTray({ files, onUpdateFiles }: FileTrayProps) {
                                     }}
                                     onClick={(e) => {
                                         e.stopPropagation();
-                                        removeFile(index);
+                                        removeFile(file);
                                     }}
                                 >
                                     <IconX size={14} />
