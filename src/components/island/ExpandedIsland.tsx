@@ -138,7 +138,7 @@ export function ExpandedIsland({
                                 <widget.ExpandedComponent />
 
                             ))}
-                            <WidgetWrapper title="Notes" className="widget-card">
+                            <WidgetWrapper title="Notes">
 
                                 <textarea
                                     className="notes-field"
@@ -154,7 +154,8 @@ export function ExpandedIsland({
                     ) : (
                         <motion.div
                             key="files"
-                            className="file-tray-wrapper"
+                            className="flex-1 flex flex-col  overflow-hidden"
+                            style={{ padding: '20px' }}
                             initial={{ opacity: 0, x: 20 }}
                             animate={{ opacity: 1, x: 0 }}
                             exit={{ opacity: 0, x: 20 }}

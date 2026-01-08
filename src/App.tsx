@@ -4,6 +4,7 @@ import { NotificationProvider } from './context/NotificationContext';
 import { WidgetProvider } from './context/WidgetContext';
 import { TimerProvider } from './context/TimerContext';
 import { SessionProvider } from './context/SessionContext';
+import { PopoverStateProvider } from './context/PopoverStateContext';
 import { useReminders } from './hooks/useReminders';
 import './App.css';
 
@@ -49,8 +50,11 @@ function App() {
       <TimerProvider>
         <SessionProvider>
           <NotificationProvider>
-            <DynamicIsland />
-            <ReminderManager />
+            <PopoverStateProvider>
+              <DynamicIsland />
+              <ReminderManager />
+              <div id="popover-mount" style={{ position: 'fixed', inset: 0, zIndex: 99999, pointerEvents: 'none' }} />
+            </PopoverStateProvider>
           </NotificationProvider>
         </SessionProvider>
       </TimerProvider>

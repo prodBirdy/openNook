@@ -3,7 +3,6 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { useEffect, useState, useCallback, useRef, useMemo } from 'react';
 import { useNotchInfo } from '../hooks/useNotchInfo';
-import './DynamicIsland.css';
 import { CompactMedia } from './island/CompactMedia';
 import { CompactFiles } from './island/CompactFiles';
 import { CompactIdle } from './island/CompactIdle';
@@ -13,6 +12,7 @@ import { ExpandedIsland } from './island/ExpandedIsland';
 import { useWidgets } from '../context/WidgetContext';
 import { useTimerContext } from '../context/TimerContext';
 import { useSessionContext } from '../context/SessionContext';
+import { usePopoverStateOptional } from '../context/PopoverStateContext';
 
 import { useFileTray } from '../hooks/useFileTray';
 import { useMediaPlayer } from '../hooks/useMediaPlayer';
@@ -28,6 +28,7 @@ export function DynamicIsland() {
 
     const { timers } = useTimerContext();
     const { sessions } = useSessionContext();
+    const { isPopoverOpen } = usePopoverStateOptional();
     // Mode management
     const [preferredModeId, setPreferredModeId] = useState<string | null>(null);
     const [isInitialLaunch, setIsInitialLaunch] = useState(true);
@@ -293,7 +294,7 @@ export function DynamicIsland() {
 
         if (expanded) {
             width = windowSize.width - 40;
-            height = windowSize.height;
+            height = Math.min(windowSize.height, 250);
         } else if (isHovered) {
             if (mode === 'idle') {
                 width = baseNotchWidth + 30;
@@ -322,10 +323,11 @@ export function DynamicIsland() {
 
 
     useEffect(() => {
-        if (!isHovered && expanded && !isAnimating) {
+        // Don't auto-collapse if a popover (like date picker) is open
+        if (!isHovered && expanded && !isAnimating && !isPopoverOpen) {
             setExpanded(false);
         }
-    }, [isHovered, expanded, isAnimating]);
+    }, [isHovered, expanded, isAnimating, isPopoverOpen]);
 
     const handleWheel = useCallback((e: React.WheelEvent) => {
         if (!isAnimating) {
@@ -391,18 +393,22 @@ export function DynamicIsland() {
             const totalWidth = rect.width + 40;
             const x = rect.left - 20;
 
+            // If a popover is open, we need to extend the window height to prevent clipping.
+            // The calendar popover is roughly 350-400px.
+            const extraHeight = isPopoverOpen ? 420 : 0;
+
             invoke('update_ui_bounds', {
                 x,
                 y: rect.top,
                 width: totalWidth,
-                height: rect.height
+                height: rect.height + extraHeight
             }).catch(console.error);
         };
 
         // Single delayed update to catch animation completion
         const timeoutId = setTimeout(updateBounds, 350);
         return () => clearTimeout(timeoutId);
-    }, [targetWidth, targetHeight]);
+    }, [targetWidth, targetHeight, isPopoverOpen]);
 
     // Memoize spring transition
     const springTransition = useMemo(() => ({
@@ -439,6 +445,7 @@ export function DynamicIsland() {
                         style={{
                             width: '100%',
                             height: '100%',
+                            maxHeight: '250px',
                             display: 'flex',
                             alignItems: 'center',
                         }}
@@ -514,6 +521,7 @@ export function DynamicIsland() {
                     <ModeIndicator
                         availableModes={availableModes}
                         currentMode={mode}
+                        onModeChange={setPreferredModeId}
                     />
                 )}
             </motion.div >

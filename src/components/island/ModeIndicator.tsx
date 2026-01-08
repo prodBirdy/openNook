@@ -1,48 +1,43 @@
 import { motion } from 'motion/react';
+import { cn } from '@/lib/utils';
 
 interface ModeIndicatorProps {
     availableModes: string[];
     currentMode: string;
+    onModeChange: (mode: string) => void;
 }
 
-export function ModeIndicator({ availableModes, currentMode }: ModeIndicatorProps) {
+export function ModeIndicator({ availableModes, currentMode, onModeChange }: ModeIndicatorProps) {
     if (availableModes.length <= 1) return null;
 
     return (
-        <div
-            style={{
-                position: 'absolute',
-                bottom: '4px',
-                left: '50%',
-                transform: 'translateX(-50%)',
-                display: 'flex',
-                gap: '4px',
-                alignItems: 'center',
-                pointerEvents: 'none',
-            }}
-        >
+        <div className="absolute bottom-1 left-1/2 gap-1 -translate-x-1/2 flex items-center">
             {availableModes.map((mode) => {
                 const isActive = mode === currentMode;
                 return (
-                    <motion.div
+                    <button
                         key={mode}
-                        style={{
-                            width: isActive ? '5px' : '4px',
-                            height: isActive ? '5px' : '4px',
-                            borderRadius: '50%',
-                            backgroundColor: isActive
-                                ? 'rgba(255, 255, 255, 0.9)'
-                                : 'rgba(255, 255, 255, 0.3)',
+                        onClick={(e) => {
+                            e.stopPropagation();
+                            onModeChange(mode);
                         }}
-                        animate={{
-                            scale: isActive ? 1 : 0.8,
-                        }}
-                        transition={{
-                            type: 'spring',
-                            stiffness: 300,
-                            damping: 20,
-                        }}
-                    />
+                        className=" cursor-pointer group outline-none"
+                    >
+                        <motion.div
+                            className={cn(
+                                "rounded-full duration-200 ease-[cubic-bezier(0.25,0.1,0.25,1)]",
+                                isActive ? "w-[8px] h-[4px] bg-white/90" : "w-[4px] h-[4px] bg-white/30 group-hover:bg-white/50"
+                            )}
+                            animate={{
+                                width: isActive ? 8 : 4,
+                            }}
+                            transition={{
+                                type: 'spring',
+                                stiffness: 300,
+                                damping: 20,
+                            }}
+                        />
+                    </button>
                 );
             })}
         </div>

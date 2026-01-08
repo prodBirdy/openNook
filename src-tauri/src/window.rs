@@ -105,7 +105,7 @@ impl Default for WindowSettings {
     fn default() -> Self {
         Self {
             extra_width: 400.0,
-            extra_height: 200.0,
+            extra_height: 800.0,
         }
     }
 }
@@ -235,13 +235,13 @@ fn get_screen_info(app_handle: Option<&tauri::AppHandle>) -> (f64, f64, f64, f64
     {
         // Try to get from app handle if available
         if let Some(handle) = app_handle {
-             if let Ok(Some(monitor)) = handle.primary_monitor() {
-                 let size = monitor.size();
-                 let scale_factor = monitor.scale_factor();
-                 let width = size.width as f64 / scale_factor;
-                 let height = size.height as f64 / scale_factor;
-                 return (width, height, 0.0, 0.0);
-             }
+            if let Ok(Some(monitor)) = handle.primary_monitor() {
+                let size = monitor.size();
+                let scale_factor = monitor.scale_factor();
+                let width = size.width as f64 / scale_factor;
+                let height = size.height as f64 / scale_factor;
+                return (width, height, 0.0, 0.0);
+            }
         }
         (1920.0, 1080.0, 0.0, 0.0)
     }
@@ -266,7 +266,8 @@ pub fn get_system_accent_color() -> String {
 /// Get notch information from the main screen using NSScreen.safeAreaInsets (macOS 12.0+)
 #[tauri::command]
 pub fn get_notch_info(app_handle: tauri::AppHandle) -> Option<NotchInfo> {
-    let (screen_width, screen_height, notch_height, notch_width) = get_screen_info(Some(&app_handle));
+    let (screen_width, screen_height, notch_height, notch_width) =
+        get_screen_info(Some(&app_handle));
     let has_notch = notch_height > 0.0;
     let visible_height = screen_height - notch_height;
 
@@ -283,7 +284,8 @@ pub fn get_notch_info(app_handle: tauri::AppHandle) -> Option<NotchInfo> {
 /// Position the window at the notch location (centered at top of screen)
 #[tauri::command]
 pub fn position_at_notch(window: Window) -> Result<(), String> {
-    let (screen_width, _screen_height, _notch_height, notch_width) = get_screen_info(Some(window.app_handle()));
+    let (screen_width, _screen_height, _notch_height, notch_width) =
+        get_screen_info(Some(window.app_handle()));
 
     // Use notch width if available, otherwise fall back to current window width
     let target_width = if notch_width > 0.0 {
@@ -309,7 +311,8 @@ pub fn position_at_notch(window: Window) -> Result<(), String> {
 /// The window is positioned at y=0 (top of screen) to overlap with the notch
 #[tauri::command]
 pub fn fit_to_notch(window: Window, width: f64, height: f64) -> Result<(), String> {
-    let (screen_width, _screen_height, _notch_height, _notch_width) = get_screen_info(Some(window.app_handle()));
+    let (screen_width, _screen_height, _notch_height, _notch_width) =
+        get_screen_info(Some(window.app_handle()));
 
     // Resize the window
     window
@@ -368,7 +371,8 @@ pub fn update_window_settings(
 /// Set up the window with a fixed size based on notch dimensions and settings.
 /// The window always uses: width = (notch_width + 160) + extra_width, height = notch_height + extra_height
 pub fn setup_fixed_window_size(window: &WebviewWindow) -> Result<(), String> {
-    let (screen_width, _screen_height, notch_height, notch_width) = get_screen_info(Some(window.app_handle()));
+    let (screen_width, _screen_height, notch_height, notch_width) =
+        get_screen_info(Some(window.app_handle()));
     let settings = get_window_settings();
 
     // Calculate fixed window dimensions
@@ -433,9 +437,9 @@ pub fn activate_window(window: Window) -> Result<(), String> {
 
     #[cfg(target_os = "windows")]
     {
-        use windows::Win32::UI::WindowsAndMessaging::SetForegroundWindow;
-        use windows::Win32::Foundation::HWND;
         use raw_window_handle::HasWindowHandle;
+        use windows::Win32::Foundation::HWND;
+        use windows::Win32::UI::WindowsAndMessaging::SetForegroundWindow;
 
         if let Ok(handle) = window.window_handle() {
             if let raw_window_handle::RawWindowHandle::Win32(win32_handle) = handle.as_raw() {
@@ -480,7 +484,8 @@ pub fn setup_mouse_monitoring(app_handle: tauri::AppHandle) {
     static IS_INSIDE: AtomicBool = AtomicBool::new(false);
 
     // Get initial screen info
-    let (screen_width, screen_height, notch_height, notch_width) = get_screen_info(Some(&app_handle));
+    let (screen_width, screen_height, notch_height, notch_width) =
+        get_screen_info(Some(&app_handle));
 
     // Pre-compute window position (window is centered at top)
     let settings = get_window_settings();
@@ -601,17 +606,22 @@ pub fn setup_mouse_monitoring(app_handle: tauri::AppHandle) {
 
 #[cfg(target_os = "windows")]
 pub fn setup_mouse_monitoring(app_handle: tauri::AppHandle) {
-    use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
     use windows::Win32::Foundation::POINT;
+    use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
 
     // Track whether mouse is currently in the UI area
     static IS_INSIDE: AtomicBool = AtomicBool::new(false);
 
-    let (screen_width, _screen_height, notch_height, notch_width) = get_screen_info(Some(&app_handle));
+    let (screen_width, _screen_height, notch_height, notch_width) =
+        get_screen_info(Some(&app_handle));
 
     // Pre-compute window position (window is centered at top)
     let settings = get_window_settings();
-    let win_width = if notch_width > 0.0 { notch_width + 160.0 + settings.extra_width } else { 800.0 + settings.extra_width }; // Fallback width
+    let win_width = if notch_width > 0.0 {
+        notch_width + 160.0 + settings.extra_width
+    } else {
+        800.0 + settings.extra_width
+    }; // Fallback width
     let window_x = (screen_width - win_width) / 2.0;
 
     std::thread::spawn(move || {
@@ -628,11 +638,7 @@ pub fn setup_mouse_monitoring(app_handle: tauri::AppHandle) {
                 let was_inside = IS_INSIDE.load(Ordering::Relaxed);
 
                 // Logic adapted from macOS version
-                 let padding = if was_inside {
-                    30.0
-                } else {
-                    20.0
-                };
+                let padding = if was_inside { 30.0 } else { 20.0 };
 
                 let in_ui_area = if let Ok(guard) = get_ui_bounds_store().try_read() {
                     if let Some(bounds) = *guard {
@@ -644,13 +650,13 @@ pub fn setup_mouse_monitoring(app_handle: tauri::AppHandle) {
                             && mouse_y <= (sy + bounds.height + padding)
                     } else {
                         // Fallback zone at top center
-                         mouse_x >= (window_x - padding)
+                        mouse_x >= (window_x - padding)
                             && mouse_x <= (window_x + win_width + padding)
                             && mouse_y >= 0.0
                             && mouse_y <= (100.0 + padding)
                     }
                 } else {
-                     mouse_x >= (window_x - padding)
+                    mouse_x >= (window_x - padding)
                         && mouse_x <= (window_x + win_width + padding)
                         && mouse_y >= 0.0
                         && mouse_y <= (100.0 + padding)
@@ -662,25 +668,26 @@ pub fn setup_mouse_monitoring(app_handle: tauri::AppHandle) {
 
                     if let Some(window) = app_handle.get_webview_window("main") {
                         let _ = window.set_ignore_cursor_events(false);
-                         // Activate window
-                         use windows::Win32::UI::WindowsAndMessaging::SetForegroundWindow;
-                         use windows::Win32::Foundation::HWND;
-                         use raw_window_handle::HasWindowHandle;
+                        // Activate window
+                        use raw_window_handle::HasWindowHandle;
+                        use windows::Win32::Foundation::HWND;
+                        use windows::Win32::UI::WindowsAndMessaging::SetForegroundWindow;
 
-                         if let Ok(handle) = window.window_handle() {
-                             if let raw_window_handle::RawWindowHandle::Win32(win32_handle) = handle.as_raw() {
-                                 unsafe {
-                                     let hwnd = HWND(win32_handle.hwnd.get() as _);
-                                     SetForegroundWindow(hwnd);
-                                 }
-                             }
-                         }
+                        if let Ok(handle) = window.window_handle() {
+                            if let raw_window_handle::RawWindowHandle::Win32(win32_handle) =
+                                handle.as_raw()
+                            {
+                                unsafe {
+                                    let hwnd = HWND(win32_handle.hwnd.get() as _);
+                                    SetForegroundWindow(hwnd);
+                                }
+                            }
+                        }
                     }
-
                 } else if !in_ui_area && was_inside {
                     IS_INSIDE.store(false, Ordering::Relaxed);
                     let _ = app_handle.emit("mouse-exited-notch", ());
-                     if let Some(window) = app_handle.get_webview_window("main") {
+                    if let Some(window) = app_handle.get_webview_window("main") {
                         let _ = window.set_ignore_cursor_events(true);
                     }
                 }

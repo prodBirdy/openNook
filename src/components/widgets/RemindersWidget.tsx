@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { IconRefresh, IconPlus, IconChecklist } from '@tabler/icons-react';
+import { z } from 'zod';
 import { registerWidget } from './WidgetRegistry';
 import { WidgetWrapper } from './WidgetWrapper';
 import { WidgetAddDialog } from './WidgetAddDialog';
@@ -14,6 +15,14 @@ interface Reminder {
     list_name: string;
     list_color: string;
 }
+
+// Zod schema for reminder form
+const reminderFormSchema = z.object({
+    title: z.string().min(1, "Title is required"),
+    dueDate: z.string().optional(),
+});
+
+type ReminderFormValues = z.infer<typeof reminderFormSchema>;
 
 export function RemindersWidget() {
     const [reminders, setReminders] = useState<Reminder[]>([]);
@@ -45,37 +54,30 @@ export function RemindersWidget() {
         invoke('complete_reminder', { id });
     };
 
-    const handleCreateReminder = (e: React.FormEvent) => {
-        e.preventDefault();
-        const form = e.target as HTMLFormElement;
-        const formData = new FormData(form);
-        const title = formData.get('title') as string;
-        const dueDateStr = formData.get('due_date') as string;
-
+    const handleCreateReminder = (data: ReminderFormValues) => {
         let dueDate = null;
-        if (dueDateStr) {
-            dueDate = new Date(dueDateStr).getTime() / 1000;
+        if (data.dueDate) {
+            dueDate = new Date(data.dueDate).getTime() / 1000;
         }
 
-        console.log("Creating reminder:", { title, dueDate });
+        console.log("Creating reminder:", { title: data.title, dueDate });
 
         // Ensure we match the Rust argument names strictly (snake_case)
-        invoke('create_reminder', { title, dueDate: dueDate })
+        return invoke('create_reminder', { title: data.title, dueDate: dueDate })
             .then(() => {
                 console.log("Reminder created successfully");
-                setShowAddDialog(false);
                 fetchReminders(true);
             })
             .catch(err => {
                 console.error("Failed to create reminder:", err);
-                alert(`Failed to create reminder: ${err}`);
+                throw err; // Re-throw to prevent dialog from closing
             });
     };
 
     if (loading && !isRefreshing && reminders.length === 0) return <div className="widget-placeholder">Loading...</div>;
 
     const headerActions = [
-        <div style={{ display: 'flex', gap: 4 }}>
+        <div key="actions" style={{ display: 'flex', gap: 4 }}>
             <button
                 className="icon-button"
                 onClick={(e) => { e.stopPropagation(); setShowAddDialog(true); }}
@@ -91,57 +93,60 @@ export function RemindersWidget() {
         </div>
     ]
 
+    // Get default date-time for the form (now)
+    const getDefaultDateTime = () => {
+        const now = new Date();
+        now.setMinutes(now.getMinutes() - now.getTimezoneOffset());
+        return now.toISOString().slice(0, 16);
+    };
 
     return (
         <WidgetWrapper title="Reminders" headerActions={headerActions} className="reminders-widget" >
-            {showAddDialog ? (
-                <WidgetAddDialog
-                    title="New Reminder"
-                    onClose={() => setShowAddDialog(false)}
-                    onSubmit={handleCreateReminder}
-                    submitLabel="Add"
-                    mainInput={{
-                        name: "title",
-                        placeholder: "Title",
+            <WidgetAddDialog
+                open={showAddDialog}
+                onOpenChange={setShowAddDialog}
+                title="New Reminder"
+                schema={reminderFormSchema}
+                defaultValues={{ title: '', dueDate: getDefaultDateTime() }}
+                onSubmit={handleCreateReminder}
+                fields={[
+                    {
+                        name: 'title',
+                        label: 'Title',
+                        placeholder: 'Reminder title',
+                        icon: <IconChecklist size={18} className="text-primary" />,
+                        autoFocus: true,
                         required: true,
-                        icon: <IconChecklist size={18} color="var(--accent-color)" />
-                    }}
-                >
-                    <div className="form-row">
-                        <label>Due</label>
-                        <input
-                            name="due_date"
-                            type="datetime-local"
-                            className="form-input"
-                            defaultValue={new Date().toISOString().slice(0, 16)}
-                        />
-                    </div>
-                </WidgetAddDialog>
-            ) : (
-                <>
+                    },
+                    {
+                        name: 'dueDate',
+                        label: 'Due Date',
+                        type: 'datetime-local',
+                    },
+                ]}
+                submitLabel="Add Reminder"
+            />
 
-                    {reminders.length === 0 ? (
-                        <div className="no-events-message">No reminders</div>
-                    ) : (
-                        <div className="reminders-list" >
-                            {reminders.slice(0, 10).map(rem => (
-                                <div className="reminder-item-modern" key={rem.id}>
-                                    <div
-                                        className="reminder-checkbox-circle"
-                                        style={{ borderColor: rem.list_color || 'var(--accent-color)' }}
-                                        onClick={(e) => { e.stopPropagation(); toggleReminder(rem.id); }}
-                                    >
-                                        <div className="reminder-checkbox-inner" style={{ backgroundColor: rem.list_color || 'var(--accent-color)' }} />
-                                    </div>
-                                    <div className="reminder-content">
-                                        <div className="reminder-title">{rem.title}</div>
-                                        <div className="reminder-list-name" style={{ color: rem.list_color || 'var(--accent-color)' }}>{rem.list_name}</div>
-                                    </div>
-                                </div>
-                            ))}
+            {reminders.length === 0 ? (
+                <div className="no-events-message">No reminders</div>
+            ) : (
+                <div className="reminders-list" >
+                    {reminders.slice(0, 10).map(rem => (
+                        <div className="reminder-item-modern" key={rem.id}>
+                            <div
+                                className="reminder-checkbox-circle"
+                                style={{ borderColor: rem.list_color || 'var(--accent-color)' }}
+                                onClick={(e) => { e.stopPropagation(); toggleReminder(rem.id); }}
+                            >
+                                <div className="reminder-checkbox-inner" style={{ backgroundColor: rem.list_color || 'var(--accent-color)' }} />
+                            </div>
+                            <div className="reminder-content">
+                                <div className="reminder-title">{rem.title}</div>
+                                <div className="reminder-list-name" style={{ color: rem.list_color || 'var(--accent-color)' }}>{rem.list_name}</div>
+                            </div>
                         </div>
-                    )}
-                </>
+                    ))}
+                </div>
             )}
         </WidgetWrapper>
     );

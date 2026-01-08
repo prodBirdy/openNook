@@ -137,25 +137,6 @@
     font-size: 14px;
 }
 
-/* Visualizer */
-.audio-visualizer {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    gap: 2.5px;
-    height: 20px;
-    padding-right: 4px;
-}
-
-.visualizer-bar {
-    width: 3.5px;
-    height: 100%;
-    /* Gradient from light grey to white to match the reference "active" look */
-    background: #e1e1e1;
-    border-radius: 4px;
-    opacity: 0.9;
-    box-shadow: 0 0 2px rgba(255, 255, 255, 0.1);
-}
 
 /* Spacer */
 .media-spacer {
@@ -262,9 +243,10 @@
 .expanded-content {
     width: 100%;
     height: 100%;
+    max-height: 250px;
     display: flex;
     flex-direction: column;
-    padding: 0;
+
     box-sizing: border-box;
     color: white;
 }
@@ -320,23 +302,7 @@
     align-items: stretch;
 }
 
-/* Common Widget Card Style */
-.widget-card {
-    height: 100%;
-    flex: 1;
-    min-width: 300px;
-    border-radius: 28px;
-    background: linear-gradient(135deg, rgba(30, 30, 32, 0.7) 0%, rgba(20, 20, 22, 0.8) 100%);
-    backdrop-filter: blur(30px) saturate(200%);
-    -webkit-backdrop-filter: blur(30px) saturate(200%);
-    border: 1px solid rgba(255, 255, 255, 0.08);
-    box-shadow:
-        0 8px 32px rgba(0, 0, 0, 0.4),
-        inset 0 0 0 1px rgba(255, 255, 255, 0.05);
-    display: flex;
-    flex-direction: column;
-    overflow: hidden;
-}
+
 
 /* Hide scrollbar for cleaner look */
 .widgets-container::-webkit-scrollbar {
@@ -563,18 +529,7 @@
     justify-content: center;
 }
 
-/* Widget Headers */
-.widget-header {
-    margin-bottom: 0px;
-    font-size: 17px;
-    color: rgba(255, 255, 255, 0.95);
-    font-weight: 600;
-    font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', sans-serif;
-    letter-spacing: -0.01em;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-}
+
 
 /* Calendar Widget */
 .calendar-widget {
@@ -749,164 +704,6 @@
 
 .tab-pill-option.active {
     color: white;
-}
-
-/* File Tray */
-.file-tray-wrapper {
-    width: 100%;
-    height: 100%;
-    display: flex;
-    flex-direction: column;
-    padding: 20px;
-    box-sizing: border-box;
-    overflow: hidden;
-}
-
-.file-tray-container {
-    flex: 1;
-    background: rgba(255, 255, 255, 0.05);
-    border-radius: 16px;
-    border: 2px dashed rgba(255, 255, 255, 0.1);
-    position: relative;
-    overflow: hidden;
-    transition: all 0.2s ease;
-}
-
-.file-tray-container.dragging {
-    background: rgba(255, 255, 255, 0.15);
-    border-color: rgba(255, 255, 255, 0.5);
-    transform: scale(1.02);
-    box-shadow: 0 0 20px rgba(255, 255, 255, 0.1);
-}
-
-.empty-tray-state {
-    width: 100%;
-    height: 100%;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    color: rgba(255, 255, 255, 0.4);
-    gap: 12px;
-}
-
-.empty-tray-state p {
-    font-size: 14px;
-    margin: 0;
-}
-
-.file-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(100px, 1fr));
-    gap: 12px;
-    padding: 12px;
-    overflow-y: auto;
-    height: 100%;
-    box-sizing: border-box;
-}
-
-.file-item {
-    background: rgba(255, 255, 255, 0.08);
-    max-height: 100%;
-    border-radius: 12px;
-    padding: 12px;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: 8px;
-    position: relative;
-    cursor: grab;
-    transition: background 0.2s ease;
-}
-
-.file-item:hover {
-    background: rgba(255, 255, 255, 0.12);
-}
-
-.file-icon-wrapper {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    background: rgba(255, 255, 255, 0.05);
-    border-radius: 8px;
-    width: 100%;
-    aspect-ratio: 1;
-    overflow: hidden;
-}
-
-.file-info {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    width: 100%;
-    gap: 2px;
-}
-
-.file-name {
-    font-size: 12px;
-    color: rgba(255, 255, 255, 0.9);
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    width: 100%;
-    text-align: center;
-}
-
-.file-size {
-    font-size: 10px;
-    color: rgba(255, 255, 255, 0.5);
-}
-
-.remove-file-btn {
-    position: absolute;
-    top: 4px;
-    right: 4px;
-    width: 20px;
-    height: 20px;
-    border-radius: 50%;
-    background: rgba(0, 0, 0, 0.3);
-    border: none;
-    color: white;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    cursor: pointer;
-    opacity: 0;
-    transition: opacity 0.2s ease;
-}
-
-.file-item:hover .remove-file-btn {
-    opacity: 1;
-}
-
-.remove-file-btn:hover {
-    background: rgba(255, 59, 48, 0.8);
-}
-
-.drag-overlay {
-    position: absolute;
-    top: 0;
-    left: 0;
-    right: 0;
-    bottom: 0;
-    background: rgba(0, 0, 0, 0.6);
-    backdrop-filter: blur(4px);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    z-index: 10;
-    pointer-events: none;
-}
-
-/* Apple-style Widget Enhancements */
-.apple-style {
-    font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', sans-serif;
-}
-
-.apple-style .widget-header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
 }
 
 .refresh-button.spinning {
@@ -1395,7 +1192,6 @@
     background: rgba(118, 118, 128, 0.24);
     border: none;
     border-radius: 10px;
-    padding: 0 12px;
     height: 36px;
     color: white;
     font-size: 16px;
@@ -1472,13 +1268,7 @@
     overflow: hidden;
 }
 
-/* Minimal Header */
-.widget-header.minimal {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    margin-bottom: 20px;
-}
+
 
 .icon-button {
     background: transparent;
@@ -1961,30 +1751,7 @@
     color: white;
 }
 
-/* ===== Widget Wrapper Styles ===== */
-.widget-wrapper {
-    display: flex;
-    flex-direction: column;
-    padding: 12px;
-    height: 100%;
-    box-sizing: border-box;
-    overflow: hidden;
-    position: relative;
-}
 
-.widget-wrapper .widget-header-actions {
-    display: flex;
-    align-items: center;
-    gap: 5px;
-}
-
-.widget-wrapper .widget-body {
-    flex: 1;
-    display: flex;
-    flex-direction: column;
-    overflow: hidden;
-    min-height: 0;
-}
 
 .timers-list.minimal-list .section-label {
     font-size: 13px;
