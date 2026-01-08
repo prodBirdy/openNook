@@ -37,7 +37,6 @@ const TIMER_STORAGE_KEY = 'timer-instances';
 const TIMER_STATE_CHANGED_EVENT = 'timer-state-changed';
 const senderId = Math.random().toString(36).substring(7);
 
-let _isExternalUpdate = false;
 let tickInterval: ReturnType<typeof setInterval> | null = null;
 
 export const useTimerStore = create<TimerStore>((set, get) => ({
@@ -189,9 +188,7 @@ export const useTimerStore = create<TimerStore>((set, get) => ({
                 if (event.payload.senderId === senderId) return;
 
                 console.log('Received timer state update from other window');
-                _isExternalUpdate = true;
                 get().setTimers(event.payload.timers);
-                setTimeout(() => { _isExternalUpdate = false; }, 100);
             }
         );
 

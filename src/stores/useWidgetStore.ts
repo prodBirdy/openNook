@@ -8,8 +8,6 @@ const INSTANCES_STORAGE_KEY = 'widget-instances';
 const WIDGET_STATE_CHANGED_EVENT = 'widget-state-changed';
 const senderId = Math.random().toString(36).substring(7);
 
-let _isExternalUpdate = false;
-
 interface WidgetState {
     widgets: WidgetManifest[];
     enabledState: WidgetEnabledState;
@@ -175,7 +173,6 @@ export const useWidgetStore = create<WidgetStore>((set, get) => ({
                 if (event.payload.senderId === senderId) return;
 
                 console.log('Received widget state update from other window');
-                _isExternalUpdate = true;
 
                 const { widgets } = get();
                 const merged: WidgetEnabledState = {};
@@ -183,8 +180,6 @@ export const useWidgetStore = create<WidgetStore>((set, get) => ({
                     merged[w.id] = event.payload.enabled[w.id] ?? get().enabledState[w.id];
                 });
                 get().setEnabledState(merged);
-
-                setTimeout(() => { _isExternalUpdate = false; }, 100);
             }
         );
 

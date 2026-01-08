@@ -35,7 +35,7 @@ const SESSION_STORAGE_KEY = 'session-instances';
 const SESSION_STATE_CHANGED_EVENT = 'session-state-changed';
 const senderId = Math.random().toString(36).substring(7);
 
-let _isExternalUpdate = false;
+
 let tickInterval: ReturnType<typeof setInterval> | null = null;
 let forceUpdateCallback: (() => void) | null = null;
 
@@ -142,9 +142,7 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
                 if (event.payload.senderId === senderId) return;
 
                 console.log('Received session state update from other window');
-                _isExternalUpdate = true;
                 get().setSessions(event.payload.sessions);
-                setTimeout(() => { _isExternalUpdate = false; }, 100);
             }
         );
 

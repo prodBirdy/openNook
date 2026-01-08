@@ -4,6 +4,7 @@ import { IconPlayerSkipBackFilled, IconPlayerPlayFilled, IconPlayerPauseFilled, 
 import { getDominantColor } from '../../utils/imageUtils';
 import { WidgetWrapper } from '../widgets/WidgetWrapper';
 import { useMediaPlayerStore } from '../../stores/useMediaPlayerStore';
+import { ScrollingText } from '../ui/scrolling-text';
 
 // Memoized ExpandedMedia component
 export const ExpandedMedia = memo(function ExpandedMedia() {
@@ -103,9 +104,13 @@ export const ExpandedMedia = memo(function ExpandedMedia() {
                     <div className="w-full h-full bg-linear-to-br from-[#2a2a2a] to-[#1a1a1a] flex items-center justify-center border border-white/10" />
                 )}
             </div>
-            <div className="flex-1 flex flex-col justify-center text-left overflow-hidden">
-                <h3 className="text-[17px] font-semibold mb-[3px] pr-[4px] whitespace-nowrap overflow-hidden text-ellipsis text-white tracking-[-0.01em]">{nowPlaying.title || 'Unknown Title'}</h3>
-                <p className="text-[13px] text-white/60 m-0 whitespace-nowrap overflow-hidden text-ellipsis">{nowPlaying.artist || 'Unknown Artist'}</p>
+            <div className="w-full flex-1 flex flex-col justify-center text-left overflow-hidden min-w-0 ">
+                <ScrollingText className="text-[17px] font-semibold  text-white tracking-[-0.01em]">
+                    {nowPlaying.title || 'Unknown Title'}
+                </ScrollingText>
+                <ScrollingText className="text-[13px] text-white/60 m-0">
+                    {nowPlaying.artist || 'Unknown Artist'}
+                </ScrollingText>
             </div>
         </>
     ]
