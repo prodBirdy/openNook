@@ -33,12 +33,9 @@ function formatTime(seconds: number, compact = false): string {
 
     if (compact) {
         if (h > 0) {
-            return m > 0 ? `${h}h${m.toString().padStart(2, '0')}` : `${h}h`;
+            return `${h}:${m.toString().padStart(2, '0')}`;
         }
-        if (m > 0) {
-            return `${m}m${s.toString().padStart(2, '0')}`;
-        }
-        return `${s}s`;
+        return `${m}:${s.toString().padStart(2, '0')}`;
     }
 
     if (h > 0) {
