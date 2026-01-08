@@ -179,7 +179,7 @@ pub fn update_ui_bounds(x: f64, y: f64, width: f64, height: f64) -> Result<(), S
 
 /// Get screen dimensions
 /// Returns (screen_width, screen_height, notch_height, notch_width)
-fn get_screen_info(app_handle: Option<&tauri::AppHandle>) -> (f64, f64, f64, f64) {
+fn get_screen_info(_app_handle: Option<&tauri::AppHandle>) -> (f64, f64, f64, f64) {
     #[cfg(target_os = "macos")]
     {
         // Define our own CGSize/CGRect to avoid deprecated cocoa crate fields

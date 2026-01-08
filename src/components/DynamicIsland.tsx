@@ -1,7 +1,7 @@
 import { motion, AnimatePresence } from 'motion/react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
-import { useEffect, useState, useCallback, useRef, useMemo } from 'react';
+import { useEffect, useCallback, useRef, useMemo } from 'react';
 import { useNotchInfo } from '../hooks/useNotchInfo';
 import { CompactMedia } from './island/CompactMedia';
 import { CompactFiles } from './island/CompactFiles';
@@ -16,8 +16,7 @@ import { usePopoverStateOptional } from '../context/PopoverStateContext';
 
 import { useFileTray } from '../hooks/useFileTray';
 import { useMediaPlayer } from '../hooks/useMediaPlayer';
-
-// artworkColorCache moved to useMediaPlayer
+import { useDynamicIslandStore } from '../stores/useDynamicIslandStore';
 
 export function DynamicIsland() {
     const { notchInfo } = useNotchInfo();
@@ -29,29 +28,35 @@ export function DynamicIsland() {
     const { timers } = useTimerContext();
     const { sessions } = useSessionContext();
     const { isPopoverOpen } = usePopoverStateOptional();
-    // Mode management
-    const [preferredModeId, setPreferredModeId] = useState<string | null>(null);
-    const [isInitialLaunch, setIsInitialLaunch] = useState(true);
 
-    // State
-    const [isHovered, setIsHovered] = useState(false);
-    const [expanded, setExpanded] = useState(false);
-    const [isAnimating, setIsAnimating] = useState(false);
-    const [notes, setNotes] = useState('');
-    const [activeTab, setActiveTab] = useState<'widgets' | 'files'>('widgets');
-    const [windowSize, setWindowSize] = useState({ width: window.innerWidth, height: window.innerHeight });
+    // Zustand store
+    const {
+        preferredModeId,
+        setPreferredModeId,
+        isInitialLaunch,
+        setIsInitialLaunch,
+        isHovered,
+        setIsHovered,
+        expanded,
+        setExpanded,
+        isAnimating,
+        setIsAnimating,
+        activeTab,
+        setActiveTab,
+        notes,
+        setNotes,
+        loadNotes,
+        saveNotes,
+        windowSize,
+        setWindowSize,
+        settings,
+        loadSettings,
+        lastModeCycleTime,
+        setLastModeCycleTime,
+    } = useDynamicIslandStore();
 
     const islandRef = useRef<HTMLDivElement>(null);
     const notesTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-    const [settings, setSettings] = useState({
-        showCalendar: false,
-        showReminders: false,
-        showMedia: true,
-        baseWidth: 160,
-        baseHeight: 38,
-        liquidGlassMode: false,
-    });
-    const lastModeCycleRef = useRef<number>(0);
     const prevHasMediaRef = useRef<boolean>(false);
     const prevHasFilesRef = useRef<boolean>(false);
 
@@ -77,11 +82,6 @@ export function DynamicIsland() {
 
         // 1. Add enabled compact widgets
         enabledCompactWidgets.forEach(widget => {
-            // Check if widget needs to be "active" to show (like timer)
-            // or if it should always show when enabled (like weather maybe?)
-
-            // For now, check if legacy Timer/Session context has active items
-            // This is a bridge until all state moves to WidgetContext completely
             let isActive = false;
 
             if (widget.id === 'timer') {
@@ -89,7 +89,6 @@ export function DynamicIsland() {
             } else if (widget.id === 'session') {
                 isActive = hasActiveInstance('session') || sessions.some(s => s.isActive);
             } else {
-                // Default to showing if enabled
                 isActive = true;
             }
 
@@ -105,8 +104,8 @@ export function DynamicIsland() {
         if (hasMedia) modes.push({ id: 'media', priority: 50 });
         if (hasFiles) modes.push({ id: 'files', priority: 80 });
 
-        modes.push({ id: 'onboard', priority: 200 }); // Always include onboard
-        modes.push({ id: 'idle', priority: 999 });    // Always include idle
+        modes.push({ id: 'onboard', priority: 200 });
+        modes.push({ id: 'idle', priority: 999 });
 
         // Sort by priority (lower is better)
         return modes.sort((a, b) => a.priority - b.priority).map(m => m.id);
@@ -115,8 +114,6 @@ export function DynamicIsland() {
     const activeModeId = useMemo(() => {
         if (preferredModeId && availableModes.includes(preferredModeId)) return preferredModeId;
 
-        // If preferred mode is not available, pick the highest priority available mode
-        // (which is the first one in the sorted availableModes array)
         if (availableModes.length > 0) return availableModes[0];
 
         return 'idle';
@@ -138,37 +135,34 @@ export function DynamicIsland() {
         const newMode = availableModes[nextIndex];
         setPreferredModeId(newMode);
         invoke('trigger_haptics').catch(console.error);
-    }, [availableModes, activeModeId]);
+    }, [availableModes, activeModeId, setPreferredModeId]);
 
     // Initial launch: keep onboard mode for 10 seconds
     useEffect(() => {
         const timer = setTimeout(() => {
             setIsInitialLaunch(false);
-        }, 10000); // 10 seconds
+        }, 10000);
 
         return () => clearTimeout(timer);
-    }, []);
+    }, [setIsInitialLaunch]);
 
     // Toggle expanded mode
     const handleIslandClick = useCallback(() => {
         setExpanded(prev => {
             if (!prev) {
-                // Expanding
                 setIsAnimating(true);
-                // Set initial tab based on current mode
                 if (mode === 'files') {
                     setActiveTab('files');
                 } else {
                     setActiveTab('widgets');
                 }
                 invoke('trigger_haptics').catch(console.error);
-
             } else {
                 invoke('trigger_haptics').catch(console.error);
             }
             return !prev;
         });
-    }, [mode]);
+    }, [mode, setExpanded, setIsAnimating, setActiveTab]);
 
     // Hover handlers for haptics
     const handleHoverStart = useCallback(() => {
@@ -184,10 +178,9 @@ export function DynamicIsland() {
             clearTimeout(notesTimeoutRef.current);
         }
         notesTimeoutRef.current = setTimeout(() => {
-            invoke('save_notes', { notes: value })
-                .catch(err => console.error('Failed to save notes:', err));
+            saveNotes(value);
         }, 500);
-    }, []);
+    }, [setNotes, saveNotes]);
 
     const handleNotesClick = useCallback((e: React.MouseEvent) => {
         e.stopPropagation();
@@ -196,9 +189,7 @@ export function DynamicIsland() {
     // Initialization and listeners
     useEffect(() => {
         // Load notes
-        invoke<string>('load_notes')
-            .then(setNotes)
-            .catch(err => console.error('Failed to load notes:', err));
+        loadNotes();
 
         // Window resize handler with throttling
         let resizeTimeout: ReturnType<typeof setTimeout> | null = null;
@@ -221,19 +212,10 @@ export function DynamicIsland() {
             unlistenEnter.then(fn => fn());
             unlistenExit.then(fn => fn());
         };
-    }, []);
+    }, [loadNotes, setWindowSize, setIsHovered]);
 
     // Load settings
     useEffect(() => {
-        const loadSettings = () => {
-            const saved = localStorage.getItem('app-settings');
-            if (saved) {
-                try {
-                    const parsed = JSON.parse(saved);
-                    setSettings(prev => ({ ...prev, ...parsed }));
-                } catch (e) { console.error(e); }
-            }
-        };
         loadSettings();
 
         const handleStorage = (e: StorageEvent) => {
@@ -241,7 +223,7 @@ export function DynamicIsland() {
         };
         window.addEventListener('storage', handleStorage);
         return () => window.removeEventListener('storage', handleStorage);
-    }, []);
+    }, [loadSettings]);
 
     const handleSettingsClick = useCallback(async () => {
         try {
@@ -251,17 +233,12 @@ export function DynamicIsland() {
         }
     }, []);
 
-
-
-
     // Auto-switch to new modes when they become available (but not during initial launch)
     useEffect(() => {
         const prevMedia = prevHasMediaRef.current;
         const prevFiles = prevHasFilesRef.current;
 
-        // Don't auto-switch during initial 10-second onboarding period
         if (isInitialLaunch) {
-            // Update refs but don't switch modes
             prevHasMediaRef.current = hasMedia;
             prevHasFilesRef.current = hasFiles;
             return;
@@ -276,10 +253,9 @@ export function DynamicIsland() {
             setPreferredModeId('files');
         }
 
-        // Update refs for next comparison
         prevHasMediaRef.current = hasMedia;
         prevHasFilesRef.current = hasFiles;
-    }, [hasMedia, hasFiles, isInitialLaunch]);
+    }, [hasMedia, hasFiles, isInitialLaunch, setPreferredModeId]);
 
     // Memoize notch dimensions
     const { notchHeight, baseNotchWidth } = useMemo(() => ({
@@ -300,17 +276,13 @@ export function DynamicIsland() {
                 width = baseNotchWidth + 30;
                 height = notchHeight + 10;
             } else {
-                // media, files, onboard and most widgets have similar hover dimensions
-                // Ideally this should come from widget config
                 width = baseNotchWidth + 125;
                 height = notchHeight + 15;
             }
         } else if (mode === 'idle') {
-            // idle is smaller
             width = baseNotchWidth;
             height = notchHeight;
         } else {
-            // Standard expanded width for active widgets
             width = baseNotchWidth + 120;
             height = notchHeight;
         }
@@ -320,14 +292,12 @@ export function DynamicIsland() {
 
     const contentOpacity = (mode === 'idle' || mode === 'onboard' || hasMedia || hasFiles || mode !== 'idle') ? 1 : 0;
 
-
-
     useEffect(() => {
         // Don't auto-collapse if a popover (like date picker) is open
         if (!isHovered && expanded && !isAnimating && !isPopoverOpen) {
             setExpanded(false);
         }
-    }, [isHovered, expanded, isAnimating, isPopoverOpen]);
+    }, [isHovered, expanded, isAnimating, isPopoverOpen, setExpanded]);
 
     const handleWheel = useCallback((e: React.WheelEvent) => {
         if (!isAnimating) {
@@ -340,35 +310,30 @@ export function DynamicIsland() {
                 setIsAnimating(true);
                 invoke('trigger_haptics').catch(console.error);
             } else if (expanded) {
-                // Horizontal swipe for tabs
                 if (e.deltaX > 20 && activeTab === 'widgets') {
                     setActiveTab('files');
                 } else if (e.deltaX < -20 && activeTab === 'files') {
                     setActiveTab('widgets');
                 }
             } else if (!expanded) {
-                // Horizontal wheel for trackpad mode cycling
-                // Add cooldown to prevent overshooting (500ms between cycles)
                 const now = Date.now();
-                const timeSinceLastCycle = now - lastModeCycleRef.current;
+                const timeSinceLastCycle = now - lastModeCycleTime;
 
                 if (Math.abs(e.deltaX) > 20 && timeSinceLastCycle > 500) {
-                    lastModeCycleRef.current = now;
+                    setLastModeCycleTime(now);
                     if (e.deltaX > 20) cycleMode('next');
                     else cycleMode('prev');
                 }
             }
         }
-    }, [expanded, isAnimating, activeTab, mode, cycleMode]);
+    }, [expanded, isAnimating, activeTab, cycleMode, setExpanded, setIsAnimating, setActiveTab, lastModeCycleTime, setLastModeCycleTime]);
 
     const handleChildWheel = useCallback((e: React.WheelEvent) => {
-        // If vertical scroll dominates, stop propagation to prevent closing the island
         if (Math.abs(e.deltaY) > Math.abs(e.deltaX)) {
             e.stopPropagation();
             return;
         }
 
-        // Check if we can scroll horizontally in the direction of the gesture
         const container = e.currentTarget;
         const isScrollable = container.scrollWidth > container.clientWidth;
 
@@ -376,8 +341,6 @@ export function DynamicIsland() {
             const canScrollRight = container.scrollLeft < (container.scrollWidth - container.clientWidth - 1);
             const canScrollLeft = container.scrollLeft > 1;
 
-            // If we can scroll in the direction of the gesture, stop propagation
-            // so the parent doesn't switch tabs.
             if ((e.deltaX > 0 && canScrollRight) || (e.deltaX < 0 && canScrollLeft)) {
                 e.stopPropagation();
             }
@@ -393,8 +356,6 @@ export function DynamicIsland() {
             const totalWidth = rect.width + 40;
             const x = rect.left - 20;
 
-            // If a popover is open, we need to extend the window height to prevent clipping.
-            // The calendar popover is roughly 350-400px.
             const extraHeight = isPopoverOpen ? 420 : 0;
 
             invoke('update_ui_bounds', {
@@ -405,7 +366,6 @@ export function DynamicIsland() {
             }).catch(console.error);
         };
 
-        // Single delayed update to catch animation completion
         const timeoutId = setTimeout(updateBounds, 350);
         return () => clearTimeout(timeoutId);
     }, [targetWidth, targetHeight, isPopoverOpen]);

@@ -67,8 +67,7 @@
       "icons/icon.ico"
     ],
     "macOS": {
-      "signingIdentity": "Apple Development: j.voegel@icloud.com (7QG5B8YYN7)",
-      "providerShortName": "7QG5B8YYN7",
+      "signingIdentity": "45F275BE00EF549224D968E3BE4582D644EF1D79",
       "infoPlist": "Info.plist",
       "entitlements": "Entitlements.plist"
     }

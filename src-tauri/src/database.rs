@@ -13,9 +13,9 @@ pub struct DatabaseState {
 }
 
 /// Helper to log SQL in debug mode
-pub fn log_sql(sql: &str) {
+pub fn log_sql(_sql: &str) {
     #[cfg(debug_assertions)]
-    println!("\x1b[34mSQL:\x1b[0m {}", sql);
+    println!("\x1b[34mSQL:\x1b[0m {}", _sql);
 }
 
 /// Initialize the database and ensure the file exists
