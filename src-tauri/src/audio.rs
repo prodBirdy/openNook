@@ -1,5 +1,6 @@
 use crate::models::NowPlayingData;
 use crate::utils::{base64_encode, fetch_artwork_from_url};
+use log;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::Emitter;
 
@@ -1091,7 +1092,7 @@ pub fn setup_audio_monitoring(app_handle: tauri::AppHandle) {
 
     // Spawn simulation thread
     thread::spawn(move || {
-        println!("🎭 Starting audio visualization simulation");
+        log::info!("🎭 Starting audio visualization simulation");
 
         let mut t = 0.0f64;
         let mut prev_levels = vec![0.15; 6];

@@ -1,5 +1,6 @@
 use crate::database::{get_connection, log_sql};
 use crate::models::NotchInfo;
+use log;
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::RwLock;
@@ -10,7 +11,7 @@ use tauri::{
 
 #[tauri::command]
 pub fn open_settings(app_handle: tauri::AppHandle) -> Result<(), String> {
-    let window = if let Some(window) = app_handle.get_webview_window("settings") {
+    let _window = if let Some(window) = app_handle.get_webview_window("settings") {
         window.show().map_err(|e| e.to_string())?;
         window.set_focus().map_err(|e| e.to_string())?;
         window
@@ -534,17 +535,132 @@ pub fn deactivate_window(window: Window) -> Result<(), String> {
     Ok(())
 }
 
-/// Trigger haptic feedback on macOS
+/// Predefined haptic patterns
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum HapticPattern {
+    /// Generic haptic (NSHapticFeedbackPattern 0)
+    Generic,
+    /// Alignment haptic - subtle (NSHapticFeedbackPattern 1)
+    Alignment,
+    /// Level change haptic - strong (NSHapticFeedbackPattern 2)
+    LevelChange,
+    /// Light tap
+    Light,
+    /// Medium tap
+    Medium,
+    /// Heavy impact
+    Heavy,
+    /// Selection feedback - quick
+    Selection,
+    /// Success - double tap pattern
+    Success,
+    /// Error - triple tap pattern
+    Error,
+}
+
+/// Haptic configuration
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct HapticConfig {
+    /// Pattern to use
+    pub pattern: HapticPattern,
+    /// Intensity (0.0 - 1.0) - maps to pattern selection
+    #[serde(default = "default_intensity")]
+    pub intensity: f64,
+}
+
+fn default_intensity() -> f64 {
+    0.6
+}
+
+impl Default for HapticConfig {
+    fn default() -> Self {
+        Self {
+            pattern: HapticPattern::Medium,
+            intensity: 0.6,
+        }
+    }
+}
+
+/// Trigger haptic feedback on macOS with pattern and intensity control
+///
+/// # Examples
+/// ```typescript
+/// // Simple - uses default Medium pattern
+/// await invoke('trigger_haptics');
+///
+/// // With pattern
+/// await invoke('trigger_haptics', { config: { pattern: 'light' } });
+///
+/// // With pattern and intensity
+/// await invoke('trigger_haptics', { config: { pattern: 'generic', intensity: 0.8 } });
+/// ```
 #[tauri::command]
-pub fn trigger_haptics() {
+pub fn trigger_haptics(config: Option<HapticConfig>) -> Result<(), String> {
+    let config = config.unwrap_or_default();
+
     #[cfg(target_os = "macos")]
     unsafe {
         use objc2::runtime::AnyObject;
         use objc2::*;
 
         let manager: *mut AnyObject = msg_send![class!(NSHapticFeedbackManager), defaultPerformer];
-        let _: () = msg_send![manager, performFeedbackPattern: 0_i64, performanceTime: 1_i64];
+
+        match config.pattern {
+            HapticPattern::Generic => {
+                let _: () =
+                    msg_send![manager, performFeedbackPattern: 0_i64, performanceTime: 1_i64];
+            }
+            HapticPattern::Alignment => {
+                let _: () =
+                    msg_send![manager, performFeedbackPattern: 1_i64, performanceTime: 1_i64];
+            }
+            HapticPattern::LevelChange => {
+                let _: () =
+                    msg_send![manager, performFeedbackPattern: 2_i64, performanceTime: 1_i64];
+            }
+            HapticPattern::Light => {
+                // Alignment pattern (subtle)
+                let _: () =
+                    msg_send![manager, performFeedbackPattern: 1_i64, performanceTime: 1_i64];
+            }
+            HapticPattern::Medium => {
+                // Generic pattern (medium strength)
+                let _: () =
+                    msg_send![manager, performFeedbackPattern: 0_i64, performanceTime: 1_i64];
+            }
+            HapticPattern::Heavy => {
+                // Level change pattern (strong)
+                let _: () =
+                    msg_send![manager, performFeedbackPattern: 2_i64, performanceTime: 1_i64];
+            }
+            HapticPattern::Selection => {
+                // Quick alignment (subtle & fast)
+                let _: () =
+                    msg_send![manager, performFeedbackPattern: 1_i64, performanceTime: 0_i64];
+            }
+            HapticPattern::Success => {
+                // Double tap - alignment then generic
+                let _: () =
+                    msg_send![manager, performFeedbackPattern: 1_i64, performanceTime: 1_i64];
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                let _: () =
+                    msg_send![manager, performFeedbackPattern: 0_i64, performanceTime: 1_i64];
+            }
+            HapticPattern::Error => {
+                // Triple tap - strong pattern
+                for i in 0..3 {
+                    let _: () =
+                        msg_send![manager, performFeedbackPattern: 2_i64, performanceTime: 1_i64];
+                    if i < 2 {
+                        std::thread::sleep(std::time::Duration::from_millis(40));
+                    }
+                }
+            }
+        }
     }
+
+    Ok(())
 }
 
 /// Setup global mouse monitoring for the window
@@ -574,8 +690,8 @@ pub fn setup_mouse_monitoring(app_handle: tauri::AppHandle) {
     };
 
     let fallback_x_start = (screen_width - effective_notch_width) / 2.0;
-    let fallback_x_end = fallback_x_start + effective_notch_width;
-    let fallback_y_end = if settings.non_notch_mode {
+    let _fallback_x_end = fallback_x_start + effective_notch_width;
+    let _fallback_y_end = if settings.non_notch_mode {
         1.0
     } else {
         notch_height
@@ -673,6 +789,19 @@ pub fn setup_mouse_monitoring(app_handle: tauri::AppHandle) {
             if in_ui_area && !was_inside {
                 IS_INSIDE.store(true, Ordering::Relaxed);
 
+                if let Ok(guard) = get_ui_bounds_store().try_read() {
+                    if let Some(bounds) = *guard {
+                        log::debug!("[mouse] ENTERED UI bounds - mouse: ({:.0}, {:.0}), bounds: x={:.0}, y={:.0}, w={:.0}, h={:.0}",
+                            mouse_x, flipped_y, window_x + bounds.x, bounds.y, bounds.width, bounds.height);
+                    } else {
+                        log::debug!(
+                            "[mouse] ENTERED UI bounds (fallback) - mouse: ({:.0}, {:.0})",
+                            mouse_x,
+                            flipped_y
+                        );
+                    }
+                }
+
                 // Emit event first for UI responsiveness
                 let _ = app_handle.emit("mouse-entered-notch", ());
 
@@ -690,6 +819,19 @@ pub fn setup_mouse_monitoring(app_handle: tauri::AppHandle) {
                 }
             } else if !in_ui_area && was_inside {
                 IS_INSIDE.store(false, Ordering::Relaxed);
+
+                if let Ok(guard) = get_ui_bounds_store().try_read() {
+                    if let Some(bounds) = *guard {
+                        log::debug!("[mouse] EXITED UI bounds - mouse: ({:.0}, {:.0}), bounds: x={:.0}, y={:.0}, w={:.0}, h={:.0}",
+                            mouse_x, flipped_y, window_x + bounds.x, bounds.y, bounds.width, bounds.height);
+                    } else {
+                        log::debug!(
+                            "[mouse] EXITED UI bounds (fallback) - mouse: ({:.0}, {:.0})",
+                            mouse_x,
+                            flipped_y
+                        );
+                    }
+                }
 
                 // Emit event first
                 let _ = app_handle.emit("mouse-exited-notch", ());
@@ -816,5 +958,5 @@ pub fn setup_mouse_monitoring(app_handle: tauri::AppHandle) {
     // Mouse monitoring on Linux (Wayland/X11) is complex to do globally without heavy dependencies.
     // For now, we will rely on window events if possible, or disable the hover feature.
     // To avoid busy looping or useless threads, we just log a message.
-    println!("Global mouse monitoring not implemented for Linux yet.");
+    log::info!("Global mouse monitoring not implemented for Linux yet.");
 }

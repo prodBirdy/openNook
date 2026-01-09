@@ -1,4 +1,5 @@
 use base64::Engine;
+use log;
 use rusqlite::types::{ToSql, ValueRef};
 use rusqlite::{Connection, Result};
 use serde_json::Value as JsonValue;
@@ -13,9 +14,8 @@ pub struct DatabaseState {
 }
 
 /// Helper to log SQL in debug mode
-pub fn log_sql(_sql: &str) {
-    #[cfg(debug_assertions)]
-    println!("\x1b[34mSQL:\x1b[0m {}", _sql);
+pub fn log_sql(sql: &str) {
+    log::debug!("SQL: {}", sql);
 }
 
 /// Initialize the database and ensure the file exists

@@ -6,7 +6,7 @@ import { ComponentType } from 'react';
 export interface CompactWidgetProps {
     baseNotchWidth: number;
     isHovered: boolean;
-    contentOpacity: number;
+    contentOpacity?: number;
 }
 
 /**

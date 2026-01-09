@@ -21,6 +21,7 @@ interface DynamicIslandState {
     expanded: boolean;
     isAnimating: boolean;
     activeTab: 'widgets' | 'files';
+    isPopoverOpen: boolean;
 
     // Content state
     notes: string;
@@ -45,6 +46,7 @@ interface DynamicIslandActions {
     setExpanded: (value: boolean | ((prev: boolean) => boolean)) => void;
     setIsAnimating: (value: boolean) => void;
     setActiveTab: (tab: 'widgets' | 'files') => void;
+    setIsPopoverOpen: (value: boolean) => void;
 
     // Content actions
     setNotes: (notes: string) => void;
@@ -86,6 +88,7 @@ export const useDynamicIslandStore = create<DynamicIslandStore>((set, get) => ({
     expanded: false,
     isAnimating: false,
     activeTab: 'widgets',
+    isPopoverOpen: false,
     notes: '',
     windowSize: { width: window.innerWidth, height: window.innerHeight },
     settings: DEFAULT_SETTINGS,
@@ -106,6 +109,7 @@ export const useDynamicIslandStore = create<DynamicIslandStore>((set, get) => ({
     },
     setIsAnimating: (value) => set({ isAnimating: value }),
     setActiveTab: (tab) => set({ activeTab: tab }),
+    setIsPopoverOpen: (value) => set({ isPopoverOpen: value }),
 
     // Content actions
     setNotes: (notes) => set({ notes }),
@@ -183,6 +187,7 @@ export const selectExpanded = (state: DynamicIslandStore) => state.expanded;
 export const selectIsHovered = (state: DynamicIslandStore) => state.isHovered;
 export const selectIsAnimating = (state: DynamicIslandStore) => state.isAnimating;
 export const selectActiveTab = (state: DynamicIslandStore) => state.activeTab;
+export const selectIsPopoverOpen = (state: DynamicIslandStore) => state.isPopoverOpen;
 export const selectSettings = (state: DynamicIslandStore) => state.settings;
 export const selectNotes = (state: DynamicIslandStore) => state.notes;
 export const selectPreferredModeId = (state: DynamicIslandStore) => state.preferredModeId;

@@ -1,3 +1,4 @@
+use log;
 use serde::Serialize;
 
 #[derive(Serialize, Clone)]
@@ -118,14 +119,15 @@ mod macos {
         let status_reminders =
             unsafe { EKEventStore::authorizationStatusForEntityType(EKEntityType::Reminder) };
 
-        println!(
+        log::debug!(
             "Calendar authorization status: {:?}, Reminders status: {:?}",
-            status_events, status_reminders
+            status_events,
+            status_reminders
         );
 
         // Check Events - only request if NotDetermined
         if status_events == EKAuthorizationStatus::NotDetermined {
-            println!("Requesting Calendar Access...");
+            log::info!("Requesting Calendar Access...");
             let (tx, rx) = tokio::sync::oneshot::channel::<bool>();
             let tx: std::sync::Mutex<Option<Sender<bool>>> = std::sync::Mutex::new(Some(tx));
 
@@ -152,16 +154,16 @@ mod macos {
 
             // Wait for user response
             match rx.await {
-                Ok(granted) => println!("Calendar access granted: {}", granted),
-                Err(_) => println!("Calendar access request cancelled"),
+                Ok(granted) => log::info!("Calendar access granted: {}", granted),
+                Err(_) => log::warn!("Calendar access request cancelled"),
             }
         } else {
-            println!("Calendar access already determined: {:?}", status_events);
+            log::debug!("Calendar access already determined: {:?}", status_events);
         }
 
         // Check Reminders - only request if NotDetermined
         if status_reminders == EKAuthorizationStatus::NotDetermined {
-            println!("Requesting Reminders Access...");
+            log::info!("Requesting Reminders Access...");
             let (tx, rx) = tokio::sync::oneshot::channel::<bool>();
             let tx: std::sync::Mutex<Option<Sender<bool>>> = std::sync::Mutex::new(Some(tx));
 
@@ -186,11 +188,11 @@ mod macos {
                 }
             }
             match rx.await {
-                Ok(granted) => println!("Reminders access granted: {}", granted),
-                Err(_) => println!("Reminders access request cancelled"),
+                Ok(granted) => log::info!("Reminders access granted: {}", granted),
+                Err(_) => log::warn!("Reminders access request cancelled"),
             }
         } else {
-            println!(
+            log::debug!(
                 "Reminders access already determined: {:?}",
                 status_reminders
             );
@@ -212,7 +214,7 @@ mod macos {
             }
         }
 
-        println!("Fetching fresh calendar events...");
+        log::debug!("Fetching fresh calendar events...");
 
         let mut events_list = Vec::new();
         let store = match get_store() {
@@ -305,7 +307,7 @@ mod macos {
             }
         }
 
-        println!("Fetching fresh reminders...");
+        log::debug!("Fetching fresh reminders...");
 
         let (tx, rx) = tokio::sync::oneshot::channel::<Vec<Reminder>>();
 
@@ -407,7 +409,7 @@ mod macos {
                 results
             }
             Err(_) => {
-                println!("Reminders fetch timed out or cancelled");
+                log::warn!("Reminders fetch timed out or cancelled");
                 Vec::new()
             }
         }
@@ -771,9 +773,13 @@ pub async fn open_calendar_event(_id: String, date: f64) -> Result<(), String> {
             year, month, day, hour, minute
         );
 
-        println!(
+        log::debug!(
             "Opening/Switching Calendar to: {}/{}/{} {}:{}",
-            year, month, day, hour, minute
+            year,
+            month,
+            day,
+            hour,
+            minute
         );
 
         std::process::Command::new("osascript")

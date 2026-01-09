@@ -5,13 +5,12 @@ import { useFileTrayStore } from '../../stores/useFileTrayStore';
 interface CompactFilesProps {
     isHovered: boolean;
     baseNotchWidth: number;
-    contentOpacity: number;
+    contentOpacity?: number;
 }
 
 export function CompactFiles({
     isHovered,
-    baseNotchWidth,
-    contentOpacity
+    baseNotchWidth
 }: CompactFilesProps) {
     const files = useFileTrayStore(state => state.files);
     return (
@@ -20,7 +19,6 @@ export function CompactFiles({
             className="island-content files-content"
             baseNotchWidth={baseNotchWidth}
             isHovered={isHovered}
-            contentOpacity={contentOpacity}
             left={
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                     <IconPhoto size={20} color="white" stroke={1.5} />

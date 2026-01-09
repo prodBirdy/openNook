@@ -1,7 +1,7 @@
 import { motion, AnimatePresence } from 'motion/react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
-import { useEffect, useCallback, useRef, useMemo, useState } from 'react';
+import { useEffect, useCallback, useRef, useMemo } from 'react';
 import { useNotchInfo } from '../../hooks/useNotchInfo';
 import { CompactMedia } from './CompactMedia';
 import { CompactFiles } from './CompactFiles';
@@ -32,8 +32,6 @@ export function DynamicIsland() {
     const timers = useDerivedTimers();
     const { sessions } = useSessionsWithElapsed();
 
-    // Track if a popover is open to pause auto-collapse
-    const [isPopoverOpen, setIsPopoverOpen] = useState(false);
 
     // Zustand store
     const {
@@ -59,6 +57,8 @@ export function DynamicIsland() {
         loadSettings,
         lastModeCycleTime,
         setLastModeCycleTime,
+        isPopoverOpen,
+        setIsPopoverOpen,
     } = useDynamicIslandStore();
 
     const islandRef = useRef<HTMLDivElement>(null);
@@ -71,7 +71,6 @@ export function DynamicIsland() {
     const visualizerColor = useMediaPlayerStore(state => state.visualizerColor);
     const fetchNowPlaying = useMediaPlayerStore(state => state.fetchNowPlaying);
     const hasMedia = useMediaPlayerStore(state => state.hasMedia(settings.showMedia));
-
 
     // Determine mode - memoized
     const hasFiles = useFileTrayStore(state => state.files.length > 0);
@@ -111,38 +110,27 @@ export function DynamicIsland() {
         return modes.sort((a, b) => a.priority - b.priority).map(m => m.id);
     }, [enabledCompactWidgets, hasMedia, hasFiles, hasActiveInstance, timers, sessions]);
 
-    const activeModeId = useMemo(() => {
+    const mode = useMemo(() => {
         if (preferredModeId && availableModes.includes(preferredModeId)) return preferredModeId;
-
         if (availableModes.length > 0) return availableModes[0];
-
         return 'idle';
     }, [availableModes, preferredModeId]);
-
-    const mode = activeModeId;
 
     const cycleMode = useCallback((direction: 'next' | 'prev') => {
         if (availableModes.length <= 1) return;
 
-        const currentIndex = availableModes.indexOf(activeModeId);
-        let nextIndex;
-        if (direction === 'next') {
-            nextIndex = (currentIndex + 1) % availableModes.length;
-        } else {
-            nextIndex = (currentIndex - 1 + availableModes.length) % availableModes.length;
-        }
+        const currentIndex = availableModes.indexOf(mode);
+        const nextIndex = direction === 'next'
+            ? (currentIndex + 1) % availableModes.length
+            : (currentIndex - 1 + availableModes.length) % availableModes.length;
 
-        const newMode = availableModes[nextIndex];
-        setPreferredModeId(newMode);
+        setPreferredModeId(availableModes[nextIndex]);
         invoke('trigger_haptics').catch(console.error);
-    }, [availableModes, activeModeId, setPreferredModeId]);
+    }, [availableModes, mode, setPreferredModeId]);
 
     // Initial launch: keep onboard mode for 10 seconds
     useEffect(() => {
-        const timer = setTimeout(() => {
-            setIsInitialLaunch(false);
-        }, 10000);
-
+        const timer = setTimeout(() => setIsInitialLaunch(false), 10000);
         return () => clearTimeout(timer);
     }, [setIsInitialLaunch]);
 
@@ -151,15 +139,9 @@ export function DynamicIsland() {
         setExpanded(prev => {
             if (!prev) {
                 setIsAnimating(true);
-                if (mode === 'files') {
-                    setActiveTab('files');
-                } else {
-                    setActiveTab('widgets');
-                }
-                invoke('trigger_haptics').catch(console.error);
-            } else {
-                invoke('trigger_haptics').catch(console.error);
+                setActiveTab(mode === 'files' ? 'files' : 'widgets');
             }
+            invoke('trigger_haptics').catch(console.error);
             return !prev;
         });
     }, [mode, setExpanded, setIsAnimating, setActiveTab]);
@@ -177,9 +159,7 @@ export function DynamicIsland() {
         if (notesTimeoutRef.current) {
             clearTimeout(notesTimeoutRef.current);
         }
-        notesTimeoutRef.current = setTimeout(() => {
-            saveNotes(value);
-        }, 500);
+        notesTimeoutRef.current = setTimeout(() => saveNotes(value), 500);
     }, [setNotes, saveNotes]);
 
     const handleNotesClick = useCallback((e: React.MouseEvent) => {
@@ -188,7 +168,6 @@ export function DynamicIsland() {
 
     // Initialization and listeners
     useEffect(() => {
-        // Load notes
         loadNotes();
 
         // Window resize handler with throttling
@@ -282,75 +261,68 @@ export function DynamicIsland() {
     // Memoize notch dimensions
     const { notchHeight, baseNotchWidth } = useMemo(() => ({
         notchHeight: Math.max(settings.baseHeight, notchInfo?.notch_height ? notchInfo.notch_height - 20 : 38),
-        baseNotchWidth: Math.max(notchInfo?.notch_width ? notchInfo.notch_width : 160),
-    }), [notchInfo?.notch_height, notchInfo?.notch_width, settings.baseHeight, settings.baseWidth]);
+        baseNotchWidth: notchInfo?.notch_width ?? 160,
+    }), [notchInfo?.notch_height, notchInfo?.notch_width, settings.baseHeight]);
 
     // Memoize target dimensions
     const { targetWidth, targetHeight } = useMemo(() => {
-        let width = baseNotchWidth;
-        let height = notchHeight;
-
         if (expanded) {
-            width = windowSize.width - 40;
-            height = Math.min(windowSize.height, 250);
-        } else if (isHovered) {
-            if (mode === 'idle') {
-                width = baseNotchWidth + 30;
-                height = notchHeight + 10;
-            } else {
-                width = baseNotchWidth + 125;
-                height = notchHeight + 15;
-            }
-        } else if (mode === 'idle') {
-            width = baseNotchWidth;
-            // If in non-notch mode, collapse to 1px
-            if (settings.nonNotchMode) {
-                height = 1;
-            } else {
-                height = notchHeight;
-            }
-        } else {
-            width = baseNotchWidth + 120;
-            height = notchHeight;
+            return {
+                targetWidth: windowSize.width - 40,
+                targetHeight: Math.min(windowSize.height, 250)
+            };
         }
 
-        return { targetWidth: width, targetHeight: height };
+        if (isHovered) {
+            return mode === 'idle'
+                ? { targetWidth: baseNotchWidth + 30, targetHeight: notchHeight + 10 }
+                : { targetWidth: baseNotchWidth + 125, targetHeight: notchHeight + 15 };
+        }
+
+        if (mode === 'idle') {
+            return {
+                targetWidth: baseNotchWidth,
+                targetHeight: settings.nonNotchMode ? 1 : notchHeight
+            };
+        }
+
+        return { targetWidth: baseNotchWidth + 120, targetHeight: notchHeight };
     }, [expanded, isHovered, mode, baseNotchWidth, notchHeight, windowSize.width, windowSize.height, settings.nonNotchMode]);
 
-    const contentOpacity = (mode === 'idle' || mode === 'onboard' || hasMedia || hasFiles || mode !== 'idle') ? 1 : 0;
-
+    // Reset popover state when island collapses
     useEffect(() => {
-        // Auto-collapse when not hovered, but pause if a popover is open
+        if (!expanded && isPopoverOpen) {
+            setIsPopoverOpen(false);
+        }
+    }, [expanded, isPopoverOpen, setIsPopoverOpen]);
+
+    // Auto-collapse when not hovered, but pause if a popover is open
+    useEffect(() => {
         if (!isHovered && expanded && !isAnimating && !isPopoverOpen) {
             setExpanded(false);
         }
     }, [isHovered, expanded, isAnimating, isPopoverOpen, setExpanded]);
 
     const handleWheel = useCallback((e: React.WheelEvent) => {
-        if (!isAnimating) {
-            if (!expanded && e.deltaY < -20) {
-                setExpanded(true);
-                setIsAnimating(true);
-                invoke('trigger_haptics').catch(console.error);
-            } else if (expanded && e.deltaY > 20) {
-                setExpanded(false);
-                setIsAnimating(true);
-                invoke('trigger_haptics').catch(console.error);
-            } else if (expanded) {
-                if (e.deltaX > 20 && activeTab === 'widgets') {
-                    setActiveTab('files');
-                } else if (e.deltaX < -20 && activeTab === 'files') {
-                    setActiveTab('widgets');
-                }
-            } else if (!expanded) {
-                const now = Date.now();
-                const timeSinceLastCycle = now - lastModeCycleTime;
+        if (isAnimating) return;
 
-                if (Math.abs(e.deltaX) > 20 && timeSinceLastCycle > 500) {
-                    setLastModeCycleTime(now);
-                    if (e.deltaX > 20) cycleMode('next');
-                    else cycleMode('prev');
-                }
+        if (!expanded && e.deltaY < -20) {
+            setExpanded(true);
+            setIsAnimating(true);
+        } else if (expanded && e.deltaY > 20) {
+            setExpanded(false);
+            setIsAnimating(true);
+        } else if (expanded) {
+            if (e.deltaX > 20 && activeTab === 'widgets') {
+                setActiveTab('files');
+            } else if (e.deltaX < -20 && activeTab === 'files') {
+                setActiveTab('widgets');
+            }
+        } else {
+            const now = Date.now();
+            if (Math.abs(e.deltaX) > 20 && now - lastModeCycleTime > 500) {
+                setLastModeCycleTime(now);
+                cycleMode(e.deltaX > 20 ? 'next' : 'prev');
             }
         }
     }, [expanded, isAnimating, activeTab, cycleMode, setExpanded, setIsAnimating, setActiveTab, lastModeCycleTime, setLastModeCycleTime]);
@@ -374,30 +346,29 @@ export function DynamicIsland() {
         }
     }, []);
 
-    // Update bounds - debounced
+    // Update bounds - send immediately and after animation
     useEffect(() => {
         const updateBounds = () => {
             if (!islandRef.current) return;
 
             const rect = islandRef.current.getBoundingClientRect();
-            const totalWidth = rect.width + 40;
-            const x = rect.left - 20;
-
-            const extraHeight = 0; // Previously was: isPopoverOpen ? 420 : 0
-
             invoke('update_ui_bounds', {
-                x,
+                x: rect.left,
                 y: rect.top,
-                width: totalWidth,
-                height: rect.height + extraHeight
+                width: rect.width,
+                height: rect.height
             }).catch(console.error);
         };
 
+        // Send immediately with current values
+        updateBounds();
+
+        // Also send after animation completes to capture final state
         const timeoutId = setTimeout(updateBounds, 350);
         return () => clearTimeout(timeoutId);
-    }, [targetWidth, targetHeight]);
+    }, [targetWidth, targetHeight, expanded]);
 
-    // Memoize spring transition
+    // Memoize transitions
     const springTransition = useMemo(() => ({
         type: 'spring' as const,
         stiffness: 400,
@@ -405,8 +376,51 @@ export function DynamicIsland() {
         mass: 0.8
     }), []);
 
-    // Memoize fade transition
     const fadeTransition = useMemo(() => ({ duration: 0.3 }), []);
+
+    // Get active widget for compact mode
+    const activeWidget = useMemo(() =>
+        enabledCompactWidgets.find(w => w.id === mode),
+        [enabledCompactWidgets, mode]
+    );
+
+    // Render compact content
+    const renderCompactContent = () => {
+        if (mode === 'media' && nowPlaying) {
+            return (
+                <CompactMedia
+                    nowPlaying={nowPlaying}
+                    isHovered={isHovered}
+                    baseNotchWidth={baseNotchWidth}
+                    visualizerColor={visualizerColor}
+                />
+            );
+        }
+
+        if (mode === 'files') {
+            return <CompactFiles isHovered={isHovered} baseNotchWidth={baseNotchWidth} />;
+        }
+
+        if (mode === 'onboard') {
+            return <CompactOnboard baseNotchWidth={baseNotchWidth} isHovered={isHovered} />;
+        }
+
+        if (mode === 'idle') {
+            return <CompactIdle />;
+        }
+
+        // Dynamic widget rendering
+        if (activeWidget?.CompactComponent) {
+            return (
+                <activeWidget.CompactComponent
+                    baseNotchWidth={baseNotchWidth}
+                    isHovered={isHovered}
+                />
+            );
+        }
+
+        return null;
+    };
 
     return (
         <div className={`dynamic-island-container ${expanded ? 'expanded' : ''}`}>
@@ -455,48 +469,12 @@ export function DynamicIsland() {
                                 handleChildWheel={handleChildWheel}
                                 setIsPopoverOpen={setIsPopoverOpen}
                             />
-                        ) : mode === 'media' && nowPlaying ? (
-                            <CompactMedia
-                                nowPlaying={nowPlaying}
-                                isHovered={isHovered}
-                                baseNotchWidth={baseNotchWidth}
-                                visualizerColor={visualizerColor}
-                                contentOpacity={contentOpacity}
-                            />
-                        ) : mode === 'files' ? (
-                            <CompactFiles
-                                isHovered={isHovered}
-                                baseNotchWidth={baseNotchWidth}
-                                contentOpacity={contentOpacity}
-                            />
-                        ) : mode === 'onboard' ? (
-                            <CompactOnboard
-                                baseNotchWidth={baseNotchWidth}
-                                isHovered={isHovered}
-                                contentOpacity={contentOpacity}
-                            />
-                        ) : mode === 'idle' ? (
-                            <CompactIdle />
                         ) : (
-                            // Dynamic widget rendering
-                            (() => {
-                                const widget = enabledCompactWidgets.find(w => w.id === mode);
-                                if (widget && widget.CompactComponent) {
-                                    return (
-                                        <widget.CompactComponent
-                                            baseNotchWidth={baseNotchWidth}
-                                            isHovered={isHovered}
-                                            contentOpacity={contentOpacity}
-                                        />
-                                    );
-                                }
-                                return null;
-                            })()
+                            renderCompactContent()
                         )}
                     </motion.div>
                 </AnimatePresence>
 
-                {/* Mode indicator dots - only show when not expanded */}
                 {!expanded && (
                     <ModeIndicator
                         availableModes={availableModes}
@@ -504,7 +482,7 @@ export function DynamicIsland() {
                         onModeChange={setPreferredModeId}
                     />
                 )}
-            </motion.div >
-        </div >
+            </motion.div>
+        </div>
     );
 }
