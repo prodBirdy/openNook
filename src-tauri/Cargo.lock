@@ -17,6 +17,7 @@ dependencies = [
  "log",
  "objc",
  "objc2",
+ "objc2-app-kit",
  "objc2-core-audio",
  "objc2-event-kit",
  "objc2-foundation",
