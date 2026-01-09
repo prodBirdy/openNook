@@ -123,3 +123,27 @@ pub fn save_drag_icon(_app_handle: AppHandle, icon_data: Vec<u8>) -> Result<Stri
 
     Ok(file_path.to_string_lossy().into_owned())
 }
+
+#[derive(Serialize, Debug, Clone)]
+pub struct FileMetadata {
+    pub size: u64,
+    #[serde(rename = "lastModified")]
+    pub last_modified: u64,
+}
+
+#[command]
+pub fn get_file_metadata(path: String) -> Result<FileMetadata, String> {
+    let metadata = fs::metadata(&path).map_err(|e| e.to_string())?;
+    let size = metadata.len();
+    let last_modified = metadata
+        .modified()
+        .map_err(|e| e.to_string())?
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|e| e.to_string())?
+        .as_millis() as u64;
+
+    Ok(FileMetadata {
+        size,
+        last_modified,
+    })
+}

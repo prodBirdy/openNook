@@ -52,14 +52,14 @@ export const useFileTrayStore = create<FileTrayStore>((set, get) => ({
         }
     },
 
-    setFiles: (files) => {
+    setFiles: (files: FileItem[]) => {
         set({ files });
         if (files.length > 0) {
             invoke('save_file_tray', { files }).catch(console.error);
         }
     },
 
-    addFiles: (newFiles) => {
+    addFiles: (newFiles: FileItem[]) => {
         const { files } = get();
         const existingPaths = new Set(files.map(f => f.path));
         const uniqueNewFiles = newFiles.filter(f => !existingPaths.has(f.path));
@@ -69,15 +69,15 @@ export const useFileTrayStore = create<FileTrayStore>((set, get) => ({
         invoke('save_file_tray', { files: updated }).catch(console.error);
     },
 
-    addDroppedFiles: (paths) => {
-        set(state => ({ droppedFiles: [...state.droppedFiles, ...paths] }));
+    addDroppedFiles: (paths: string[]) => {
+        set((state: FileTrayState) => ({ droppedFiles: [...state.droppedFiles, ...paths] }));
     },
 
     processDroppedFiles: async () => {
         const { droppedFiles } = get();
         if (droppedFiles.length === 0) return;
 
-        const newFilesPromises = droppedFiles.map(async path => {
+        const newFilesPromises = droppedFiles.map(async (path: string) => {
             const name = path.split(/[/\\]/).pop() || path;
             const ext = name.split('.').pop()?.toLowerCase();
             let type = 'unknown';
@@ -86,19 +86,25 @@ export const useFileTrayStore = create<FileTrayStore>((set, get) => ({
             }
 
             let resolvedPath = path;
+            let size = 0;
+            let lastModified = Date.now();
+
             try {
                 resolvedPath = await invoke<string>('resolve_path', { path });
+                const metadata = await invoke<{ size: number; lastModified: number }>('get_file_metadata', { path });
+                size = metadata.size;
+                lastModified = metadata.lastModified;
             } catch (e) {
-                console.error('Failed to resolve path', e);
+                console.error('Failed to get file info', e);
             }
 
             return {
                 name,
-                size: 0,
+                size,
                 path,
                 resolvedPath,
                 type,
-                lastModified: Date.now()
+                lastModified
             };
         });
 
@@ -107,7 +113,7 @@ export const useFileTrayStore = create<FileTrayStore>((set, get) => ({
         set({ droppedFiles: [] });
     },
 
-    removeFile: (path) => {
+    removeFile: (path: string) => {
         const { files } = get();
         const updated = files.filter(f => f.path !== path);
         set({ files: updated });

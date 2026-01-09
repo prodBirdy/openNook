@@ -58,6 +58,7 @@ pub fn run() {
             files::load_file_tray,
             files::resolve_path,
             files::save_drag_icon,
+            files::get_file_metadata,
             window::get_system_accent_color,
             widgets::save_widget_state,
             widgets::load_widget_state,
