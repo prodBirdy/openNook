@@ -28,7 +28,7 @@ mod macos {
     use super::*;
     use objc2::rc::Retained;
     use objc2_event_kit::{EKAuthorizationStatus, EKEntityType, EKEventStore};
-    use objc2_foundation::{MainThreadMarker, NSCalendar, NSCalendarUnit, NSDate};
+    use objc2_foundation::{MainThreadMarker, NSCalendar, NSCalendarUnit, NSDate, NSDateComponents};
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::OnceLock;
     use tokio::sync::oneshot::Sender;
@@ -357,7 +357,14 @@ mod macos {
                             let priority = unsafe { reminder.priority() } as i32;
 
                             // Due date - reminders use dueDateComponents
-                            let due_date: Option<f64> = None; // Complex to extract, skip for now
+                            let due_date: Option<f64> = unsafe {
+                                reminder.dueDateComponents().and_then(|components| {
+                                    let calendar = NSCalendar::currentCalendar();
+                                    calendar.dateFromComponents(&components).map(|date| {
+                                        date.timeIntervalSince1970()
+                                    })
+                                })
+                            };
 
                             // Get calendar info
                             let (list_name, list_color) = {
