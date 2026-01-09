@@ -67,6 +67,10 @@ mod macos {
                 .map(|d| d < duration)
                 .unwrap_or(false)
         }
+
+        fn invalidate(&mut self) {
+            self.last_fetched = SystemTime::UNIX_EPOCH;
+        }
     }
 
     // Static caches
@@ -495,16 +499,7 @@ mod macos {
             // Invalidate cache
             if let Some(cache_mutex) = REMINDERS_CACHE.get() {
                 if let Ok(mut cache) = cache_mutex.lock() {
-                    // We don't have the full object to add to cache easily without fetching, so just clear it or invalidate
-                    // For simplicity, let's just clear for now so next fetch gets it.
-                    // Or better, we can re-fetch?
-                    // Let's just invalidate/remove all to force refresh or just let the user's refresh button handle it if needed.
-                    // Actually, better to just invalidate effectively.
-                    cache.data.clear();
-                    // Wait, clearing might show empty list. Maybe better to leave it stale until refresh?
-                    // The user asked for "Add reminder", assume they want to see it.
-                    // So we should probably return the new list or let the frontend trigger a refresh.
-                    // The frontend stores local state too.
+                    cache.invalidate();
                 }
             }
 
@@ -561,7 +556,7 @@ mod macos {
             // Invalidate cache
             if let Some(cache_mutex) = EVENTS_CACHE.get() {
                 if let Ok(mut cache) = cache_mutex.lock() {
-                    cache.data.clear();
+                    cache.invalidate();
                 }
             }
 
