@@ -37,8 +37,6 @@ export function DynamicIsland() {
     const {
         preferredModeId,
         setPreferredModeId,
-        isInitialLaunch,
-        setIsInitialLaunch,
         isHovered,
         setIsHovered,
         expanded,
@@ -128,11 +126,7 @@ export function DynamicIsland() {
         invoke('trigger_haptics').catch(console.error);
     }, [availableModes, mode, setPreferredModeId]);
 
-    // Initial launch: keep onboard mode for 10 seconds
-    useEffect(() => {
-        const timer = setTimeout(() => setIsInitialLaunch(false), 10000);
-        return () => clearTimeout(timer);
-    }, [setIsInitialLaunch]);
+
 
     // Toggle expanded mode
     const handleIslandClick = useCallback(() => {
@@ -234,16 +228,10 @@ export function DynamicIsland() {
         }
     }, []);
 
-    // Auto-switch to new modes when they become available (but not during initial launch)
+    // Auto-switch to new modes when they become available
     useEffect(() => {
         const prevMedia = prevHasMediaRef.current;
         const prevFiles = prevHasFilesRef.current;
-
-        if (isInitialLaunch) {
-            prevHasMediaRef.current = hasMedia;
-            prevHasFilesRef.current = hasFiles;
-            return;
-        }
 
         // Media started playing - switch to it
         if (!prevMedia && hasMedia) {
@@ -256,7 +244,7 @@ export function DynamicIsland() {
 
         prevHasMediaRef.current = hasMedia;
         prevHasFilesRef.current = hasFiles;
-    }, [hasMedia, hasFiles, isInitialLaunch, setPreferredModeId]);
+    }, [hasMedia, hasFiles, setPreferredModeId]);
 
     // Memoize notch dimensions
     const { notchHeight, baseNotchWidth } = useMemo(() => ({

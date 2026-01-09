@@ -14,7 +14,6 @@ interface Settings {
 interface DynamicIslandState {
     // Mode management
     preferredModeId: string | null;
-    isInitialLaunch: boolean;
 
     // UI state
     isHovered: boolean;
@@ -39,7 +38,6 @@ interface DynamicIslandState {
 interface DynamicIslandActions {
     // Mode actions
     setPreferredModeId: (modeId: string | null) => void;
-    setIsInitialLaunch: (value: boolean) => void;
 
     // UI actions
     setIsHovered: (value: boolean) => void;
@@ -83,7 +81,6 @@ const DEFAULT_SETTINGS: Settings = {
 export const useDynamicIslandStore = create<DynamicIslandStore>((set, get) => ({
     // Initial state
     preferredModeId: null,
-    isInitialLaunch: true,
     isHovered: false,
     expanded: false,
     isAnimating: false,
@@ -96,7 +93,6 @@ export const useDynamicIslandStore = create<DynamicIslandStore>((set, get) => ({
 
     // Mode actions
     setPreferredModeId: (modeId) => set({ preferredModeId: modeId }),
-    setIsInitialLaunch: (value) => set({ isInitialLaunch: value }),
 
     // UI actions
     setIsHovered: (value) => set({ isHovered: value }),
@@ -191,5 +187,4 @@ export const selectIsPopoverOpen = (state: DynamicIslandStore) => state.isPopove
 export const selectSettings = (state: DynamicIslandStore) => state.settings;
 export const selectNotes = (state: DynamicIslandStore) => state.notes;
 export const selectPreferredModeId = (state: DynamicIslandStore) => state.preferredModeId;
-export const selectIsInitialLaunch = (state: DynamicIslandStore) => state.isInitialLaunch;
 export const selectWindowSize = (state: DynamicIslandStore) => state.windowSize;
