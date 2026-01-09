@@ -5,7 +5,7 @@ import { z } from 'zod';
 import { registerWidget } from './WidgetRegistry';
 import { CompactWidgetProps } from './WidgetTypes';
 import { CompactWrapper } from '../island/CompactWrapper';
-import { useTimerContext } from '../../context/TimerContext';
+import { useTimerStore, useDerivedTimers } from '../../stores/useTimerStore';
 import { WidgetWrapper } from './WidgetWrapper';
 import { WidgetAddDialog } from './WidgetAddDialog';
 import { Button } from '@/components/ui/button';
@@ -48,7 +48,8 @@ function formatTime(seconds: number, compact = false): string {
 }
 
 export function TimerWidget() {
-    const { timers, addTimer, removeTimer, toggleTimer, resetTimer } = useTimerContext();
+    const timers = useDerivedTimers();
+    const { addTimer, removeTimer, toggleTimer, resetTimer } = useTimerStore();
     const [showAddDialog, setShowAddDialog] = useState(false);
 
     const handleAddTimer = (data: TimerFormValues) => {
@@ -211,7 +212,8 @@ export function TimerWidget() {
 
 // Compact Timer Component
 export function CompactTimer({ baseNotchWidth, isHovered, contentOpacity }: CompactWidgetProps) {
-    const { timers, toggleTimer } = useTimerContext();
+    const timers = useDerivedTimers();
+    const toggleTimer = useTimerStore(state => state.toggleTimer);
 
     // Prioritize showing a completed timer so the user sees it immediately
     const completedTimer = timers.find(t => t.remaining === 0 && t.duration > 0);

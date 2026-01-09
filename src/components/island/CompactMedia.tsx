@@ -3,7 +3,7 @@ import { CompactWrapper } from './CompactWrapper';
 import { useState, useCallback } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { AlbumCover } from '../AlbumCover';
-import { SmartAudioVisualizer } from '../SmartAudioVisualizer';
+import { SmartAudioVisualizer } from '../AudioVisualizer';
 import { NowPlayingData } from './types';
 
 interface CompactMediaProps {
@@ -11,15 +11,14 @@ interface CompactMediaProps {
     isHovered: boolean;
     baseNotchWidth: number;
     visualizerColor: string | null;
-    contentOpacity: number;
+    contentOpacity?: number;
 }
 
 export function CompactMedia({
     nowPlaying,
     isHovered,
     baseNotchWidth,
-    visualizerColor,
-    contentOpacity
+    visualizerColor
 }: CompactMediaProps) {
     const [isCoverHovered, setIsCoverHovered] = useState(false);
 
@@ -35,7 +34,6 @@ export function CompactMedia({
             className="island-content files-content"
             baseNotchWidth={baseNotchWidth}
             isHovered={isHovered}
-            contentOpacity={contentOpacity}
             left={
                 <div className="album-cover-wrapper" style={{ width: 'auto' }}>
                     <AlbumCover

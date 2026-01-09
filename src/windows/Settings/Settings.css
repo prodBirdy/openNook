@@ -1,6 +1,6 @@
 .settings-window {
-    background-color: #000000;
-    color: rgba(255, 255, 255, 0.9);
+    background-color: var(--background);
+    color: var(--foreground);
     font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Helvetica Neue", Arial, sans-serif;
     user-select: none;
     -webkit-user-select: none;
@@ -15,7 +15,7 @@
     margin-bottom: 24px;
     display: flex;
     align-items: center;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+    border-bottom: 1px solid var(--border);
     padding-bottom: 10px;
 }
 
@@ -30,7 +30,7 @@
 .section-title {
     font-size: 13px;
     text-transform: uppercase;
-    color: rgba(255, 255, 255, 0.4);
+    color: var(--muted-foreground);
     margin-bottom: 8px;
     padding-left: 10px;
     font-weight: 500;
@@ -38,11 +38,11 @@
 }
 
 .settings-group {
-    background-color: black;
+    background-color: var(--card);
     border-radius: 16px;
     margin-bottom: 24px;
     overflow: hidden;
-    border: 1px solid rgba(255, 255, 255, 0.05);
+    border: 1px solid var(--border);
 }
 
 
@@ -51,7 +51,7 @@
     align-items: center;
     justify-content: space-between;
     padding: 12px 16px;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+    border-bottom: 1px solid var(--border);
 }
 
 
@@ -72,7 +72,7 @@
 
 .setting-desc {
     font-size: 12px;
-    color: rgba(255, 255, 255, 0.5);
+    color: var(--muted-foreground);
     margin-top: 2px;
 }
 
@@ -218,7 +218,7 @@ input:checked+.slider:before {
     align-items: center;
     justify-content: space-between;
     padding: 12px 16px;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+    border-bottom: 1px solid var(--border);
 }
 
 .plugin-item:last-child {
@@ -236,17 +236,17 @@ input:checked+.slider:before {
 .plugin-name {
     font-size: 14px;
     font-weight: 500;
-    color: rgba(255, 255, 255, 0.9);
+    color: var(--foreground);
 }
 
 .plugin-meta {
     font-size: 11px;
-    color: rgba(255, 255, 255, 0.4);
+    color: var(--muted-foreground);
 }
 
 .plugin-desc {
     font-size: 12px;
-    color: rgba(255, 255, 255, 0.5);
+    color: var(--muted-foreground);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;

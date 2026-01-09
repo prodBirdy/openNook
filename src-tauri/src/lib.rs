@@ -24,6 +24,7 @@ pub fn run() {
             window::fit_to_notch,
             window::set_click_through,
             window::activate_window,
+            window::deactivate_window,
             window::trigger_haptics,
             window::update_ui_bounds,
             window::get_window_settings,

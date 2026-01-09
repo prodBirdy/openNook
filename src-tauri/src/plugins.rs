@@ -1,3 +1,4 @@
+use log;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
@@ -75,9 +76,10 @@ pub fn scan_plugins_directory(_app_handle: AppHandle) -> Result<Vec<PluginInfo>,
         let manifest_content = match fs::read_to_string(&manifest_path) {
             Ok(c) => c,
             Err(e) => {
-                eprintln!(
+                log::error!(
                     "Failed to read plugin manifest at {:?}: {}",
-                    manifest_path, e
+                    manifest_path,
+                    e
                 );
                 continue;
             }
@@ -86,9 +88,10 @@ pub fn scan_plugins_directory(_app_handle: AppHandle) -> Result<Vec<PluginInfo>,
         let manifest: PluginManifest = match serde_json::from_str(&manifest_content) {
             Ok(m) => m,
             Err(e) => {
-                eprintln!(
+                log::error!(
                     "Failed to parse plugin manifest at {:?}: {}",
-                    manifest_path, e
+                    manifest_path,
+                    e
                 );
                 continue;
             }
@@ -97,7 +100,7 @@ pub fn scan_plugins_directory(_app_handle: AppHandle) -> Result<Vec<PluginInfo>,
         // Verify the main bundle exists
         let bundle_path = path.join(&manifest.main);
         if !bundle_path.exists() {
-            eprintln!("Plugin bundle not found: {:?}", bundle_path);
+            log::error!("Plugin bundle not found: {:?}", bundle_path);
             continue;
         }
 

@@ -10,5 +10,7 @@
     <string>Need access to show upcoming events.</string>
     <key>NSRemindersUsageDescription</key>
     <string>Need access to show and manage reminders.</string>
+    <key>NSCameraUsageDescription</key>
+    <string>Need camera access for Mirror widget.</string>
 </dict>
 </plist>

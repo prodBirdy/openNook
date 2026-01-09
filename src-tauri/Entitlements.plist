@@ -5,6 +5,9 @@
     <!-- Audio input device access - triggers TCC prompt -->
     <key>com.apple.security.device.audio-input</key>
     <true/>
+    <!-- Camera access -->
+    <key>com.apple.security.device.camera</key>
+    <true/>
     <!-- App Sandbox disabled for audio access -->
     <key>com.apple.security.app-sandbox</key>
     <false/>

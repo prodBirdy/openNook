@@ -6,7 +6,7 @@ export interface CompactWrapperProps {
     right?: ReactNode;
     baseNotchWidth: number;
     isHovered: boolean;
-    contentOpacity: number;
+    contentOpacity?: number;
     className?: string;
     id?: string;
 }
@@ -16,7 +16,7 @@ export function CompactWrapper({
     right,
     baseNotchWidth,
     isHovered,
-    contentOpacity,
+    contentOpacity = 1,
     className = "island-content",
     id
 }: CompactWrapperProps) {

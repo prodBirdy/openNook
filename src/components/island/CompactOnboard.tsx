@@ -7,10 +7,10 @@ import { IconBrandGithub } from '@tabler/icons-react';
 interface CompactOnboardProps {
     baseNotchWidth: number;
     isHovered: boolean;
-    contentOpacity: number;
+    contentOpacity?: number;
 }
 
-export function CompactOnboard({ baseNotchWidth, isHovered, contentOpacity }: CompactOnboardProps) {
+export function CompactOnboard({ baseNotchWidth, isHovered }: CompactOnboardProps) {
     const videoRef = useRef<HTMLVideoElement>(null);
 
     useEffect(() => {
@@ -44,7 +44,6 @@ export function CompactOnboard({ baseNotchWidth, isHovered, contentOpacity }: Co
             className="island-content onboard-content"
             baseNotchWidth={baseNotchWidth}
             isHovered={isHovered}
-            contentOpacity={contentOpacity}
             left={
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                     <video
@@ -62,7 +61,7 @@ export function CompactOnboard({ baseNotchWidth, isHovered, contentOpacity }: Co
                         muted
                         playsInline
                         preload="auto"
-                        // Trigger play as soon as enough data is buffered
+                        // Trigger play as soon as enough data is buffered¥
                         onCanPlay={() => videoRef.current?.play().catch(() => { })}
                     />
                 </div>

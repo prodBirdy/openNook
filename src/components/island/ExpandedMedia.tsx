@@ -1,37 +1,23 @@
 import { memo, useMemo, useState, useEffect } from 'react';
 import { motion } from 'motion/react';
 import { IconPlayerSkipBackFilled, IconPlayerPlayFilled, IconPlayerPauseFilled, IconPlayerSkipForwardFilled } from '@tabler/icons-react';
-import { getDominantColor } from '../utils/imageUtils';
-import { WidgetWrapper } from './widgets/WidgetWrapper';
-
-interface NowPlayingData {
-    title: string | null;
-    artist: string | null;
-    album: string | null;
-    artwork_base64: string | null;
-    duration: number | null;
-    elapsed_time: number | null;
-    is_playing: boolean;
-    audio_levels: number[] | null;
-    app_name: string | null;
-}
-
-interface ExpandedMediaProps {
-    nowPlaying: NowPlayingData;
-    onPlayPause: (e: React.MouseEvent) => void;
-    onNext: (e: React.MouseEvent) => void;
-    onPrevious: (e: React.MouseEvent) => void;
-    onSeek: (position: number) => Promise<void>;
-}
+import { getDominantColor } from '../../utils/imageUtils';
+import { WidgetWrapper } from '../widgets/WidgetWrapper';
+import { useMediaPlayerStore } from '../../stores/useMediaPlayerStore';
+import { ScrollingText } from '../ui/scrolling-text';
 
 // Memoized ExpandedMedia component
-export const ExpandedMedia = memo(function ExpandedMedia({
-    nowPlaying,
-    onPlayPause,
-    onNext,
-    onPrevious,
-    onSeek
-}: ExpandedMediaProps) {
+export const ExpandedMedia = memo(function ExpandedMedia() {
+    const nowPlaying = useMediaPlayerStore(state => state.nowPlaying);
+    const handlePlayPause = useMediaPlayerStore(state => state.handlePlayPause);
+    const handleNextTrack = useMediaPlayerStore(state => state.handleNextTrack);
+    const handlePreviousTrack = useMediaPlayerStore(state => state.handlePreviousTrack);
+    const handleSeek = useMediaPlayerStore(state => state.handleSeek);
+
+    // Early return if no media is playing
+    if (!nowPlaying) {
+        return null;
+    }
     const formatTime = (seconds: number) => {
         const mins = Math.floor(seconds / 60);
         const secs = Math.floor(seconds % 60);
@@ -70,7 +56,7 @@ export const ExpandedMedia = memo(function ExpandedMedia({
         }
     }, [nowPlaying.artwork_base64]);
 
-    const handleSeek = async (e: React.PointerEvent<HTMLDivElement>) => {
+    const handleSeekInternal = async (e: React.PointerEvent<HTMLDivElement>) => {
         if (!nowPlaying.duration) {
             setIsSeizing(false);
             return;
@@ -85,7 +71,7 @@ export const ExpandedMedia = memo(function ExpandedMedia({
         setLocalProgress(percentage);
 
         // Wait for backend confirmation
-        await onSeek(newTime);
+        await handleSeek(newTime);
 
         // Only release lock after backend is done
         setIsSeizing(false);
@@ -118,9 +104,13 @@ export const ExpandedMedia = memo(function ExpandedMedia({
                     <div className="w-full h-full bg-linear-to-br from-[#2a2a2a] to-[#1a1a1a] flex items-center justify-center border border-white/10" />
                 )}
             </div>
-            <div className="flex-1 flex flex-col justify-center text-left overflow-hidden">
-                <h3 className="text-[17px] font-semibold mb-[3px] pr-[4px] whitespace-nowrap overflow-hidden text-ellipsis text-white tracking-[-0.01em]">{nowPlaying.title || 'Unknown Title'}</h3>
-                <p className="text-[13px] text-white/60 m-0 whitespace-nowrap overflow-hidden text-ellipsis">{nowPlaying.artist || 'Unknown Artist'}</p>
+            <div className="w-full flex-1 flex flex-col justify-center text-left overflow-hidden min-w-0 ">
+                <ScrollingText className="text-[17px] font-semibold  text-white tracking-[-0.01em]">
+                    {nowPlaying.title || 'Unknown Title'}
+                </ScrollingText>
+                <ScrollingText className="text-[13px] text-white/60 m-0">
+                    {nowPlaying.artist || 'Unknown Artist'}
+                </ScrollingText>
             </div>
         </>
     ]
@@ -141,8 +131,8 @@ export const ExpandedMedia = memo(function ExpandedMedia({
                     if (!nowPlaying.duration || nowPlaying.duration <= 0) return;
                     e.stopPropagation();
                     e.currentTarget.releasePointerCapture(e.pointerId);
-                    // Do NOT setIsSeizing(false) here - handleSeek depends on it blocking updates
-                    handleSeek(e); // Commit seek
+                    // Do NOT setIsSeizing(false) here - handleSeekInternal depends on it blocking updates
+                    handleSeekInternal(e); // Commit seek
                 }}
                 onPointerMove={(e) => {
                     if (isSeizing) handleMouseMove(e);
@@ -170,17 +160,17 @@ export const ExpandedMedia = memo(function ExpandedMedia({
             </div>
 
             <div className="flex items-center justify-center gap-[36px] p-0 mt-0" onClick={(e) => e.stopPropagation()}>
-                <div className="flex items-center justify-center cursor-pointer opacity-90 transition-all duration-200 ease-[cubic-bezier(0.25,0.1,0.25,1)] text-white text-[20px] hover:opacity-100 hover:scale-110 active:scale-[0.92]" onClick={(e) => { e.stopPropagation(); onPrevious(e); }}>
+                <div className="flex items-center justify-center cursor-pointer opacity-90 transition-all duration-200 ease-[cubic-bezier(0.25,0.1,0.25,1)] text-white text-[20px] hover:opacity-100 hover:scale-110 active:scale-[0.92]" onClick={(e) => { e.stopPropagation(); handlePreviousTrack(e); }}>
                     <IconPlayerSkipBackFilled size={24} />
                 </div>
-                <div className="flex items-center justify-center cursor-pointer opacity-90 transition-all duration-200 ease-[cubic-bezier(0.25,0.1,0.25,1)] w-10 h-10 text-[24px] bg-white rounded-full text-black  hover:opacity-100 hover:scale-[1.08] hover:bg-[#f5f5f5] active:scale-[0.95]" onClick={(e) => { e.stopPropagation(); onPlayPause(e); }}>
+                <div className="flex items-center justify-center cursor-pointer opacity-90 transition-all duration-200 ease-[cubic-bezier(0.25,0.1,0.25,1)] w-10 h-10 text-[24px] bg-white rounded-full text-black  hover:opacity-100 hover:scale-[1.08] hover:bg-[#f5f5f5] active:scale-[0.95]" onClick={(e) => { e.stopPropagation(); handlePlayPause(e); }}>
                     {nowPlaying.is_playing ? (
                         <IconPlayerPauseFilled size={24} className="text-black" />
                     ) : (
                         <IconPlayerPlayFilled size={24} className="text-black" />
                     )}
                 </div>
-                <div className="flex items-center justify-center cursor-pointer opacity-90 transition-all duration-200 ease-[cubic-bezier(0.25,0.1,0.25,1)] text-white text-[20px] hover:opacity-100 hover:scale-110 active:scale-[0.92]" onClick={(e) => { e.stopPropagation(); onNext(e); }}>
+                <div className="flex items-center justify-center cursor-pointer opacity-90 transition-all duration-200 ease-[cubic-bezier(0.25,0.1,0.25,1)] text-white text-[20px] hover:opacity-100 hover:scale-110 active:scale-[0.92]" onClick={(e) => { e.stopPropagation(); handleNextTrack(e); }}>
                     <IconPlayerSkipForwardFilled size={24} />
                 </div>
             </div>

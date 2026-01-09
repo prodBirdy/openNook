@@ -22,6 +22,7 @@ export const builtinWidgets: WidgetConfigEntry[] = [
     { id: 'reminders', module: () => import('./RemindersWidget') },
     { id: 'timer', module: () => import('./TimerWidget') },
     { id: 'session', module: () => import('./SessionWidget') },
+    { id: 'mirror', module: () => import('./MirrorWidget') },
 ];
 
 /**

@@ -1,3 +1,4 @@
+use log;
 use serde::Serialize;
 
 #[derive(Serialize, Clone)]
@@ -90,7 +91,6 @@ mod macos {
     pub async fn request_access() -> Result<bool, String> {
         // If already requested, return immediately
         if ACCESS_ALREADY_REQUESTED.load(Ordering::SeqCst) {
-            println!("Calendar/Reminders access already requested, skipping");
             return Ok(true);
         }
 
@@ -99,7 +99,6 @@ mod macos {
             .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
             .is_err()
         {
-            println!("Calendar access request already in progress, skipping");
             return Ok(true);
         }
 
@@ -120,14 +119,15 @@ mod macos {
         let status_reminders =
             unsafe { EKEventStore::authorizationStatusForEntityType(EKEntityType::Reminder) };
 
-        println!(
+        log::debug!(
             "Calendar authorization status: {:?}, Reminders status: {:?}",
-            status_events, status_reminders
+            status_events,
+            status_reminders
         );
 
         // Check Events - only request if NotDetermined
         if status_events == EKAuthorizationStatus::NotDetermined {
-            println!("Requesting Calendar Access...");
+            log::info!("Requesting Calendar Access...");
             let (tx, rx) = tokio::sync::oneshot::channel::<bool>();
             let tx: std::sync::Mutex<Option<Sender<bool>>> = std::sync::Mutex::new(Some(tx));
 
@@ -154,16 +154,16 @@ mod macos {
 
             // Wait for user response
             match rx.await {
-                Ok(granted) => println!("Calendar access granted: {}", granted),
-                Err(_) => println!("Calendar access request cancelled"),
+                Ok(granted) => log::info!("Calendar access granted: {}", granted),
+                Err(_) => log::warn!("Calendar access request cancelled"),
             }
         } else {
-            println!("Calendar access already determined: {:?}", status_events);
+            log::debug!("Calendar access already determined: {:?}", status_events);
         }
 
         // Check Reminders - only request if NotDetermined
         if status_reminders == EKAuthorizationStatus::NotDetermined {
-            println!("Requesting Reminders Access...");
+            log::info!("Requesting Reminders Access...");
             let (tx, rx) = tokio::sync::oneshot::channel::<bool>();
             let tx: std::sync::Mutex<Option<Sender<bool>>> = std::sync::Mutex::new(Some(tx));
 
@@ -188,11 +188,11 @@ mod macos {
                 }
             }
             match rx.await {
-                Ok(granted) => println!("Reminders access granted: {}", granted),
-                Err(_) => println!("Reminders access request cancelled"),
+                Ok(granted) => log::info!("Reminders access granted: {}", granted),
+                Err(_) => log::warn!("Reminders access request cancelled"),
             }
         } else {
-            println!(
+            log::debug!(
                 "Reminders access already determined: {:?}",
                 status_reminders
             );
@@ -208,14 +208,13 @@ mod macos {
                 if let Ok(cache) = cache_mutex.lock() {
                     if cache.is_valid(Duration::from_secs(600)) {
                         // 10 minutes
-                        println!("Using cached calendar events");
                         return cache.data.clone();
                     }
                 }
             }
         }
 
-        println!("Fetching fresh calendar events...");
+        log::debug!("Fetching fresh calendar events...");
 
         let mut events_list = Vec::new();
         let store = match get_store() {
@@ -302,14 +301,13 @@ mod macos {
                 if let Ok(cache) = cache_mutex.lock() {
                     if cache.is_valid(Duration::from_secs(600)) {
                         // 10 minutes
-                        println!("Using cached reminders");
                         return cache.data.clone();
                     }
                 }
             }
         }
 
-        println!("Fetching fresh reminders...");
+        log::debug!("Fetching fresh reminders...");
 
         let (tx, rx) = tokio::sync::oneshot::channel::<Vec<Reminder>>();
 
@@ -411,7 +409,7 @@ mod macos {
                 results
             }
             Err(_) => {
-                println!("Reminders fetch timed out or cancelled");
+                log::warn!("Reminders fetch timed out or cancelled");
                 Vec::new()
             }
         }
@@ -657,9 +655,7 @@ pub async fn open_calendar_app() -> Result<(), String> {
         std::process::Command::new("xdg-open")
             .arg("calendar:")
             .spawn()
-            .or_else(|_| {
-                 std::process::Command::new("gnome-calendar").spawn()
-            })
+            .or_else(|_| std::process::Command::new("gnome-calendar").spawn())
             .map_err(|e| e.to_string())?;
     }
     Ok(())
@@ -677,7 +673,7 @@ pub async fn open_reminders_app() -> Result<(), String> {
     }
     #[cfg(target_os = "windows")]
     {
-         std::process::Command::new("explorer")
+        std::process::Command::new("explorer")
             .arg("ms-to-do:")
             .spawn()
             .map_err(|e| e.to_string())?;
@@ -685,12 +681,10 @@ pub async fn open_reminders_app() -> Result<(), String> {
     #[cfg(target_os = "linux")]
     {
         // Try to open common todo apps
-         std::process::Command::new("xdg-open")
+        std::process::Command::new("xdg-open")
             .arg("todo:") // unlikely to work but consistent
             .spawn()
-            .or_else(|_| {
-                 std::process::Command::new("gnome-todo").spawn()
-            })
+            .or_else(|_| std::process::Command::new("gnome-todo").spawn())
             .map_err(|e| e.to_string())?;
     }
     Ok(())
@@ -714,7 +708,7 @@ pub async fn open_privacy_settings() -> Result<(), String> {
     }
     #[cfg(target_os = "linux")]
     {
-         std::process::Command::new("xdg-open")
+        std::process::Command::new("xdg-open")
             .arg("help:privacy") // Very generic/wrong, but Linux settings are DE specific.
             .spawn()
             .map_err(|e| e.to_string())?;
@@ -779,9 +773,13 @@ pub async fn open_calendar_event(_id: String, date: f64) -> Result<(), String> {
             year, month, day, hour, minute
         );
 
-        println!(
+        log::debug!(
             "Opening/Switching Calendar to: {}/{}/{} {}:{}",
-            year, month, day, hour, minute
+            year,
+            month,
+            day,
+            hour,
+            minute
         );
 
         std::process::Command::new("osascript")

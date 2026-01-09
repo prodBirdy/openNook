@@ -1,4 +1,5 @@
 use crate::database::{get_connection, log_sql};
+use log;
 use serde::{Deserialize, Serialize};
 use std::fs;
 #[cfg(target_os = "macos")]
@@ -101,7 +102,7 @@ pub fn reveal_file(path: String) -> Result<(), String> {
 
 #[command]
 pub fn on_file_drop(path: String) {
-    println!("File dropped: {}", path);
+    log::debug!("File dropped: {}", path);
 }
 
 #[command]

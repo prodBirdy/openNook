@@ -1,10 +1,11 @@
 import { motion, AnimatePresence } from 'motion/react';
 import { IconSettings, IconLayoutGrid, IconFiles } from '@tabler/icons-react';
-import { ExpandedMedia } from '../ExpandedMedia';
-import { FileTray, FileItem } from '../FileTray';
-import { NowPlayingData } from './types';
-import { useWidgets } from '../../context/WidgetContext';
+import { ExpandedMedia } from './ExpandedMedia';
+import { FileTray } from '../FileTray';
+import { useWidgetStore } from '../../stores/useWidgetStore';
 import { WidgetWrapper } from '../widgets/WidgetWrapper';
+import { useMemo } from 'react';
+import { PopoverProvider } from '../../context/PopoverContext';
 
 interface ExpandedIslandProps {
     activeTab: 'widgets' | 'files';
@@ -20,17 +21,11 @@ interface ExpandedIslandProps {
         liquidGlassMode: boolean;
     };
     handleSettingsClick: () => void;
-    nowPlaying: NowPlayingData | null;
-    handlePlayPause: (e: React.MouseEvent) => void;
-    handleNextTrack: (e: React.MouseEvent) => void;
-    handlePreviousTrack: (e: React.MouseEvent) => void;
-    handleSeek: (position: number) => Promise<void>;
-    files: FileItem[];
-    setFiles: (files: FileItem[]) => void;
     notes: string;
     handleNotesChange: (e: React.ChangeEvent<HTMLTextAreaElement>) => void;
     handleNotesClick: (e: React.MouseEvent) => void;
     handleChildWheel: (e: React.WheelEvent) => void;
+    setIsPopoverOpen: (open: boolean) => void;
 }
 
 export function ExpandedIsland({
@@ -40,19 +35,20 @@ export function ExpandedIsland({
     baseNotchWidth,
     settings,
     handleSettingsClick,
-    nowPlaying,
-    handlePlayPause,
-    handleNextTrack,
-    handlePreviousTrack,
-    handleSeek,
-    files,
-    setFiles,
     notes,
     handleNotesChange,
     handleNotesClick,
-    handleChildWheel
+    handleChildWheel,
+    setIsPopoverOpen
 }: ExpandedIslandProps) {
-    const { enabledWidgets } = useWidgets();
+    const widgets = useWidgetStore(state => state.widgets);
+    const widgetEnabledState = useWidgetStore(state => state.enabledState);
+
+    // Compute enabled widgets with memoization to avoid infinite loops
+    const enabledWidgets = useMemo(() =>
+        widgets.filter(w => widgetEnabledState[w.id]),
+        [widgets, widgetEnabledState]
+    );
 
     return (
         <motion.div
@@ -115,29 +111,15 @@ export function ExpandedIsland({
                             transition={{ duration: 0.3 }}
                             onWheel={handleChildWheel}
                         >
-                            {/* Media player is a special case - needs props */}
-                            {settings.showMedia && (
-                                <>
-                                    {nowPlaying ? (
-                                        <ExpandedMedia
-                                            nowPlaying={nowPlaying}
-                                            onPlayPause={handlePlayPause}
-                                            onNext={handleNextTrack}
-                                            onPrevious={handlePreviousTrack}
-                                            onSeek={handleSeek}
-                                        />
-                                    ) : (
-                                        <div className="no-media-message">No media playing</div>
-                                    )}
-                                </>
-                            )}
+                            {/* Media player is a special case - uses Zustand store */}
+                            {settings.showMedia && <ExpandedMedia />}
 
                             {/* Dynamically render enabled widgets from the registry */}
-                            {enabledWidgets.map(widget => (
-
-                                <widget.ExpandedComponent />
-
-                            ))}
+                            <PopoverProvider onOpenChange={setIsPopoverOpen}>
+                                {enabledWidgets.map(widget => (
+                                    <widget.ExpandedComponent key={widget.id} />
+                                ))}
+                            </PopoverProvider>
                             <WidgetWrapper title="Notes">
 
                                 <textarea
@@ -161,7 +143,7 @@ export function ExpandedIsland({
                             exit={{ opacity: 0, x: 20 }}
                             transition={{ duration: 0.3 }}
                         >
-                            <FileTray files={files} onUpdateFiles={setFiles} />
+                            <FileTray />
                         </motion.div>
                     )}
                 </AnimatePresence>
