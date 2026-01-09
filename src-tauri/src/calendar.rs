@@ -428,15 +428,14 @@ mod macos {
 
         if let Some(item) = item {
             // Check if it is a reminder (EKReminder inherits from EKCalendarItem)
-            // We can try to cast or check class. For now, we assume ID is correct.
-            let reminder_ptr: *const objc2_event_kit::EKCalendarItem =
-                objc2::rc::Retained::as_ptr(&item);
-            let reminder: &objc2_event_kit::EKReminder =
-                unsafe { &*(reminder_ptr as *const objc2_event_kit::EKReminder) };
+            // We use downcast to verify the type safely.
+            let reminder = item
+                .downcast::<objc2_event_kit::EKReminder>()
+                .map_err(|_| "Item found is not a reminder".to_string())?;
 
             unsafe {
                 reminder.setCompleted(true);
-                let _ = store.saveReminder_commit_error(reminder, true);
+                let _ = store.saveReminder_commit_error(&reminder, true);
             }
 
             // Invalidate cache
