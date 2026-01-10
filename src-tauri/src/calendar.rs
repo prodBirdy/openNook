@@ -27,6 +27,7 @@ pub struct Reminder {
 mod macos {
     use super::*;
     use objc2::rc::Retained;
+    use objc2_app_kit::{NSColor, NSColorSpace};
     use objc2_event_kit::{EKAuthorizationStatus, EKEntityType, EKEventStore};
     use objc2_foundation::{MainThreadMarker, NSCalendar, NSCalendarUnit, NSDate};
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -86,6 +87,19 @@ mod macos {
             SyncEventStore(store)
         });
         EVENT_STORE.get()
+    }
+
+    unsafe fn get_calendar_color(calendar: &objc2_event_kit::EKCalendar) -> String {
+        let color_ns = calendar.color();
+        let srgb_space = NSColorSpace::sRGBColorSpace();
+        if let Some(safe_color) = color_ns.colorUsingColorSpace(Some(&srgb_space)) {
+            let r = (safe_color.redComponent() * 255.0) as u8;
+            let g = (safe_color.greenComponent() * 255.0) as u8;
+            let b = (safe_color.blueComponent() * 255.0) as u8;
+            format!("#{:02x}{:02x}{:02x}", r, g, b)
+        } else {
+            "#808080".to_string()
+        }
     }
 
     pub async fn request_access() -> Result<bool, String> {
@@ -268,8 +282,14 @@ mod macos {
 
             let is_all_day = unsafe { event.isAllDay() };
 
-            // Use default color for now
-            let color = "#34c759".to_string();
+            // Get color from calendar
+            let color = unsafe {
+                if let Some(calendar) = event.calendar() {
+                    get_calendar_color(&calendar)
+                } else {
+                    "#34c759".to_string()
+                }
+            };
 
             events_list.push(CalendarEvent {
                 id,
@@ -364,7 +384,7 @@ mod macos {
                                 match unsafe { reminder.calendar() } {
                                     Some(cal) => {
                                         let name = unsafe { cal.title() }.to_string();
-                                        (name, "#ff3b30".to_string())
+                                        (name, get_calendar_color(&cal))
                                     }
                                     None => ("Unknown".to_string(), "#ff3b30".to_string()),
                                 }
