@@ -35,7 +35,8 @@
     "react-hook-form": "^7.70.0",
     "tailwind-merge": "^3.4.0",
     "tailwindcss": "^4.1.18",
-    "zod": "3"
+    "zod": "3",
+    "zustand": "^5.0.9"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2",
