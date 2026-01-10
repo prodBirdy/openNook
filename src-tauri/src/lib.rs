@@ -61,6 +61,7 @@ pub fn run() {
             window::get_system_accent_color,
             widgets::save_widget_state,
             widgets::load_widget_state,
+            widgets::run_speed_test,
             plugins::scan_plugins_directory,
             plugins::read_plugin_bundle,
             plugins::get_plugins_directory_path,

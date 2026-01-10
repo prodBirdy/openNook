@@ -89,11 +89,14 @@ export const ExpandedMedia = memo(function ExpandedMedia() {
     const headerActions = [
         <>
             <div
-                className="w-[52px] h-[52px] rounded-[10px] overflow-hidden shrink-0 shadow-[0_4px_12px_rgba(0,0,0,0.4),0_8px_32px_-4px_var(--glow-color,transparent)] transition-shadow duration-500 ease-in-out"
-                style={{
-                    '--glow-color': glowColor || 'transparent',
-                } as React.CSSProperties}
+                className="w-[52px] h-[52px] rounded-[10px] overflow-visible shrink-0  "
             >
+                <div
+                    className="absolute w-[52px] h-[52px] rounded-[10px] overflow-visible shrink-0 shadow-[0_4px_12px_rgba(0,0,0,0.4),0_8px_32px_-4px_var(--glow-color,transparent)] transition-shadow duration-500 ease-in-out"
+                    style={{
+                        '--glow-color': glowColor || 'transparent',
+                    } as React.CSSProperties}
+                ></div>
                 {nowPlaying.artwork_base64 ? (
                     <img
                         src={`data:image/png;base64,${nowPlaying.artwork_base64}`}
@@ -101,7 +104,7 @@ export const ExpandedMedia = memo(function ExpandedMedia() {
                         className="w-full h-full object-cover rounded-[12px]"
                     />
                 ) : (
-                    <div className="w-full h-full bg-linear-to-br from-[#2a2a2a] to-[#1a1a1a] flex items-center justify-center border border-white/10" />
+                    <div className="w-full h-full object-cover rounded-[12px] bg-linear-to-br from-[#2a2a2a] to-[#1a1a1a] flex items-center justify-center border border-white/10" />
                 )}
             </div>
             <div className="w-full flex-1 flex flex-col justify-center text-left overflow-hidden min-w-0 ">
@@ -138,7 +141,7 @@ export const ExpandedMedia = memo(function ExpandedMedia() {
                     if (isSeizing) handleMouseMove(e);
                 }}
             >
-                <div className="w-full h-1 bg-white/15 rounded-[2px] overflow-hidden cursor-pointer ">
+                <div className="w-full h-1 bg-white/15 rounded-[2px] cursor-pointer ">
                     <motion.div
                         className="h-full bg-white rounded-[2px]"
                         initial={{ width: 0 }}
