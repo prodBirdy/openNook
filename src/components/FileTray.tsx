@@ -113,32 +113,106 @@ export function FileTray() {
         }
     }, []);
 
-    const createResizedIcon = async (src: string): Promise<Uint8Array | null> => {
+    const drawGenericIcon = (ctx: CanvasRenderingContext2D, width: number, height: number, filename: string) => {
+        ctx.clearRect(0, 0, width, height);
+
+        // Draw file shape background
+        const pad = 12;
+        const w = width - pad * 2;
+        const h = height - pad * 2;
+        const x = pad;
+        const y = pad;
+        const radius = 8;
+
+        // White background with shadow
+        ctx.shadowColor = 'rgba(0, 0, 0, 0.2)';
+        ctx.shadowBlur = 10;
+        ctx.shadowOffsetX = 0;
+        ctx.shadowOffsetY = 4;
+        ctx.fillStyle = '#ffffff';
+
+        ctx.beginPath();
+        // @ts-ignore
+        if (typeof ctx.roundRect === 'function') {
+             // @ts-ignore
+            ctx.roundRect(x, y, w, h, radius);
+        } else {
+             // Fallback for older browsers
+             ctx.moveTo(x + radius, y);
+             ctx.lineTo(x + w - radius, y);
+             ctx.quadraticCurveTo(x + w, y, x + w, y + radius);
+             ctx.lineTo(x + w, y + h - radius);
+             ctx.quadraticCurveTo(x + w, y + h, x + w - radius, y + h);
+             ctx.lineTo(x + radius, y + h);
+             ctx.quadraticCurveTo(x, y + h, x, y + h - radius);
+             ctx.lineTo(x, y + radius);
+             ctx.quadraticCurveTo(x, y, x + radius, y);
+        }
+        ctx.fill();
+
+        // Reset shadow
+        ctx.shadowColor = 'transparent';
+        ctx.shadowBlur = 0;
+        ctx.shadowOffsetX = 0;
+        ctx.shadowOffsetY = 0;
+
+        // Draw extension text
+        const ext = filename.split('.').pop()?.toUpperCase().substring(0, 4) || 'FILE';
+        ctx.fillStyle = '#6b7280'; // gray-500
+        ctx.font = 'bold 24px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(ext, width / 2, height / 2);
+    };
+
+    const createDragIcon = async (file: FileItem): Promise<Uint8Array | null> => {
+        const isImage = file.type.startsWith('image/');
+        const MAX_SIZE = 128; // Larger size for better quality on high-res displays
+
         return new Promise((resolve) => {
-            const img = new Image();
-            img.crossOrigin = "Anonymous";
-            img.onload = () => {
-                try {
-                    const canvas = document.createElement('canvas');
-                    canvas.width = 30;
-                    canvas.height = 30;
-                    const ctx = canvas.getContext('2d');
-                    if (!ctx) { resolve(null); return; }
+            const canvas = document.createElement('canvas');
+            canvas.width = MAX_SIZE;
+            canvas.height = MAX_SIZE;
+            const ctx = canvas.getContext('2d');
+            if (!ctx) { resolve(null); return; }
 
-                    // Draw image scaled to 30x30
-                    ctx.drawImage(img, 0, 0, 30, 30);
-
-                    canvas.toBlob((blob) => {
-                        if (!blob) { resolve(null); return; }
-                        blob.arrayBuffer().then(buf => resolve(new Uint8Array(buf)));
-                    }, 'image/png');
-                } catch (e) {
-                    console.error("Canvas error", e);
-                    resolve(null);
-                }
+            const returnCanvasData = () => {
+                canvas.toBlob((blob) => {
+                    if (!blob) { resolve(null); return; }
+                    blob.arrayBuffer().then(buf => resolve(new Uint8Array(buf)));
+                }, 'image/png');
             };
-            img.onerror = () => resolve(null);
-            img.src = src;
+
+            if (isImage && (file.resolvedPath || file.path)) {
+                const img = new Image();
+                img.crossOrigin = "Anonymous";
+                img.onload = () => {
+                    // Clear canvas
+                    ctx.clearRect(0, 0, MAX_SIZE, MAX_SIZE);
+
+                    // Draw image preserving aspect ratio
+                    const scale = Math.min(MAX_SIZE / img.width, MAX_SIZE / img.height);
+                    const w = img.width * scale;
+                    const h = img.height * scale;
+                    const x = (MAX_SIZE - w) / 2;
+                    const y = (MAX_SIZE - h) / 2;
+
+                    // Add a slight shadow for better visibility
+                    ctx.shadowColor = 'rgba(0, 0, 0, 0.2)';
+                    ctx.shadowBlur = 8;
+                    ctx.drawImage(img, x, y, w, h);
+
+                    returnCanvasData();
+                };
+                img.onerror = () => {
+                    drawGenericIcon(ctx, MAX_SIZE, MAX_SIZE, file.name);
+                    returnCanvasData();
+                };
+                img.src = convertFileSrc(file.resolvedPath || file.path!);
+            } else {
+                drawGenericIcon(ctx, MAX_SIZE, MAX_SIZE, file.name);
+                returnCanvasData();
+            }
         });
     };
 
@@ -149,15 +223,16 @@ export function FileTray() {
             try {
                 let dragIconPath = path;
 
-                // Try to generate a small icon
-                const src = convertFileSrc(path);
-                const iconData = await createResizedIcon(src);
+                // Always try to generate an optimized icon to avoid large drag images
+                const iconData = await createDragIcon(file);
 
                 if (iconData) {
                     try {
                         dragIconPath = await invoke('save_drag_icon', { iconData: Array.from(iconData) });
                     } catch (e) {
                         console.error('Failed to save drag icon', e);
+                        // Fallback to path is risky for large images, but we have no choice if save fails
+                        // Ideally we might want a static asset path here as fallback
                     }
                 }
 
@@ -166,7 +241,7 @@ export function FileTray() {
                 const { startDrag } = await import('@crabnebula/tauri-plugin-drag');
                 await startDrag({
                     item: [path],
-                    icon: dragIconPath // Reverted to use path as icon is required. Note: may cause large drag image for high-res files.
+                    icon: dragIconPath
                 });
 
                 // If we get here, drag completed successfully - remove file from tray
