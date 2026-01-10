@@ -3,7 +3,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { IconRefresh, IconPlus, IconChecklist } from '@tabler/icons-react';
 import { z } from 'zod';
 import { format, isPast } from 'date-fns';
-import { motion, AnimatePresence } from 'framer-motion';
+import { motion, AnimatePresence } from 'motion/react';
 import { registerWidget } from './WidgetRegistry';
 import { WidgetWrapper } from './WidgetWrapper';
 import { WidgetAddDialog } from './WidgetAddDialog';
