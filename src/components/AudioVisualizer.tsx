@@ -77,7 +77,6 @@ export const SmartAudioVisualizer = memo(function SmartAudioVisualizer({
                 const scale = Math.max(0.15, Math.min(1, next));
 
                 bar.style.transform = `scaleY(${scale})`;
-                bar.style.backgroundColor = barColor;
             }
 
             animationFrameRef.current = requestAnimationFrame(animate);
