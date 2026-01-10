@@ -89,7 +89,7 @@ export const ExpandedMedia = memo(function ExpandedMedia() {
     const headerActions = [
         <>
             <div
-                className="w-[52px] h-[52px] rounded-[10px] overflow-visible shrink-0 "
+                className="w-[52px] h-[52px] rounded-[10px] overflow-visible shrink-0  "
             >
                 <div
                     className="absolute w-[52px] h-[52px] rounded-[10px] overflow-visible shrink-0 shadow-[0_4px_12px_rgba(0,0,0,0.4),0_8px_32px_-4px_var(--glow-color,transparent)] transition-shadow duration-500 ease-in-out"
@@ -104,7 +104,7 @@ export const ExpandedMedia = memo(function ExpandedMedia() {
                         className="w-full h-full object-cover rounded-[12px]"
                     />
                 ) : (
-                    <div className="w-full h-full bg-linear-to-br from-[#2a2a2a] to-[#1a1a1a] flex items-center justify-center border border-white/10" />
+                    <div className="w-full h-full object-cover rounded-[12px] bg-linear-to-br from-[#2a2a2a] to-[#1a1a1a] flex items-center justify-center border border-white/10" />
                 )}
             </div>
             <div className="w-full flex-1 flex flex-col justify-center text-left overflow-hidden min-w-0 ">
