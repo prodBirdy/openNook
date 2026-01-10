@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { motion, AnimatePresence } from 'framer-motion';
+import { motion, AnimatePresence } from 'motion/react';
 import { IconPlayerPlay, IconPlayerStop, IconPlus, IconTrash, IconActivity, IconBriefcase, IconCode, IconBook, IconMoon, IconCpu, IconBulb, IconHeadphones, IconCoffee, IconDeviceLaptop, IconWriting } from '@tabler/icons-react';
 import { z } from 'zod';
 import { registerWidget } from './WidgetRegistry';
@@ -34,7 +34,7 @@ const sessionFormSchema = z.object({
 
 type SessionFormValues = z.infer<typeof sessionFormSchema>;
 
-function formatElapsed(seconds: number, compact = false): string {
+function formatTime(seconds: number, compact = false): string {
     const h = Math.floor(seconds / 3600);
     const m = Math.floor((seconds % 3600) / 60);
     const s = seconds % 60;
@@ -50,7 +50,7 @@ function formatElapsed(seconds: number, compact = false): string {
     }
 
     if (h > 0) {
-        return `${h}:${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
+        return `${h}:${m.toString().padStart(2, '0')}`;
     }
     return `${m}:${s.toString().padStart(2, '0')}`;
 }
@@ -176,7 +176,7 @@ export function SessionWidget() {
                                     })()}
                                 </div>
                                 <div className='flex-1 flex flex-col justify-center'>
-                                    <div className='text-[26px] font-medium text-white/95 tabular-nums tracking-[-0.5px] leading-none'>{formatElapsed(getElapsedTime(session))}</div>
+                                    <div className='text-[26px] font-medium text-white/95 tabular-nums tracking-[-0.5px] leading-none'>{formatTime(getElapsedTime(session))}</div>
                                     <div className='text-[13px] text-white/40 mt-0.5 font-medium' >{session.name || 'Focus Session'}</div>
                                 </div>
 
@@ -207,7 +207,7 @@ export function SessionWidget() {
                                 animate={{ opacity: 1, scale: 1, y: 0 }}
                                 exit={{ opacity: 0, scale: 0.9, y: -20 }}
                                 transition={{ type: "spring", bounce: 0.3, duration: 0.4 }}
-                                className="group flex items-center gap-2 px-4 py-3 rounded-[20px] bg-transparent border border-transparent transition-colors duration-200 cursor-default hover:bg-white/5"
+                                className="group flex items-center gap-2 px-4 py-3 rounded-4xl bg-transparent border border-transparent transition-colors duration-200 cursor-default hover:bg-white/5"
                                 key={session.id}
                                 onClick={(e) => { e.stopPropagation(); resumeSession(session.id); }}
                                 style={{ cursor: 'pointer' }}
@@ -219,7 +219,7 @@ export function SessionWidget() {
                                     })()}
                                 </div>
                                 <div className="flex-1 flex flex-col justify-center">
-                                    <div className="text-[26px] font-medium text-white/70 tabular-nums tracking-[-0.5px] leading-none">{formatElapsed(getElapsedTime(session))}</div>
+                                    <div className="text-[26px] font-medium text-white/70 tabular-nums tracking-[-0.5px] leading-none">{formatTime(getElapsedTime(session))}</div>
                                     <div className="text-[13px] text-white/30 mt-0.5 font-medium">{session.name || 'Focus Session'}</div>
                                 </div>
 
@@ -304,7 +304,7 @@ export function CompactSession({ baseNotchWidth, isHovered, contentOpacity }: Co
             right={
                 <div className="flex items-center gap-2">
                     <span className="text-white text-sm tabular-nums">
-                        {formatElapsed(getElapsedTime(activeSession), true)}
+                        {formatTime(getElapsedTime(activeSession))}
                     </span>
                 </div>
             }

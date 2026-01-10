@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { motion, AnimatePresence } from 'framer-motion';
+import { motion, AnimatePresence } from 'motion/react';
 import { IconPlayerPlay, IconPlayerPause, IconRefresh, IconPlus, IconTrash, IconClock } from '@tabler/icons-react';
 import { z } from 'zod';
 import { registerWidget } from './WidgetRegistry';
@@ -42,7 +42,7 @@ function formatTime(seconds: number, compact = false): string {
     }
 
     if (h > 0) {
-        return `${h}:${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
+        return `${h}:${m.toString().padStart(2, '0')}`;
     }
     return `${m}:${s.toString().padStart(2, '0')}`;
 }
