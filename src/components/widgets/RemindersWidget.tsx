@@ -2,9 +2,12 @@ import { useEffect, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { IconRefresh, IconPlus, IconChecklist } from '@tabler/icons-react';
 import { z } from 'zod';
+import { format, isPast } from 'date-fns';
+import { motion, AnimatePresence } from 'framer-motion';
 import { registerWidget } from './WidgetRegistry';
 import { WidgetWrapper } from './WidgetWrapper';
 import { WidgetAddDialog } from './WidgetAddDialog';
+import { cn } from '@/lib/utils';
 
 interface Reminder {
     id: string;
@@ -60,8 +63,6 @@ export function RemindersWidget() {
             dueDate = new Date(data.dueDate).getTime() / 1000;
         }
 
-        console.log("Creating reminder:", { title: data.title, dueDate });
-
         // Ensure we match the Rust argument names strictly (snake_case)
         return invoke('create_reminder', { title: data.title, dueDate: dueDate })
             .then(() => {
@@ -77,21 +78,24 @@ export function RemindersWidget() {
     if (loading && !isRefreshing && reminders.length === 0) return <div className="widget-placeholder">Loading...</div>;
 
     const headerActions = [
-        <div key="actions" style={{ display: 'flex', gap: 4 }}>
+        <div key="actions" className="flex gap-1">
             <button
-                className="icon-button"
+                className="bg-transparent border-none text-white/40 cursor-pointer p-1.5 rounded-full flex items-center justify-center transition-all duration-200 hover:bg-white/10 hover:text-white"
                 onClick={(e) => { e.stopPropagation(); setShowAddDialog(true); }}
             >
                 <IconPlus size={18} />
             </button>
             <button
-                className={`icon-button ${isRefreshing ? 'spinning' : ''}`}
+                className={cn(
+                    "bg-transparent border-none text-white/40 cursor-pointer p-1.5 rounded-full flex items-center justify-center transition-all duration-200 hover:bg-white/10 hover:text-white",
+                    isRefreshing && "animate-spin text-primary"
+                )}
                 onClick={(e) => { e.stopPropagation(); fetchReminders(true); }}
             >
                 <IconRefresh size={18} />
             </button>
         </div>
-    ]
+    ];
 
     // Get default date-time for the form (now)
     const getDefaultDateTime = () => {
@@ -100,8 +104,26 @@ export function RemindersWidget() {
         return now.toISOString().slice(0, 16);
     };
 
+    const formatDueDate = (timestamp: number) => {
+        const date = new Date(timestamp * 1000);
+        const overdue = isPast(date);
+
+        // If it's today, show only time, otherwise show date and time
+        const isToday = new Date().toDateString() === date.toDateString();
+        const formatStr = isToday ? 'h:mm a' : 'MMM d, h:mm a';
+
+        return {
+            text: (isToday ? 'Today, ' : '') + format(date, formatStr),
+            overdue
+        };
+    };
+
     return (
-        <WidgetWrapper title="Reminders" headerActions={headerActions} className="reminders-widget" >
+        <WidgetWrapper
+            title="Reminders"
+            headerActions={headerActions}
+            className="flex flex-col p-5 h-full box-border overflow-hidden"
+        >
             <WidgetAddDialog
                 open={showAddDialog}
                 onOpenChange={setShowAddDialog}
@@ -128,24 +150,60 @@ export function RemindersWidget() {
             />
 
             {reminders.length === 0 ? (
-                <div className="no-events-message">No reminders</div>
+                <div className="flex-1 flex flex-col items-center justify-center gap-3 text-white/30 text-sm">
+                    <span>No reminders</span>
+                    <button
+                        className="bg-white/10 border-none px-4 py-2 rounded-[20px] text-white text-[13px] font-medium cursor-pointer transition-colors duration-200 hover:bg-white/20"
+                        onClick={() => setShowAddDialog(true)}
+                    >
+                        Create Reminder
+                    </button>
+                </div>
             ) : (
-                <div className="reminders-list" >
-                    {reminders.slice(0, 10).map(rem => (
-                        <div className="reminder-item-modern" key={rem.id}>
-                            <div
-                                className="reminder-checkbox-circle"
-                                style={{ borderColor: rem.list_color || 'var(--accent-color)' }}
-                                onClick={(e) => { e.stopPropagation(); toggleReminder(rem.id); }}
+                <div className="flex flex-col gap-1 flex-1 overflow-y-auto min-h-0 pr-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+                    <AnimatePresence mode="popLayout" initial={false}>
+                        {reminders.slice(0, 10).map(rem => (
+                            <motion.div
+                                layout
+                                initial={{ opacity: 0, scale: 0.9, y: 20 }}
+                                animate={{ opacity: 1, scale: 1, y: 0 }}
+                                exit={{ opacity: 0, scale: 0.9, y: -20 }}
+                                transition={{ type: "spring", bounce: 0.3, duration: 0.4 }}
+                                className="group flex items-center gap-3 px-4 py-3 rounded-[20px] transition-colors duration-200 cursor-default border border-transparent hover:bg-white/5"
+                                key={rem.id}
                             >
-                                <div className="reminder-checkbox-inner" style={{ backgroundColor: rem.list_color || 'var(--accent-color)' }} />
-                            </div>
-                            <div className="reminder-content">
-                                <div className="reminder-title">{rem.title}</div>
-                                <div className="reminder-list-name" style={{ color: rem.list_color || 'var(--accent-color)' }}>{rem.list_name}</div>
-                            </div>
-                        </div>
-                    ))}
+                                <div
+                                    className="relative w-8 h-8 shrink-0 cursor-pointer rounded-full border-2 flex items-center justify-center transition-transform active:scale-95"
+                                    style={{ borderColor: rem.list_color || 'var(--accent-color)' }}
+                                    onClick={(e) => { e.stopPropagation(); toggleReminder(rem.id); }}
+                                >
+                                    <div
+                                        className="w-4 h-4 rounded-full transition-opacity opacity-0 group-hover:opacity-40"
+                                        style={{ backgroundColor: rem.list_color || 'var(--accent-color)' }}
+                                    />
+                                </div>
+                                <div className="flex-1 flex flex-col justify-center overflow-hidden">
+                                    <div className="text-[17px] font-medium text-white/95 truncate leading-tight flex flex-row justify-between">
+                                        {rem.title}
+                                        <div className="text-[13px] font-medium opacity-60" style={{ color: rem.list_color || 'var(--accent-color)' }}>
+                                            {rem.list_name}
+                                        </div>
+                                    </div>
+                                    <div className="flex items-center gap-2 mt-0.5">
+                                        {rem.due_date && (() => {
+                                            const { text, overdue } = formatDueDate(rem.due_date);
+                                            return (
+                                                <div className={cn("text-[13px] font-medium", overdue ? "text-red-400" : "text-white/40")}>
+                                                    {text}
+                                                </div>
+                                            );
+                                        })()}
+
+                                    </div>
+                                </div>
+                            </motion.div>
+                        ))}
+                    </AnimatePresence>
                 </div>
             )}
         </WidgetWrapper>

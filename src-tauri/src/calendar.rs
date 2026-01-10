@@ -28,7 +28,7 @@ mod macos {
     use super::*;
     use objc2::rc::Retained;
     use objc2_event_kit::{EKAuthorizationStatus, EKEntityType, EKEventStore};
-    use objc2_foundation::{MainThreadMarker, NSCalendar, NSCalendarUnit, NSDate, NSDateComponents};
+    use objc2_foundation::{MainThreadMarker, NSCalendar, NSCalendarUnit, NSDate};
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::OnceLock;
     use tokio::sync::oneshot::Sender;
@@ -360,9 +360,9 @@ mod macos {
                             let due_date: Option<f64> = unsafe {
                                 reminder.dueDateComponents().and_then(|components| {
                                     let calendar = NSCalendar::currentCalendar();
-                                    calendar.dateFromComponents(&components).map(|date| {
-                                        date.timeIntervalSince1970()
-                                    })
+                                    calendar
+                                        .dateFromComponents(&components)
+                                        .map(|date| date.timeIntervalSince1970())
                                 })
                             };
 
@@ -371,9 +371,63 @@ mod macos {
                                 match unsafe { reminder.calendar() } {
                                     Some(cal) => {
                                         let name = unsafe { cal.title() }.to_string();
-                                        (name, "#ff3b30".to_string())
+
+                                        // Extract color from calendar using Core Graphics C API
+                                        let color = unsafe {
+                                            use objc2::msg_send;
+                                            use std::ffi::c_void;
+
+                                            // CGColorRef is a C type, not an Objective-C object
+                                            type CGColorRef = *const c_void;
+
+                                            // External C functions from Core Graphics
+                                            extern "C" {
+                                                fn CGColorGetNumberOfComponents(
+                                                    color: CGColorRef,
+                                                ) -> usize;
+                                                fn CGColorGetComponents(
+                                                    color: CGColorRef,
+                                                ) -> *const f64;
+                                            }
+
+                                            // Get CGColor from calendar (this returns a CGColorRef)
+                                            let cg_color: CGColorRef = msg_send![&cal, CGColor];
+
+                                            if !cg_color.is_null() {
+                                                // Use Core Graphics C functions
+                                                let num_components =
+                                                    CGColorGetNumberOfComponents(cg_color);
+
+                                                if num_components >= 3 {
+                                                    let components_ptr =
+                                                        CGColorGetComponents(cg_color);
+
+                                                    if !components_ptr.is_null() {
+                                                        let components = std::slice::from_raw_parts(
+                                                            components_ptr,
+                                                            num_components,
+                                                        );
+
+                                                        // Convert RGB components (0.0-1.0) to hex
+                                                        let r = (components[0] * 255.0) as u8;
+                                                        let g = (components[1] * 255.0) as u8;
+                                                        let b = (components[2] * 255.0) as u8;
+
+                                                        format!("#{:02x}{:02x}{:02x}", r, g, b)
+                                                    } else {
+                                                        "#0a84ff".to_string() // Default blue
+                                                    }
+                                                } else {
+                                                    "#0a84ff".to_string()
+                                                }
+                                            } else {
+                                                "#0a84ff".to_string()
+                                            }
+                                        };
+
+                                        (name, color)
                                     }
-                                    None => ("Unknown".to_string(), "#ff3b30".to_string()),
+                                    None => ("Unknown".to_string(), "#0a84ff".to_string()),
                                 }
                             };
 
