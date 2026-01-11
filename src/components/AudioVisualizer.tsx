@@ -51,8 +51,6 @@ export const SmartAudioVisualizer = memo(function SmartAudioVisualizer({
     // Animation Loop
     useEffect(() => {
         const animate = () => {
-            const barColor = color || '#e1e1e1';
-
             // Interpolation factor (0.0 to 1.0)
             // Higher = snappier, Lower = smoother
             // 0.15 at 60fps is a good balance for "following" the 30fps data
@@ -77,7 +75,6 @@ export const SmartAudioVisualizer = memo(function SmartAudioVisualizer({
                 const scale = Math.max(0.15, Math.min(1, next));
 
                 bar.style.transform = `scaleY(${scale})`;
-                bar.style.backgroundColor = barColor;
             }
 
             animationFrameRef.current = requestAnimationFrame(animate);
@@ -88,7 +85,7 @@ export const SmartAudioVisualizer = memo(function SmartAudioVisualizer({
         return () => {
             if (animationFrameRef.current) cancelAnimationFrame(animationFrameRef.current);
         };
-    }, [isPlaying, color]);
+    }, [isPlaying]);
 
     return (
         <div className="flex items-center justify-center gap-[2.5px] h-5 pr-1">
@@ -99,8 +96,8 @@ export const SmartAudioVisualizer = memo(function SmartAudioVisualizer({
                     className="w-[3.5px] h-full bg-[#e1e1e1] rounded-full  will-change-transform"
                     style={{
                         transform: 'scaleY(0.15)',
+                        // PERFORMANCE: Managed by React, removed from animation loop to avoid unnecessary style recalcs
                         backgroundColor: color || '#e1e1e1',
-                        // CSS transition for background color, but transform is managed by loop
                         transition: 'background-color 0.5s ease',
                     }}
                 />
