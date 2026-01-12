@@ -51,8 +51,6 @@ export const SmartAudioVisualizer = memo(function SmartAudioVisualizer({
     // Animation Loop
     useEffect(() => {
         const animate = () => {
-            const barColor = color || '#e1e1e1';
-
             // Interpolation factor (0.0 to 1.0)
             // Higher = snappier, Lower = smoother
             // 0.15 at 60fps is a good balance for "following" the 30fps data
@@ -77,7 +75,6 @@ export const SmartAudioVisualizer = memo(function SmartAudioVisualizer({
                 const scale = Math.max(0.15, Math.min(1, next));
 
                 bar.style.transform = `scaleY(${scale})`;
-                bar.style.backgroundColor = barColor;
             }
 
             animationFrameRef.current = requestAnimationFrame(animate);
