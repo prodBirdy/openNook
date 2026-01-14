@@ -1,7 +1,6 @@
 import { memo, useMemo, useState, useEffect } from 'react';
 import { motion } from 'motion/react';
 import { IconPlayerSkipBackFilled, IconPlayerPlayFilled, IconPlayerPauseFilled, IconPlayerSkipForwardFilled } from '@tabler/icons-react';
-import { getDominantColor } from '../../utils/imageUtils';
 import { WidgetWrapper } from '../widgets/WidgetWrapper';
 import { useMediaPlayerStore } from '../../stores/useMediaPlayerStore';
 import { ScrollingText } from '../ui/scrolling-text';
@@ -9,6 +8,7 @@ import { ScrollingText } from '../ui/scrolling-text';
 // Memoized ExpandedMedia component
 export const ExpandedMedia = memo(function ExpandedMedia() {
     const nowPlaying = useMediaPlayerStore(state => state.nowPlaying);
+    const visualizerColor = useMediaPlayerStore(state => state.visualizerColor);
     const handlePlayPause = useMediaPlayerStore(state => state.handlePlayPause);
     const handleNextTrack = useMediaPlayerStore(state => state.handleNextTrack);
     const handlePreviousTrack = useMediaPlayerStore(state => state.handlePreviousTrack);
@@ -26,7 +26,6 @@ export const ExpandedMedia = memo(function ExpandedMedia() {
 
     const [isSeizing, setIsSeizing] = useState(false);
     const [localProgress, setLocalProgress] = useState(0);
-    const [glowColor, setGlowColor] = useState<string | null>(null);
 
     const progress = useMemo(() => {
         if (!nowPlaying.duration || !nowPlaying.elapsed_time) return 0;
@@ -39,22 +38,6 @@ export const ExpandedMedia = memo(function ExpandedMedia() {
             setLocalProgress(progress);
         }
     }, [progress, isSeizing]);
-
-    // Extract dominant color for glow
-    useEffect(() => {
-        if (nowPlaying.artwork_base64) {
-            const src = `data:image/png;base64,${nowPlaying.artwork_base64}`;
-            getDominantColor(src).then(rgb => {
-                if (rgb) {
-                    setGlowColor(`rgb(${rgb[0]}, ${rgb[1]}, ${rgb[2]})`);
-                } else {
-                    setGlowColor(null);
-                }
-            });
-        } else {
-            setTimeout(() => setGlowColor(null), 300); // Clear after fade out
-        }
-    }, [nowPlaying.artwork_base64]);
 
     const handleSeekInternal = async (e: React.PointerEvent<HTMLDivElement>) => {
         if (!nowPlaying.duration) {
@@ -94,7 +77,7 @@ export const ExpandedMedia = memo(function ExpandedMedia() {
                 <div
                     className="absolute w-[52px] h-[52px] rounded-[10px] overflow-visible shrink-0 shadow-[0_4px_12px_rgba(0,0,0,0.4),0_8px_32px_-4px_var(--glow-color,transparent)] transition-shadow duration-500 ease-in-out"
                     style={{
-                        '--glow-color': glowColor || 'transparent',
+                        '--glow-color': visualizerColor || 'transparent',
                     } as React.CSSProperties}
                 ></div>
                 {nowPlaying.artwork_base64 ? (
