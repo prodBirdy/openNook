@@ -863,6 +863,8 @@ pub fn setup_mouse_monitoring(app_handle: tauri::AppHandle) {
 
         loop {
             // Refresh settings on every iteration to handle runtime toggles
+            // This is intentional - settings can be changed via update_window_settings
+            // and we need to immediately reflect those changes in mouse detection
             let settings = get_window_settings();
             let effective_notch_width = if settings.non_notch_mode {
                 0.0
