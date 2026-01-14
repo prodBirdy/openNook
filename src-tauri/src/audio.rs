@@ -318,61 +318,70 @@ pub async fn get_now_playing() -> NowPlayingData {
         use windows::Media::Control::GlobalSystemMediaTransportControlsSessionManager;
         use windows::Storage::Streams::DataReader;
 
-        if let Ok(manager) = GlobalSystemMediaTransportControlsSessionManager::RequestAsync() {
-            if let Ok(manager) = manager.await {
+        if let Ok(manager_async) = GlobalSystemMediaTransportControlsSessionManager::RequestAsync() {
+            if let Ok(manager) = manager_async.await {
                 if let Ok(session) = manager.GetCurrentSession() {
-                    if let Ok(properties) = session.TryGetMediaPropertiesAsync().unwrap().await {
-                        let title = properties.Title().ok().map(|h| h.to_string());
-                        let artist = properties.Artist().ok().map(|h| h.to_string());
-                        let album = properties.AlbumTitle().ok().map(|h| h.to_string());
+                    if let Ok(properties_async) = session.TryGetMediaPropertiesAsync() {
+                        if let Ok(properties) = properties_async.await {
+                            let title = properties.Title().ok().map(|h| h.to_string());
+                            let artist = properties.Artist().ok().map(|h| h.to_string());
+                            let album = properties.AlbumTitle().ok().map(|h| h.to_string());
 
-                        // Check playback status
-                        let playback_info = session.GetPlaybackInfo().unwrap();
-                        let is_playing = playback_info.PlaybackStatus().unwrap() == windows::Media::Control::GlobalSystemMediaTransportControlsSessionPlaybackStatus::Playing;
+                            // Check playback status
+                            let is_playing = session.GetPlaybackInfo()
+                                .ok()
+                                .and_then(|info| info.PlaybackStatus().ok())
+                                .map(|status| status == windows::Media::Control::GlobalSystemMediaTransportControlsSessionPlaybackStatus::Playing)
+                                .unwrap_or(false);
 
-                        // Get timeline
-                        let timeline = session.GetTimelineProperties().unwrap();
-                        let duration = timeline
-                            .EndTime()
-                            .ok()
-                            .map(|t| t.Duration as f64 / 10_000_000.0);
-                        let position = timeline
-                            .Position()
-                            .ok()
-                            .map(|t| t.Duration as f64 / 10_000_000.0);
+                            // Get timeline
+                            let timeline = session.GetTimelineProperties().ok();
+                            let duration = timeline.as_ref()
+                                .and_then(|t| t.EndTime().ok())
+                                .map(|t| t.Duration as f64 / 10_000_000.0);
+                            let position = timeline.as_ref()
+                                .and_then(|t| t.Position().ok())
+                                .map(|t| t.Duration as f64 / 10_000_000.0);
 
-                        // Artwork
-                        // Getting stream from IRandomAccessStreamReference
-                        let mut artwork_base64 = None;
-                        if let Ok(thumb_ref) = properties.Thumbnail() {
-                            if let Ok(stream) = thumb_ref.OpenReadAsync().unwrap().await {
-                                let size = stream.Size().unwrap() as usize;
-                                let reader = DataReader::CreateDataReader(&stream).unwrap();
-                                if reader.LoadAsync(size as u32).unwrap().await.is_ok() {
-                                    let mut buffer = vec![0u8; size];
-                                    if reader.ReadBytes(&mut buffer).is_ok() {
-                                        artwork_base64 = Some(base64_encode(&buffer));
+                            // Artwork
+                            // Getting stream from IRandomAccessStreamReference
+                            let mut artwork_base64 = None;
+                            if let Ok(thumb_ref) = properties.Thumbnail() {
+                                if let Ok(stream_async) = thumb_ref.OpenReadAsync() {
+                                    if let Ok(stream) = stream_async.await {
+                                        if let Ok(size) = stream.Size() {
+                                            if let Ok(reader) = DataReader::CreateDataReader(&stream) {
+                                                if let Ok(load_async) = reader.LoadAsync(size as u32) {
+                                                    if load_async.await.is_ok() {
+                                                        let mut buffer = vec![0u8; size as usize];
+                                                        if reader.ReadBytes(&mut buffer).is_ok() {
+                                                            artwork_base64 = Some(base64_encode(&buffer));
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
                                     }
                                 }
                             }
+
+                            IS_PLAYING.store(is_playing, Ordering::Relaxed);
+
+                            let data = NowPlayingData {
+                                title,
+                                artist,
+                                album,
+                                artwork_base64,
+                                duration,
+                                elapsed_time: position,
+                                is_playing,
+                                audio_levels: Some(get_audio_levels_internal()),
+                                app_name: Some("System".to_string()),
+                            };
+
+                            save_last_played(&data);
+                            return data;
                         }
-
-                        IS_PLAYING.store(is_playing, Ordering::Relaxed);
-
-                        let data = NowPlayingData {
-                            title,
-                            artist,
-                            album,
-                            artwork_base64,
-                            duration,
-                            elapsed_time: position,
-                            is_playing,
-                            audio_levels: Some(get_audio_levels_internal()),
-                            app_name: Some("System".to_string()),
-                        };
-
-                        save_last_played(&data);
-                        return data;
                     }
                 }
             }
@@ -657,10 +666,12 @@ pub async fn media_play_pause() -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
         use windows::Media::Control::GlobalSystemMediaTransportControlsSessionManager;
-        if let Ok(manager) = GlobalSystemMediaTransportControlsSessionManager::RequestAsync() {
-            if let Ok(manager) = manager.await {
+        if let Ok(manager_async) = GlobalSystemMediaTransportControlsSessionManager::RequestAsync() {
+            if let Ok(manager) = manager_async.await {
                 if let Ok(session) = manager.GetCurrentSession() {
-                    let _ = session.TryTogglePlayPauseAsync().unwrap().await;
+                    if let Ok(toggle_async) = session.TryTogglePlayPauseAsync() {
+                        let _ = toggle_async.await;
+                    }
                 }
             }
         }
@@ -792,10 +803,13 @@ pub async fn media_next_track() -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
         use windows::Media::Control::GlobalSystemMediaTransportControlsSessionManager;
-        if let Ok(manager) = GlobalSystemMediaTransportControlsSessionManager::RequestAsync() {
-            if let Ok(manager) = manager.await {
+        if let Ok(manager_async) = GlobalSystemMediaTransportControlsSessionManager::RequestAsync() {
+            if let Ok(manager) = manager_async.await {
                 if let Ok(session) = manager.GetCurrentSession() {
-                    let _ = session.TrySkipNextAsync().unwrap().await;
+                    if let Ok(skip_async) = session.TrySkipNextAsync() {
+                        let _ = skip_async.await;
+                    }
+                }
                 }
             }
         }
@@ -923,10 +937,13 @@ pub async fn media_previous_track() -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
         use windows::Media::Control::GlobalSystemMediaTransportControlsSessionManager;
-        if let Ok(manager) = GlobalSystemMediaTransportControlsSessionManager::RequestAsync() {
-            if let Ok(manager) = manager.await {
+        if let Ok(manager_async) = GlobalSystemMediaTransportControlsSessionManager::RequestAsync() {
+            if let Ok(manager) = manager_async.await {
                 if let Ok(session) = manager.GetCurrentSession() {
-                    let _ = session.TrySkipPreviousAsync().unwrap().await;
+                    if let Ok(skip_async) = session.TrySkipPreviousAsync() {
+                        let _ = skip_async.await;
+                    }
+                }
                 }
             }
         }

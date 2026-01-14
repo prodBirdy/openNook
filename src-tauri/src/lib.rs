@@ -140,8 +140,11 @@ pub fn run() {
                     window.set_skip_taskbar(true).unwrap();
                 }
 
-                #[cfg(not(target_os = "windows"))]
-                let _ = window.set_decorations(false);
+                #[cfg(target_os = "macos")]
+                {
+                    // macOS decorations are already set by NSWindow level configuration above
+                    let _ = window.set_decorations(false);
+                }
 
                 // Enable click-through by default (no notification showing)
                 let _ = window.set_ignore_cursor_events(true);
