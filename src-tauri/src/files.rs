@@ -2,8 +2,6 @@ use crate::database::{get_connection, log_sql};
 use log;
 use serde::{Deserialize, Serialize};
 use std::fs;
-#[cfg(target_os = "macos")]
-use std::process::Command;
 use tauri::{command, AppHandle};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -82,10 +80,29 @@ pub fn load_file_tray(app_handle: AppHandle) -> Result<Vec<FileTrayItem>, String
 #[allow(unused_variables)]
 pub fn open_file(path: String) -> Result<(), String> {
     #[cfg(target_os = "macos")]
-    Command::new("open")
-        .arg(&path)
-        .spawn()
-        .map_err(|e| e.to_string())?;
+    {
+        use std::process::Command;
+        Command::new("open")
+            .arg(&path)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+    #[cfg(target_os = "windows")]
+    {
+        use std::process::Command;
+        Command::new("cmd")
+            .args(&["/C", "start", "", &path])
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        use std::process::Command;
+        Command::new("xdg-open")
+            .arg(&path)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
     Ok(())
 }
 
@@ -93,10 +110,33 @@ pub fn open_file(path: String) -> Result<(), String> {
 #[allow(unused_variables)]
 pub fn reveal_file(path: String) -> Result<(), String> {
     #[cfg(target_os = "macos")]
-    Command::new("open")
-        .args(&["-R", &path])
-        .spawn()
-        .map_err(|e| e.to_string())?;
+    {
+        use std::process::Command;
+        Command::new("open")
+            .args(&["-R", &path])
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+    #[cfg(target_os = "windows")]
+    {
+        use std::process::Command;
+        Command::new("explorer")
+            .args(&["/select,", &path])
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        use std::process::Command;
+        // Try to open the parent directory with the file highlighted
+        // This is not universally supported on Linux, so we fall back to opening the parent dir
+        if let Some(parent) = std::path::Path::new(&path).parent() {
+            Command::new("xdg-open")
+                .arg(parent)
+                .spawn()
+                .map_err(|e| e.to_string())?;
+        }
+    }
     Ok(())
 }
 
