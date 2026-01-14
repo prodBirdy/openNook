@@ -855,29 +855,29 @@ pub fn setup_mouse_monitoring(app_handle: tauri::AppHandle) {
     // Track whether mouse is currently in the UI area
     static IS_INSIDE: AtomicBool = AtomicBool::new(false);
 
-    let (screen_width, _screen_height, notch_height, notch_width) =
+    let (screen_width, _screen_height, _notch_height, notch_width) =
         get_screen_info(Some(&app_handle));
-
-    // Pre-compute window position (window is centered at top)
-    let settings = get_window_settings();
-    let effective_notch_width = if settings.non_notch_mode {
-        0.0
-    } else {
-        notch_width
-    };
-
-    let win_width = if effective_notch_width > 0.0 {
-        effective_notch_width + 160.0 + settings.extra_width
-    } else {
-        800.0 + settings.extra_width
-    }; // Fallback width
-
-    let window_x = (screen_width - win_width) / 2.0;
 
     std::thread::spawn(move || {
         const POLL_MS: u64 = 20;
 
         loop {
+            // Refresh settings on every iteration to handle runtime toggles
+            let settings = get_window_settings();
+            let effective_notch_width = if settings.non_notch_mode {
+                0.0
+            } else {
+                notch_width
+            };
+
+            let win_width = if effective_notch_width > 0.0 {
+                effective_notch_width + 160.0 + settings.extra_width
+            } else {
+                800.0 + settings.extra_width
+            }; // Fallback width
+
+            let window_x = (screen_width - win_width) / 2.0;
+
             let mut point = POINT::default();
             let success = unsafe { GetCursorPos(&mut point) };
 
