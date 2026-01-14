@@ -318,7 +318,8 @@ pub async fn get_now_playing() -> NowPlayingData {
         use windows::Media::Control::GlobalSystemMediaTransportControlsSessionManager;
         use windows::Storage::Streams::DataReader;
 
-        if let Ok(manager_async) = GlobalSystemMediaTransportControlsSessionManager::RequestAsync() {
+        if let Ok(manager_async) = GlobalSystemMediaTransportControlsSessionManager::RequestAsync()
+        {
             if let Ok(manager) = manager_async.await {
                 if let Ok(session) = manager.GetCurrentSession() {
                     if let Ok(properties_async) = session.TryGetMediaPropertiesAsync() {
@@ -336,10 +337,12 @@ pub async fn get_now_playing() -> NowPlayingData {
 
                             // Get timeline
                             let timeline = session.GetTimelineProperties().ok();
-                            let duration = timeline.as_ref()
+                            let duration = timeline
+                                .as_ref()
                                 .and_then(|t| t.EndTime().ok())
                                 .map(|t| t.Duration as f64 / 10_000_000.0);
-                            let position = timeline.as_ref()
+                            let position = timeline
+                                .as_ref()
                                 .and_then(|t| t.Position().ok())
                                 .map(|t| t.Duration as f64 / 10_000_000.0);
 
@@ -350,12 +353,17 @@ pub async fn get_now_playing() -> NowPlayingData {
                                 if let Ok(stream_async) = thumb_ref.OpenReadAsync() {
                                     if let Ok(stream) = stream_async.await {
                                         if let Ok(size) = stream.Size() {
-                                            if let Ok(reader) = DataReader::CreateDataReader(&stream) {
-                                                if let Ok(load_async) = reader.LoadAsync(size as u32) {
+                                            if let Ok(reader) =
+                                                DataReader::CreateDataReader(&stream)
+                                            {
+                                                if let Ok(load_async) =
+                                                    reader.LoadAsync(size as u32)
+                                                {
                                                     if load_async.await.is_ok() {
                                                         let mut buffer = vec![0u8; size as usize];
                                                         if reader.ReadBytes(&mut buffer).is_ok() {
-                                                            artwork_base64 = Some(base64_encode(&buffer));
+                                                            artwork_base64 =
+                                                                Some(base64_encode(&buffer));
                                                         }
                                                     }
                                                 }
@@ -666,7 +674,8 @@ pub async fn media_play_pause() -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
         use windows::Media::Control::GlobalSystemMediaTransportControlsSessionManager;
-        if let Ok(manager_async) = GlobalSystemMediaTransportControlsSessionManager::RequestAsync() {
+        if let Ok(manager_async) = GlobalSystemMediaTransportControlsSessionManager::RequestAsync()
+        {
             if let Ok(manager) = manager_async.await {
                 if let Ok(session) = manager.GetCurrentSession() {
                     if let Ok(toggle_async) = session.TryTogglePlayPauseAsync() {
@@ -803,13 +812,13 @@ pub async fn media_next_track() -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
         use windows::Media::Control::GlobalSystemMediaTransportControlsSessionManager;
-        if let Ok(manager_async) = GlobalSystemMediaTransportControlsSessionManager::RequestAsync() {
+        if let Ok(manager_async) = GlobalSystemMediaTransportControlsSessionManager::RequestAsync()
+        {
             if let Ok(manager) = manager_async.await {
                 if let Ok(session) = manager.GetCurrentSession() {
                     if let Ok(skip_async) = session.TrySkipNextAsync() {
                         let _ = skip_async.await;
                     }
-                }
                 }
             }
         }
@@ -937,13 +946,13 @@ pub async fn media_previous_track() -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
         use windows::Media::Control::GlobalSystemMediaTransportControlsSessionManager;
-        if let Ok(manager_async) = GlobalSystemMediaTransportControlsSessionManager::RequestAsync() {
+        if let Ok(manager_async) = GlobalSystemMediaTransportControlsSessionManager::RequestAsync()
+        {
             if let Ok(manager) = manager_async.await {
                 if let Ok(session) = manager.GetCurrentSession() {
                     if let Ok(skip_async) = session.TrySkipPreviousAsync() {
                         let _ = skip_async.await;
                     }
-                }
                 }
             }
         }
