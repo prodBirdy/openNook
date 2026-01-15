@@ -1,5 +1,7 @@
 use crate::models::NowPlayingData;
-use crate::utils::{base64_encode, fetch_artwork_from_url};
+use crate::utils::fetch_artwork_from_url;
+#[cfg(not(target_os = "linux"))]
+use crate::utils::base64_encode;
 use log;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::Emitter;
@@ -45,6 +47,7 @@ pub fn get_audio_levels() -> Vec<f64> {
     get_audio_levels_internal()
 }
 
+#[cfg(target_os = "macos")]
 fn get_cached_track() -> (Option<String>, Option<String>, Option<String>) {
     TRACK_CACHE
         .get()
@@ -52,12 +55,14 @@ fn get_cached_track() -> (Option<String>, Option<String>, Option<String>) {
         .unwrap_or((None, None, None))
 }
 
+#[cfg(target_os = "macos")]
 fn set_cached_track(title: Option<String>, artist: Option<String>, artwork: Option<String>) {
     if let Some(m) = TRACK_CACHE.get() {
         *m.lock().unwrap() = (title, artist, artwork);
     }
 }
 
+#[cfg(target_os = "macos")]
 fn is_track_changed(title: &Option<String>, artist: &Option<String>) -> bool {
     let cached = get_cached_track();
     cached.0 != *title || cached.1 != *artist
@@ -493,7 +498,7 @@ pub async fn get_now_playing() -> NowPlayingData {
                                 artwork_base64,
                                 duration,
                                 elapsed_time: position,
-                                is_playing,
+                                is_playing: true,
                                 audio_levels: Some(get_audio_levels_internal()),
                                 app_name: Some(name.replace("org.mpris.MediaPlayer2.", "")),
                             };
@@ -1056,6 +1061,7 @@ pub async fn media_seek(position: f64) -> Result<(), String> {
 
     #[cfg(not(target_os = "macos"))]
     {
+        let _ = position;
         // Seeking not easily supported in global transport controls universally
         Ok(())
     }
@@ -1089,6 +1095,7 @@ pub fn activate_media_app(app_name: String) -> Result<(), String> {
 
     #[cfg(not(target_os = "macos"))]
     {
+        let _ = app_name;
         // Maybe try opening by protocol or process name?
         Ok(())
     }

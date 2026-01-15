@@ -2,6 +2,7 @@ use crate::database::{get_connection, log_sql};
 use log;
 use serde::{Deserialize, Serialize};
 use std::fs;
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 use std::process::Command;
 use tauri::{command, AppHandle};
 
