@@ -22,6 +22,7 @@ dependencies = [
  "objc2-event-kit",
  "objc2-foundation",
  "objc2-media-player",
+ "open",
  "raw-window-handle",
  "reqwest",
  "rusqlite",
