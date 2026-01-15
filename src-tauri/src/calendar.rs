@@ -283,7 +283,11 @@ mod macos {
         }
 
         // Sort by start date
-        events_list.sort_by(|a, b| a.start_date.partial_cmp(&b.start_date).unwrap());
+        events_list.sort_by(|a, b| {
+            a.start_date
+                .partial_cmp(&b.start_date)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
 
         // Update cache
         let cache_mutex = EVENTS_CACHE.get_or_init(|| Mutex::new(Cache::new(Vec::new())));

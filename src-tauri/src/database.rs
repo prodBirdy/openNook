@@ -1,4 +1,4 @@
-use base64::Engine;
+use crate::utils::base64_encode;
 use log;
 use rusqlite::types::{ToSql, ValueRef};
 use rusqlite::{Connection, Result};
@@ -143,9 +143,7 @@ pub fn db_select(
                         .map(JsonValue::Number)
                         .unwrap_or(JsonValue::Null),
                     ValueRef::Text(t) => JsonValue::String(String::from_utf8_lossy(t).to_string()),
-                    ValueRef::Blob(b) => {
-                        JsonValue::String(base64::engine::general_purpose::STANDARD.encode(b))
-                    }
+                    ValueRef::Blob(b) => JsonValue::String(base64_encode(b)),
                 };
                 map.insert(col_name.clone(), json_val);
             }
