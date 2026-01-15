@@ -1,7 +1,6 @@
 import { create } from 'zustand';
 import { emit, listen } from '@tauri-apps/api/event';
 import { dbService } from '../services/DatabaseService';
-import React from 'react';
 
 export interface Session {
     id: string;
@@ -37,7 +36,7 @@ const senderId = Math.random().toString(36).substring(7);
 
 
 let tickInterval: ReturnType<typeof setInterval> | null = null;
-let forceUpdateCallback: (() => void) | null = null;
+// let forceUpdateCallback: (() => void) | null = null; // Removed as it is no longer used
 
 export const useSessionStore = create<SessionStore>((set, get) => ({
     sessions: [],
@@ -152,8 +151,10 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
             const hasActive = sessions.some(s => s.isActive);
 
             if (hasActive && !tickInterval) {
+                // Interval logic for future use, or if we need to do something else periodically
+                // Currently just kept to maintain structure, but callback is removed
                 tickInterval = setInterval(() => {
-                    forceUpdateCallback?.();
+                   // forceUpdateCallback?.();
                 }, 1000);
             } else if (!hasActive && tickInterval) {
                 clearInterval(tickInterval);
@@ -178,25 +179,3 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
 // Selectors
 export const selectSessions = (state: SessionStore) => state.sessions;
 export const selectHasActiveSession = (state: SessionStore) => state.sessions.some(s => s.isActive);
-
-// Hook with auto-refresh for elapsed time
-export function useSessionsWithElapsed() {
-    const sessions = useSessionStore(state => state.sessions);
-    const getElapsedTime = useSessionStore(state => state.getElapsedTime);
-    const [, forceUpdate] = React.useState(0);
-
-    React.useEffect(() => {
-        forceUpdateCallback = () => forceUpdate(n => n + 1);
-        return () => { forceUpdateCallback = null; };
-    }, []);
-
-    React.useEffect(() => {
-        const hasActive = sessions.some(s => s.isActive);
-        if (!hasActive) return;
-
-        const interval = setInterval(() => forceUpdate(n => n + 1), 1000);
-        return () => clearInterval(interval);
-    }, [sessions]);
-
-    return { sessions, getElapsedTime };
-}

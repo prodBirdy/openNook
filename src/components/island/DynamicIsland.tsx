@@ -13,8 +13,8 @@ import { ExpandedIsland } from './ExpandedIsland';
 import { useMediaPlayerStore } from '../../stores/useMediaPlayerStore';
 import { useDynamicIslandStore } from '../../stores/useDynamicIslandStore';
 import { useWidgetStore } from '../../stores/useWidgetStore';
-import { useDerivedTimers } from '../../stores/useTimerStore';
-import { useSessionsWithElapsed } from '../../stores/useSessionStore';
+import { useDerivedTimers } from '../../hooks/useDerivedTimers';
+import { useSessionsWithElapsed } from '../../hooks/useSessionsWithElapsed';
 import { useFileTrayStore } from '../../stores/useFileTrayStore';
 
 export function DynamicIsland() {

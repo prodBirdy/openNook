@@ -235,24 +235,3 @@ export const useTimerStore = create<TimerStore>((set, get) => ({
 // Selectors
 export const selectTimers = (state: TimerStore) => state.getDerivedTimers();
 export const selectHasRunningTimer = (state: TimerStore) => state.timers.some(t => t.isRunning);
-
-// Hook for derived timers with auto-refresh
-export function useDerivedTimers() {
-    const timers = useTimerStore(state => state.timers);
-    const getDerivedTimers = useTimerStore(state => state.getDerivedTimers);
-
-    // Force re-render when there are running timers
-    const [, forceUpdate] = React.useState(0);
-
-    React.useEffect(() => {
-        const hasRunning = timers.some(t => t.isRunning);
-        if (!hasRunning) return;
-
-        const interval = setInterval(() => forceUpdate(n => n + 1), 1000);
-        return () => clearInterval(interval);
-    }, [timers]);
-
-    return getDerivedTimers();
-}
-
-import React from 'react';
