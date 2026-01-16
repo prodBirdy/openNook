@@ -1,4 +1,3 @@
-use log;
 use serde::Serialize;
 
 #[derive(Serialize, Clone)]
@@ -283,7 +282,11 @@ mod macos {
         }
 
         // Sort by start date
-        events_list.sort_by(|a, b| a.start_date.partial_cmp(&b.start_date).unwrap());
+        events_list.sort_by(|a, b| {
+            a.start_date
+                .partial_cmp(&b.start_date)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
 
         // Update cache
         let cache_mutex = EVENTS_CACHE.get_or_init(|| Mutex::new(Cache::new(Vec::new())));
@@ -654,7 +657,10 @@ pub async fn get_upcoming_events(
         Ok(macos::get_events(7, force_refresh.unwrap_or(false)))
     }
     #[cfg(not(target_os = "macos"))]
-    Ok(vec![])
+    {
+        let _ = force_refresh;
+        Ok(vec![])
+    }
 }
 
 #[tauri::command]
@@ -664,7 +670,10 @@ pub async fn get_reminders(force_refresh: Option<bool>) -> Result<Vec<Reminder>,
         Ok(macos::get_reminders(force_refresh.unwrap_or(false)).await)
     }
     #[cfg(not(target_os = "macos"))]
-    Ok(vec![])
+    {
+        let _ = force_refresh;
+        Ok(vec![])
+    }
 }
 
 #[tauri::command]
@@ -674,7 +683,10 @@ pub async fn complete_reminder(id: String) -> Result<bool, String> {
         macos::complete_reminder(id).await
     }
     #[cfg(not(target_os = "macos"))]
-    Ok(true)
+    {
+        let _ = id;
+        Ok(true)
+    }
 }
 
 #[tauri::command]
@@ -684,7 +696,11 @@ pub async fn create_reminder(title: String, due_date: Option<f64>) -> Result<boo
         macos::create_reminder(title, due_date).await
     }
     #[cfg(not(target_os = "macos"))]
-    Ok(true)
+    {
+        let _ = title;
+        let _ = due_date;
+        Ok(true)
+    }
 }
 
 #[tauri::command]
@@ -699,25 +715,13 @@ pub async fn open_calendar_app() -> Result<(), String> {
     }
     #[cfg(target_os = "windows")]
     {
-        // Try to open Windows Calendar or Outlook
-        std::process::Command::new("explorer")
-            .arg("outlookcal:")
-            .spawn()
-            .map_err(|e| e.to_string())?;
+        open::that("outlookcal:").map_err(|e| e.to_string())?;
     }
     #[cfg(target_os = "linux")]
     {
-        // Try to open standard calendar app via xdg-open
-        // We might not have a specific calendar URL scheme, so we try opening a calendar file or just generic logic?
-        // Actually, just spawning gnome-calendar or similar if present, or just nothing for now as 'xdg-open' needs a URL.
-        // A safe bet is trying to run common calendar apps or just return Ok.
-        // Let's try xdg-open with a calendar scheme if it exists, or just log.
-        // "webcal:" or "calendar:" might work on some DEs.
-        std::process::Command::new("xdg-open")
-            .arg("calendar:")
-            .spawn()
-            .or_else(|_| std::process::Command::new("gnome-calendar").spawn())
-            .map_err(|e| e.to_string())?;
+        // Try to open common calendar URL or let xdg-open find default
+        // "webcal:" might be handled? or just calendar:
+        open::that("calendar:").or_else(|_| open::that("gnome-calendar")).map_err(|e| e.to_string())?;
     }
     Ok(())
 }
@@ -734,19 +738,11 @@ pub async fn open_reminders_app() -> Result<(), String> {
     }
     #[cfg(target_os = "windows")]
     {
-        std::process::Command::new("explorer")
-            .arg("ms-to-do:")
-            .spawn()
-            .map_err(|e| e.to_string())?;
+        open::that("ms-to-do:").map_err(|e| e.to_string())?;
     }
     #[cfg(target_os = "linux")]
     {
-        // Try to open common todo apps
-        std::process::Command::new("xdg-open")
-            .arg("todo:") // unlikely to work but consistent
-            .spawn()
-            .or_else(|_| std::process::Command::new("gnome-todo").spawn())
-            .map_err(|e| e.to_string())?;
+        open::that("todo:").or_else(|_| open::that("gnome-todo")).map_err(|e| e.to_string())?;
     }
     Ok(())
 }
@@ -755,24 +751,16 @@ pub async fn open_reminders_app() -> Result<(), String> {
 pub async fn open_privacy_settings() -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
-        std::process::Command::new("open")
-            .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_Calendars")
-            .spawn()
+        open::that("x-apple.systempreferences:com.apple.preference.security?Privacy_Calendars")
             .map_err(|e| e.to_string())?;
     }
     #[cfg(target_os = "windows")]
     {
-        std::process::Command::new("explorer")
-            .arg("ms-settings:privacy-calendar")
-            .spawn()
-            .map_err(|e| e.to_string())?;
+        open::that("ms-settings:privacy-calendar").map_err(|e| e.to_string())?;
     }
     #[cfg(target_os = "linux")]
     {
-        std::process::Command::new("xdg-open")
-            .arg("help:privacy") // Very generic/wrong, but Linux settings are DE specific.
-            .spawn()
-            .map_err(|e| e.to_string())?;
+        open::that("help:privacy").map_err(|e| e.to_string())?;
     }
     Ok(())
 }
@@ -790,7 +778,14 @@ pub async fn create_calendar_event(
         macos::create_event(title, start_date, end_date, is_all_day, location).await
     }
     #[cfg(not(target_os = "macos"))]
-    Ok(true)
+    {
+        let _ = title;
+        let _ = start_date;
+        let _ = end_date;
+        let _ = is_all_day;
+        let _ = location;
+        Ok(true)
+    }
 }
 
 #[tauri::command]
@@ -848,6 +843,11 @@ pub async fn open_calendar_event(_id: String, date: f64) -> Result<(), String> {
             .arg(&script)
             .output()
             .map_err(|e| e.to_string())?;
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = _id;
+        let _ = date;
     }
     Ok(())
 }
