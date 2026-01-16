@@ -1,4 +1,5 @@
 use crate::models::NowPlayingData;
+use crate::utils::fetch_artwork_from_url;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::Emitter;
