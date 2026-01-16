@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { invoke } from '@tauri-apps/api/core';
+import { invoke, convertFileSrc } from '@tauri-apps/api/core';
 import { NowPlayingData } from '../components/island/types';
 import { getDominantColor } from '../utils/imageUtils';
 
@@ -177,7 +177,11 @@ export const useMediaPlayerStore = create<MediaPlayerStore>((set, get) => ({
             return;
         }
 
-        const src = `data:image/png;base64,${artwork}`;
+        // Handle both old base64 (if any cached) and new file paths
+        const src = artwork.startsWith('/') || artwork.match(/^[a-zA-Z]:/)
+            ? convertFileSrc(artwork)
+            : `data:image/png;base64,${artwork}`;
+
         const rgb = await getDominantColor(src);
         const color = rgb ? `rgb(${rgb[0]}, ${rgb[1]}, ${rgb[2]})` : null;
         artworkColorCache.set(artwork, color);

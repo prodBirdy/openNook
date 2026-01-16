@@ -1,5 +1,6 @@
 import { memo, useMemo, useCallback, useState } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
+import { convertFileSrc } from '@tauri-apps/api/core';
 import { IconPlayerPlayFilled, IconPlayerPauseFilled } from '@tabler/icons-react';
 import './DynamicIsland.css'; // Assuming CSS is shared or moved. Ideally specific CSS should be here.
 
@@ -58,7 +59,7 @@ export const AlbumCover = memo(function AlbumCover({
         >
             {artwork ? (
                 <img
-                    src={`data:image/png;base64,${artwork}`}
+                    src={artwork.startsWith('/') || artwork.match(/^[a-zA-Z]:/) ? convertFileSrc(artwork) : `data:image/png;base64,${artwork}`}
                     alt={title || 'Album cover'}
                     className="album-cover__image"
                 />
