@@ -2,12 +2,15 @@ use crate::database::{get_connection, log_sql};
 use crate::models::NotchInfo;
 use log;
 use serde::{Deserialize, Serialize};
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::RwLock;
 use tauri::{
-    AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, WebviewUrl, WebviewWindow,
+    AppHandle, LogicalPosition, LogicalSize, Manager, WebviewUrl, WebviewWindow,
     WebviewWindowBuilder, Window,
 };
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+use tauri::Emitter;
 
 #[tauri::command]
 pub fn open_settings(app_handle: tauri::AppHandle) -> Result<(), String> {
@@ -502,6 +505,9 @@ pub fn activate_window(window: Window) -> Result<(), String> {
 /// Deactivate the window and reset activation policy (hide from dock)
 #[tauri::command]
 pub fn deactivate_window(window: Window) -> Result<(), String> {
+    #[cfg(not(target_os = "macos"))]
+    let _ = window;
+
     #[cfg(target_os = "macos")]
     {
         use objc2::runtime::AnyObject;
@@ -598,6 +604,8 @@ impl Default for HapticConfig {
 #[tauri::command]
 pub fn trigger_haptics(config: Option<HapticConfig>) -> Result<(), String> {
     let config = config.unwrap_or_default();
+    #[cfg(not(target_os = "macos"))]
+    let _ = config;
 
     #[cfg(target_os = "macos")]
     unsafe {
@@ -957,6 +965,7 @@ pub fn setup_mouse_monitoring(app_handle: tauri::AppHandle) {
 
 #[cfg(target_os = "linux")]
 pub fn setup_mouse_monitoring(app_handle: tauri::AppHandle) {
+    let _ = app_handle;
     // Mouse monitoring on Linux (Wayland/X11) is complex to do globally without heavy dependencies.
     // For now, we will rely on window events if possible, or disable the hover feature.
     // To avoid busy looping or useless threads, we just log a message.

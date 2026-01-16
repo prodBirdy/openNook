@@ -1,5 +1,9 @@
 use crate::models::NowPlayingData;
-use crate::utils::{base64_encode, fetch_artwork_from_url};
+#[cfg(not(target_os = "linux"))]
+use crate::utils::base64_encode;
+use crate::utils::fetch_artwork_from_url;
+#[cfg(target_os = "macos")]
+use crate::utils::save_temp_file;
 use log;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::Emitter;
@@ -45,6 +49,7 @@ pub fn get_audio_levels() -> Vec<f64> {
     get_audio_levels_internal()
 }
 
+#[cfg(target_os = "macos")]
 fn get_cached_track() -> (Option<String>, Option<String>, Option<String>) {
     TRACK_CACHE
         .get()
@@ -52,12 +57,14 @@ fn get_cached_track() -> (Option<String>, Option<String>, Option<String>) {
         .unwrap_or((None, None, None))
 }
 
+#[cfg(target_os = "macos")]
 fn set_cached_track(title: Option<String>, artist: Option<String>, artwork: Option<String>) {
     if let Some(m) = TRACK_CACHE.get() {
         *m.lock().unwrap() = (title, artist, artwork);
     }
 }
 
+#[cfg(target_os = "macos")]
 fn is_track_changed(title: &Option<String>, artist: &Option<String>) -> bool {
     let cached = get_cached_track();
     cached.0 != *title || cached.1 != *artist
@@ -84,6 +91,132 @@ fn get_last_played_or_default(levels: Vec<f64>) -> NowPlayingData {
         audio_levels: Some(levels),
         ..Default::default()
     }
+}
+
+#[cfg(target_os = "macos")]
+fn build_now_playing_script(
+    spotify_running: bool,
+    music_running: bool,
+    safari_running: bool,
+) -> String {
+    let mut script = String::new();
+
+    // Check Spotify
+    if spotify_running {
+        script.push_str(
+            r#"
+            tell application "Spotify"
+                if player state is playing then
+                    set trackName to name of current track
+                    set artistName to artist of current track
+                    set albumName to album of current track
+                    set trackDuration to (duration of current track) / 1000
+                    set trackPosition to player position
+                    set artUrl to artwork url of current track
+                    return "playing|" & trackName & "|" & artistName & "|" & albumName & "|" & trackDuration & "|" & trackPosition & "|" & artUrl & "|spotify"
+                end if
+            end tell
+        "#,
+        );
+    }
+
+    // Check Music
+    if music_running {
+        script.push_str(
+            r#"
+            tell application "Music"
+                if player state is playing then
+                    set trackName to name of current track
+                    set artistName to artist of current track
+                    set albumName to album of current track
+                    set trackDuration to duration of current track
+                    set trackPosition to player position
+                    return "playing|" & trackName & "|" & artistName & "|" & albumName & "|" & trackDuration & "|" & trackPosition & "||music"
+                end if
+            end tell
+        "#,
+        );
+    }
+
+    // Check Safari
+    if safari_running {
+        script.push_str(r#"
+            tell application "Safari"
+                try
+                    repeat with w in windows
+                        repeat with t in tabs of w
+                            try
+                                set tabURL to URL of t
+                                set tabName to name of t
+
+                                if tabURL contains "youtube.com" or tabURL contains "music.youtube.com" or tabURL contains "open.spotify.com" or tabURL contains "soundcloud.com" then
+                                    try
+                                        set jsResult to do JavaScript "
+                                            (function() {
+                                                var video = document.querySelector('video');
+                                                var audio = document.querySelector('audio');
+                                                var activeMedia = (video && !video.paused && !video.ended) ? video : (audio && !audio.paused && !audio.ended) ? audio : null;
+
+                                                if (!activeMedia) return 'paused';
+
+                                                var duration = activeMedia.duration || '';
+                                                var currentTime = activeMedia.currentTime || '';
+
+                                                var art = '';
+                                                try {
+                                                    if (location.hostname.includes('spotify')) {
+                                                        var img = document.querySelector('img[alt^=\"Now playing\"]') || document.querySelector('img[data-testid=\"cover-art-image\"]');
+                                                        if (img) art = img.src;
+                                                    } else if (location.hostname.includes('music.youtube')) {
+                                                        var img = document.querySelector('.ytmusic-player-bar.style-scope img');
+                                                        if (img) art = img.src;
+                                                    }
+
+                                                    if (!art) {
+                                                        var icon = document.querySelector('link[rel*=\"icon\"]');
+                                                        if (icon) art = icon.href;
+                                                    }
+                                                } catch (e) {}
+
+                                                return 'playing|' + art + '|' + duration + '|' + currentTime;
+                                            })();
+                                        " in t
+
+                                        if jsResult starts with "playing" then
+                                            set AppleScript's text item delimiters to "|"
+                                            set jsParts to text items of jsResult
+                                            set artUrl to ""
+                                            set trackDuration to ""
+                                            set trackPosition to ""
+
+                                            if (count of jsParts) > 1 then
+                                                set artUrl to item 2 of jsParts
+                                            end if
+                                            if (count of jsParts) > 2 then
+                                                set trackDuration to item 3 of jsParts
+                                            end if
+                                            if (count of jsParts) > 3 then
+                                                set trackPosition to item 4 of jsParts
+                                            end if
+
+                                            return "playing|" & tabName & "|Safari|" & tabURL & "|" & trackDuration & "|" & trackPosition & "|" & artUrl & "|safari"
+                                        end if
+                                    on error
+                                        if tabName starts with "▶" then
+                                            return "playing|" & tabName & "|Safari|" & tabURL & "|||safari"
+                                        end if
+                                    end try
+                                end if
+                            end try
+                        end repeat
+                    end repeat
+                end try
+            end tell
+        "#);
+    }
+
+    script.push_str("\nreturn \"not_playing\"");
+    script
 }
 
 /// Get currently playing music information
@@ -127,120 +260,7 @@ pub async fn get_now_playing() -> NowPlayingData {
         // Default to not playing before check
         IS_PLAYING.store(false, Ordering::Relaxed);
 
-        // Build dynamic script based on running apps only
-        let mut script = String::new();
-
-        // Check Spotify
-        if spotify_running {
-            script.push_str(r#"
-                tell application "Spotify"
-                    if player state is playing then
-                        set trackName to name of current track
-                        set artistName to artist of current track
-                        set albumName to album of current track
-                        set trackDuration to (duration of current track) / 1000
-                        set trackPosition to player position
-                        set artUrl to artwork url of current track
-                        return "playing|" & trackName & "|" & artistName & "|" & albumName & "|" & trackDuration & "|" & trackPosition & "|" & artUrl & "|spotify"
-                    end if
-                end tell
-            "#);
-        }
-
-        // Check Music
-        if music_running {
-            script.push_str(r#"
-                tell application "Music"
-                    if player state is playing then
-                        set trackName to name of current track
-                        set artistName to artist of current track
-                        set albumName to album of current track
-                        set trackDuration to duration of current track
-                        set trackPosition to player position
-                        return "playing|" & trackName & "|" & artistName & "|" & albumName & "|" & trackDuration & "|" & trackPosition & "||music"
-                    end if
-                end tell
-            "#);
-        }
-
-        // Check Safari
-        if safari_running {
-            script.push_str(r#"
-                tell application "Safari"
-                    try
-                        repeat with w in windows
-                            repeat with t in tabs of w
-                                try
-                                    set tabURL to URL of t
-                                    set tabName to name of t
-
-                                    if tabURL contains "youtube.com" or tabURL contains "music.youtube.com" or tabURL contains "open.spotify.com" or tabURL contains "soundcloud.com" then
-                                        try
-                                            set jsResult to do JavaScript "
-                                                (function() {
-                                                    var video = document.querySelector('video');
-                                                    var audio = document.querySelector('audio');
-                                                    var activeMedia = (video && !video.paused && !video.ended) ? video : (audio && !audio.paused && !audio.ended) ? audio : null;
-
-                                                    if (!activeMedia) return 'paused';
-
-                                                    var duration = activeMedia.duration || '';
-                                                    var currentTime = activeMedia.currentTime || '';
-
-                                                    var art = '';
-                                                    try {
-                                                        if (location.hostname.includes('spotify')) {
-                                                            var img = document.querySelector('img[alt^=\"Now playing\"]') || document.querySelector('img[data-testid=\"cover-art-image\"]');
-                                                            if (img) art = img.src;
-                                                        } else if (location.hostname.includes('music.youtube')) {
-                                                            var img = document.querySelector('.ytmusic-player-bar.style-scope img');
-                                                            if (img) art = img.src;
-                                                        }
-
-                                                        if (!art) {
-                                                            var icon = document.querySelector('link[rel*=\"icon\"]');
-                                                            if (icon) art = icon.href;
-                                                        }
-                                                    } catch (e) {}
-
-                                                    return 'playing|' + art + '|' + duration + '|' + currentTime;
-                                                })();
-                                            " in t
-
-                                            if jsResult starts with "playing" then
-                                                set AppleScript's text item delimiters to "|"
-                                                set jsParts to text items of jsResult
-                                                set artUrl to ""
-                                                set trackDuration to ""
-                                                set trackPosition to ""
-
-                                                if (count of jsParts) > 1 then
-                                                    set artUrl to item 2 of jsParts
-                                                end if
-                                                if (count of jsParts) > 2 then
-                                                    set trackDuration to item 3 of jsParts
-                                                end if
-                                                if (count of jsParts) > 3 then
-                                                    set trackPosition to item 4 of jsParts
-                                                end if
-
-                                                return "playing|" & tabName & "|Safari|" & tabURL & "|" & trackDuration & "|" & trackPosition & "|" & artUrl & "|safari"
-                                            end if
-                                        on error
-                                            if tabName starts with "▶" then
-                                                return "playing|" & tabName & "|Safari|" & tabURL & "|||safari"
-                                            end if
-                                        end try
-                                    end if
-                                end try
-                            end repeat
-                        end repeat
-                    end try
-                end tell
-            "#);
-        }
-
-        script.push_str("\nreturn \"not_playing\"");
+        let script = build_now_playing_script(spotify_running, music_running, safari_running);
 
         if let Ok(result) = Command::new("osascript").arg("-e").arg(&script).output() {
             let stdout = String::from_utf8_lossy(&result.stdout).trim().to_string();
@@ -266,7 +286,7 @@ pub async fn get_now_playing() -> NowPlayingData {
                     if *app_id == "music" {
                         get_music_app_artwork()
                     } else if !parts[6].is_empty() {
-                        let art = fetch_artwork_from_url(parts[6]);
+                        let art = fetch_artwork_from_url(parts[6]).await;
                         art
                     } else {
                         None
@@ -350,24 +370,14 @@ pub async fn get_now_playing() -> NowPlayingData {
                             // Getting stream from IRandomAccessStreamReference
                             let mut artwork_base64 = None;
                             if let Ok(thumb_ref) = properties.Thumbnail() {
-                                if let Ok(stream_async) = thumb_ref.OpenReadAsync() {
-                                    if let Ok(stream) = stream_async.await {
-                                        if let Ok(size) = stream.Size() {
-                                            if let Ok(reader) =
-                                                DataReader::CreateDataReader(&stream)
-                                            {
-                                                if let Ok(load_async) =
-                                                    reader.LoadAsync(size as u32)
-                                                {
-                                                    if load_async.await.is_ok() {
-                                                        let mut buffer = vec![0u8; size as usize];
-                                                        if reader.ReadBytes(&mut buffer).is_ok() {
-                                                            artwork_base64 =
-                                                                Some(base64_encode(&buffer));
-                                                        }
-                                                    }
-                                                }
-                                            }
+                                if let Ok(stream) = thumb_ref.OpenReadAsync().unwrap().await {
+                                    let size = stream.Size().unwrap() as usize;
+                                    let reader = DataReader::CreateDataReader(&stream).unwrap();
+                                    if reader.LoadAsync(size as u32).unwrap().await.is_ok() {
+                                        let mut buffer = vec![0u8; size];
+                                        if reader.ReadBytes(&mut buffer).is_ok() {
+                                            artwork_base64 =
+                                                crate::utils::save_temp_file(&buffer, "png");
                                         }
                                     }
                                 }
@@ -441,6 +451,7 @@ pub async fn get_now_playing() -> NowPlayingData {
                     if let Ok(status) = player.playback_status().await {
                         if status == "Playing" {
                             IS_PLAYING.store(true, Ordering::Relaxed);
+                            let is_playing = true;
 
                             let mut title = None;
                             let mut artist = None;
@@ -485,7 +496,7 @@ pub async fn get_now_playing() -> NowPlayingData {
                                 player.position().await.ok().map(|p| p as f64 / 1_000_000.0);
 
                             let artwork_base64 = if let Some(url) = artwork_url {
-                                fetch_artwork_from_url(&url)
+                                fetch_artwork_from_url(&url).await
                             } else {
                                 None
                             };
@@ -497,7 +508,7 @@ pub async fn get_now_playing() -> NowPlayingData {
                                 artwork_base64,
                                 duration,
                                 elapsed_time: position,
-                                is_playing: true,
+                                is_playing,
                                 audio_levels: Some(get_audio_levels_internal()),
                                 app_name: Some(name.replace("org.mpris.MediaPlayer2.", "")),
                             };
@@ -574,7 +585,8 @@ fn get_music_app_artwork() -> Option<String> {
             if let Ok(data) = fs::read(temp_path) {
                 let _ = fs::remove_file(temp_path);
                 if !data.is_empty() {
-                    return Some(base64_encode(&data));
+                    // Use common save_temp_file logic to get consistent hashing/dedup
+                    return crate::utils::save_temp_file(&data, "png");
                 }
             }
         }
@@ -1069,6 +1081,7 @@ pub async fn media_seek(position: f64) -> Result<(), String> {
 
     #[cfg(not(target_os = "macos"))]
     {
+        let _ = position;
         // Seeking not easily supported in global transport controls universally
         Ok(())
     }
@@ -1102,6 +1115,7 @@ pub fn activate_media_app(app_name: String) -> Result<(), String> {
 
     #[cfg(not(target_os = "macos"))]
     {
+        let _ = app_name;
         // Maybe try opening by protocol or process name?
         Ok(())
     }
@@ -1155,7 +1169,8 @@ pub fn setup_audio_monitoring(app_handle: tauri::AppHandle) {
                 (hasher.finish() % 1000) as f64 / 1000.0 - 0.5
             };
 
-            let mut levels = vec![0.0; 6];
+            let mut levels = vec![0.0; 6]; // In a loop, this could be reused, but Vec of 6 floats is trivial.
+                                           // Keeping as is for simplicity unless specific optimization request for this.
 
             // Bass (20-150 Hz) - strongest on beat
             levels[0] = energy * (0.4 + beat * 0.5 + noise() * 0.1);

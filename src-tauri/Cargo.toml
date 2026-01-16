@@ -27,11 +27,12 @@ tauri-plugin-fs = "2.4.4"
 tauri-plugin-drag = "2.1.0"
 tauri-plugin-dialog = "2.5.0"
 dirs = "6.0.0"
-rusqlite = "0.38.0"
+rusqlite = { version = "0.38.0", features = ["bundled"] }
 base64 = "0.22.1"
 log = "0.4"
-reqwest = { version = "0.12", features = ["json", "stream"] }
+reqwest = { version = "0.12", features = ["json", "stream", "blocking"] }
 futures-util = "0.3"
+open = "5.3"
 
 
 # macOS-specific dependencies for notch detection
