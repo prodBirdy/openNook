@@ -20,17 +20,29 @@ openNook aims to provide a seamless and interactive "island" experience on your 
 
 We are just getting started. The goal is to evolve openNook into a highly extensible platform:
 
-*   **Cross-Platform Support**: While currently focused on macOS, we plan to leverage Tauri's capabilities to bring openNook to Windows and Linux users in the future.
-*   **Plugin Ecosystem**: We are planning a Plugin API that will empower users and developers to extend the app. You will be able to create:
+*   **Cross-Platform Support**: openNook currently supports macOS and Windows. Validated on Windows 11.
+*   **Plugin Ecosystem**: The core Plugin API is implemented, empowering users and developers to extend the app. You can currently create:
     *   **Custom Widgets**: Add new functionality tailored to your needs.
     *   **New Tabs**: extend the interface with new pages.
     *   **Custom Interfaces**: Redesign or repurpose the island for different workflows.
+
+
+## Plugin System
+
+openNook features a plugin system that allows you to load external functionality.
+
+*   **Installation**: Plugins can be installed from a local folder or a Git repository.
+*   **Location**: Plugins are stored in `~/.opennook/plugins`.
+*   **Development**: Developers can create plugins as separate JavaScript/TypeScript bundles.
 
 ## Getting Started
 
 To run this project locally:
 
-1.  Make sure you have prerequisites for [Tauri](https://tauri.app/v1/guides/getting-started/prerequisites) installed.
+> [!NOTE]
+> Windows users, please check [WINDOWS_BUILD.md](WINDOWS_BUILD.md) for specific instructions.
+
+1.  Make sure you have prerequisites for [Tauri](https://tauri.app/start/prerequisites/) installed.
 2.  Install dependencies:
     ```bash
     npm install

@@ -1,16 +1,15 @@
 use crate::database::{get_connection, log_sql};
 use crate::models::NotchInfo;
-use log;
 use serde::{Deserialize, Serialize};
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::RwLock;
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+use tauri::Emitter;
 use tauri::{
     AppHandle, LogicalPosition, LogicalSize, Manager, WebviewUrl, WebviewWindow,
     WebviewWindowBuilder, Window,
 };
-#[cfg(any(target_os = "macos", target_os = "windows"))]
-use tauri::Emitter;
 
 #[tauri::command]
 pub fn open_settings(app_handle: tauri::AppHandle) -> Result<(), String> {
@@ -187,6 +186,13 @@ fn get_ui_bounds_store() -> &'static RwLock<Option<UiBounds>> {
 }
 
 /// Update the actual UI element bounds (called from frontend when element resizes)
+///
+/// Receives window-relative coordinates from getBoundingClientRect():
+/// - x, y: Position relative to the window's top-left corner
+/// - width, height: Element dimensions
+///
+/// These will be converted to screen coordinates during mouse collision detection
+/// by adding the window's screen position.
 #[tauri::command]
 pub fn update_ui_bounds(x: f64, y: f64, width: f64, height: f64) -> Result<(), String> {
     let store = get_ui_bounds_store();
@@ -200,9 +206,15 @@ pub fn update_ui_bounds(x: f64, y: f64, width: f64, height: f64) -> Result<(), S
     Ok(())
 }
 
+/// Helper to calculate dynamic notch width based on screen width
+/// Returns a width between 200.0 and 260.0 (10% of screen width)
+fn calculate_dynamic_notch_width(screen_width: f64) -> f64 {
+    (screen_width * 0.1).clamp(200.0, 260.0)
+}
+
 /// Get screen dimensions
 /// Returns (screen_width, screen_height, notch_height, notch_width)
-fn get_screen_info(app_handle: Option<&tauri::AppHandle>) -> (f64, f64, f64, f64) {
+fn get_screen_info(_app_handle: Option<&tauri::AppHandle>) -> (f64, f64, f64, f64) {
     #[cfg(target_os = "macos")]
     {
         // Define our own CGSize/CGRect to avoid deprecated cocoa crate fields
@@ -236,7 +248,8 @@ fn get_screen_info(app_handle: Option<&tauri::AppHandle>) -> (f64, f64, f64, f64
             let notch_width = if safe_area_top > 0.0 {
                 (screen_width * 0.1).max(200.0).min(260.0)
             } else {
-                180.0
+                // OLD: 180.0
+                calculate_dynamic_notch_width(screen_width)
             };
 
             (screen_width, screen_height, notch_height, notch_width)
@@ -245,28 +258,44 @@ fn get_screen_info(app_handle: Option<&tauri::AppHandle>) -> (f64, f64, f64, f64
 
     #[cfg(target_os = "windows")]
     {
-        use windows::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN};
+        // Use primary_monitor for DPI-aware screen dimensions
+        // GetSystemMetrics returns scaled values on high-DPI screens (e.g., 4K displays)
+        if let Some(handle) = _app_handle {
+            if let Ok(Some(monitor)) = handle.primary_monitor() {
+                let size = monitor.size();
+                let scale_factor = monitor.scale_factor();
+                let width = size.width as f64 / scale_factor;
+                let height = size.height as f64 / scale_factor;
+                let notch_width = calculate_dynamic_notch_width(width);
+                return (width, height, 0.0, notch_width);
+            }
+        }
 
+        // Fallback to GetSystemMetrics if monitor API unavailable
+        use windows::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN};
         unsafe {
             let width = GetSystemMetrics(SM_CXSCREEN) as f64;
             let height = GetSystemMetrics(SM_CYSCREEN) as f64;
-            (width, height, 0.0, 0.0)
+            let notch_width = calculate_dynamic_notch_width(width);
+            (width, height, 0.0, notch_width)
         }
     }
 
     #[cfg(target_os = "linux")]
     {
         // Try to get from app handle if available
-        if let Some(handle) = app_handle {
+        if let Some(handle) = _app_handle {
             if let Ok(Some(monitor)) = handle.primary_monitor() {
                 let size = monitor.size();
                 let scale_factor = monitor.scale_factor();
                 let width = size.width as f64 / scale_factor;
                 let height = size.height as f64 / scale_factor;
-                return (width, height, 0.0, 0.0);
+                let notch_width = calculate_dynamic_notch_width(width);
+                return (width, height, 0.0, notch_width);
             }
         }
-        (1920.0, 1080.0, 0.0, 0.0)
+        let notch_width = calculate_dynamic_notch_width(1920.0);
+        (1920.0, 1080.0, 0.0, notch_width)
     }
 }
 
@@ -276,11 +305,7 @@ pub fn get_system_accent_color() -> String {
     return crate::utils::get_macos_accent_color();
 
     #[cfg(target_os = "windows")]
-    {
-        // Fallback to blue for now, retrieving registry value is a bit more involved
-        // and dwmapi GetWindowAttribute uses BGR which needs conversion
-        "#007AFF".to_string()
-    }
+    return crate::utils::get_windows_accent_color();
 
     #[cfg(target_os = "linux")]
     return "#007AFF".to_string();
@@ -400,7 +425,7 @@ pub fn update_window_settings(
 /// Set up the window with a fixed size based on notch dimensions and settings.
 /// The window always uses: width = (notch_width + 160) + extra_width, height = notch_height + extra_height
 pub fn setup_fixed_window_size(window: &WebviewWindow) -> Result<(), String> {
-    let (screen_width, _screen_height, notch_height, notch_width) =
+    let (screen_width, _screen_height, notch_height, _notch_width) =
         get_screen_info(Some(window.app_handle()));
     let settings = get_window_settings();
 
@@ -408,7 +433,8 @@ pub fn setup_fixed_window_size(window: &WebviewWindow) -> Result<(), String> {
     // In non-notch mode, we might want a smaller fixed window if possible, but keeping it consistent is safer for now
     // unless the "too big" comment refers to the window size itself blocking things?
     // If the window is transparent and click-through, size shouldn't matter much visually, but might block clicks if implementation is wrong.
-    let target_width = (notch_width + 160.0) + settings.extra_width;
+    // We want the window to be full width
+    let target_width = screen_width;
     let target_height = notch_height + settings.extra_height;
 
     // Resize the window
@@ -417,7 +443,7 @@ pub fn setup_fixed_window_size(window: &WebviewWindow) -> Result<(), String> {
         .map_err(|e| e.to_string())?;
 
     // Center horizontally, position at very top (y=0) to overlap with notch
-    let x = (screen_width - target_width) / 2.0;
+    let x = 0.0;
     let y = 0.0;
 
     window
@@ -774,12 +800,15 @@ pub fn setup_mouse_monitoring(app_handle: tauri::AppHandle) {
             // Check UI bounds or fallback to notch area
             let in_ui_area = if let Ok(guard) = get_ui_bounds_store().try_read() {
                 if let Some(bounds) = *guard {
-                    let sx = window_x + bounds.x;
-                    let sy = bounds.y;
-                    mouse_x >= (sx - padding)
-                        && mouse_x <= (sx + bounds.width + padding)
-                        && flipped_y >= (sy - padding)
-                        && flipped_y <= (sy + bounds.height + padding)
+                    // Center the bounds within the window
+                    // win_width is the total window width, bounds.width is the UI element width
+                    // This centers the activation zone regardless of where the element is positioned
+                    let screen_x = window_x + (win_width - bounds.width) / 2.0;
+                    let screen_y = bounds.y; // Window is at y=0, so bounds.y is already screen-relative
+                    mouse_x >= (screen_x - padding)
+                        && mouse_x <= (screen_x + bounds.width + padding)
+                        && flipped_y >= (screen_y - padding)
+                        && flipped_y <= (screen_y + bounds.height + padding)
                 } else {
                     mouse_x >= (fallback_x_start - padding)
                         && mouse_x <= (fallback_x_end + padding)
@@ -799,8 +828,9 @@ pub fn setup_mouse_monitoring(app_handle: tauri::AppHandle) {
 
                 if let Ok(guard) = get_ui_bounds_store().try_read() {
                     if let Some(bounds) = *guard {
+                        let centered_x = window_x + (win_width - bounds.width) / 2.0;
                         log::debug!("[mouse] ENTERED UI bounds - mouse: ({:.0}, {:.0}), bounds: x={:.0}, y={:.0}, w={:.0}, h={:.0}",
-                            mouse_x, flipped_y, window_x + bounds.x, bounds.y, bounds.width, bounds.height);
+                            mouse_x, flipped_y, centered_x, bounds.y, bounds.width, bounds.height);
                     } else {
                         log::debug!(
                             "[mouse] ENTERED UI bounds (fallback) - mouse: ({:.0}, {:.0})",
@@ -863,35 +893,59 @@ pub fn setup_mouse_monitoring(app_handle: tauri::AppHandle) {
     // Track whether mouse is currently in the UI area
     static IS_INSIDE: AtomicBool = AtomicBool::new(false);
 
-    let (screen_width, _screen_height, notch_height, notch_width) =
+    let (screen_width, _screen_height, _notch_height, notch_width) =
         get_screen_info(Some(&app_handle));
-
-    // Pre-compute window position (window is centered at top)
-    let settings = get_window_settings();
-    let effective_notch_width = if settings.non_notch_mode {
-        0.0
-    } else {
-        notch_width
-    };
-
-    let win_width = if effective_notch_width > 0.0 {
-        effective_notch_width + 160.0 + settings.extra_width
-    } else {
-        800.0 + settings.extra_width
-    }; // Fallback width
-
-    let window_x = (screen_width - win_width) / 2.0;
 
     std::thread::spawn(move || {
         const POLL_MS: u64 = 20;
 
         loop {
+            // Refresh settings on every iteration to handle runtime toggles
+            // This is intentional - settings can be changed via update_window_settings
+            // and we need to immediately reflect those changes in mouse detection
+            let settings = get_window_settings();
+
+            let effective_notch_width = if settings.non_notch_mode {
+                0.0
+            } else {
+                notch_width
+            };
+
+            // Get actual window position instead of calculating it
+            // This ensures we match the real window position even with DPI scaling
+            // Get actual window position instead of calculating it
+            // This ensures we match the real window position even with DPI scaling
+            let (window_x, win_width, scale_factor) =
+                if let Some(window) = app_handle.get_webview_window("main") {
+                    if let (Ok(pos), Ok(size)) = (window.outer_position(), window.outer_size()) {
+                        let scale = window.scale_factor().unwrap_or(1.0);
+                        ((pos.x as f64) / scale, (size.width as f64) / scale, scale)
+                    } else {
+                        // Fallback calculation
+                        let win_w = if effective_notch_width > 0.0 {
+                            effective_notch_width + 160.0 + settings.extra_width
+                        } else {
+                            800.0 + settings.extra_width
+                        };
+                        ((screen_width - win_w) / 2.0, win_w, 1.0)
+                    }
+                } else {
+                    // Fallback if window not available
+                    let win_w = if effective_notch_width > 0.0 {
+                        effective_notch_width + 160.0 + settings.extra_width
+                    } else {
+                        800.0 + settings.extra_width
+                    };
+                    ((screen_width - win_w) / 2.0, win_w, 1.0)
+                };
+
             let mut point = POINT::default();
             let success = unsafe { GetCursorPos(&mut point) };
 
             if success.is_ok() {
-                let mouse_x = point.x as f64;
-                let mouse_y = point.y as f64;
+                // Convert physical mouse coordinates to logical pixels
+                let mouse_x = (point.x as f64) / scale_factor;
+                let mouse_y = (point.y as f64) / scale_factor;
 
                 let was_inside = IS_INSIDE.load(Ordering::Relaxed);
 
@@ -900,12 +954,13 @@ pub fn setup_mouse_monitoring(app_handle: tauri::AppHandle) {
 
                 let in_ui_area = if let Ok(guard) = get_ui_bounds_store().try_read() {
                     if let Some(bounds) = *guard {
-                        let sx = window_x + bounds.x;
-                        let sy = bounds.y;
-                        mouse_x >= (sx - padding)
-                            && mouse_x <= (sx + bounds.width + padding)
-                            && mouse_y >= (sy - padding)
-                            && mouse_y <= (sy + bounds.height + padding)
+                        // Center the bounds within the window (same as macOS)
+                        let screen_x = window_x + (win_width - bounds.width) / 2.0;
+                        let screen_y = bounds.y;
+                        mouse_x >= (screen_x - padding)
+                            && mouse_x <= (screen_x + bounds.width + padding)
+                            && mouse_y >= (screen_y - padding)
+                            && mouse_y <= (screen_y + bounds.height + padding)
                     } else {
                         // Fallback zone at top center
                         // In non-notch mode we use a very small height for fallback
@@ -931,7 +986,9 @@ pub fn setup_mouse_monitoring(app_handle: tauri::AppHandle) {
 
                     if let Some(window) = app_handle.get_webview_window("main") {
                         let _ = window.set_ignore_cursor_events(false);
-                        // Activate window
+                        // Do NOT activate window on Windows as it cancels Drag & Drop operations
+                        // The window is already always-on-top so it will receive events once ignore_cursor_events is false
+                        /*
                         use raw_window_handle::HasWindowHandle;
                         use windows::Win32::Foundation::HWND;
                         use windows::Win32::UI::WindowsAndMessaging::SetForegroundWindow;
@@ -946,6 +1003,7 @@ pub fn setup_mouse_monitoring(app_handle: tauri::AppHandle) {
                                 }
                             }
                         }
+                        */
                     }
                 } else if !in_ui_area && was_inside {
                     IS_INSIDE.store(false, Ordering::Relaxed);

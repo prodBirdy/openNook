@@ -130,6 +130,27 @@ pub fn run() {
                     window.set_always_on_top(true).unwrap();
                     window.set_decorations(false).unwrap();
                     window.set_skip_taskbar(true).unwrap();
+
+                    use raw_window_handle::HasWindowHandle;
+                    use windows::Win32::Foundation::HWND;
+                    use windows::Win32::UI::WindowsAndMessaging::{
+                        GetClassLongPtrW, SetClassLongPtrW, CS_DROPSHADOW, GCL_STYLE,
+                    };
+
+                    if let Ok(handle) = window.window_handle() {
+                        if let raw_window_handle::RawWindowHandle::Win32(win32_handle) =
+                            handle.as_raw()
+                        {
+                            // win32_handle.hwnd is NonZeroIsize
+                            let hwnd = HWND(win32_handle.hwnd.get() as _);
+                            unsafe {
+                                // Remove CS_DROPSHADOW from the window class style
+                                let style = GetClassLongPtrW(hwnd, GCL_STYLE);
+                                let new_style = style & !(CS_DROPSHADOW.0 as usize);
+                                SetClassLongPtrW(hwnd, GCL_STYLE, new_style.try_into().unwrap());
+                            }
+                        }
+                    }
                 }
 
                 #[cfg(target_os = "linux")]
@@ -140,8 +161,11 @@ pub fn run() {
                     window.set_skip_taskbar(true).unwrap();
                 }
 
-                #[cfg(not(target_os = "windows"))]
-                let _ = window.set_decorations(false);
+                #[cfg(target_os = "macos")]
+                {
+                    // macOS decorations are already set by NSWindow level configuration above
+                    let _ = window.set_decorations(false);
+                }
 
                 // Enable click-through by default (no notification showing)
                 let _ = window.set_ignore_cursor_events(true);

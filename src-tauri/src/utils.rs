@@ -26,6 +26,14 @@ pub async fn fetch_artwork_from_url(url: &str) -> Option<String> {
     }
 }
 
+/// Save binary data to a temp file and return as base64-encoded string
+pub fn save_temp_file(data: &[u8], _extension: &str) -> Option<String> {
+    if data.is_empty() {
+        return None;
+    }
+    Some(base64_encode(data))
+}
+
 /// Get the system accent color on macOS
 #[cfg(target_os = "macos")]
 pub fn get_macos_accent_color() -> String {
@@ -73,4 +81,23 @@ pub fn get_macos_accent_color() -> String {
             (b * 255.0).round() as u8
         );
     }
+}
+
+/// Get the system accent color on Windows
+#[cfg(target_os = "windows")]
+pub fn get_windows_accent_color() -> String {
+    use winreg::enums::*;
+    use winreg::RegKey;
+
+    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+    if let Ok(dwm) = hkcu.open_subkey("SOFTWARE\\Microsoft\\Windows\\DWM") {
+        if let Ok(color) = dwm.get_value::<u32, _>("ColorizationColor") {
+            // Color is in ARGB format (alpha, red, green, blue)
+            let r = (color >> 16) & 0xFF;
+            let g = (color >> 8) & 0xFF;
+            let b = color & 0xFF;
+            return format!("#{:02x}{:02x}{:02x}", r, g, b);
+        }
+    }
+    "#007AFF".to_string()
 }

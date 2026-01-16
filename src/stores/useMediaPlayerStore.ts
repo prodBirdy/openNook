@@ -33,7 +33,7 @@ type MediaPlayerStore = MediaPlayerState & MediaPlayerActions & MediaPlayerDeriv
 let mediaPersistTimeout: ReturnType<typeof setTimeout> | null = null;
 let prevIsPlaying = false;
 let lastArtwork: string | null | undefined = null;
-let expandedRef = false;
+
 
 export const useMediaPlayerStore = create<MediaPlayerStore>((set, get) => ({
     nowPlaying: null,
@@ -49,24 +49,15 @@ export const useMediaPlayerStore = create<MediaPlayerStore>((set, get) => ({
     setVisualizerColor: (color) => set({ visualizerColor: color }),
     setMediaPersist: (persist) => set({ mediaPersist: persist }),
 
-    fetchNowPlaying: async (expanded = false) => {
-        expandedRef = expanded;
+    fetchNowPlaying: async (_expanded = false) => {
+
         try {
             const data = await invoke<NowPlayingData>('get_now_playing');
             const { nowPlaying: prev } = get();
 
-            const trackChanged = !prev ||
-                prev.title !== data.title ||
-                prev.artist !== data.artist ||
-                prev.is_playing !== data.is_playing;
 
-            // Optimization: If only elapsed time changed and we are NOT expanded,
-            // do NOT update state to prevent re-renders.
-            if (prev && !trackChanged && !expandedRef) {
-                if (prev.duration === data.duration && prev.album === data.album) {
-                    return;
-                }
-            }
+
+
 
             // Optimization: Reuse artwork string reference
             let artwork = data.artwork_base64;
@@ -178,7 +169,8 @@ export const useMediaPlayerStore = create<MediaPlayerStore>((set, get) => ({
         }
 
         // Handle both old base64 (if any cached) and new file paths
-        const src = artwork.startsWith('/') || artwork.match(/^[a-zA-Z]:/)
+        const isFilePath = artwork.length < 500 && (artwork.startsWith('/') || !!artwork.match(/^[a-zA-Z]:/));
+        const src = isFilePath
             ? convertFileSrc(artwork)
             : `data:image/png;base64,${artwork}`;
 

@@ -1,6 +1,7 @@
 import { motion, AnimatePresence } from 'motion/react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
+import { getCurrentWindow } from '@tauri-apps/api/window';
 import { useEffect, useCallback, useRef, useMemo } from 'react';
 import { useNotchInfo } from '../../hooks/useNotchInfo';
 import { CompactMedia } from './CompactMedia';
@@ -162,6 +163,20 @@ export function DynamicIsland() {
 
     // Initialization and listeners
     useEffect(() => {
+        const initWindow = async () => {
+            try {
+                const appWindow = getCurrentWindow();
+                await appWindow.setDecorations(false);
+                await appWindow.setShadow(false);
+            } catch (e) {
+                console.error('Failed to configure window:', e);
+            }
+        };
+        initWindow();
+    }, []);
+
+    // Other listeners
+    useEffect(() => {
         loadNotes();
 
         // Window resize handler with throttling
@@ -256,7 +271,7 @@ export function DynamicIsland() {
     const { targetWidth, targetHeight } = useMemo(() => {
         if (expanded) {
             return {
-                targetWidth: windowSize.width - 40,
+                targetWidth: Math.min(windowSize.width - 40, 600),
                 targetHeight: Math.min(windowSize.height, 250)
             };
         }

@@ -59,7 +59,7 @@ export const AlbumCover = memo(function AlbumCover({
         >
             {artwork ? (
                 <img
-                    src={artwork.startsWith('/') || artwork.match(/^[a-zA-Z]:/) ? convertFileSrc(artwork) : `data:image/png;base64,${artwork}`}
+                    src={(artwork.length < 500 && (artwork.startsWith('/') || artwork.match(/^[a-zA-Z]:/))) ? convertFileSrc(artwork) : `data:image/png;base64,${artwork}`}
                     alt={title || 'Album cover'}
                     className="album-cover__image"
                 />
