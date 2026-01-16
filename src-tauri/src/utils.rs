@@ -4,54 +4,23 @@ pub fn base64_encode(data: &[u8]) -> String {
     BASE64_STANDARD.encode(data)
 }
 
-/// Save data to a temporary file and return the path
-pub fn save_temp_file(data: &[u8], extension: &str) -> Option<String> {
-    use std::fs::File;
-    use std::io::Write;
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-
-    let temp_dir = std::env::temp_dir();
-
-    // Hash the data to create a unique filename (deduplication)
-    let mut hasher = DefaultHasher::new();
-    data.hash(&mut hasher);
-    let hash = hasher.finish();
-
-    let filename = format!("overdone_art_{:x}.{}", hash, extension);
-    let path = temp_dir.join(filename);
-
-    // If file exists, return path (cache hit)
-    if path.exists() {
-        return Some(path.to_string_lossy().to_string());
-    }
-
-    if let Ok(mut file) = File::create(&path) {
-        if file.write_all(data).is_ok() {
-            return Some(path.to_string_lossy().to_string());
-        }
-    }
-    None
-}
-
-/// Fetch artwork from a URL (used for Spotify) and save to temp file
-pub fn fetch_artwork_from_url(url: &str) -> Option<String> {
+/// Fetch artwork from a URL (used for Spotify) - async version
+pub async fn fetch_artwork_from_url(url: &str) -> Option<String> {
     if url.is_empty() {
         return None;
     }
 
-    // Use reqwest blocking client to fetch the image
-    let client = reqwest::blocking::Client::builder()
+    // Use async reqwest client to avoid runtime conflicts
+    let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(2))
         .build()
         .ok()?;
 
-    let response = client.get(url).send().ok()?;
+    let response = client.get(url).send().await.ok()?;
 
     if response.status().is_success() {
-        let bytes = response.bytes().ok()?;
-        // Save to temp file instead of returning base64
-        save_temp_file(&bytes, "jpg")
+        let bytes = response.bytes().await.ok()?;
+        Some(base64_encode(&bytes))
     } else {
         None
     }

@@ -286,7 +286,7 @@ pub async fn get_now_playing() -> NowPlayingData {
                     if *app_id == "music" {
                         get_music_app_artwork()
                     } else if !parts[6].is_empty() {
-                        let art = fetch_artwork_from_url(parts[6]);
+                        let art = fetch_artwork_from_url(parts[6]).await;
                         art
                     } else {
                         None
@@ -489,7 +489,7 @@ pub async fn get_now_playing() -> NowPlayingData {
                                 player.position().await.ok().map(|p| p as f64 / 1_000_000.0);
 
                             let artwork_base64 = if let Some(url) = artwork_url {
-                                fetch_artwork_from_url(&url)
+                                fetch_artwork_from_url(&url).await
                             } else {
                                 None
                             };
