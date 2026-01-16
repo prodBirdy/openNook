@@ -178,7 +178,8 @@ export const useMediaPlayerStore = create<MediaPlayerStore>((set, get) => ({
         }
 
         // Handle both old base64 (if any cached) and new file paths
-        const src = artwork.startsWith('/') || artwork.match(/^[a-zA-Z]:/)
+        const isFilePath = artwork.length < 500 && (artwork.startsWith('/') || !!artwork.match(/^[a-zA-Z]:/));
+        const src = isFilePath
             ? convertFileSrc(artwork)
             : `data:image/png;base64,${artwork}`;
 

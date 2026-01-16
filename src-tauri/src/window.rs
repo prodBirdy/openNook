@@ -5,12 +5,12 @@ use serde::{Deserialize, Serialize};
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::RwLock;
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+use tauri::Emitter;
 use tauri::{
     AppHandle, LogicalPosition, LogicalSize, Manager, WebviewUrl, WebviewWindow,
     WebviewWindowBuilder, Window,
 };
-#[cfg(any(target_os = "macos", target_os = "windows"))]
-use tauri::Emitter;
 
 #[tauri::command]
 pub fn open_settings(app_handle: tauri::AppHandle) -> Result<(), String> {
@@ -202,7 +202,7 @@ pub fn update_ui_bounds(x: f64, y: f64, width: f64, height: f64) -> Result<(), S
 
 /// Get screen dimensions
 /// Returns (screen_width, screen_height, notch_height, notch_width)
-fn get_screen_info(app_handle: Option<&tauri::AppHandle>) -> (f64, f64, f64, f64) {
+fn get_screen_info(_app_handle: Option<&tauri::AppHandle>) -> (f64, f64, f64, f64) {
     #[cfg(target_os = "macos")]
     {
         // Define our own CGSize/CGRect to avoid deprecated cocoa crate fields
@@ -257,7 +257,7 @@ fn get_screen_info(app_handle: Option<&tauri::AppHandle>) -> (f64, f64, f64, f64
     #[cfg(target_os = "linux")]
     {
         // Try to get from app handle if available
-        if let Some(handle) = app_handle {
+        if let Some(handle) = _app_handle {
             if let Ok(Some(monitor)) = handle.primary_monitor() {
                 let size = monitor.size();
                 let scale_factor = monitor.scale_factor();
@@ -276,11 +276,7 @@ pub fn get_system_accent_color() -> String {
     return crate::utils::get_macos_accent_color();
 
     #[cfg(target_os = "windows")]
-    {
-        // Fallback to blue for now, retrieving registry value is a bit more involved
-        // and dwmapi GetWindowAttribute uses BGR which needs conversion
-        "#007AFF".to_string()
-    }
+    return crate::utils::get_windows_accent_color();
 
     #[cfg(target_os = "linux")]
     return "#007AFF".to_string();

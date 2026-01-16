@@ -1,9 +1,6 @@
 use crate::models::NowPlayingData;
-#[cfg(not(target_os = "linux"))]
-use crate::utils::base64_encode;
 use crate::utils::fetch_artwork_from_url;
-#[cfg(target_os = "macos")]
-use crate::utils::save_temp_file;
+
 use log;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::Emitter;
@@ -13,6 +10,9 @@ static AUDIO_LEVELS: std::sync::OnceLock<std::sync::Mutex<Vec<f64>>> = std::sync
 
 /// Global state to track if media is playing (to pause simulation)
 static IS_PLAYING: AtomicBool = AtomicBool::new(false);
+
+/// Track if we were playing in the previous poll cycle (to detect resume)
+static WAS_PLAYING: AtomicBool = AtomicBool::new(false);
 
 /// Cache for current track info to avoid refetching artwork
 /// Format: (title, artist, artwork_base64)
@@ -254,6 +254,7 @@ pub async fn get_now_playing() -> NowPlayingData {
         // If no relevant apps are running, return early with no overhead
         if !spotify_running && !music_running && !safari_running {
             IS_PLAYING.store(false, Ordering::Relaxed);
+            WAS_PLAYING.store(false, Ordering::Relaxed);
             return get_last_played_or_default(get_audio_levels());
         }
 
@@ -268,6 +269,9 @@ pub async fn get_now_playing() -> NowPlayingData {
 
             if parts.len() >= 8 && parts[0] == "playing" {
                 IS_PLAYING.store(true, Ordering::Relaxed);
+                // Check if we just started playing (transition from not playing to playing)
+                let just_started = !WAS_PLAYING.swap(true, Ordering::Relaxed);
+
                 let app_id = parts.last().unwrap_or(&"");
 
                 let title = if parts[1].is_empty() {
@@ -281,8 +285,10 @@ pub async fn get_now_playing() -> NowPlayingData {
                     Some(parts[2].to_string())
                 };
 
-                // Fetch artwork if track changed
-                let artwork = if is_track_changed(&title, &artist) {
+                let track_changed = is_track_changed(&title, &artist);
+
+                // Fetch artwork if track changed OR if we just resumed playback
+                let artwork = if track_changed || just_started {
                     if *app_id == "music" {
                         get_music_app_artwork()
                     } else if !parts[6].is_empty() {
@@ -295,7 +301,7 @@ pub async fn get_now_playing() -> NowPlayingData {
                     get_cached_track().2
                 };
 
-                if is_track_changed(&title, &artist) {
+                if track_changed || just_started {
                     set_cached_track(title.clone(), artist.clone(), artwork.clone());
                 }
 
@@ -330,6 +336,7 @@ pub async fn get_now_playing() -> NowPlayingData {
             }
         }
 
+        WAS_PLAYING.store(false, Ordering::Relaxed);
         get_last_played_or_default(get_audio_levels())
     }
 
@@ -1079,10 +1086,30 @@ pub async fn media_seek(position: f64) -> Result<(), String> {
         Ok(())
     }
 
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
+    {
+        use windows::Foundation::TimeSpan;
+        use windows::Media::Control::GlobalSystemMediaTransportControlsSessionManager;
+
+        if let Ok(manager_async) = GlobalSystemMediaTransportControlsSessionManager::RequestAsync()
+        {
+            if let Ok(manager) = manager_async.await {
+                if let Ok(session) = manager.GetCurrentSession() {
+                    // Convert seconds to 100-nanosecond intervals
+                    let duration = (position * 10_000_000.0) as i64;
+                    let timespan = TimeSpan { Duration: duration };
+                    if let Ok(seek_async) = session.TryChangePlaybackPositionAsync(timespan) {
+                        let _ = seek_async.await;
+                    }
+                }
+            }
+        }
+        return Ok(());
+    }
+
+    #[cfg(target_os = "linux")]
     {
         let _ = position;
-        // Seeking not easily supported in global transport controls universally
         Ok(())
     }
 }
@@ -1113,10 +1140,29 @@ pub fn activate_media_app(app_name: String) -> Result<(), String> {
         Ok(())
     }
 
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
     {
-        let _ = app_name;
-        // Maybe try opening by protocol or process name?
+        use std::process::Command;
+
+        match app_name.to_lowercase().as_str() {
+            "spotify" => {
+                // Use Spotify URI protocol to activate the app
+                let _ = Command::new("cmd")
+                    .args(["/C", "start", "spotify:"])
+                    .spawn();
+            }
+            _ => {
+                // For other apps, try opening by name
+                let _ = open::that(&app_name);
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        // Try opening via xdg-open or similar
+        let _ = open::that(&app_name);
         Ok(())
     }
 }
