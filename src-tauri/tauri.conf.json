@@ -20,6 +20,7 @@
         "x": 0,
         "y": 0,
         "decorations": false,
+        "shadow": false,
         "transparent": true,
         "alwaysOnTop": true,
         "skipTaskbar": true,

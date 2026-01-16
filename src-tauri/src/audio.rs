@@ -1,7 +1,5 @@
 use crate::models::NowPlayingData;
-use crate::utils::fetch_artwork_from_url;
 
-use log;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::Emitter;
 
@@ -342,74 +340,88 @@ pub async fn get_now_playing() -> NowPlayingData {
 
     #[cfg(target_os = "windows")]
     {
+        use std::sync::mpsc;
         use windows::Media::Control::GlobalSystemMediaTransportControlsSessionManager;
         use windows::Storage::Streams::DataReader;
 
-        if let Ok(manager_async) = GlobalSystemMediaTransportControlsSessionManager::RequestAsync()
-        {
-            if let Ok(manager) = manager_async.await {
-                if let Ok(session) = manager.GetCurrentSession() {
-                    if let Ok(properties_async) = session.TryGetMediaPropertiesAsync() {
-                        if let Ok(properties) = properties_async.await {
-                            let title = properties.Title().ok().map(|h| h.to_string());
-                            let artist = properties.Artist().ok().map(|h| h.to_string());
-                            let album = properties.AlbumTitle().ok().map(|h| h.to_string());
+        // Spawn a thread to handle all Windows COM operations synchronously
+        // This avoids the !Send issue with COM types across await points
+        let (tx, rx) = mpsc::channel();
 
-                            // Check playback status
-                            let is_playing = session.GetPlaybackInfo()
-                                .ok()
-                                .and_then(|info| info.PlaybackStatus().ok())
-                                .map(|status| status == windows::Media::Control::GlobalSystemMediaTransportControlsSessionPlaybackStatus::Playing)
-                                .unwrap_or(false);
+        std::thread::spawn(move || {
+            let result = (|| -> Option<NowPlayingData> {
+                // Use pollster or futures::executor to block on Windows async operations
+                let manager = futures::executor::block_on(async {
+                    let manager_async =
+                        GlobalSystemMediaTransportControlsSessionManager::RequestAsync().ok()?;
+                    manager_async.await.ok()
+                })?;
 
-                            // Get timeline
-                            let timeline = session.GetTimelineProperties().ok();
-                            let duration = timeline
-                                .as_ref()
-                                .and_then(|t| t.EndTime().ok())
-                                .map(|t| t.Duration as f64 / 10_000_000.0);
-                            let position = timeline
-                                .as_ref()
-                                .and_then(|t| t.Position().ok())
-                                .map(|t| t.Duration as f64 / 10_000_000.0);
+                let session = manager.GetCurrentSession().ok()?;
 
-                            // Artwork
-                            // Getting stream from IRandomAccessStreamReference
-                            let mut artwork_base64 = None;
-                            if let Ok(thumb_ref) = properties.Thumbnail() {
-                                if let Ok(stream) = thumb_ref.OpenReadAsync().unwrap().await {
-                                    let size = stream.Size().unwrap() as usize;
-                                    let reader = DataReader::CreateDataReader(&stream).unwrap();
-                                    if reader.LoadAsync(size as u32).unwrap().await.is_ok() {
-                                        let mut buffer = vec![0u8; size];
-                                        if reader.ReadBytes(&mut buffer).is_ok() {
-                                            artwork_base64 =
-                                                crate::utils::save_temp_file(&buffer, "png");
-                                        }
-                                    }
-                                }
-                            }
+                let properties = futures::executor::block_on(async {
+                    let properties_async = session.TryGetMediaPropertiesAsync().ok()?;
+                    properties_async.await.ok()
+                })?;
 
-                            IS_PLAYING.store(is_playing, Ordering::Relaxed);
+                let title = properties.Title().ok().map(|h| h.to_string());
+                let artist = properties.Artist().ok().map(|h| h.to_string());
+                let album = properties.AlbumTitle().ok().map(|h| h.to_string());
 
-                            let data = NowPlayingData {
-                                title,
-                                artist,
-                                album,
-                                artwork_base64,
-                                duration,
-                                elapsed_time: position,
-                                is_playing,
-                                audio_levels: Some(get_audio_levels_internal()),
-                                app_name: Some("System".to_string()),
-                            };
+                // Check playback status
+                let is_playing = session.GetPlaybackInfo()
+                    .ok()
+                    .and_then(|info| info.PlaybackStatus().ok())
+                    .map(|status| status == windows::Media::Control::GlobalSystemMediaTransportControlsSessionPlaybackStatus::Playing)
+                    .unwrap_or(false);
 
-                            save_last_played(&data);
-                            return data;
-                        }
-                    }
-                }
-            }
+                // Get timeline
+                let timeline = session.GetTimelineProperties().ok();
+                let duration = timeline
+                    .as_ref()
+                    .and_then(|t| t.EndTime().ok())
+                    .map(|t| t.Duration as f64 / 10_000_000.0);
+                let position = timeline
+                    .as_ref()
+                    .and_then(|t| t.Position().ok())
+                    .map(|t| t.Duration as f64 / 10_000_000.0);
+
+                // Artwork - all COM operations done synchronously
+                let artwork_base64 = futures::executor::block_on(async {
+                    let thumb_ref = properties.Thumbnail().ok()?;
+                    let stream_async = thumb_ref.OpenReadAsync().ok()?;
+                    let stream = stream_async.await.ok()?;
+                    let size = stream.Size().ok()? as usize;
+                    let reader = DataReader::CreateDataReader(&stream).ok()?;
+                    let load_async = reader.LoadAsync(size as u32).ok()?;
+                    load_async.await.ok()?;
+                    let mut buffer = vec![0u8; size];
+                    reader.ReadBytes(&mut buffer).ok()?;
+                    crate::utils::save_temp_file(&buffer, "png")
+                });
+
+                IS_PLAYING.store(is_playing, Ordering::Relaxed);
+
+                Some(NowPlayingData {
+                    title,
+                    artist,
+                    album,
+                    artwork_base64,
+                    duration,
+                    elapsed_time: position,
+                    is_playing,
+                    audio_levels: Some(get_audio_levels_internal()),
+                    app_name: Some("System".to_string()),
+                })
+            })();
+
+            let _ = tx.send(result);
+        });
+
+        // Wait for the result from the blocking thread
+        if let Ok(Some(data)) = rx.recv() {
+            save_last_played(&data);
+            return data;
         }
 
         get_last_played_or_default(get_audio_levels())
@@ -1088,7 +1100,6 @@ pub async fn media_seek(position: f64) -> Result<(), String> {
 
     #[cfg(target_os = "windows")]
     {
-        use windows::Foundation::TimeSpan;
         use windows::Media::Control::GlobalSystemMediaTransportControlsSessionManager;
 
         if let Ok(manager_async) = GlobalSystemMediaTransportControlsSessionManager::RequestAsync()
@@ -1096,9 +1107,9 @@ pub async fn media_seek(position: f64) -> Result<(), String> {
             if let Ok(manager) = manager_async.await {
                 if let Ok(session) = manager.GetCurrentSession() {
                     // Convert seconds to 100-nanosecond intervals
-                    let duration = (position * 10_000_000.0) as i64;
-                    let timespan = TimeSpan { Duration: duration };
-                    if let Ok(seek_async) = session.TryChangePlaybackPositionAsync(timespan) {
+                    // TryChangePlaybackPositionAsync expects i64 directly, not TimeSpan
+                    let position_ticks = (position * 10_000_000.0) as i64;
+                    if let Ok(seek_async) = session.TryChangePlaybackPositionAsync(position_ticks) {
                         let _ = seek_async.await;
                     }
                 }

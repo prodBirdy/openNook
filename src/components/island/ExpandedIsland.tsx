@@ -4,7 +4,7 @@ import { ExpandedMedia } from './ExpandedMedia';
 import { FileTray } from '../FileTray';
 import { useWidgetStore } from '../../stores/useWidgetStore';
 import { WidgetWrapper } from '../widgets/WidgetWrapper';
-import { useMemo } from 'react';
+import { useMemo, useRef, useState } from 'react';
 import { PopoverProvider } from '../../context/PopoverContext';
 
 interface ExpandedIslandProps {
@@ -43,6 +43,35 @@ export function ExpandedIsland({
 }: ExpandedIslandProps) {
     const widgets = useWidgetStore(state => state.widgets);
     const widgetEnabledState = useWidgetStore(state => state.enabledState);
+
+    // Drag to scroll logic
+    const widgetsContainerRef = useRef<HTMLDivElement>(null);
+    const [isDragging, setIsDragging] = useState(false);
+    const [startX, setStartX] = useState(0);
+    const [scrollLeft, setScrollLeft] = useState(0);
+
+    const handleMouseDown = (e: React.MouseEvent) => {
+        if (!widgetsContainerRef.current) return;
+        setIsDragging(true);
+        setStartX(e.pageX - widgetsContainerRef.current.offsetLeft);
+        setScrollLeft(widgetsContainerRef.current.scrollLeft);
+    };
+
+    const handleMouseLeave = () => {
+        setIsDragging(false);
+    };
+
+    const handleMouseUp = () => {
+        setIsDragging(false);
+    };
+
+    const handleMouseMove = (e: React.MouseEvent) => {
+        if (!isDragging || !widgetsContainerRef.current) return;
+        e.preventDefault();
+        const x = e.pageX - widgetsContainerRef.current.offsetLeft;
+        const walk = (x - startX) * 1.5; // Scroll-fast
+        widgetsContainerRef.current.scrollLeft = scrollLeft - walk;
+    };
 
     // Compute enabled widgets with memoization to avoid infinite loops
     const enabledWidgets = useMemo(() =>
@@ -105,11 +134,20 @@ export function ExpandedIsland({
                         <motion.div
                             key="widgets"
                             className="widgets-container"
+                            ref={widgetsContainerRef}
                             initial={{ opacity: 0, x: -20 }}
                             animate={{ opacity: 1, x: 0 }}
                             exit={{ opacity: 0, x: -20 }}
                             transition={{ duration: 0.3 }}
                             onWheel={handleChildWheel}
+                            onMouseDown={handleMouseDown}
+                            onMouseLeave={handleMouseLeave}
+                            onMouseUp={handleMouseUp}
+                            onMouseMove={handleMouseMove}
+                            style={{
+                                cursor: isDragging ? 'grabbing' : 'grab',
+                                userSelect: 'none'
+                            }}
                         >
                             {/* Media player is a special case - uses Zustand store */}
                             {settings.showMedia && <ExpandedMedia />}

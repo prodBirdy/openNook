@@ -21,8 +21,11 @@ export function ModeIndicator({ availableModes, currentMode, onModeChange }: Mod
                             e.stopPropagation();
                             onModeChange(mode);
                         }}
-                        className=" cursor-pointer group outline-none"
+                        className="cursor-pointer group outline-none relative"
                     >
+                        {/* Invisible large hit area */}
+                        <div className="absolute -inset-2 bg-transparent content-['']" />
+
                         <motion.div
                             className={cn(
                                 "rounded-full duration-200 ease-[cubic-bezier(0.25,0.1,0.25,1)]",
