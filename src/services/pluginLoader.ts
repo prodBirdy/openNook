@@ -8,7 +8,39 @@
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { registerWidget, unregisterWidget, WidgetRegistry } from '../components/widgets/WidgetRegistry';
-import { IconBox } from '@tabler/icons-react';
+import {
+    IconBox,
+    IconPlus,
+    IconTrash,
+    IconRefresh,
+    IconClock,
+    IconCalendar,
+    IconCalendarEvent,
+    IconPlayerPlay,
+    IconPlayerPause,
+    IconPlayerStop,
+    IconCheck,
+    IconX,
+    IconSettings,
+    IconBell,
+    IconStar,
+    IconHeart,
+    IconHome,
+    IconUser,
+    IconSearch,
+    IconMenu,
+    IconChevronDown,
+    IconChevronUp,
+    IconChevronLeft,
+    IconChevronRight,
+    IconLoader,
+    IconAlertCircle,
+    IconInfoCircle,
+    IconCircleCheck,
+    IconCloud,
+    IconCalculator,
+    IconCactus
+} from '@tabler/icons-react';
 
 const PLUGIN_CHANGED_EVENT = 'plugin-changed';
 
@@ -81,11 +113,23 @@ async function setupPluginAPI(): Promise<void> {
         return;
     }
 
-    // Import React and components
-    const [React, WidgetWrapperModule, WidgetAddDialogModule] = await Promise.all([
+    // Import React, components, hooks, and UI libraries
+    const [
+        React,
+        WidgetWrapperModule,
+        WidgetAddDialogModule,
+        ButtonModule,
+        PopoverModule,
+        NotificationStoreModule,
+        TauriCore
+    ] = await Promise.all([
         import('react'),
         import('../components/widgets/WidgetWrapper'),
         import('../components/widgets/WidgetAddDialog'),
+        import('../components/ui/button'),
+        import('../components/ui/popover'),
+        import('../stores/useNotificationStore'),
+        import('@tauri-apps/api/core')
     ]);
 
     (window as any).__openNookPluginAPI__ = {
@@ -96,11 +140,54 @@ async function setupPluginAPI(): Promise<void> {
         // UI Components
         WidgetWrapper: WidgetWrapperModule.WidgetWrapper,
         WidgetAddDialog: WidgetAddDialogModule.WidgetAddDialog,
+        Button: ButtonModule.Button,
+        Popover: PopoverModule.Popover,
+        PopoverTrigger: PopoverModule.PopoverTrigger,
+        PopoverContent: PopoverModule.PopoverContent,
+        PopoverAnchor: PopoverModule.PopoverAnchor,
 
-        // Icons
-        IconBox,
+        // Hooks
+        useNotification: NotificationStoreModule.useNotificationStore,
+
+        // Icons - Expose commonly used icons
+        icons: {
+            IconBox,
+            IconPlus,
+            IconTrash,
+            IconRefresh,
+            IconClock,
+            IconCalendar,
+            IconPlayerPlay,
+            IconPlayerPause,
+            IconPlayerStop,
+            IconCheck,
+            IconX,
+            IconSettings,
+            IconBell,
+            IconStar,
+            IconHeart,
+            IconHome,
+            IconUser,
+            IconSearch,
+            IconMenu,
+            IconChevronDown,
+            IconChevronUp,
+            IconChevronLeft,
+            IconChevronRight,
+            IconLoader,
+            IconAlertCircle,
+            IconInfoCircle,
+            IconCircleCheck,
+            IconCloud,
+            IconCalculator,
+            IconCactus,
+            IconCalendarEvent,
+        },
+
+        // Backend API - Safe invoke wrapper
+        invoke: TauriCore.invoke,
     };
-    console.log('Plugin API initialized');
+    console.log('Plugin API initialized with enhanced features');
 }
 
 /**

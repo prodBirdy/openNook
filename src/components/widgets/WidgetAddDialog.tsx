@@ -1,5 +1,5 @@
 import React, { ReactNode } from 'react';
-import { useForm, SubmitHandler, Path, DefaultValues } from 'react-hook-form';
+import { useForm, SubmitHandler, Path, DefaultValues, FieldValues, Resolver } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
 import {
@@ -32,20 +32,20 @@ export interface FormFieldConfig {
 }
 
 // Props for WidgetAddDialog with inferred schema type
-interface WidgetAddDialogProps<TSchema extends z.ZodSchema> {
+interface WidgetAddDialogProps<TFormData extends FieldValues> {
     open: boolean;
     onOpenChange: (open: boolean) => void;
     title: string;
-    schema: TSchema;
-    defaultValues?: DefaultValues<z.infer<TSchema>>;
-    onSubmit: SubmitHandler<z.infer<TSchema>>;
+    schema: z.ZodSchema<TFormData>;
+    defaultValues?: DefaultValues<TFormData>;
+    onSubmit: SubmitHandler<TFormData>;
     fields: FormFieldConfig[];
     submitLabel?: string;
     submitIcon?: ReactNode;
-    children?: ReactNode | ((form: ReturnType<typeof useForm<z.infer<TSchema>>>) => ReactNode);
+    children?: ReactNode | ((form: ReturnType<typeof useForm<TFormData>>) => ReactNode);
 }
 
-export function WidgetAddDialog<TSchema extends z.ZodSchema>({
+export function WidgetAddDialog<TFormData extends FieldValues>({
     open,
     onOpenChange,
     title,
@@ -56,12 +56,11 @@ export function WidgetAddDialog<TSchema extends z.ZodSchema>({
     submitLabel = "Add",
     submitIcon,
     children,
-}: WidgetAddDialogProps<TSchema>) {
-    type FormData = z.infer<TSchema>;
+}: WidgetAddDialogProps<TFormData>) {
     const { setIsPopoverOpen } = usePopoverContext();
 
-    const form = useForm<FormData>({
-        resolver: zodResolver(schema),
+    const form = useForm<TFormData>({
+        resolver: zodResolver(schema as any) as Resolver<TFormData>,
         defaultValues: defaultValues,
     });
 
@@ -74,7 +73,7 @@ export function WidgetAddDialog<TSchema extends z.ZodSchema>({
         wasOpen.current = open;
     }, [open, defaultValues, form]);
 
-    const handleSubmit = async (data: FormData) => {
+    const handleSubmit: SubmitHandler<TFormData> = async (data) => {
         try {
             await onSubmit(data);
             form.reset();
@@ -114,7 +113,7 @@ export function WidgetAddDialog<TSchema extends z.ZodSchema>({
                             <FormField
                                 key={fieldConfig.name}
                                 control={form.control}
-                                name={fieldConfig.name as Path<FormData>}
+                                name={fieldConfig.name as Path<TFormData>}
                                 render={({ field }) => (
                                     <FormItem className="space-y-1">
                                         {fieldConfig.label && (

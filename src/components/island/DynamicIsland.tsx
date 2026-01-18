@@ -4,6 +4,7 @@ import { listen } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { useEffect, useCallback, useRef, useMemo } from 'react';
 import { useNotchInfo } from '../../hooks/useNotchInfo';
+import { cn } from '../../lib/utils';
 import { CompactMedia } from './CompactMedia';
 import { CompactFiles } from './CompactFiles';
 import { CompactIdle } from './CompactIdle';
@@ -46,10 +47,6 @@ export function DynamicIsland() {
         setIsAnimating,
         activeTab,
         setActiveTab,
-        notes,
-        setNotes,
-        loadNotes,
-        saveNotes,
         windowSize,
         setWindowSize,
         settings,
@@ -61,7 +58,6 @@ export function DynamicIsland() {
     } = useDynamicIslandStore();
 
     const islandRef = useRef<HTMLDivElement>(null);
-    const notesTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const prevHasMediaRef = useRef<boolean>(false);
     const prevHasFilesRef = useRef<boolean>(false);
 
@@ -146,21 +142,6 @@ export function DynamicIsland() {
         invoke('trigger_haptics').catch(console.error);
     }, []);
 
-    // Notes handlers
-    const handleNotesChange = useCallback((e: React.ChangeEvent<HTMLTextAreaElement>) => {
-        const value = e.target.value;
-        setNotes(value);
-
-        if (notesTimeoutRef.current) {
-            clearTimeout(notesTimeoutRef.current);
-        }
-        notesTimeoutRef.current = setTimeout(() => saveNotes(value), 500);
-    }, [setNotes, saveNotes]);
-
-    const handleNotesClick = useCallback((e: React.MouseEvent) => {
-        e.stopPropagation();
-    }, []);
-
     // Initialization and listeners
     useEffect(() => {
         const initWindow = async () => {
@@ -177,8 +158,6 @@ export function DynamicIsland() {
 
     // Other listeners
     useEffect(() => {
-        loadNotes();
-
         // Window resize handler with throttling
         let resizeTimeout: ReturnType<typeof setTimeout> | null = null;
         const handleResize = () => {
@@ -200,7 +179,7 @@ export function DynamicIsland() {
             unlistenEnter.then(fn => fn());
             unlistenExit.then(fn => fn());
         };
-    }, [loadNotes, setWindowSize, setIsHovered]);
+    }, [setWindowSize, setIsHovered]);
 
     // Load settings
     useEffect(() => {
@@ -263,9 +242,9 @@ export function DynamicIsland() {
 
     // Memoize notch dimensions
     const { notchHeight, baseNotchWidth } = useMemo(() => ({
-        notchHeight: Math.max(settings.baseHeight, notchInfo?.notch_height ? notchInfo.notch_height - 20 : 38),
+        notchHeight: notchInfo?.notch_height ? notchInfo.notch_height - 14 : 38,
         baseNotchWidth: notchInfo?.notch_width ?? 160,
-    }), [notchInfo?.notch_height, notchInfo?.notch_width, settings.baseHeight]);
+    }), [notchInfo?.notch_height, notchInfo?.notch_width]);
 
     // Memoize target dimensions
     const { targetWidth, targetHeight } = useMemo(() => {
@@ -426,10 +405,25 @@ export function DynamicIsland() {
     };
 
     return (
-        <div className={`dynamic-island-container ${expanded ? 'expanded' : ''}`}>
+        <div className={cn(
+            "fixed top-0 left-0 right-0 flex justify-center items-start pointer-events-none z-[9999]",
+            expanded && "bottom-0 pointer-events-auto z-[10000]"
+        )}>
             <motion.div
                 ref={islandRef}
-                className={`dynamic-island ${mode} ${expanded ? 'expanded' : ''} ${settings.liquidGlassMode ? 'liquid-glass' : ''} ${settings.nonNotchMode ? 'no-wings' : ''} ${isHovered ? 'hovered' : ''}`}
+                className={cn(
+                    "pointer-events-auto bg-black rounded-b-[20px] overflow-visible flex items-center justify-center relative will-change-[width,height,border-radius]",
+                    // Expanded
+                    expanded && "rounded-b-[18px] flex-col justify-start",
+                    // Liquid Glass
+                    settings.liquidGlassMode && "bg-black/65 backdrop-blur-[25px] backdrop-saturate-[180%] border border-white/10 shadow-[0_10px_40px_rgba(0,0,0,0.5)]",
+                    // Wings
+                    "before:content-[''] before:absolute before:top-0 before:-left-[6px] before:w-[6px] before:h-[6px] before:z-10 before:pointer-events-none",
+                    "before:bg-[radial-gradient(circle_at_0_100%,transparent_6px,black_6px)]",
+                    "after:content-[''] after:absolute after:top-0 after:-right-[6px] after:w-[6px] after:h-[6px] after:z-10 after:pointer-events-none",
+                    "after:bg-[radial-gradient(circle_at_100%_100%,transparent_6px,black_6px)]",
+                    (settings.nonNotchMode && mode === 'idle' && !isHovered && !expanded) && "before:hidden after:hidden"
+                )}
                 initial={false}
                 onAnimationComplete={() => setIsAnimating(false)}
                 animate={{
@@ -466,9 +460,6 @@ export function DynamicIsland() {
                                 baseNotchWidth={baseNotchWidth}
                                 settings={settings}
                                 handleSettingsClick={handleSettingsClick}
-                                notes={notes}
-                                handleNotesChange={handleNotesChange}
-                                handleNotesClick={handleNotesClick}
                                 handleChildWheel={handleChildWheel}
                                 setIsPopoverOpen={setIsPopoverOpen}
                             />

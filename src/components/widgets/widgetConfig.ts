@@ -24,6 +24,7 @@ export const builtinWidgets: WidgetConfigEntry[] = [
     { id: 'session', module: () => import('./SessionWidget') },
     { id: 'mirror', module: () => import('./MirrorWidget') },
     { id: 'speedtest', module: () => import('./SpeedTestWidget') },
+    { id: 'notes', module: () => import('./NotesWidget') },
 ];
 
 /**

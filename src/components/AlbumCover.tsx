@@ -1,8 +1,13 @@
 import { memo, useMemo, useCallback, useState } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
+
+// The comment is line 3.
+// The overlay is lines 75-90.
+// I'll do two chunks if possible? No, replace_file_content is single contiguous.
+// I'll do multi_replace_file_content.
+
 import { convertFileSrc } from '@tauri-apps/api/core';
 import { IconPlayerPlayFilled, IconPlayerPauseFilled } from '@tabler/icons-react';
-import './DynamicIsland.css'; // Assuming CSS is shared or moved. Ideally specific CSS should be here.
 
 interface AlbumCoverProps {
     artwork: string | null;
@@ -49,7 +54,7 @@ export const AlbumCover = memo(function AlbumCover({
 
     return (
         <motion.div
-            className="album-cover"
+            className="w-full h-full flex items-center justify-center pl-[2px]"
             animate={animateValues}
             transition={transition}
             onHoverStart={handleHoverStart}
@@ -61,10 +66,10 @@ export const AlbumCover = memo(function AlbumCover({
                 <img
                     src={(artwork.length < 500 && (artwork.startsWith('/') || artwork.match(/^[a-zA-Z]:/))) ? convertFileSrc(artwork) : `data:image/png;base64,${artwork}`}
                     alt={title || 'Album cover'}
-                    className="album-cover__image"
+                    className="w-[26px] h-[26px] rounded-[5px] object-cover shadow-[0_1px_4px_rgba(0,0,0,0.3)]"
                 />
             ) : (
-                <div className="album-cover__placeholder">
+                <div className="w-[26px] h-[26px] rounded-[5px] bg-[linear-gradient(135deg,#333,#111)] flex items-center justify-center text-white/50 text-[14px]">
                     <span className="album-cover__icon"></span>
                 </div>
             )}
@@ -72,21 +77,11 @@ export const AlbumCover = memo(function AlbumCover({
             <AnimatePresence>
                 {isHovered && (
                     <motion.div
-                        className="album-cover-overlay"
+                        className="absolute inset-0 bg-black/30 flex items-center justify-center rounded-[inherit] backdrop-blur-[1px]"
                         initial={{ opacity: 0 }}
                         animate={{ opacity: 1 }}
                         exit={{ opacity: 0 }}
                         transition={{ duration: 0.2 }}
-                        style={{
-                            position: 'absolute',
-                            inset: 0,
-                            backgroundColor: 'rgba(0,0,0,0.3)',
-                            display: 'flex',
-                            alignItems: 'center',
-                            justifyContent: 'center',
-                            borderRadius: 'inherit',
-                            backdropFilter: 'blur(1px)'
-                        }}
                     >
                         {isPlaying ? (
                             <IconPlayerPauseFilled size={16} color="white" />

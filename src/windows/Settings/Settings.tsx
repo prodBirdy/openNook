@@ -1,6 +1,9 @@
 import { useState, useEffect } from 'react';
 import { useWidgetStore } from '../../stores/useWidgetStore';
 import { PluginStore } from '../../components/PluginStore';
+import { Switch } from '@/components/ui/switch';
+import { Button } from '@/components/ui/button';
+import { Label } from '@/components/ui/label';
 import {
     Settings as SettingsIcon,
     Palette,
@@ -8,12 +11,10 @@ import {
     Grid,
     Puzzle
 } from 'lucide-react';
-import './Settings.css';
+import { cn } from '@/lib/utils';
 
 interface SettingsState {
     showMedia: boolean;
-    baseWidth: number;
-    baseHeight: number;
     liquidGlassMode: boolean;
     nonNotchMode: boolean;
 }
@@ -26,8 +27,6 @@ export default function Settings() {
     const toggleWidget = useWidgetStore(state => state.toggleWidget);
     const [settings, setSettings] = useState<SettingsState>({
         showMedia: true,
-        baseWidth: 160,
-        baseHeight: 38,
         liquidGlassMode: false,
         nonNotchMode: false,
     });
@@ -56,8 +55,6 @@ export default function Settings() {
                 const parsed = JSON.parse(saved);
                 setSettings({
                     showMedia: true,
-                    baseWidth: 160,
-                    baseHeight: 38,
                     liquidGlassMode: false,
                     nonNotchMode: false,
                     ...parsed
@@ -78,30 +75,17 @@ export default function Settings() {
             }));
 
             // Sync window settings to backend
-            // usage: extraWidth and extraHeight define the transparent canvas size buffer
-            // We keep them large (defaults) to ensure the window doesn't shrink and clip content
             import('@tauri-apps/api/core').then(({ invoke }) => {
                 invoke('update_window_settings', {
                     extraWidth: 400.0,
                     extraHeight: 800.0,
-                    non_notch_mode: next.nonNotchMode // Note: backend param is snake_case? check definition.
-                    // Backend define: non_notch_mode: bool. Tauri usually maps camelCase to snake_case automatically for commands.
-                    // But wait, the struct field is non_notch_mode. The command arg is non_notch_mode.
-                    // Tauri invoke uses camelCase keys usually?
-                    // "nonNotchMode" -> "non_notch_mode". YES.
-                    // But "extraWidth" -> "extra_width".
+                    non_notch_mode: next.nonNotchMode
                 }).catch(console.error);
             });
 
             return next;
         });
     };
-
-    const toggleSetting = (key: keyof SettingsState) => {
-        updateSetting(key, !settings[key] as SettingsState[typeof key]);
-    };
-
-
 
     return (
         <div className="flex w-full h-screen bg-background text-foreground overflow-hidden font-sans selection:bg-white/20">
@@ -163,46 +147,12 @@ export default function Settings() {
 
                     {activeTab === 'general' && (
                         <div className="space-y-6">
-                            <div className="settings-group">
-                                <div className="setting-item slider-item">
-                                    <div className="setting-info">
-                                        <span className="setting-label">Base Width</span>
-                                        <span className="setting-desc">{settings.baseWidth}px</span>
+                            <div className="bg-card rounded-2xl mb-6 overflow-hidden border border-border">
+                                <div className="flex items-center justify-between p-3 px-4 border-b border-border last:border-b-0">
+                                    <div className="flex flex-col">
+                                        <Label className="text-[15px] font-normal">Launch at Login</Label>
                                     </div>
-                                    <input
-                                        type="range"
-                                        min="160"
-                                        max={window.screen.width}
-                                        value={settings.baseWidth}
-                                        onChange={(e) => updateSetting('baseWidth', parseInt(e.target.value))}
-                                        className="settings-slider"
-                                    />
-                                </div>
-                                <div className="setting-item slider-item">
-                                    <div className="setting-info">
-                                        <span className="setting-label">Base Height</span>
-                                        <span className="setting-desc">{settings.baseHeight}px</span>
-                                    </div>
-                                    <input
-                                        type="range"
-                                        min="38"
-                                        max={window.screen.height}
-                                        value={settings.baseHeight}
-                                        onChange={(e) => updateSetting('baseHeight', parseInt(e.target.value))}
-                                        className="settings-slider"
-                                    />
-                                </div>
-                            </div>
-
-                            <div className="settings-group">
-                                <div className="setting-item">
-                                    <div className="setting-info">
-                                        <span className="setting-label">Launch at Login</span>
-                                    </div>
-                                    <label className="switch">
-                                        <input type="checkbox" disabled />
-                                        <span className="slider round"></span>
-                                    </label>
+                                    <Switch disabled />
                                 </div>
                             </div>
                         </div>
@@ -210,36 +160,28 @@ export default function Settings() {
 
                     {activeTab === 'appearance' && (
                         <div className="space-y-6">
-                            <div className="settings-group">
-                                <div className="setting-item">
-                                    <div className="setting-info">
-                                        <span className="setting-label">Liquid Glass Mode</span>
-                                        <span className="setting-desc">Experimental translucency effect</span>
+                            <div className="bg-card rounded-2xl mb-6 overflow-hidden border border-border">
+                                <div className="flex items-center justify-between p-3 px-4 border-b border-border last:border-b-0">
+                                    <div className="flex flex-col">
+                                        <Label className="text-[15px] font-normal">Liquid Glass Mode</Label>
+                                        <span className="text-xs text-muted-foreground mt-0.5">Experimental translucency effect</span>
                                     </div>
-                                    <label className="switch">
-                                        <input
-                                            type="checkbox"
-                                            checked={settings.liquidGlassMode}
-                                            onChange={() => toggleSetting('liquidGlassMode')}
-                                        />
-                                        <span className="slider round"></span>
-                                    </label>
+                                    <Switch
+                                        checked={settings.liquidGlassMode}
+                                        onCheckedChange={(c) => updateSetting('liquidGlassMode', c)}
+                                    />
                                 </div>
                             </div>
-                            <div className="settings-group">
-                                <div className="setting-item">
-                                    <div className="setting-info">
-                                        <span className="setting-label">Non-Notch Mode</span>
-                                        <span className="setting-desc">Hide island when idle (hover top to show)</span>
+                            <div className="bg-card rounded-2xl mb-6 overflow-hidden border border-border">
+                                <div className="flex items-center justify-between p-3 px-4 border-b border-border last:border-b-0">
+                                    <div className="flex flex-col">
+                                        <Label className="text-[15px] font-normal">Non-Notch Mode</Label>
+                                        <span className="text-xs text-muted-foreground mt-0.5">Hide island when idle (hover top to show)</span>
                                     </div>
-                                    <label className="switch">
-                                        <input
-                                            type="checkbox"
-                                            checked={settings.nonNotchMode}
-                                            onChange={() => toggleSetting('nonNotchMode')}
-                                        />
-                                        <span className="slider round"></span>
-                                    </label>
+                                    <Switch
+                                        checked={settings.nonNotchMode}
+                                        onCheckedChange={(c) => updateSetting('nonNotchMode', c)}
+                                    />
                                 </div>
                             </div>
                         </div>
@@ -247,20 +189,16 @@ export default function Settings() {
 
                     {activeTab === 'media' && (
                         <div className="space-y-6">
-                            <div className="settings-group">
-                                <div className="setting-item">
-                                    <div className="setting-info">
-                                        <span className="setting-label">Media Controls</span>
-                                        <span className="setting-desc">Show now playing info</span>
+                            <div className="bg-card rounded-2xl mb-6 overflow-hidden border border-border">
+                                <div className="flex items-center justify-between p-3 px-4 border-b border-border last:border-b-0">
+                                    <div className="flex flex-col">
+                                        <Label className="text-[15px] font-normal">Media Controls</Label>
+                                        <span className="text-xs text-muted-foreground mt-0.5">Show now playing info</span>
                                     </div>
-                                    <label className="switch">
-                                        <input
-                                            type="checkbox"
-                                            checked={settings.showMedia}
-                                            onChange={() => toggleSetting('showMedia')}
-                                        />
-                                        <span className="slider round"></span>
-                                    </label>
+                                    <Switch
+                                        checked={settings.showMedia}
+                                        onCheckedChange={(c) => updateSetting('showMedia', c)}
+                                    />
                                 </div>
                             </div>
                         </div>
@@ -280,7 +218,7 @@ export default function Settings() {
                                     <h3 className="text-sm font-medium text-white/40 uppercase tracking-wider mb-3 px-1">
                                         {category}
                                     </h3>
-                                    <div className="settings-group">
+                                    <div className="bg-card rounded-2xl mb-6 overflow-hidden border border-border">
                                         {categoryWidgets.map(widget => (
                                             <WidgetToggle
                                                 key={widget.id}
@@ -308,34 +246,33 @@ export default function Settings() {
 
 function SidebarItem({ active, onClick, icon, label }: { active: boolean, onClick: () => void, icon: React.ReactNode, label: string }) {
     return (
-        <button
+        <Button
+            variant="ghost"
             onClick={onClick}
-            className={`w-full flex items-center gap-3 px-3 py-2 rounded-md text-sm transition-all duration-200 cursor-pointer ${active
-                ? 'bg-blue-600/90 text-white shadow-sm'
-                : 'text-white/60 hover:text-white hover:bg-white/5'
-                }`}
+            className={cn(
+                "w-full justify-start gap-3 px-3 py-2 h-auto font-normal",
+                active
+                    ? 'bg-primary/90 text-primary-foreground shadow-sm hover:bg-primary/90 hover:text-primary-foreground'
+                    : 'text-muted-foreground hover:text-foreground hover:bg-white/5'
+            )}
         >
             {icon}
             <span>{label}</span>
-        </button>
+        </Button>
     );
 }
 
 function WidgetToggle({ widget, active, onToggle }: { widget: any, active: boolean, onToggle: () => void }) {
     return (
-        <div className="setting-item">
-            <div className="setting-info">
-                <span className="setting-label">{widget.name}</span>
-                <span className="setting-desc">{widget.description}</span>
+        <div className="flex items-center justify-between p-3 px-4 border-b border-border last:border-b-0">
+            <div className="flex flex-col">
+                <Label className="text-[15px] font-normal">{widget.name}</Label>
+                <span className="text-xs text-muted-foreground mt-0.5">{widget.description}</span>
             </div>
-            <label className="switch">
-                <input
-                    type="checkbox"
-                    checked={active}
-                    onChange={onToggle}
-                />
-                <span className="slider round"></span>
-            </label>
+            <Switch
+                checked={active}
+                onCheckedChange={() => onToggle()}
+            />
         </div>
     );
 }

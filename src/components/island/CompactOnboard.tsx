@@ -41,21 +41,15 @@ export function CompactOnboard({ baseNotchWidth, isHovered }: CompactOnboardProp
     return (
         <CompactWrapper
             id="onboard-content"
-            className="island-content onboard-content"
             baseNotchWidth={baseNotchWidth}
             isHovered={isHovered}
             left={
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <div className="flex items-center gap-2">
                     <video
                         ref={videoRef}
                         src={animatedLogo}
                         poster={logo}
-                        style={{
-                            height: '28px',
-                            width: 'auto',
-                            opacity: 1,
-                            pointerEvents: 'none'
-                        }}
+                        className="h-7 w-auto opacity-100 pointer-events-none"
                         autoPlay
                         loop
                         muted
@@ -67,7 +61,7 @@ export function CompactOnboard({ baseNotchWidth, isHovered }: CompactOnboardProp
                 </div>
             }
             right={
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <div className="flex items-center gap-2">
                     <a href="https://github.com/prodBirdy/openNook" target="_blank" rel="noopener noreferrer" onClick={(e) => e.stopPropagation()}>
                         <IconBrandGithub size={28} color="white" />
                     </a>

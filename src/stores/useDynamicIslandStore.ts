@@ -5,8 +5,6 @@ interface Settings {
     showCalendar: boolean;
     showReminders: boolean;
     showMedia: boolean;
-    baseWidth: number;
-    baseHeight: number;
     liquidGlassMode: boolean;
     nonNotchMode: boolean;
 }
@@ -72,8 +70,6 @@ const DEFAULT_SETTINGS: Settings = {
     showCalendar: false,
     showReminders: false,
     showMedia: true,
-    baseWidth: 160,
-    baseHeight: 38,
     liquidGlassMode: false,
     nonNotchMode: false,
 };

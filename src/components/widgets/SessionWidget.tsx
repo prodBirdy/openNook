@@ -207,7 +207,7 @@ export function SessionWidget() {
                                 animate={{ opacity: 1, scale: 1, y: 0 }}
                                 exit={{ opacity: 0, scale: 0.9, y: -20 }}
                                 transition={{ type: "spring", bounce: 0.3, duration: 0.4 }}
-                                className="group flex items-center gap-2 px-4 py-3 rounded-4xl bg-transparent border border-transparent transition-colors duration-200 cursor-default hover:bg-white/5"
+                                className="group flex items-center gap-2 px-4 py-3 rounded-[20px] bg-transparent border border-transparent transition-colors duration-200 cursor-default hover:bg-white/5"
                                 key={session.id}
                                 onClick={(e) => { e.stopPropagation(); resumeSession(session.id); }}
                                 style={{ cursor: 'pointer' }}

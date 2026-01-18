@@ -45,8 +45,6 @@ export const DatePicker = React.forwardRef<HTMLButtonElement, DatePickerProps>(
             setDate(newDate);
         };
 
-        const containerElement = typeof document !== 'undefined' ? document.getElementById('popover-mount') : null;
-
         return (
             <Popover open={isOpen} onOpenChange={handleOpenChange} modal={false}>
                 <PopoverTrigger asChild>
@@ -72,7 +70,6 @@ export const DatePicker = React.forwardRef<HTMLButtonElement, DatePickerProps>(
                     side="bottom"
                     sideOffset={10}
                     collisionPadding={10}
-                    container={containerElement}
                     onPointerDownOutside={(e) => e.preventDefault()}
                     onInteractOutside={(e) => e.preventDefault()}
                 >

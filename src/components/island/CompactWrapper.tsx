@@ -1,5 +1,6 @@
 import { motion } from 'motion/react';
 import { ReactNode } from 'react';
+import { cn } from '../../lib/utils';
 
 export interface CompactWrapperProps {
     left?: ReactNode;
@@ -17,30 +18,28 @@ export function CompactWrapper({
     baseNotchWidth,
     isHovered,
     contentOpacity = 1,
-    className = "island-content",
+    className = "w-full h-full flex items-center overflow-visible",
     id
 }: CompactWrapperProps) {
     return (
         <motion.div
             key={id}
-            className={`${className} flex items-center justify-between`}
+            className={cn(
+                className,
+                "flex items-center justify-between px-3",
+                isHovered ? "pointer-events-auto" : "pointer-events-none"
+            )}
             initial={{ opacity: 0 }}
             animate={{ opacity: contentOpacity }}
             transition={{ duration: 0.3 }}
-            style={{
-                pointerEvents: isHovered ? 'auto' : 'none',
-                padding: '0 12px',
-            }}
         >
-            <div className=" flex-1 min-w-0 h-full flex items-center justify-start">
+            <div className="flex-1 min-w-0 h-full flex items-center justify-start">
                 {left}
             </div>
 
-            <div className="media-spacer text-accent text-sm" style={{ width: baseNotchWidth }} >
+            <div className="shrink-0 text-[var(--accent-color)] text-sm" style={{ width: baseNotchWidth }} />
 
-            </div>
-
-            <div className=" flex-1 min-w-0 h-full flex items-center justify-end">
+            <div className="flex-1 min-w-0 h-full flex items-center justify-end">
                 {right}
             </div>
         </motion.div>

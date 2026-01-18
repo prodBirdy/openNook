@@ -1,10 +1,12 @@
 import { useEffect, useState, useMemo } from 'react';
+import { motion } from 'motion/react';
 import { invoke } from '@tauri-apps/api/core';
 import { IconRefresh, IconPlus, IconCalendar, IconMapPin } from '@tabler/icons-react';
 import { z } from 'zod';
 import { registerWidget } from './WidgetRegistry';
 import { WidgetWrapper } from './WidgetWrapper';
 import { WidgetAddDialog } from './WidgetAddDialog';
+import { cn } from '@/lib/utils';
 
 interface CalendarEvent {
     id: string;
@@ -32,7 +34,6 @@ export function CalendarWidget() {
     const [permission, setPermission] = useState(true);
     const [selectedDate, setSelectedDate] = useState(new Date());
     const [isRefreshing, setIsRefreshing] = useState(false);
-    const [isScrollerHovered, setIsScrollerHovered] = useState(false);
     const [showAddDialog, setShowAddDialog] = useState(false);
 
     // Generate days for the scroller (today + next 14 days)
@@ -146,7 +147,15 @@ export function CalendarWidget() {
     ];
 
     return (
-        <WidgetWrapper title="Calendar" headerActions={headerActions} className="calendar-widget" >
+        <WidgetWrapper
+            title="Calendar"
+            headerActions={headerActions}
+            className="flex flex-col h-full box-border overflow-hidden p-5"
+            initial={{ opacity: 0, scale: 0.9, filter: "blur(10px)" }}
+            animate={{ opacity: 1, scale: 1, filter: "blur(0px)" }}
+            exit={{ opacity: 0, scale: 0.95, filter: "blur(10px)" }}
+            transition={{ type: "spring", stiffness: 300, damping: 25 }}
+        >
             <WidgetAddDialog
                 open={showAddDialog}
                 onOpenChange={setShowAddDialog}
@@ -190,64 +199,84 @@ export function CalendarWidget() {
                 submitLabel="Add Event"
             />
 
-            {/* Scroller Container with Hover Logic */}
-            <div
-                className={`scroller-container ${isScrollerHovered ? 'expanded' : 'compact'}`}
-                onMouseEnter={() => setIsScrollerHovered(true)}
-                onMouseLeave={() => setIsScrollerHovered(false)}
-                onWheel={(e) => {
-                    if (isScrollerHovered) e.stopPropagation();
-                }}
+
+
+            {/* Scroller Container */}
+            <motion.div
+                layout
+                transition={{ type: "spring", stiffness: 400, damping: 30 }}
+                className="relative z-10 mb-2 bg-transparent rounded-xl overflow-hidden h-[32px] mb-1"
             >
                 {/* Horizontal Day Scroller */}
-                <div className="calendar-day-scroller">
+                <motion.div
+                    layout
+                    className="flex gap-1 items-center h-full pb-0 overflow-hidden gap-1"
+                >
                     {days.map((date, i) => {
                         const isSelected = date.toDateString() === selectedDate.toDateString();
                         const isToday = date.toDateString() === new Date().toDateString();
+                        const hasEvent = events.some(e => new Date(e.start_date * 1000).toDateString() === date.toDateString());
+
                         return (
-                            <div
+                            <motion.div
+                                layout
                                 key={i}
-                                className={`day-item ${isSelected ? 'selected' : ''} ${isToday ? 'today' : ''} ${events.some(e => new Date(e.start_date * 1000).toDateString() === date.toDateString()) ? 'has-event' : ''}`}
+                                transition={{ type: "spring", stiffness: 400, damping: 30 }}
+                                className={cn(
+                                    "flex flex-col items-center justify-center cursor-pointer flex-1",
+                                    // Base State Styles
+                                    "bg-white/10 opacity-60 h-[24px] min-w-[20px] rounded-[6px] p-0 m-0 hover:bg-white/20 hover:opacity-100",
+                                    isSelected && "opacity-100! bg-[var(--accent-color)]! text-white h-[28px] shadow-sm scale-110",
+                                    hasEvent && !isSelected && "bg-[#ff3b30] opacity-100!",
+                                    isToday && "bg-[var(--accent-color)] brightness-75 opacity-100! h-[24px]"
+                                )}
                                 onClick={(e) => { e.stopPropagation(); setSelectedDate(date); }}
                             >
-                                <span className="day-name">{date.toLocaleDateString('en-US', { weekday: 'short' }).charAt(0)}</span>
-                                <span className="day-number">{date.getDate()}</span>
-                                {events.some(e => new Date(e.start_date * 1000).toDateString() === date.toDateString()) && (
-                                    <div className="event-dot" />
-                                )}
-                            </div>
+                                <motion.span
+                                    layout
+                                    className="text-[7px] mb-0 leading-none text-white/70"
+                                >
+                                    {date.toLocaleDateString('en-US', { weekday: 'short' }).charAt(0)}
+                                </motion.span>
+                                <motion.span
+                                    layout
+                                    className="text-[9px] leading-none text-white font-medium"
+                                >
+                                    {date.getDate()}
+                                </motion.span>
+                            </motion.div>
                         );
                     })}
-                </div>
-            </div>
+                </motion.div>
+            </motion.div>
 
             {/* Events List */}
-            <div className={`events-list-container ${isScrollerHovered ? 'dimmed' : ''}`}>
+            <div className={cn(
+                "flex-1 overflow-y-auto pr-1 flex flex-col transition-opacity duration-200 opacity-100 pointer-events-auto"
+            )}>
                 {filteredEvents.length === 0 ? (
-                    <div className="no-events-message">No events</div>
+                    <div className="h-full flex items-center justify-center text-white/40 text-[14px] font-medium">No events</div>
                 ) : (
-                    <div className="events-list">
+                    <div className="flex flex-col gap-3">
                         {filteredEvents.map((event, i) => (
                             <div
-                                className="event-item-modern"
+                                className="flex items-center py-2 border-b border-white/5 last:border-0 cursor-pointer"
                                 key={i}
                                 onClick={(e) => { e.stopPropagation(); handleEventClick(event); }}
-                                style={{ cursor: 'pointer' }}
                             >
-                                <div className="event-time-column">
+                                <div className="flex flex-col items-end w-12 text-right pr-2 shrink-0">
                                     {event.is_all_day ? (
-                                        <span className="all-day-label">All Day</span>
+                                        <span className="text-[10px] uppercase text-white/60 font-semibold">All Day</span>
                                     ) : (
                                         <>
-                                            <span className="event-start-time">{formatTime(event.start_date)}</span>
-                                            {/* <span className="event-duration">1h</span> */}
+                                            <span className="text-[13px] font-medium text-white/90">{formatTime(event.start_date)}</span>
                                         </>
                                     )}
                                 </div>
-                                <div className="event-color-bar" style={{ backgroundColor: 'var(--accent-color)' }} />
-                                <div className="event-details-modern">
-                                    <div className="event-title">{event.title}</div>
-                                    {event.location && <div className="event-location">{event.location}</div>}
+                                <div className="w-[3px] h-8 rounded-sm mr-3 shrink-0 bg-[var(--accent-color)]" />
+                                <div className="flex flex-col justify-center overflow-hidden">
+                                    <div className="text-[14px] font-semibold">{event.title}</div>
+                                    {event.location && <div className="text-[11px] text-white/50 mt-[1px]">{event.location}</div>}
                                 </div>
                             </div>
                         ))}
