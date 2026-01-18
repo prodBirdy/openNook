@@ -3,9 +3,10 @@ import { IconSettings, IconLayoutGrid, IconFiles } from '@tabler/icons-react';
 import { ExpandedMedia } from './ExpandedMedia';
 import { FileTray } from '../FileTray';
 import { useWidgetStore } from '../../stores/useWidgetStore';
-import { WidgetWrapper } from '../widgets/WidgetWrapper';
+import { PluginErrorBoundary } from '../widgets/PluginErrorBoundary';
 import { useMemo, useRef, useState } from 'react';
 import { PopoverProvider } from '../../context/PopoverContext';
+import { cn } from '../../lib/utils';
 
 interface ExpandedIslandProps {
     activeTab: 'widgets' | 'files';
@@ -16,14 +17,9 @@ interface ExpandedIslandProps {
         showMedia: boolean;
         showCalendar: boolean;
         showReminders: boolean;
-        baseWidth: number;
-        baseHeight: number;
         liquidGlassMode: boolean;
     };
     handleSettingsClick: () => void;
-    notes: string;
-    handleNotesChange: (e: React.ChangeEvent<HTMLTextAreaElement>) => void;
-    handleNotesClick: (e: React.MouseEvent) => void;
     handleChildWheel: (e: React.WheelEvent) => void;
     setIsPopoverOpen: (open: boolean) => void;
 }
@@ -35,9 +31,6 @@ export function ExpandedIsland({
     baseNotchWidth,
     settings,
     handleSettingsClick,
-    notes,
-    handleNotesChange,
-    handleNotesClick,
     handleChildWheel,
     setIsPopoverOpen
 }: ExpandedIslandProps) {
@@ -82,40 +75,46 @@ export function ExpandedIsland({
     return (
         <motion.div
             key="expanded-content"
-            className="island-content expanded-content"
+            className="w-full h-full max-h-[250px] flex flex-col items-center overflow-visible text-white box-border"
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
             transition={{ duration: 0.3 }}
         >
             {/* Top Menu Bar */}
-            <div className="expanded-menu-bar" style={{ height: notchHeight }}>
-                <div className="tab-control-container">
-                    <div className="tab-pill-background">
+            <div className="w-full flex items-center justify-between px-5 box-border z-20" style={{ height: notchHeight }}>
+                <div className="flex items-center h-full">
+                    <div className="relative flex bg-white/10 rounded-[20px] p-[2px] h-8 w-20">
                         <div
-                            className="tab-pill-active-bg"
+                            className="absolute top-[2px] left-[2px] w-[calc(50%-2px)] h-[calc(100%-4px)] bg-white/20 rounded-[18px] transition-transform duration-300 ease-[cubic-bezier(0.4,0.0,0.2,1)]"
                             style={{
                                 transform: `translateX(${activeTab === 'widgets' ? '0%' : '100%'})`
                             }}
                         />
                         <div
-                            className={`tab-pill-option ${activeTab === 'widgets' ? 'active' : ''}`}
+                            className={cn(
+                                "flex-1 flex items-center justify-center z-10 cursor-pointer text-white/50 transition-colors duration-200",
+                                activeTab === 'widgets' && "text-white"
+                            )}
                             onClick={(e) => { e.stopPropagation(); setActiveTab('widgets'); }}
                         >
                             <IconLayoutGrid size={16} />
                         </div>
                         <div
-                            className={`tab-pill-option ${activeTab === 'files' ? 'active' : ''}`}
+                            className={cn(
+                                "flex-1 flex items-center justify-center z-10 cursor-pointer text-white/50 transition-colors duration-200",
+                                activeTab === 'files' && "text-white"
+                            )}
                             onClick={(e) => { e.stopPropagation(); setActiveTab('files'); }}
                         >
                             <IconFiles size={16} />
                         </div>
                     </div>
                 </div>
-                <div className="media-spacer" style={{ width: baseNotchWidth, height: '100%' }} />
+                <div className="shrink-0" style={{ width: baseNotchWidth, height: '100%' }} />
                 <div style={{ flex: 1, display: 'flex', justifyContent: 'flex-end', alignItems: 'center' }}>
                     <div
-                        className="settings-button"
+                        className="flex items-center justify-center rounded-full cursor-pointer bg-white/10 transition-all duration-200 text-white/80 backdrop-blur-[10px] hover:bg-white/20 hover:text-white hover:scale-105 active:scale-95"
                         style={{ height: notchHeight - 4, width: notchHeight - 4 }}
                         onClick={(e) => {
                             e.stopPropagation();
@@ -128,12 +127,12 @@ export function ExpandedIsland({
             </div>
 
             {/* Main Content Area */}
-            <div className="main-content-area">
+            <div className="flex-1 w-full overflow-hidden relative flex flex-col">
                 <AnimatePresence mode="wait">
                     {activeTab === 'widgets' ? (
                         <motion.div
                             key="widgets"
-                            className="widgets-container"
+                            className="flex-1 flex flex-row gap-4 w-full p-5 box-border overflow-x-auto items-stretch [scrollbar-width:none] [-ms-overflow-style:none] [&::-webkit-scrollbar]:hidden"
                             ref={widgetsContainerRef}
                             initial={{ opacity: 0, x: -20 }}
                             animate={{ opacity: 1, x: 0 }}
@@ -155,27 +154,20 @@ export function ExpandedIsland({
                             {/* Dynamically render enabled widgets from the registry */}
                             <PopoverProvider onOpenChange={setIsPopoverOpen}>
                                 {enabledWidgets.map(widget => (
-                                    <widget.ExpandedComponent key={widget.id} />
+                                    <PluginErrorBoundary
+                                        key={widget.id}
+                                        pluginId={widget.id}
+                                        pluginName={widget.name}
+                                    >
+                                        <widget.ExpandedComponent />
+                                    </PluginErrorBoundary>
                                 ))}
                             </PopoverProvider>
-                            <WidgetWrapper title="Notes">
-
-                                <textarea
-                                    className="notes-field"
-                                    placeholder="Type your notes here..."
-                                    value={notes}
-                                    onChange={handleNotesChange}
-                                    onClick={handleNotesClick}
-                                />
-
-                            </WidgetWrapper>
-
                         </motion.div>
                     ) : (
                         <motion.div
                             key="files"
-                            className="flex-1 flex flex-col  overflow-hidden"
-                            style={{ padding: '20px' }}
+                            className="flex-1 flex flex-col overflow-hidden p-5"
                             initial={{ opacity: 0, x: 20 }}
                             animate={{ opacity: 1, x: 0 }}
                             exit={{ opacity: 0, x: 20 }}

@@ -75,7 +75,7 @@ export function RemindersWidget() {
             });
     };
 
-    if (loading && !isRefreshing && reminders.length === 0) return <div className="widget-placeholder">Loading...</div>;
+    if (loading && !isRefreshing && reminders.length === 0) return <div className="flex h-full w-full flex-col items-center justify-center text-white/50 text-[14px]">Loading...</div>;
 
     const headerActions = [
         <div key="actions" className="flex gap-1">

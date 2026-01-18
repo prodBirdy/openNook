@@ -43,6 +43,7 @@ This compiles `src/index.tsx` → `index.js`
 external-counter-plugin/
 ├── plugin.json       # Plugin manifest
 ├── package.json      # npm config with build script
+├── tsconfig.json     # TypeScript configuration (ensures correct JSX build)
 ├── src/
 │   └── index.tsx     # TSX source (edit this!)
 ├── index.js          # Built bundle (auto-generated)
@@ -59,8 +60,10 @@ const {
     React,              // React library
     WidgetWrapper,      // Standard widget container
     WidgetAddDialog,    // Form dialog component
-    IconBox,            // Default icon
+    icons,              // Commonly used icons
 } = window.__openNookPluginAPI__;
+
+const { IconBox } = icons;
 ```
 
 ## Using WidgetWrapper
@@ -70,7 +73,7 @@ The `WidgetWrapper` component provides consistent styling:
 ```tsx
 function MyWidget() {
     return (
-        <WidgetWrapper title="My Widget" icon={MyIcon}>
+        <WidgetWrapper title="My Widget">
             {/* Your content here */}
         </WidgetWrapper>
     );

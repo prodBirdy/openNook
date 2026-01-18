@@ -50,24 +50,31 @@ External plugins must be **pre-bundled**. Here's a minimal example:
 // index.js - This is your bundled plugin
 (function() {
   // The plugin loader provides these globals
-  const { registerWidget, IconBox } = window.__openNookPluginAPI__;
+  const { registerWidget, WidgetWrapper, icons } = window.__openNookPluginAPI__;
+  const { IconBox } = icons;
 
   // Define your widget component
   function MyCounterWidget() {
     const [count, setCount] = React.useState(0);
 
-    return React.createElement('div', {
-      className: 'flex flex-col items-center gap-4 p-4'
+    return React.createElement(WidgetWrapper, {
+      title: 'My Counter',
+      key: 'wrapper'
     }, [
-      React.createElement('h2', {
-        className: 'text-2xl font-bold text-white',
-        key: 'count'
-      }, count),
-      React.createElement('button', {
-        onClick: () => setCount(c => c + 1),
-        className: 'px-4 py-2 bg-blue-500 rounded-lg text-white',
-        key: 'button'
-      }, 'Increment')
+      React.createElement('div', {
+        className: 'flex flex-col items-center justify-center gap-4 h-full',
+        key: 'content'
+      }, [
+        React.createElement('h2', {
+          className: 'text-5xl font-bold text-white',
+          key: 'count'
+        }, count),
+        React.createElement('button', {
+          onClick: () => setCount(c => c + 1),
+          className: 'px-6 py-2 bg-blue-500 hover:bg-blue-400 rounded-full text-white transition-colors',
+          key: 'button'
+        }, 'Increment')
+      ])
     ]);
   }
 
@@ -108,6 +115,24 @@ npm init -y
 # Install dependencies
 npm install react react-dom @tabler/icons-react
 npm install -D esbuild
+
+# Create tsconfig.json (Important for JSX)
+cat > tsconfig.json << 'EOF'
+{
+  "compilerOptions": {
+    "target": "es2020",
+    "lib": ["dom", "es2020"],
+    "module": "esnext",
+    "jsx": "react",
+    "jsxFactory": "React.createElement",
+    "jsxFragmentFactory": "React.Fragment",
+    "strict": true,
+    "moduleResolution": "node",
+    "types": ["react"]
+  },
+  "include": ["src/**/*"]
+}
+EOF
 
 # Create source file
 cat > src/index.jsx << 'EOF'
@@ -188,14 +213,38 @@ registerWidget({
 
 ### Available Globals
 
-External plugins have access to:
+External plugins have access to a comprehensive API via `window.__openNookPluginAPI__`:
 
 ```javascript
 window.__openNookPluginAPI__ = {
+  // Core
   registerWidget,    // Register function
   React,            // React library
-  IconBox,          // Default icon
-  // More APIs coming soon
+
+  // UI Components
+  WidgetWrapper,    // Standard widget container
+  WidgetAddDialog,  // Dialog for adding items
+  Button,           // Shadcn button component
+  Popover,          // Popover component
+  PopoverTrigger,   // Popover trigger
+  PopoverContent,   // Popover content
+  PopoverAnchor,    // Popover anchor
+
+  // Hooks
+  useNotification,  // Show notifications (hydration, screenBreak)
+
+  // Icons - 25+ commonly used icons from @tabler/icons-react
+  icons: {
+    IconBox, IconPlus, IconTrash, IconRefresh, IconClock,
+    IconCalendar, IconPlayerPlay, IconPlayerPause, IconPlayerStop,
+    IconCheck, IconX, IconSettings, IconBell, IconStar,
+    IconHeart, IconHome, IconUser, IconSearch, IconMenu,
+    IconChevronDown, IconChevronUp, IconChevronLeft, IconChevronRight,
+    IconLoader, IconAlertCircle, IconInfoCircle, IconCircleCheck
+  },
+
+  // Backend API
+  invoke,           // Call Tauri backend commands
 };
 ```
 
@@ -220,7 +269,8 @@ className="text-white text-lg font-semibold"
 
 ```javascript
 (function() {
-  const { registerWidget, React, IconCloud } = window.__openNookPluginAPI__;
+  const { registerWidget, WidgetWrapper, React, icons } = window.__openNookPluginAPI__;
+  const { IconCloud } = icons;
   const { useState, useEffect } = React;
 
   function WeatherWidget() {
@@ -233,17 +283,21 @@ className="text-white text-lg font-semibold"
         .then(setWeather);
     }, []);
 
-    return React.createElement('div', {
-      className: 'flex flex-col gap-2 p-4'
+    return React.createElement(WidgetWrapper, {
+      title: 'Weather'
     }, [
-      React.createElement('h3', {
-        className: 'text-white font-bold',
-        key: 'title'
-      }, 'Weather'),
-      weather && React.createElement('p', {
-        className: 'text-white/80',
-        key: 'temp'
-      }, `${weather.temperature}°F`)
+      React.createElement('div', {
+        className: 'flex flex-col items-center justify-center h-full gap-2',
+        key: 'content'
+      }, [
+        weather ? React.createElement('p', {
+          className: 'text-3xl text-white font-bold',
+          key: 'temp'
+        }, `${weather.temperature}°F`) : React.createElement('p', {
+          className: 'text-white/60',
+          key: 'loading'
+        }, 'Loading...')
+      ])
     ]);
   }
 

@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, useCallback } from 'react';
 import { IconCamera, IconCameraOff } from '@tabler/icons-react';
 import { registerWidget } from './WidgetRegistry';
 import { WidgetWrapper } from './WidgetWrapper';
-import { motion, AnimatePresence } from 'motion/react';
+import { WidgetDialog } from './WidgetDialog';
 
 export function MirrorWidget() {
     const videoRef = useRef<HTMLVideoElement>(null);
@@ -72,53 +72,34 @@ export function MirrorWidget() {
             title="Mirror"
             className="flex flex-col p-0 h-full box-border overflow-hidden bg-black relative rounded-[22px] border border-white/10 aspect-square"
         >
-            <AnimatePresence mode="wait">
-                {!isActive ? (
-                    <motion.div
-                        key="inactive"
-                        initial={{ opacity: 0 }}
-                        animate={{ opacity: 1 }}
-                        exit={{ opacity: 0 }}
-                        className="flex flex-col items-center justify-center h-full gap-4 p-4 text-center cursor-pointer group select-none relative"
-                        onClick={() => setIsActive(true)}
-                    >
-                        <div className="relative z-10 w-16 h-16 rounded-full bg-neutral-800 border border-white/10 flex items-center justify-center transition-all duration-300 group-hover:bg-neutral-700 group-hover:scale-105">
-                            <IconCamera size={28} className="text-white/90" />
-                        </div>
+            <div className="flex flex-col items-center justify-center h-full gap-4 p-4 text-center cursor-pointer group select-none relative"
+                onClick={() => setIsActive(true)}
+            >
+                <div className="relative z-10 w-16 h-16 rounded-full bg-neutral-800 border border-white/10 flex items-center justify-center transition-all duration-300 group-hover:bg-neutral-700 group-hover:scale-105">
+                    <IconCamera size={28} className="text-white/90" />
+                </div>
+            </div>
 
-                    </motion.div>
-                ) : error ? (
-                    <motion.div
-                        key="error"
-                        initial={{ opacity: 0 }}
-                        animate={{ opacity: 1 }}
-                        exit={{ opacity: 0 }}
-                        className="flex flex-col items-center justify-center h-full text-white/50 gap-3 p-4 text-center z-10"
-                    >
+            <WidgetDialog
+                open={isActive}
+                onOpenChange={setIsActive}
+                title="Mirror"
+                variant="fullscreen"
+            >
+                {error ? (
+                    <div className="flex flex-col items-center justify-center h-full text-white/50 gap-3 p-4 text-center z-10">
                         <div className="w-12 h-12 rounded-full bg-red-500/10 flex items-center justify-center">
                             <IconCameraOff size={24} className="text-red-400" />
                         </div>
                         <span className="text-sm font-medium text-red-200/80">{error}</span>
-                        <button
-                            className="mt-2 px-4 py-1.5 bg-neutral-800 rounded-full text-xs font-medium hover:bg-neutral-700 transition-all active:scale-95 border border-white/5"
-                            onClick={() => setIsActive(false)}
-                        >
-                            Close
-                        </button>
-                    </motion.div>
+                    </div>
                 ) : (
-                    <motion.div
-                        key="active"
-                        className="relative w-full h-full group"
-                        initial={{ opacity: 0 }}
-                        animate={{ opacity: 1 }}
-                        exit={{ opacity: 0 }}
-                    >
+                    <div className="relative w-full h-full group bg-black">
                         <video
                             ref={setVideoRef}
                             autoPlay
                             playsInline
-                            className="w-full h-full object-cover transform scale-x-[-1] rounded-[22px]"
+                            className="w-full h-full object-cover transform scale-x-[-1]"
                         />
 
                         {isLoading && (
@@ -126,22 +107,9 @@ export function MirrorWidget() {
                                 <div className="w-8 h-8 border-2 border-white/20 border-t-white rounded-full animate-spin" />
                             </div>
                         )}
-
-                        <motion.button
-                            initial={{ opacity: 0, y: -10 }}
-                            animate={{ opacity: 1, y: 0 }}
-                            className="absolute top-4 right-4 p-2.5 bg-neutral-800 text-white/90 rounded-full border border-white/10 hover:bg-neutral-700 hover:text-white hover:scale-105 active:scale-95 transition-all shadow-lg z-20"
-                            onClick={(e) => {
-                                e.stopPropagation();
-                                setIsActive(false);
-                            }}
-                            title="Stop Camera"
-                        >
-                            <IconCameraOff size={18} />
-                        </motion.button>
-                    </motion.div>
+                    </div>
                 )}
-            </AnimatePresence>
+            </WidgetDialog>
         </WidgetWrapper>
     );
 }

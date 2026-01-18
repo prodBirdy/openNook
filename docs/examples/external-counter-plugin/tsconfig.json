@@ -1,0 +1,14 @@
+{
+  "compilerOptions": {
+    "target": "es2020",
+    "lib": ["dom", "es2020"],
+    "module": "esnext",
+    "jsx": "react",
+    "jsxFactory": "React.createElement",
+    "jsxFragmentFactory": "React.Fragment",
+    "strict": true,
+    "moduleResolution": "node",
+    "types": ["react"]
+  },
+  "include": ["src/**/*"]
+}

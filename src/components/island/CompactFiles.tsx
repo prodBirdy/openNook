@@ -16,16 +16,15 @@ export function CompactFiles({
     return (
         <CompactWrapper
             id="files-content"
-            className="island-content files-content"
             baseNotchWidth={baseNotchWidth}
             isHovered={isHovered}
             left={
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <div className="flex items-center gap-2">
                     <IconPhoto size={20} color="white" stroke={1.5} />
                 </div>
             }
             right={
-                <div style={{ display: 'flex', alignItems: 'center', color: 'white' }}>
+                <div className="flex items-center text-white">
                     {files.length}
                 </div>
             }

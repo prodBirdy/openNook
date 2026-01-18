@@ -13,8 +13,10 @@ const {
     registerWidget,
     React,
     WidgetWrapper,
-    IconBox
+    icons
 } = api;
+
+const { IconBox } = icons;
 
 const { useState, useEffect } = React;
 
@@ -36,8 +38,8 @@ function ExternalCounterWidget() {
     }, [count]);
 
     return (
-        <WidgetWrapper title="Counter" icon={IconBox}>
-            <div className="flex flex-col items-center justify-center gap-4 py-4">
+        <WidgetWrapper title="Counter">
+            <div className="flex h-full flex-col items-center justify-center gap-4 py-4">
                 {/* Counter display */}
                 <div className="text-5xl font-bold text-white tabular-nums">
                     {count}
