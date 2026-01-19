@@ -56,6 +56,16 @@ To run this project locally:
     bun run tauri dev
     ```
 
+## Releases
+
+Releases are automatically built and published via GitHub Actions when code is pushed to the `main` branch or when a version tag is created. The CI/CD workflow builds cross-platform binaries for:
+
+- macOS (Apple Silicon and Intel)
+- Windows
+- Linux (Ubuntu)
+
+Draft releases are created automatically with all platform binaries attached. You can find releases on the [releases page](https://github.com/prodBirdy/openNook/releases).
+
 ## Contributing
 
 This project is open source and we welcome contributions! Whether it's fixing bugs, improving the UI, or suggesting new features for the upcoming Plugin API, your help is appreciated.

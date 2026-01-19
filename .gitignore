@@ -23,3 +23,6 @@ cert*
 *.njsproj
 *.sln
 *.sw?
+
+# Tools and binaries
+actionlint
