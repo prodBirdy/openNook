@@ -1,14 +1,19 @@
-# Repository Metadata
+# Repository Metadata Configuration
 
-This document contains the recommended description and topics for the openNook GitHub repository.
+> **Action Required**: This document contains the metadata that needs to be applied to the GitHub repository. Please follow the instructions below to update the repository description and topics.
 
-## Repository Description
+## Current Status
+
+- **Description**: ❌ Not set (currently `null`)
+- **Topics**: ❌ Not set
+
+## Required Repository Description
 
 ```
 An open-source dynamic island client for desktop. Built with Tauri, React, and TypeScript, bringing the utility and aesthetic of the dynamic island to macOS and Windows.
 ```
 
-## Repository Topics
+## Required Repository Topics
 
 The following topics should be added to improve discoverability:
 
@@ -24,11 +29,22 @@ The following topics should be added to improve discoverability:
 - `rust`
 - `motion`
 
-## How to Update
+## How to Apply These Changes
 
-Repository description and topics can be updated through:
+### Option 1: Using the Provided Script (Recommended)
 
-1. **GitHub Web Interface:**
+Run the automated script:
+```bash
+.github/apply-metadata.sh
+```
+
+This script will update both the description and topics automatically using GitHub CLI.
+
+### Option 2: Manual Methods
+
+Repository description and topics can also be updated manually through:
+
+1. **GitHub Web Interface (No CLI required):**
    - Go to the repository settings
    - Update the "Description" field at the top
    - Add topics in the "Topics" section
