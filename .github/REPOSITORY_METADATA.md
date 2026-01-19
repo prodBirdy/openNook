@@ -54,8 +54,19 @@ Repository description and topics can also be updated manually through:
    # Update description
    gh repo edit prodBirdy/openNook --description "An open-source dynamic island client for desktop. Built with Tauri, React, and TypeScript, bringing the utility and aesthetic of the dynamic island to macOS and Windows."
    
-   # Add topics
-   gh repo edit prodBirdy/openNook --add-topic tauri,react,desktop-app,typescript,dynamic-island,macos,windows,cross-platform,plugin-system,rust,motion
+   # Add topics (each topic added individually)
+   gh repo edit prodBirdy/openNook \
+     --add-topic tauri \
+     --add-topic react \
+     --add-topic desktop-app \
+     --add-topic typescript \
+     --add-topic dynamic-island \
+     --add-topic macos \
+     --add-topic windows \
+     --add-topic cross-platform \
+     --add-topic plugin-system \
+     --add-topic rust \
+     --add-topic motion
    ```
 
 3. **GitHub API:**

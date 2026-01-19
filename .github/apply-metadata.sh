@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Script to apply repository metadata (description and topics)
 # Requires: GitHub CLI (gh) to be installed and authenticated
 
@@ -6,7 +6,8 @@ set -e
 
 REPO="prodBirdy/openNook"
 DESCRIPTION="An open-source dynamic island client for desktop. Built with Tauri, React, and TypeScript, bringing the utility and aesthetic of the dynamic island to macOS and Windows."
-TOPICS="tauri,react,desktop-app,typescript,dynamic-island,macos,windows,cross-platform,plugin-system,rust,motion"
+# Topics as an array for proper handling
+TOPICS=(tauri react desktop-app typescript dynamic-island macos windows cross-platform plugin-system rust motion)
 
 echo "📝 Updating repository metadata for $REPO"
 echo ""
@@ -41,7 +42,13 @@ echo ""
 
 # Add topics
 echo "Adding repository topics..."
-if gh repo edit "$REPO" --add-topic "$TOPICS"; then
+# Build the topic arguments
+TOPIC_ARGS=()
+for topic in "${TOPICS[@]}"; do
+    TOPIC_ARGS+=(--add-topic "$topic")
+done
+
+if gh repo edit "$REPO" "${TOPIC_ARGS[@]}"; then
     echo "✅ Topics added successfully"
 else
     echo "❌ Failed to add topics"
