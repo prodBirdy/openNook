@@ -423,19 +423,17 @@ pub fn update_window_settings(
 }
 
 /// Set up the window with a fixed size based on notch dimensions and settings.
-/// The window always uses: width = (notch_width + 160) + extra_width, height = notch_height + extra_height
+/// The window always uses: width = screen_width (full width), height = screen_height (full height)
+/// Note: The notch size remains unchanged - this is only for the window canvas size
 pub fn setup_fixed_window_size(window: &WebviewWindow) -> Result<(), String> {
-    let (screen_width, _screen_height, notch_height, _notch_width) =
+    let (screen_width, screen_height, _notch_height, _notch_width) =
         get_screen_info(Some(window.app_handle()));
-    let settings = get_window_settings();
+    let _settings = get_window_settings();
 
     // Calculate fixed window dimensions
-    // In non-notch mode, we might want a smaller fixed window if possible, but keeping it consistent is safer for now
-    // unless the "too big" comment refers to the window size itself blocking things?
-    // If the window is transparent and click-through, size shouldn't matter much visually, but might block clicks if implementation is wrong.
-    // We want the window to be full width
+    // Use full screen width and height for the canvas, but notch size remains unchanged
     let target_width = screen_width;
-    let target_height = notch_height + settings.extra_height;
+    let target_height = screen_height;
 
     // Resize the window
     window
