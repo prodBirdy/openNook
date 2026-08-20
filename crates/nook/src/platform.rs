@@ -25,6 +25,11 @@ use std::sync::Once;
 static INSTALL: Once = Once::new();
 #[cfg(target_os = "macos")]
 static LOGGED_PIN: AtomicBool = AtomicBool::new(false);
+#[cfg(target_os = "macos")]
+static OPEN_SETTINGS: AtomicBool = AtomicBool::new(false);
+#[cfg(target_os = "macos")]
+static STATUS_ITEM: std::sync::atomic::AtomicPtr<objc2::runtime::AnyObject> =
+    std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
 
 /// Call once before `open_island`. Safe to call again.
 pub fn install() {
@@ -56,20 +61,19 @@ fn install_macos() {
             frame
         }
 
-        let types = CString::new(
-            "{CGRect={CGPoint=dd}{CGSize=dd}}@:{CGRect={CGPoint=dd}{CGSize=dd}}@",
-        )
-        .unwrap();
+        let types =
+            CString::new("{CGRect={CGPoint=dd}{CGSize=dd}}@:{CGRect={CGPoint=dd}{CGSize=dd}}@")
+                .unwrap();
         let sel = sel!(constrainFrameRect:toScreen:);
         let imp: Imp = std::mem::transmute(
-            constrain_frame
-                as extern "C" fn(*mut AnyObject, Sel, CGRect, *mut AnyObject) -> CGRect,
+            constrain_frame as extern "C" fn(*mut AnyObject, Sel, CGRect, *mut AnyObject) -> CGRect,
         );
         let cls_ptr = gpui_panel as *const AnyClass as *mut AnyClass;
         if !class_addMethod(cls_ptr, sel, imp, types.as_ptr()).as_bool() {
             class_replaceMethod(cls_ptr, sel, imp, types.as_ptr());
         }
         log::info!("notch constrainFrameRect installed on GPUIPanel");
+        install_app_target();
     });
 }
 
@@ -93,6 +97,7 @@ pub fn apply_island_chrome() {}
 
 /// Kept for the settings window path that still has a GPUI `Window`.
 #[cfg(target_os = "macos")]
+#[allow(dead_code)]
 pub fn apply_island_chrome_on(window: &Window) {
     install_macos();
     unsafe {
@@ -134,7 +139,8 @@ unsafe fn style_island_window(ns_win: *mut objc2::runtime::AnyObject) {
     let _: () = msg_send![ns_win, setStyleMask: mask];
     let _: () = msg_send![ns_win, setLevel: 25_i64];
     // CanJoinAllSpaces | Stationary | FullScreenAuxiliary | IgnoresCycle
-    let _: () = msg_send![ns_win, setCollectionBehavior: (1u64 | (1u64 << 4) | (1u64 << 8) | (1u64 << 6))];
+    let _: () =
+        msg_send![ns_win, setCollectionBehavior: (1u64 | (1u64 << 4) | (1u64 << 8) | (1u64 << 6))];
     let _: () = msg_send![ns_win, setHasShadow: false];
     let _: () = msg_send![ns_win, setOpaque: false];
     let _: () = msg_send![ns_win, setMovable: false];
@@ -340,6 +346,7 @@ pub fn set_click_through_current(ignore: bool) {
     let _ = ignore;
 }
 
+#[allow(dead_code)]
 pub fn set_click_through(window: &Window, ignore: bool) {
     #[cfg(target_os = "macos")]
     unsafe {
@@ -379,6 +386,7 @@ pub fn set_accessory(accessory: bool) {
 }
 
 #[cfg(target_os = "macos")]
+#[allow(dead_code)]
 fn ns_window(window: &Window) -> Option<*mut objc2::runtime::AnyObject> {
     use objc2::runtime::AnyObject;
     use objc2::*;
@@ -395,4 +403,226 @@ fn ns_window(window: &Window) -> Option<*mut objc2::runtime::AnyObject> {
         },
         _ => None,
     }
+}
+
+/// True once if the status item asked to open Settings.
+pub fn take_open_settings() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        return OPEN_SETTINGS.swap(false, Ordering::SeqCst);
+    }
+    #[cfg(not(target_os = "macos"))]
+    false
+}
+
+/// Menu-bar extra with Settings and Quit. Accessory apps have no Dock/menu otherwise.
+pub fn install_status_item() {
+    #[cfg(target_os = "macos")]
+    unsafe {
+        install_macos();
+        use objc2::runtime::AnyObject;
+        use objc2::*;
+
+        if !STATUS_ITEM.load(Ordering::Relaxed).is_null() {
+            return;
+        }
+
+        let bar: *mut AnyObject = msg_send![class!(NSStatusBar), systemStatusBar];
+        // NSVariableStatusItemLength = -1
+        let item: *mut AnyObject = msg_send![bar, statusItemWithLength: -1.0_f64];
+        if item.is_null() {
+            log::error!("failed to create NSStatusItem");
+            return;
+        }
+        let _: *mut AnyObject = msg_send![item, retain];
+        STATUS_ITEM.store(item, Ordering::Relaxed);
+
+        let title: *mut AnyObject =
+            msg_send![class!(NSString), stringWithUTF8String: c"Nook".as_ptr()];
+        let button: *mut AnyObject = msg_send![item, button];
+        if !button.is_null() {
+            let _: () = msg_send![button, setTitle: title];
+        } else {
+            let _: () = msg_send![item, setTitle: title];
+        }
+
+        let menu: *mut AnyObject = msg_send![class!(NSMenu), new];
+        let settings_title: *mut AnyObject =
+            msg_send![class!(NSString), stringWithUTF8String: c"Settings".as_ptr()];
+        let settings_item: *mut AnyObject = msg_send![class!(NSMenuItem), alloc];
+        let empty: *mut AnyObject = msg_send![class!(NSString), stringWithUTF8String: c"".as_ptr()];
+        let settings_item: *mut AnyObject = msg_send![
+            settings_item,
+            initWithTitle: settings_title,
+            action: sel!(openSettings:),
+            keyEquivalent: empty
+        ];
+        let target_cls = objc2::runtime::AnyClass::get(c"NookAppTarget");
+        let target: *mut AnyObject = if let Some(cls) = target_cls {
+            msg_send![cls, new]
+        } else {
+            std::ptr::null_mut()
+        };
+        if !target.is_null() {
+            let _: () = msg_send![settings_item, setTarget: target];
+        }
+        let _: () = msg_send![menu, addItem: settings_item];
+
+        let sep: *mut AnyObject = msg_send![class!(NSMenuItem), separatorItem];
+        let _: () = msg_send![menu, addItem: sep];
+
+        let quit_title: *mut AnyObject =
+            msg_send![class!(NSString), stringWithUTF8String: c"Quit openNook".as_ptr()];
+        let quit_item: *mut AnyObject = msg_send![class!(NSMenuItem), alloc];
+        let q: *mut AnyObject = msg_send![class!(NSString), stringWithUTF8String: c"q".as_ptr()];
+        let quit_item: *mut AnyObject = msg_send![
+            quit_item,
+            initWithTitle: quit_title,
+            action: sel!(terminate:),
+            keyEquivalent: q
+        ];
+        let ns_app: *mut AnyObject = msg_send![class!(NSApplication), sharedApplication];
+        let _: () = msg_send![quit_item, setTarget: ns_app];
+        let _: () = msg_send![menu, addItem: quit_item];
+
+        let _: () = msg_send![item, setMenu: menu];
+        log::info!("status item installed");
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn install_app_target() {
+    use objc2::ffi::{class_addMethod, objc_allocateClassPair, objc_registerClassPair};
+    use objc2::runtime::{AnyClass, AnyObject, Imp, Sel};
+    use objc2::{class, sel};
+    use std::ffi::CString;
+
+    unsafe {
+        if AnyClass::get(c"NookAppTarget").is_some() {
+            observe_screen_changes();
+            return;
+        }
+
+        extern "C" fn open_settings(_this: *mut AnyObject, _cmd: Sel, _sender: *mut AnyObject) {
+            OPEN_SETTINGS.store(true, Ordering::SeqCst);
+        }
+        extern "C" fn screen_changed(_this: *mut AnyObject, _cmd: Sel, _note: *mut AnyObject) {
+            nook_core::notch::invalidate_screen_cache();
+            pin_island_windows();
+        }
+
+        let super_cls = class!(NSObject) as *const AnyClass as *mut AnyClass;
+        let cls = objc_allocateClassPair(super_cls, c"NookAppTarget".as_ptr(), 0);
+        if cls.is_null() {
+            log::error!("could not allocate NookAppTarget");
+            return;
+        }
+        let types = CString::new("v@:@").unwrap();
+        let imp_settings: Imp = std::mem::transmute(
+            open_settings as extern "C" fn(*mut AnyObject, Sel, *mut AnyObject),
+        );
+        let imp_screen: Imp = std::mem::transmute(
+            screen_changed as extern "C" fn(*mut AnyObject, Sel, *mut AnyObject),
+        );
+        let _ = class_addMethod(cls, sel!(openSettings:), imp_settings, types.as_ptr());
+        let _ = class_addMethod(cls, sel!(screenChanged:), imp_screen, types.as_ptr());
+        objc_registerClassPair(cls);
+        observe_screen_changes();
+    }
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn observe_screen_changes() {
+    use objc2::runtime::AnyObject;
+    use objc2::*;
+
+    let Some(cls) = objc2::runtime::AnyClass::get(c"NookAppTarget") else {
+        return;
+    };
+    let target: *mut AnyObject = msg_send![cls, new];
+    if target.is_null() {
+        return;
+    }
+    let center: *mut AnyObject = msg_send![class!(NSNotificationCenter), defaultCenter];
+    let name: *mut AnyObject = msg_send![
+        class!(NSString),
+        stringWithUTF8String: c"NSApplicationDidChangeScreenParametersNotification".as_ptr()
+    ];
+    let _: () = msg_send![
+        center,
+        addObserver: target,
+        selector: sel!(screenChanged:),
+        name: name,
+        object: std::ptr::null_mut::<AnyObject>()
+    ];
+}
+
+/// System Settings → Appearance → *Accent color* (`NSColor.controlAccentColor`),
+/// as sRGB components in 0..=1. `None` when there is no AppKit to ask or the
+/// color cannot be converted to an RGB space — callers fall back to systemBlue.
+///
+/// Read live rather than cached so switching the accent in System Settings
+/// shows up on the next frame. Must be called on the main thread.
+pub fn accent_color() -> Option<(f32, f32, f32)> {
+    #[cfg(target_os = "macos")]
+    {
+        accent_color_macos()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        None
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn accent_color_macos() -> Option<(f32, f32, f32)> {
+    use objc2::rc::autoreleasepool;
+    use objc2::runtime::AnyObject;
+    use objc2::*;
+
+    // `colorUsingColorSpace:` returns an autoreleased color; without a pool it
+    // would pile up for as long as the frame's pool lives.
+    autoreleasepool(|_| unsafe {
+        let color: *mut AnyObject = msg_send![class!(NSColor), controlAccentColor];
+        if color.is_null() {
+            return None;
+        }
+        let space: *mut AnyObject = msg_send![class!(NSColorSpace), sRGBColorSpace];
+        if space.is_null() {
+            return None;
+        }
+        // `getRed:…` throws on a catalog/pattern color, so convert first and
+        // bail if AppKit says the conversion is impossible.
+        let srgb: *mut AnyObject = msg_send![color, colorUsingColorSpace: space];
+        if srgb.is_null() {
+            return None;
+        }
+        let (mut r, mut g, mut b, mut a) = (0f64, 0f64, 0f64, 0f64);
+        let _: () = msg_send![
+            srgb,
+            getRed: &mut r as *mut f64,
+            green: &mut g as *mut f64,
+            blue: &mut b as *mut f64,
+            alpha: &mut a as *mut f64
+        ];
+        Some((r as f32, g as f32, b as f32))
+    })
+}
+
+/// Accessibility › Display › "Reduce transparency". HIG › Materials requires
+/// materials to respond to it, so the island drops its translucency when it is
+/// on. `false` when there is no AppKit to ask.
+pub fn reduce_transparency() -> bool {
+    #[cfg(target_os = "macos")]
+    unsafe {
+        use objc2::runtime::AnyObject;
+        use objc2::*;
+        let workspace: *mut AnyObject = msg_send![class!(NSWorkspace), sharedWorkspace];
+        if workspace.is_null() {
+            return false;
+        }
+        msg_send![workspace, accessibilityDisplayShouldReduceTransparency]
+    }
+    #[cfg(not(target_os = "macos"))]
+    false
 }

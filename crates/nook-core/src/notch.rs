@@ -1,5 +1,7 @@
 use crate::models::NotchInfo;
 use crate::settings::get_window_settings;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{OnceLock, RwLock};
 
 #[cfg(target_os = "macos")]
 use objc2::{Encode, Encoding};
@@ -65,8 +67,36 @@ fn calculate_dynamic_notch_width(screen_width: f64) -> f64 {
     (screen_width * 0.1).clamp(200.0, 260.0)
 }
 
+static SCREEN: OnceLock<RwLock<(f64, f64, f64, f64)>> = OnceLock::new();
+static SCREEN_GEN: AtomicU64 = AtomicU64::new(1);
+
+fn screen_store() -> &'static RwLock<(f64, f64, f64, f64)> {
+    SCREEN.get_or_init(|| RwLock::new(read_screen_info()))
+}
+
 /// Screen + notch metrics. Heights are in logical points.
+/// Cached until [`invalidate_screen_cache`].
 pub fn get_screen_info() -> (f64, f64, f64, f64) {
+    if let Ok(guard) = screen_store().read() {
+        return *guard;
+    }
+    read_screen_info()
+}
+
+/// Re-read NSScreen / Win32 metrics. Call on display reconfiguration.
+pub fn invalidate_screen_cache() {
+    let fresh = read_screen_info();
+    if let Ok(mut guard) = screen_store().write() {
+        *guard = fresh;
+    }
+    SCREEN_GEN.fetch_add(1, Ordering::Relaxed);
+}
+
+pub fn screen_generation() -> u64 {
+    SCREEN_GEN.load(Ordering::Relaxed)
+}
+
+fn read_screen_info() -> (f64, f64, f64, f64) {
     #[cfg(target_os = "macos")]
     {
         use objc2::runtime::AnyObject;

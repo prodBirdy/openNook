@@ -4,3 +4,4 @@
 .idea
 .vscode
 *.pdb
+/third_party/mediaremote-adapter

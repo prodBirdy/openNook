@@ -41,6 +41,21 @@ pub fn trigger(config: Option<HapticConfig>) {
     let _ = config;
 
     #[cfg(target_os = "macos")]
+    {
+        // Multi-tap patterns sleep between strikes; never do that on the UI thread.
+        match config.pattern {
+            HapticPattern::Success | HapticPattern::Error => {
+                let _ = std::thread::Builder::new()
+                    .name("nook-haptic".into())
+                    .spawn(move || fire(config));
+            }
+            _ => fire(config),
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn fire(config: HapticConfig) {
     unsafe {
         use objc2::runtime::AnyObject;
         use objc2::*;

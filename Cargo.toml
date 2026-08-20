@@ -11,7 +11,7 @@ repository = "https://github.com/prodBirdy/openNook-gpui"
 
 [workspace.dependencies]
 nook-core = { path = "crates/nook-core" }
-gpui = "0.2.2"
+gpui = "=0.2.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }

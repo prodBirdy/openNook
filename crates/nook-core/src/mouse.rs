@@ -4,9 +4,9 @@
 //! This module only reports enter/exit against the island's UI bounds.
 
 use crate::notch::get_screen_info;
-use crate::settings::get_window_settings;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{mpsc, RwLock};
+use crate::settings::get_app_settings;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::RwLock;
 
 #[derive(Debug, Clone, Copy)]
 pub struct UiBounds {
@@ -16,14 +16,11 @@ pub struct UiBounds {
     pub height: f64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MouseEvent {
-    Entered,
-    Exited,
-}
-
 static UI_BOUNDS: std::sync::OnceLock<RwLock<Option<UiBounds>>> = std::sync::OnceLock::new();
-static IS_INSIDE: AtomicBool = AtomicBool::new(false);
+static MOUSE_X: AtomicU64 = AtomicU64::new(0);
+static MOUSE_Y: AtomicU64 = AtomicU64::new(0);
+static DRAG_ACTIVE: AtomicBool = AtomicBool::new(false);
+static POLL_STARTED: AtomicBool = AtomicBool::new(false);
 
 fn bounds_store() -> &'static RwLock<Option<UiBounds>> {
     UI_BOUNDS.get_or_init(|| RwLock::new(None))
@@ -40,11 +37,146 @@ pub fn update_ui_bounds(x: f64, y: f64, width: f64, height: f64) {
     }
 }
 
-pub fn is_inside() -> bool {
-    IS_INSIDE.load(Ordering::Relaxed)
+pub fn current_mouse_logical() -> (f64, f64) {
+    (
+        f64::from_bits(MOUSE_X.load(Ordering::Relaxed)),
+        f64::from_bits(MOUSE_Y.load(Ordering::Relaxed)),
+    )
 }
 
-pub fn current_mouse_logical() -> (f64, f64) {
+pub fn drag_active() -> bool {
+    DRAG_ACTIVE.load(Ordering::Relaxed)
+}
+
+/// Hit-test the cursor against the island — the painted box and nothing else.
+pub fn hit_test(mouse_x: f64, mouse_y: f64) -> bool {
+    contains(hit_region(hover_padding()), mouse_x, mouse_y)
+}
+
+/// Margin around the painted island that still counts as a hover.
+///
+/// Zero in normal use: the compact island is only ~32px tall and sits under the
+/// menu bar, so any margin at all arms it from outside its own box. Hysteresis
+/// is not needed either, since hovering *grows* the island — the cursor is well
+/// inside the new bounds before the old ones stop applying.
+///
+/// A Finder drag is the exception. NSWindow only receives `draggingEntered` if
+/// click-through has already lifted by the time the drag cursor arrives, so the
+/// region has to reach out and meet it.
+pub fn hover_padding() -> f64 {
+    if drag_active() || crate::files::file_drag_active() {
+        80.0
+    } else {
+        0.0
+    }
+}
+
+/// Strict test against the painted island — no hover tolerance, no drag
+/// widening. The overlay NSWindow spans the full screen width and is far taller
+/// than the island, so this is what decides whether a click belongs to us or
+/// falls through to whatever is underneath.
+pub fn hit_test_exact(mouse_x: f64, mouse_y: f64) -> bool {
+    contains(hit_region(0.0), mouse_x, mouse_y)
+}
+
+/// What [`hit_test`] accepts, as a rect. For the debug overlay, so what gets
+/// drawn cannot drift from what gets tested.
+pub fn hover_bounds() -> UiBounds {
+    rect(hit_region(hover_padding()))
+}
+
+/// What [`hit_test_exact`] accepts, as a rect.
+pub fn exact_bounds() -> UiBounds {
+    rect(hit_region(0.0))
+}
+
+fn rect((x0, x1, y0, y1): (f64, f64, f64, f64)) -> UiBounds {
+    UiBounds {
+        x: x0,
+        y: y0,
+        width: x1 - x0,
+        height: y1 - y0,
+    }
+}
+
+/// Without a notch the idle island collapses to a 1px line, which no cursor can
+/// land on. The bottom edge alone is floored to this so the sliver stays
+/// grabbable by shoving the pointer at the top of the screen; the sides stay
+/// flush with the paint.
+const MIN_GRAB_HEIGHT: f64 = 8.0;
+
+/// The island rect in screen-logical, y-down coordinates, grown by `padding` on
+/// every side. Falls back to the physical notch until the first paint reports
+/// real bounds.
+fn hit_region(padding: f64) -> (f64, f64, f64, f64) {
+    if let Ok(guard) = bounds_store().try_read() {
+        if let Some(bounds) = *guard {
+            return (
+                bounds.x - padding,
+                bounds.x + bounds.width + padding,
+                bounds.y - padding,
+                (bounds.y + bounds.height).max(MIN_GRAB_HEIGHT) + padding,
+            );
+        }
+    }
+
+    let (screen_width, _, notch_height, notch_width) = get_screen_info();
+    let settings = get_app_settings();
+    let effective_notch_width = if settings.non_notch_mode {
+        0.0
+    } else {
+        notch_width
+    };
+    let x_start = (screen_width - effective_notch_width) / 2.0;
+    let y_end = if settings.non_notch_mode {
+        1.0
+    } else {
+        notch_height.max(38.0)
+    };
+
+    (
+        x_start - padding,
+        x_start + effective_notch_width + padding,
+        -padding,
+        y_end + padding,
+    )
+}
+
+fn contains((x0, x1, y0, y1): (f64, f64, f64, f64), x: f64, y: f64) -> bool {
+    x >= x0 && x <= x1 && y >= y0 && y <= y1
+}
+
+/// Sample the cursor off the UI thread. Safe to call more than once.
+pub fn start_polling() {
+    if POLL_STARTED.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    sample_now();
+    let _ = std::thread::Builder::new()
+        .name("nook-mouse".into())
+        .spawn(|| loop {
+            sample_now();
+            let inside = {
+                let (mx, my) = current_mouse_logical();
+                hit_test(mx, my)
+            };
+            let ms = if inside || DRAG_ACTIVE.load(Ordering::Relaxed) {
+                20
+            } else {
+                33
+            };
+            std::thread::sleep(std::time::Duration::from_millis(ms));
+        });
+}
+
+fn sample_now() {
+    let (x, y) = read_mouse_logical();
+    MOUSE_X.store(x.to_bits(), Ordering::Relaxed);
+    MOUSE_Y.store(y.to_bits(), Ordering::Relaxed);
+    DRAG_ACTIVE.store(crate::files::file_drag_active(), Ordering::Relaxed);
+}
+
+fn read_mouse_logical() -> (f64, f64) {
     #[cfg(target_os = "macos")]
     {
         use crate::notch::CGPoint;
@@ -71,69 +203,65 @@ pub fn current_mouse_logical() -> (f64, f64) {
     }
 }
 
-pub fn hit_test(mouse_x: f64, mouse_y: f64) -> bool {
-    let (screen_width, _, notch_height, notch_width) = get_screen_info();
-    let settings = get_window_settings();
-    let was_inside = IS_INSIDE.load(Ordering::Relaxed);
-    let mut padding: f64 = if was_inside { 30.0 } else { 20.0 };
-    // Widen the hover so click-through lifts *before* Finder's drag cursor
-    // reaches the island; otherwise NSWindow never sees draggingEntered.
-    if crate::files::file_drag_active() {
-        padding = padding.max(80.0);
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Mutex, MutexGuard};
+
+    /// `UI_BOUNDS` is process-global, so tests that publish bounds must not run
+    /// concurrently or they read each other's island.
+    static BOUNDS: Mutex<()> = Mutex::new(());
+
+    fn lock() -> MutexGuard<'static, ()> {
+        BOUNDS.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    if let Ok(guard) = bounds_store().try_read() {
-        if let Some(bounds) = *guard {
-            let screen_x = (screen_width - bounds.width) / 2.0;
-            return mouse_x >= (screen_x - padding)
-                && mouse_x <= (screen_x + bounds.width + padding)
-                && mouse_y >= (bounds.y - padding)
-                && mouse_y <= (bounds.y + bounds.height + padding);
+    #[test]
+    fn hover_region_is_the_painted_box() {
+        let _guard = lock();
+        update_ui_bounds(100.0, 0.0, 200.0, 34.0);
+        assert_eq!(hover_padding(), 0.0);
+        assert!(hit_test(150.0, 10.0));
+        // A pixel out on any side is out — no entry pad, no hysteresis.
+        assert!(!hit_test(99.0, 10.0));
+        assert!(!hit_test(301.0, 10.0));
+        assert!(!hit_test(150.0, 35.0));
+
+        let bounds = hover_bounds();
+        assert_eq!((bounds.x, bounds.width), (100.0, 200.0));
+        assert_eq!((bounds.y, bounds.height), (0.0, 34.0));
+    }
+
+    #[test]
+    fn hover_and_click_regions_agree() {
+        let _guard = lock();
+        update_ui_bounds(100.0, 0.0, 200.0, 34.0);
+        // Hover used to reach further than clicks did; nothing arms from
+        // outside the paint any more.
+        for (x, y) in [(150.0, 10.0), (150.0, 39.0), (95.0, 10.0), (250.0, 33.0)] {
+            assert_eq!(hit_test(x, y), hit_test_exact(x, y), "at ({x}, {y})");
         }
+        assert!(hit_test_exact(150.0, 10.0));
+        assert!(!hit_test_exact(150.0, 39.0));
+        assert!(!hit_test_exact(95.0, 10.0));
     }
 
-    let effective_notch_width = if settings.non_notch_mode {
-        0.0
-    } else {
-        notch_width
-    };
-    let fallback_x_start = (screen_width - effective_notch_width) / 2.0;
-    let fallback_x_end = fallback_x_start + effective_notch_width;
-    let fallback_y_end = if settings.non_notch_mode {
-        1.0
-    } else {
-        notch_height.max(38.0)
-    };
+    #[test]
+    fn sliver_island_keeps_a_grabbable_strip() {
+        let _guard = lock();
+        // What non-notch mode paints when idle: a 1px line.
+        update_ui_bounds(100.0, 0.0, 200.0, 1.0);
+        assert!(hit_test(150.0, 6.0));
+        assert!(!hit_test(150.0, 12.0));
+        // The floor is on the bottom edge only; the sides stay flush.
+        assert!(!hit_test(99.0, 6.0));
+    }
 
-    mouse_x >= (fallback_x_start - padding)
-        && mouse_x <= (fallback_x_end + padding)
-        && mouse_y >= -padding
-        && mouse_y <= (fallback_y_end + padding)
-}
-
-/// Spawn a 50 Hz poller. Dropping the receiver stops the UI from seeing events;
-/// the thread keeps running for process lifetime (cheap).
-pub fn spawn_monitor() -> mpsc::Receiver<MouseEvent> {
-    let (tx, rx) = mpsc::channel();
-    std::thread::Builder::new()
-        .name("nook-mouse".into())
-        .spawn(move || loop {
-            let (mx, my) = current_mouse_logical();
-            let inside = hit_test(mx, my);
-            let was = IS_INSIDE.load(Ordering::Relaxed);
-            if inside && !was {
-                IS_INSIDE.store(true, Ordering::Relaxed);
-                if tx.send(MouseEvent::Entered).is_err() {
-                    break;
-                }
-            } else if !inside && was {
-                IS_INSIDE.store(false, Ordering::Relaxed);
-                if tx.send(MouseEvent::Exited).is_err() {
-                    break;
-                }
-            }
-            std::thread::sleep(std::time::Duration::from_millis(20));
-        })
-        .expect("mouse thread");
-    rx
+    #[test]
+    fn uses_bounds_origin_not_recomputed_center() {
+        let _guard = lock();
+        update_ui_bounds(10.0, 0.0, 100.0, 34.0);
+        assert!(hit_test(20.0, 10.0));
+        assert!(!hit_test(200.0, 10.0));
+    }
 }

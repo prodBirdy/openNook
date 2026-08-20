@@ -28,16 +28,20 @@ pub fn init_audio_state() {
     let _ = LAST_PLAYED.set(std::sync::Mutex::new(None));
 }
 
+fn lock_mutex<T>(m: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 fn get_audio_levels_internal() -> Vec<f64> {
     AUDIO_LEVELS
         .get()
-        .map(|m| m.lock().unwrap().clone())
+        .map(|m| lock_mutex(m).clone())
         .unwrap_or_else(|| vec![0.15; 6])
 }
 
 fn set_audio_levels(levels: Vec<f64>) {
     if let Some(m) = AUDIO_LEVELS.get() {
-        *m.lock().unwrap() = levels;
+        *lock_mutex(m) = levels;
     }
 }
 
@@ -50,14 +54,14 @@ pub fn get_audio_levels() -> Vec<f64> {
 fn get_cached_track() -> (Option<String>, Option<String>, Option<String>) {
     TRACK_CACHE
         .get()
-        .map(|m| m.lock().unwrap().clone())
+        .map(|m| lock_mutex(m).clone())
         .unwrap_or((None, None, None))
 }
 
 #[cfg(target_os = "macos")]
 fn set_cached_track(title: Option<String>, artist: Option<String>, artwork: Option<String>) {
     if let Some(m) = TRACK_CACHE.get() {
-        *m.lock().unwrap() = (title, artist, artwork);
+        *lock_mutex(m) = (title, artist, artwork);
     }
 }
 
@@ -69,7 +73,7 @@ fn is_track_changed(title: &Option<String>, artist: &Option<String>) -> bool {
 
 fn save_last_played(data: &NowPlayingData) {
     if let Some(m) = LAST_PLAYED.get() {
-        *m.lock().unwrap() = Some(data.clone());
+        *lock_mutex(m) = Some(data.clone());
     }
 }
 
@@ -88,6 +92,41 @@ fn get_last_played_or_default(levels: Vec<f64>) -> NowPlayingData {
         audio_levels: Some(levels),
         ..Default::default()
     }
+}
+
+#[cfg(target_os = "macos")]
+fn now_playing_from_adapter(track: crate::mediaremote::AdapterTrack) -> NowPlayingData {
+    IS_PLAYING.store(track.is_playing, Ordering::Relaxed);
+    let just_started = track.is_playing && !WAS_PLAYING.swap(track.is_playing, Ordering::Relaxed);
+    if !track.is_playing {
+        WAS_PLAYING.store(false, Ordering::Relaxed);
+    }
+
+    let track_changed = is_track_changed(&track.title, &track.artist);
+    let artwork = if track.artwork_base64.is_some() {
+        track.artwork_base64.clone()
+    } else if !track_changed {
+        get_cached_track().2
+    } else {
+        None
+    };
+    if track_changed || just_started || track.artwork_base64.is_some() {
+        set_cached_track(track.title.clone(), track.artist.clone(), artwork.clone());
+    }
+
+    let data = NowPlayingData {
+        title: track.title,
+        artist: track.artist,
+        album: track.album,
+        artwork_base64: artwork,
+        duration: track.duration,
+        elapsed_time: track.elapsed_time,
+        is_playing: track.is_playing,
+        audio_levels: Some(get_audio_levels_internal()),
+        app_name: track.app_name,
+    };
+    save_last_played(&data);
+    data
 }
 
 #[cfg(target_os = "macos")]
@@ -216,29 +255,52 @@ fn build_now_playing_script(
     script
 }
 
-/// Get currently playing music information
-/// Tries multiple sources: Spotify, Music.app, Safari
+/// Get currently playing music information.
+///
+/// On macOS this prefers MediaRemote via [mediaremote-adapter]
+/// (`get --now`), which works for any now-playing app on 15.4+.
+/// AppleScript (Spotify / Music / Safari) is the fallback.
+///
+/// [mediaremote-adapter]: https://github.com/ungive/mediaremote-adapter
 pub async fn get_now_playing() -> NowPlayingData {
     #[cfg(target_os = "macos")]
     {
-        use std::process::Command;
+        if crate::mediaremote::is_available() {
+            match crate::mediaremote::get_now_playing() {
+                Ok(Some(track)) => return now_playing_from_adapter(track),
+                Ok(None) => {
+                    IS_PLAYING.store(false, Ordering::Relaxed);
+                    WAS_PLAYING.store(false, Ordering::Relaxed);
+                    return get_last_played_or_default(get_audio_levels());
+                }
+                Err(err) => {
+                    log::debug!("MediaRemote adapter get failed: {err}");
+                }
+            }
+        }
+
         use sysinfo::System;
 
         // Static system monitor to avoid re-initialization
         static SYSTEM: std::sync::OnceLock<std::sync::Mutex<System>> = std::sync::OnceLock::new();
 
         let apps_running = {
-            let sys_lock = SYSTEM.get_or_init(|| std::sync::Mutex::new(System::new_all()));
+            let sys_lock = SYSTEM.get_or_init(|| std::sync::Mutex::new(System::new()));
 
             if let Ok(mut sys) = sys_lock.lock() {
-                sys.refresh_all();
+                sys.refresh_processes_specifics(
+                    sysinfo::ProcessesToUpdate::All,
+                    true,
+                    sysinfo::ProcessRefreshKind::nothing(),
+                );
                 let processes = sys.processes();
+                let named = |want: &str| {
+                    processes
+                        .values()
+                        .any(|p| p.name() == std::ffi::OsStr::new(want))
+                };
 
-                let spotify = processes.values().any(|p| p.name() == "Spotify");
-                let music = processes.values().any(|p| p.name() == "Music");
-                let safari = processes.values().any(|p| p.name() == "Safari");
-
-                Some((spotify, music, safari))
+                Some((named("Spotify"), named("Music"), named("Safari")))
             } else {
                 None
             }
@@ -259,8 +321,7 @@ pub async fn get_now_playing() -> NowPlayingData {
 
         let script = build_now_playing_script(spotify_running, music_running, safari_running);
 
-        if let Ok(result) = Command::new("osascript").arg("-e").arg(&script).output() {
-            let stdout = String::from_utf8_lossy(&result.stdout).trim().to_string();
+        if let Ok(stdout) = run_osascript(&script) {
             let parts: Vec<&str> = stdout.split('|').collect();
 
             if parts.len() >= 8 && parts[0] == "playing" {
@@ -349,7 +410,7 @@ pub async fn get_now_playing() -> NowPlayingData {
         std::thread::spawn(move || {
             let result = (|| -> Option<NowPlayingData> {
                 // Use pollster or futures::executor to block on Windows async operations
-                let manager = futures::executor::block_on(async {
+                let manager = futures_executor::block_on(async {
                     let manager_async =
                         GlobalSystemMediaTransportControlsSessionManager::RequestAsync().ok()?;
                     manager_async.await.ok()
@@ -357,7 +418,7 @@ pub async fn get_now_playing() -> NowPlayingData {
 
                 let session = manager.GetCurrentSession().ok()?;
 
-                let properties = futures::executor::block_on(async {
+                let properties = futures_executor::block_on(async {
                     let properties_async = session.TryGetMediaPropertiesAsync().ok()?;
                     properties_async.await.ok()
                 })?;
@@ -385,7 +446,7 @@ pub async fn get_now_playing() -> NowPlayingData {
                     .map(|t| t.Duration as f64 / 10_000_000.0);
 
                 // Artwork - all COM operations done synchronously
-                let artwork_base64 = futures::executor::block_on(async {
+                let artwork_base64 = futures_executor::block_on(async {
                     let thumb_ref = properties.Thumbnail().ok()?;
                     let stream_async = thumb_ref.OpenReadAsync().ok()?;
                     let stream = stream_async.await.ok()?;
@@ -453,17 +514,21 @@ pub async fn get_now_playing() -> NowPlayingData {
             // Real impl should list names org.mpris.MediaPlayer2.*
 
             // We can list names
-            let proxy = zbus::fdo::DBusProxy::new(&conn).await.unwrap();
-            let names = proxy.list_names().await.unwrap();
+            let Ok(proxy) = zbus::fdo::DBusProxy::new(&conn).await else {
+                return get_last_played_or_default(get_audio_levels());
+            };
+            let Ok(names) = proxy.list_names().await else {
+                return get_last_played_or_default(get_audio_levels());
+            };
 
             for name in names {
                 if name.starts_with("org.mpris.MediaPlayer2.") {
-                    let player = PlayerProxy::builder(&conn)
-                        .destination(name.clone())
-                        .unwrap()
-                        .build()
-                        .await
-                        .unwrap();
+                    let Ok(builder) = PlayerProxy::builder(&conn).destination(name.clone()) else {
+                        continue;
+                    };
+                    let Ok(player) = builder.build().await else {
+                        continue;
+                    };
 
                     if let Ok(status) = player.playback_status().await {
                         if status == "Playing" {
@@ -541,16 +606,48 @@ pub async fn get_now_playing() -> NowPlayingData {
     }
 }
 
-/// Get artwork from Music.app using AppleScript to write to temp file
+#[cfg(target_os = "macos")]
+fn run_osascript(script: &str) -> Result<String, String> {
+    use std::process::Command;
+    let output = Command::new("osascript")
+        .arg("-e")
+        .arg(script)
+        .output()
+        .map_err(|e| e.to_string())?;
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if !output.status.success() {
+        log::warn!("osascript failed ({}): {stderr}", output.status);
+        if stderr.contains("-1743") || stderr.to_lowercase().contains("not allowed") {
+            log::warn!(
+                "Automation permission denied. Grant access in System Settings → Privacy & Security → Automation."
+            );
+        }
+        return Err(format!("osascript failed: {}", output.status));
+    }
+    if !stderr.is_empty() {
+        log::debug!("osascript stderr: {stderr}");
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+/// Get artwork from Music.app using AppleScript to write under the app data dir.
 #[cfg(target_os = "macos")]
 fn get_music_app_artwork() -> Option<String> {
     use std::fs;
-    use std::process::Command;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
-    // Use a unique path to avoid conflicts
-    let temp_path = "/tmp/overdone_music_art_v3.data";
-    // Ensure cleanup
-    let _ = fs::remove_file(temp_path);
+    let dir = crate::app_data_dir().join("artwork");
+    let _ = fs::create_dir_all(&dir);
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let temp_path = dir.join(format!("music-{}-{unique}.data", std::process::id()));
+    let temp_path_str = temp_path
+        .to_string_lossy()
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"");
+    let _ = fs::remove_file(&temp_path);
 
     // AppleScript to extract artwork to a file
     // Tries 'data' first, then 'raw data' as fallback
@@ -590,35 +687,34 @@ fn get_music_app_artwork() -> Option<String> {
             end try
         end tell
     "#,
-        temp_path, temp_path
+        temp_path_str, temp_path_str
     );
 
-    if let Ok(result) = Command::new("osascript").arg("-e").arg(&script).output() {
-        let stdout = String::from_utf8_lossy(&result.stdout).trim().to_string();
-
-        // println!("Artwork fetch result: {}", stdout); // Uncomment for debugging
-
-        if stdout == "success" {
-            if let Ok(data) = fs::read(temp_path) {
-                let _ = fs::remove_file(temp_path);
+    match run_osascript(&script) {
+        Ok(stdout) if stdout == "success" => {
+            if let Ok(data) = fs::read(&temp_path) {
+                let _ = fs::remove_file(&temp_path);
                 if !data.is_empty() {
-                    // Use common save_temp_file logic to get consistent hashing/dedup
-                    return crate::utils::save_temp_file(&data, "png");
+                    return crate::utils::encode_bytes_base64(&data);
                 }
             }
         }
+        Ok(stdout) => log::debug!("Music artwork: {stdout}"),
+        Err(err) => log::debug!("Music artwork: {err}"),
     }
 
-    // Ensure cleanup on failure
-    let _ = fs::remove_file(temp_path);
+    let _ = fs::remove_file(&temp_path);
     None
 }
 
-/// Toggle play/pause for the currently playing media
+/// Toggle play/pause for the currently playing media.
+/// macOS: MediaRemote `kMRATogglePlayPause` (send 2), AppleScript fallback.
 pub async fn media_play_pause() -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
-        use std::process::Command;
+        if crate::mediaremote::is_available() {
+            return crate::mediaremote::send(crate::mediaremote::MraCommand::TogglePlayPause);
+        }
 
         // Script that controls whichever app is playing
         let script = r#"
@@ -690,12 +786,7 @@ pub async fn media_play_pause() -> Result<(), String> {
             end if
         "#;
 
-        Command::new("osascript")
-            .arg("-e")
-            .arg(script)
-            .output()
-            .map_err(|e| e.to_string())?;
-
+        let _ = run_osascript(script)?;
         Ok(())
     }
 
@@ -727,16 +818,20 @@ pub async fn media_play_pause() -> Result<(), String> {
         }
 
         if let Ok(conn) = Connection::session().await {
-            let proxy = zbus::fdo::DBusProxy::new(&conn).await.unwrap();
-            let names = proxy.list_names().await.unwrap();
+            let Ok(proxy) = zbus::fdo::DBusProxy::new(&conn).await else {
+                return Ok(());
+            };
+            let Ok(names) = proxy.list_names().await else {
+                return Ok(());
+            };
             for name in names {
                 if name.starts_with("org.mpris.MediaPlayer2.") {
-                    let player = PlayerProxy::builder(&conn)
-                        .destination(name)
-                        .unwrap()
-                        .build()
-                        .await
-                        .unwrap();
+                    let Ok(builder) = PlayerProxy::builder(&conn).destination(name) else {
+                        continue;
+                    };
+                    let Ok(player) = builder.build().await else {
+                        continue;
+                    };
                     let _ = player.play_pause().await;
                 }
             }
@@ -745,11 +840,14 @@ pub async fn media_play_pause() -> Result<(), String> {
     }
 }
 
-/// Skip to the next track
+/// Skip to the next track.
+/// macOS: MediaRemote `kMRANextTrack` (send 4), AppleScript fallback.
 pub async fn media_next_track() -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
-        use std::process::Command;
+        if crate::mediaremote::is_available() {
+            return crate::mediaremote::send(crate::mediaremote::MraCommand::NextTrack);
+        }
 
         let script = r#"
             tell application "System Events"
@@ -827,12 +925,7 @@ pub async fn media_next_track() -> Result<(), String> {
             end if
         "#;
 
-        Command::new("osascript")
-            .arg("-e")
-            .arg(script)
-            .output()
-            .map_err(|e| e.to_string())?;
-
+        let _ = run_osascript(script)?;
         Ok(())
     }
 
@@ -863,16 +956,20 @@ pub async fn media_next_track() -> Result<(), String> {
             fn next(&self) -> zbus::Result<()>;
         }
         if let Ok(conn) = Connection::session().await {
-            let proxy = zbus::fdo::DBusProxy::new(&conn).await.unwrap();
-            let names = proxy.list_names().await.unwrap();
+            let Ok(proxy) = zbus::fdo::DBusProxy::new(&conn).await else {
+                return Ok(());
+            };
+            let Ok(names) = proxy.list_names().await else {
+                return Ok(());
+            };
             for name in names {
                 if name.starts_with("org.mpris.MediaPlayer2.") {
-                    let player = PlayerProxy::builder(&conn)
-                        .destination(name)
-                        .unwrap()
-                        .build()
-                        .await
-                        .unwrap();
+                    let Ok(builder) = PlayerProxy::builder(&conn).destination(name) else {
+                        continue;
+                    };
+                    let Ok(player) = builder.build().await else {
+                        continue;
+                    };
                     let _ = player.next().await;
                 }
             }
@@ -881,11 +978,14 @@ pub async fn media_next_track() -> Result<(), String> {
     }
 }
 
-/// Go to the previous track
+/// Go to the previous track.
+/// macOS: MediaRemote `kMRAPreviousTrack` (send 5), AppleScript fallback.
 pub async fn media_previous_track() -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
-        use std::process::Command;
+        if crate::mediaremote::is_available() {
+            return crate::mediaremote::send(crate::mediaremote::MraCommand::PreviousTrack);
+        }
 
         let script = r#"
             tell application "System Events"
@@ -960,12 +1060,7 @@ pub async fn media_previous_track() -> Result<(), String> {
             end if
         "#;
 
-        Command::new("osascript")
-            .arg("-e")
-            .arg(script)
-            .output()
-            .map_err(|e| e.to_string())?;
-
+        let _ = run_osascript(script)?;
         Ok(())
     }
 
@@ -996,16 +1091,20 @@ pub async fn media_previous_track() -> Result<(), String> {
             fn previous(&self) -> zbus::Result<()>;
         }
         if let Ok(conn) = Connection::session().await {
-            let proxy = zbus::fdo::DBusProxy::new(&conn).await.unwrap();
-            let names = proxy.list_names().await.unwrap();
+            let Ok(proxy) = zbus::fdo::DBusProxy::new(&conn).await else {
+                return Ok(());
+            };
+            let Ok(names) = proxy.list_names().await else {
+                return Ok(());
+            };
             for name in names {
                 if name.starts_with("org.mpris.MediaPlayer2.") {
-                    let player = PlayerProxy::builder(&conn)
-                        .destination(name)
-                        .unwrap()
-                        .build()
-                        .await
-                        .unwrap();
+                    let Ok(builder) = PlayerProxy::builder(&conn).destination(name) else {
+                        continue;
+                    };
+                    let Ok(player) = builder.build().await else {
+                        continue;
+                    };
                     let _ = player.previous().await;
                 }
             }
@@ -1014,11 +1113,14 @@ pub async fn media_previous_track() -> Result<(), String> {
     }
 }
 
-/// Seek to a specific position in the track (in seconds)
+/// Seek to a timeline position in seconds.
+/// macOS: MediaRemote `adapter_seek`, AppleScript fallback.
 pub async fn media_seek(position: f64) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
-        use std::process::Command;
+        if crate::mediaremote::is_available() {
+            return crate::mediaremote::seek_seconds(position);
+        }
 
         let script = format!(
             r#"
@@ -1030,19 +1132,15 @@ pub async fn media_seek(position: f64) -> Result<(), String> {
 
             if spotifyRunning then
                 tell application "Spotify"
-                    if player state is playing then
-                        set player position to {}
-                        return "spotify"
-                    end if
+                    set player position to {position}
+                    return "spotify"
                 end tell
             end if
 
             if musicRunning then
                 tell application "Music"
-                    if player state is playing then
-                        set player position to {}
-                        return "music"
-                    end if
+                    set player position to {position}
+                    return "music"
                 end tell
             end if
 
@@ -1058,12 +1156,9 @@ pub async fn media_seek(position: f64) -> Result<(), String> {
                                             (function() {{
                                                 var video = document.querySelector('video');
                                                 var audio = document.querySelector('audio');
-                                                var activeMedia = (video && !video.paused && !video.ended) ? video : (audio && !audio.paused && !audio.ended) ? audio : null;
-                                                // Fallback if paused but visible
-                                                if (!activeMedia) activeMedia = video || audio;
-
+                                                var activeMedia = video || audio;
                                                 if (activeMedia) {{
-                                                    activeMedia.currentTime = {};
+                                                    activeMedia.currentTime = {position};
                                                     return 'success';
                                                 }}
                                                 return 'no_media';
@@ -1079,29 +1174,19 @@ pub async fn media_seek(position: f64) -> Result<(), String> {
             end if
 
             return "no_app"
-            "#,
-            position, position, position
+            "#
         );
-
-        Command::new("osascript")
-            .arg("-e")
-            .arg(script)
-            .output()
-            .map_err(|e| e.to_string())?;
-
+        let _ = run_osascript(&script)?;
         Ok(())
     }
 
     #[cfg(target_os = "windows")]
     {
         use windows::Media::Control::GlobalSystemMediaTransportControlsSessionManager;
-
         if let Ok(manager_async) = GlobalSystemMediaTransportControlsSessionManager::RequestAsync()
         {
             if let Ok(manager) = manager_async.await {
                 if let Ok(session) = manager.GetCurrentSession() {
-                    // Convert seconds to 100-nanosecond intervals
-                    // TryChangePlaybackPositionAsync expects i64 directly, not TimeSpan
                     let position_ticks = (position * 10_000_000.0) as i64;
                     if let Ok(seek_async) = session.TryChangePlaybackPositionAsync(position_ticks) {
                         let _ = seek_async.await;
@@ -1109,7 +1194,7 @@ pub async fn media_seek(position: f64) -> Result<(), String> {
                 }
             }
         }
-        return Ok(());
+        Ok(())
     }
 
     #[cfg(target_os = "linux")]
@@ -1119,68 +1204,18 @@ pub async fn media_seek(position: f64) -> Result<(), String> {
     }
 }
 
-/// Activate the media application
-pub fn activate_media_app(app_name: String) -> Result<(), String> {
-    #[cfg(target_os = "macos")]
-    {
-        use std::process::Command;
-
-        // Map common names if necessary, but open -a usually handles "Spotify", "Music", "Safari" fine.
-        // "Music" might need to be "Music" (it's the app name).
-
-        let app = match app_name.to_lowercase().as_str() {
-            "music" => "Music",
-            "spotify" => "Spotify",
-            "safari" => "Safari",
-            _ => &app_name,
-        };
-
-        Command::new("open")
-            .arg("-a")
-            .arg(app)
-            .output()
-            .map_err(|e| e.to_string())?;
-
-        Ok(())
-    }
-
-    #[cfg(target_os = "windows")]
-    {
-        use std::process::Command;
-
-        match app_name.to_lowercase().as_str() {
-            "spotify" => {
-                // Use Spotify URI protocol to activate the app
-                let _ = Command::new("cmd")
-                    .args(["/C", "start", "spotify:"])
-                    .spawn();
-            }
-            _ => {
-                // For other apps, try opening by name
-                let _ = open::that(&app_name);
-            }
-        }
-        Ok(())
-    }
-
-    #[cfg(target_os = "linux")]
-    {
-        // Try opening via xdg-open or similar
-        let _ = open::that(&app_name);
-        Ok(())
-    }
-}
-
 use std::thread;
 
 /// Setup audio level monitoring using simulated audio visualization
 pub fn setup_audio_monitoring() {
-    // Initialize the audio levels storage if not already done
+    static STARTED: AtomicBool = AtomicBool::new(false);
     if AUDIO_LEVELS.get().is_none() {
         let _ = AUDIO_LEVELS.set(std::sync::Mutex::new(vec![0.15; 6]));
     }
+    if STARTED.swap(true, Ordering::SeqCst) {
+        return;
+    }
 
-    // Spawn simulation thread
     thread::spawn(move || {
         log::info!("🎭 Starting audio visualization simulation");
 
@@ -1206,16 +1241,19 @@ pub fn setup_audio_monitoring() {
             let energy_wave = (t * 0.15).sin() * 0.3 + 0.9;
             energy = energy * 0.995 + energy_wave * 0.005;
 
-            // Simulate beat at ~160 BPM (2.67 beats per second)
-            beat_phase += 0.0333 * 2.67 * std::f64::consts::PI * 2.67;
+            // Simulate beat at ~160 BPM (2.67 beats per second): 2π · 2.67 · dt
+            beat_phase += 0.0333 * 2.67 * std::f64::consts::TAU;
             let beat = (beat_phase.sin().max(0.0)).powf(4.0); // Sharp beat pulse
 
-            // Add some randomness for realism
-            let noise = || -> f64 {
+            // Add some randomness for realism (per-band: hash t and the band index)
+            let noise = |band: u64| -> f64 {
                 use std::collections::hash_map::DefaultHasher;
                 use std::hash::{Hash, Hasher};
                 let mut hasher = DefaultHasher::new();
-                ((t * 10000.0) as u64).hash(&mut hasher);
+                ((t * 10000.0) as u64)
+                    .wrapping_mul(31)
+                    .wrapping_add(band)
+                    .hash(&mut hasher);
                 (hasher.finish() % 1000) as f64 / 1000.0 - 0.5
             };
 
@@ -1223,25 +1261,25 @@ pub fn setup_audio_monitoring() {
                                            // Keeping as is for simplicity unless specific optimization request for this.
 
             // Bass (20-150 Hz) - strongest on beat
-            levels[0] = energy * (0.4 + beat * 0.5 + noise() * 0.1);
+            levels[0] = energy * (0.4 + beat * 0.5 + noise(0) * 0.1);
 
             // Low-mid (150-400 Hz) - follows bass with slight delay
-            levels[1] = energy * (0.35 + beat * 0.3 + (t * 3.2).sin() * 0.15 + noise() * 0.08);
+            levels[1] = energy * (0.35 + beat * 0.3 + (t * 3.2).sin() * 0.15 + noise(1) * 0.08);
 
             // Mid (400-1000 Hz) - melodic content
             levels[2] =
-                energy * (0.3 + (t * 5.7).sin() * 0.2 + (t * 7.3).cos() * 0.1 + noise() * 0.1);
+                energy * (0.3 + (t * 5.7).sin() * 0.2 + (t * 7.3).cos() * 0.1 + noise(2) * 0.1);
 
             // High-mid (1000-2500 Hz) - vocals, instruments
             levels[3] =
-                energy * (0.28 + (t * 4.1).sin() * 0.18 + (t * 6.8).cos() * 0.12 + noise() * 0.08);
+                energy * (0.28 + (t * 4.1).sin() * 0.18 + (t * 6.8).cos() * 0.12 + noise(3) * 0.08);
 
             // Presence (2500-6000 Hz) - clarity, attack
-            levels[4] = energy * (0.22 + (t * 8.3).sin() * 0.15 + beat * 0.1 + noise() * 0.1);
+            levels[4] = energy * (0.22 + (t * 8.3).sin() * 0.15 + beat * 0.1 + noise(4) * 0.1);
 
             // Brilliance (6000-20000 Hz) - air, shimmer (generally lower)
             levels[5] =
-                energy * (0.18 + (t * 11.2).sin() * 0.1 + (t * 9.7).cos() * 0.08 + noise() * 0.06);
+                energy * (0.18 + (t * 11.2).sin() * 0.1 + (t * 9.7).cos() * 0.08 + noise(5) * 0.06);
 
             // Smooth transitions (exponential moving average)
             for i in 0..6 {

@@ -27,19 +27,28 @@ cd ~/openNook-gpui
 ./scripts/with-metal.sh cargo run -p nook
 ```
 
-On macOS the process is an accessory (`LSUIElement` / `NSApplicationActivationPolicyAccessory`): no dock icon. Hover the notch to take mouse events; click or scroll up to expand.
+`cargo run` is fine for UI iteration. Calendar, Reminders, and media Automation prompts need a real bundle (otherwise TCC has no `CFBundleIdentifier` to attach to):
+
+```bash
+./scripts/with-metal.sh ./scripts/bundle.sh
+open target/OpenNook.app
+```
+
+On macOS the process is an accessory (`LSUIElement` / `NSApplicationActivationPolicyAccessory`): no dock icon. Hover the notch to take mouse events; click or scroll up to expand. Quit and Settings live on the **Nook** menu-bar extra.
 
 ## Features (v1)
 
 - Compact pill matching the hardware notch (idle / media / files / timer / first-run)
 - Hover expand, click or scroll to open the island
-- Now Playing with play/pause/skip (MediaPlayer + simulation visualizer)
+- Now Playing with play/pause/skip and a simulated GPU visualizer (MediaRemote on macOS, AppleScript fallback)
 - Calendar and Reminders (EventKit)
-- File tray, notes, timers, Cloudflare speed test
+- File tray (open / remove / clear), notes (external editor), timers, Cloudflare speed test
 - Settings window (media/calendar/reminders, liquid glass, non-notch mode)
 
 No plugin system in this build. Built-in widgets only.
 
 ## Permissions
 
-macOS will prompt for Calendar and Reminders. Usage strings live in `Info.plist`.
+macOS will prompt for Calendar, Reminders, and (only if MediaRemote is unavailable) Automation. Usage strings live in `Info.plist` and only apply when you run the `.app` from `scripts/bundle.sh`.
+
+Now Playing on macOS uses [mediaremote-adapter](https://github.com/ungive/mediaremote-adapter): `/usr/bin/perl` loads a bundled helper framework and calls `MRMediaRemoteGetNowPlayingInfo` / `MRMediaRemoteSendCommand` (`kMRATogglePlayPause` 2, `kMRANextTrack` 4, `kMRAPreviousTrack` 5). That is the path that still works on macOS 15.4+. `scripts/bundle.sh` builds and copies the framework into `OpenNook.app/Contents/Resources`. `cargo run` uses the same framework from `third_party/mediaremote-adapter` after `./scripts/build-mediaremote-adapter.sh`.

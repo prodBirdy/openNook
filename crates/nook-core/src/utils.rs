@@ -26,12 +26,17 @@ pub async fn fetch_artwork_from_url(url: &str) -> Option<String> {
     }
 }
 
-/// Save binary data to a temp file and return as base64-encoded string
-pub fn save_temp_file(data: &[u8], _extension: &str) -> Option<String> {
+/// Encode binary data as a base64 string (used for album artwork).
+pub fn encode_bytes_base64(data: &[u8]) -> Option<String> {
     if data.is_empty() {
         return None;
     }
     Some(base64_encode(data))
+}
+
+/// Back-compat alias used by the Windows Now Playing path.
+pub fn save_temp_file(data: &[u8], _extension: &str) -> Option<String> {
+    encode_bytes_base64(data)
 }
 
 /// Get the system accent color on macOS

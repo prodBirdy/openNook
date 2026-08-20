@@ -2,32 +2,46 @@ use crate::database;
 use serde::{Deserialize, Serialize};
 use std::sync::RwLock;
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 pub struct WindowSettings {
+    #[serde(default = "default_extra_width")]
+    #[allow(dead_code)]
     pub extra_width: f64,
+    #[serde(default = "default_extra_height")]
     pub extra_height: f64,
-    #[serde(default)]
+    /// Legacy copy of [`AppSettings::non_notch_mode`]; read on load, not written.
+    #[serde(default, skip_serializing)]
     pub non_notch_mode: bool,
+}
+
+fn default_extra_width() -> f64 {
+    400.0
+}
+
+fn default_extra_height() -> f64 {
+    800.0
 }
 
 impl Default for WindowSettings {
     fn default() -> Self {
         Self {
-            extra_width: 400.0,
-            extra_height: 800.0,
+            extra_width: default_extra_width(),
+            extra_height: default_extra_height(),
             non_notch_mode: false,
         }
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AppSettings {
     #[serde(default = "default_true")]
     pub show_media: bool,
-    #[serde(default)]
+    #[serde(default = "default_true")]
     pub show_calendar: bool,
-    #[serde(default)]
+    #[serde(default = "default_true")]
     pub show_reminders: bool,
+    #[serde(default = "default_true")]
+    pub show_agents: bool,
     #[serde(default)]
     pub liquid_glass_mode: bool,
     #[serde(default)]
@@ -46,6 +60,7 @@ impl Default for AppSettings {
             show_media: true,
             show_calendar: true,
             show_reminders: true,
+            show_agents: true,
             liquid_glass_mode: false,
             non_notch_mode: false,
             window: WindowSettings::default(),
@@ -81,7 +96,6 @@ pub fn update_window_settings(settings: WindowSettings) {
     }
     if let Ok(mut app) = app_store().write() {
         app.window = settings;
-        app.non_notch_mode = settings.non_notch_mode;
     }
     persist();
 }
@@ -92,7 +106,6 @@ pub fn update_app_settings(settings: AppSettings) {
     }
     if let Ok(mut win) = window_store().write() {
         *win = settings.window;
-        win.non_notch_mode = settings.non_notch_mode;
     }
     persist();
 }
@@ -100,12 +113,15 @@ pub fn update_app_settings(settings: AppSettings) {
 pub fn load_from_db() {
     if let Some(json) = database::get_setting("app_settings") {
         if let Ok(settings) = serde_json::from_str::<AppSettings>(&json) {
+            let mut settings = settings;
+            if settings.window.non_notch_mode {
+                settings.non_notch_mode = true;
+            }
             if let Ok(mut guard) = app_store().write() {
                 *guard = settings.clone();
             }
             if let Ok(mut win) = window_store().write() {
                 *win = settings.window;
-                win.non_notch_mode = settings.non_notch_mode;
             }
             return;
         }
@@ -115,8 +131,26 @@ pub fn load_from_db() {
             if let Ok(mut guard) = window_store().write() {
                 *guard = settings;
             }
+            if let Ok(mut app) = app_store().write() {
+                app.window = settings;
+            }
         }
     }
+    // Persist defaults so missing keys can't silently appear on a later load,
+    // and so first-run is tracked by `onboarded` rather than "settings exist".
+    persist();
+}
+
+/// First launch until the user dismisses the onboarding pill.
+pub fn is_first_run() -> bool {
+    database::get_setting("onboarded").is_none()
+}
+
+pub fn mark_onboarded() {
+    if let Err(err) = database::set_setting("onboarded", "1") {
+        log::warn!("failed to persist onboarded flag: {err}");
+    }
+    persist();
 }
 
 fn persist() {
@@ -126,15 +160,24 @@ fn persist() {
     }
 }
 
-pub fn accent_color() -> String {
-    #[cfg(target_os = "macos")]
-    {
-        return crate::utils::get_macos_accent_color();
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn empty_json_matches_default() {
+        let parsed: AppSettings = serde_json::from_str("{}").unwrap();
+        assert_eq!(parsed, AppSettings::default());
     }
-    #[cfg(target_os = "windows")]
-    {
-        return crate::utils::get_windows_accent_color();
+
+    #[test]
+    fn missing_widget_flags_default_on() {
+        let parsed: AppSettings = serde_json::from_str(r#"{"liquid_glass_mode":true}"#).unwrap();
+        assert!(parsed.show_media);
+        assert!(parsed.show_calendar);
+        assert!(parsed.show_reminders);
+        assert!(parsed.show_agents);
+        assert!(parsed.liquid_glass_mode);
+        assert!(!parsed.non_notch_mode);
     }
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    "#007AFF".to_string()
 }

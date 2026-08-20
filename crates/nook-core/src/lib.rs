@@ -3,16 +3,18 @@
 //! The GPUI app (and any other native frontend) talks to these modules
 //! directly instead of going through `invoke`.
 
+pub mod agents;
 pub mod audio;
 pub mod calendar;
 pub mod database;
 pub mod files;
 pub mod haptics;
+#[cfg(target_os = "macos")]
+mod mediaremote;
 pub mod models;
 pub mod mouse;
-pub mod notes;
 pub mod notch;
-pub mod runtime;
+pub mod notes;
 pub mod settings;
 pub mod utils;
 pub mod widgets;
@@ -20,10 +22,11 @@ pub mod widgets;
 pub use models::{NotchInfo, NowPlayingData};
 pub use settings::{AppSettings, WindowSettings};
 
-use std::sync::OnceLock;
+use std::sync::{Once, OnceLock};
 use tokio::runtime::Runtime;
 
 static RUNTIME: OnceLock<Runtime> = OnceLock::new();
+static INIT: Once = Once::new();
 
 /// Shared multi-thread Tokio runtime for EventKit / Now Playing / HTTP.
 pub fn runtime() -> &'static Runtime {
@@ -47,10 +50,15 @@ pub fn app_data_dir() -> std::path::PathBuf {
 
 /// One-shot init for caches, sqlite, and audio visualizer thread.
 pub fn init() {
-    let _ = env_logger::try_init();
-    let _ = runtime();
-    database::init_db().expect("database");
-    settings::load_from_db();
-    audio::init_audio_state();
-    audio::setup_audio_monitoring();
+    INIT.call_once(|| {
+        let _ = runtime();
+        if let Err(err) = database::init_db() {
+            log::error!("database unavailable ({err}); settings and tray will not persist");
+        } else {
+            settings::load_from_db();
+        }
+        audio::init_audio_state();
+        audio::setup_audio_monitoring();
+        mouse::start_polling();
+    });
 }

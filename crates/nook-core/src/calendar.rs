@@ -75,15 +75,21 @@ mod macos {
     // Static store reference
     static EVENT_STORE: OnceLock<SyncEventStore> = OnceLock::new();
 
+    const CACHE_TTL: Duration = Duration::from_secs(30);
+
+    pub fn init_store() {
+        if EVENT_STORE.get().is_some() {
+            return;
+        }
+        let Some(_mtm) = MainThreadMarker::new() else {
+            log::warn!("EventKit store init skipped: not on the main thread");
+            return;
+        };
+        let store = unsafe { EKEventStore::new() };
+        let _ = EVENT_STORE.set(SyncEventStore(store));
+    }
+
     fn get_store() -> Option<&'static SyncEventStore> {
-        EVENT_STORE.get_or_init(|| {
-            // EKEventStore initialization
-            // We'll trust that we call this from command which is on some thread?
-            // But to be safe with MTM:
-            let _mtm = unsafe { MainThreadMarker::new_unchecked() };
-            let store = unsafe { EKEventStore::new() };
-            SyncEventStore(store)
-        });
         EVENT_STORE.get()
     }
 
@@ -205,8 +211,7 @@ mod macos {
         if !force_refresh {
             if let Some(cache_mutex) = EVENTS_CACHE.get() {
                 if let Ok(cache) = cache_mutex.lock() {
-                    if cache.is_valid(Duration::from_secs(600)) {
-                        // 10 minutes
+                    if cache.is_valid(CACHE_TTL) {
                         return cache.data.clone();
                     }
                 }
@@ -302,8 +307,7 @@ mod macos {
         if !force_refresh {
             if let Some(cache_mutex) = REMINDERS_CACHE.get() {
                 if let Ok(cache) = cache_mutex.lock() {
-                    if cache.is_valid(Duration::from_secs(600)) {
-                        // 10 minutes
+                    if cache.is_valid(CACHE_TTL) {
                         return cache.data.clone();
                     }
                 }
@@ -491,22 +495,20 @@ mod macos {
         let item = unsafe { store.calendarItemWithIdentifier(&ns_id) };
 
         if let Some(item) = item {
-            // Check if it is a reminder (EKReminder inherits from EKCalendarItem)
-            // We can try to cast or check class. For now, we assume ID is correct.
-            let reminder_ptr: *const objc2_event_kit::EKCalendarItem =
-                objc2::rc::Retained::as_ptr(&item);
-            let reminder: &objc2_event_kit::EKReminder =
-                unsafe { &*(reminder_ptr as *const objc2_event_kit::EKReminder) };
+            let reminder = item
+                .downcast::<objc2_event_kit::EKReminder>()
+                .map_err(|_| "calendar item is not a reminder".to_string())?;
 
             unsafe {
                 reminder.setCompleted(true);
-                let _ = store.saveReminder_commit_error(reminder, true);
+                store
+                    .saveReminder_commit_error(&reminder, true)
+                    .map_err(|e| e.to_string())?;
             }
 
             // Invalidate cache
             if let Some(cache_mutex) = REMINDERS_CACHE.get() {
                 if let Ok(mut cache) = cache_mutex.lock() {
-                    // Remove the item from cache immediately for responsiveness
                     cache.data.retain(|r| r.id != id);
                 }
             }
@@ -638,6 +640,12 @@ mod macos {
 
 // Public commands
 
+/// Create the EventKit store on the main thread. Safe to call more than once.
+pub fn init_store() {
+    #[cfg(target_os = "macos")]
+    macos::init_store();
+}
+
 pub async fn request_calendar_access() -> Result<bool, String> {
     #[cfg(target_os = "macos")]
     {
@@ -715,7 +723,9 @@ pub async fn open_calendar_app() -> Result<(), String> {
     {
         // Try to open common calendar URL or let xdg-open find default
         // "webcal:" might be handled? or just calendar:
-        open::that("calendar:").or_else(|_| open::that("gnome-calendar")).map_err(|e| e.to_string())?;
+        open::that("calendar:")
+            .or_else(|_| open::that("gnome-calendar"))
+            .map_err(|e| e.to_string())?;
     }
     Ok(())
 }
@@ -735,7 +745,9 @@ pub async fn open_reminders_app() -> Result<(), String> {
     }
     #[cfg(target_os = "linux")]
     {
-        open::that("todo:").or_else(|_| open::that("gnome-todo")).map_err(|e| e.to_string())?;
+        open::that("todo:")
+            .or_else(|_| open::that("gnome-todo"))
+            .map_err(|e| e.to_string())?;
     }
     Ok(())
 }

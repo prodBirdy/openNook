@@ -2,7 +2,7 @@
 //! GPUI renders each SVG as an alpha mask tinted by `text_color`.
 
 use crate::theme;
-use gpui::{prelude::*, px, svg, SharedString};
+use gpui::{prelude::*, px, svg, Hsla, SharedString};
 use rust_embed::RustEmbed;
 use std::borrow::Cow;
 
@@ -11,10 +11,14 @@ use std::borrow::Cow;
 struct IconPack;
 
 pub fn lucide(name: &'static str, size: f32) -> impl IntoElement {
+    lucide_color(name, size, theme::TEXT)
+}
+
+pub fn lucide_color(name: &'static str, size: f32, color: impl Into<Hsla>) -> impl IntoElement {
     svg()
         .path(SharedString::from(format!("icons/{name}.svg")))
         .size(px(size))
-        .text_color(theme::TEXT)
+        .text_color(color)
 }
 
 pub struct Assets;

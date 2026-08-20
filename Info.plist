@@ -8,15 +8,25 @@
 	<string>openNook</string>
 	<key>CFBundleIdentifier</key>
 	<string>com.jonasvogel.opennook-gpui</string>
+	<key>CFBundleExecutable</key>
+	<string>openNook</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleVersion</key>
+	<string>0.1.0</string>
+	<key>CFBundleShortVersionString</key>
+	<string>0.1.0</string>
+	<key>CFBundleIconFile</key>
+	<string>icon.png</string>
 	<key>LSUIElement</key>
 	<true/>
 	<key>NSHighResolutionCapable</key>
 	<true/>
 	<key>NSCalendarsUsageDescription</key>
-	<string>Need access to show upcoming events.</string>
+	<string>openNook shows upcoming events in the island so you can glance at the next thing on your calendar.</string>
 	<key>NSRemindersUsageDescription</key>
-	<string>Need access to show and manage reminders.</string>
-	<key>NSAudioCaptureUsageDescription</key>
-	<string>Need audio access for visualization.</string>
+	<string>openNook shows reminders in the island and lets you mark them complete from there.</string>
+	<key>NSAppleEventsUsageDescription</key>
+	<string>openNook can skip or pause Music, Spotify, and Safari from the island if system media controls are unavailable.</string>
 </dict>
 </plist>

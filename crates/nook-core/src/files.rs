@@ -106,13 +106,27 @@ pub fn resolve_path(path: String) -> Result<String, String> {
         .map_err(|e| e.to_string())
 }
 
+/// Drag-pasteboard changeCount last seen with no mouse button held, or
+/// [`i64::MIN`] before we have ever observed an idle cursor.
+#[cfg(target_os = "macos")]
+static DRAG_PB_IDLE: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(i64::MIN);
+
 /// True while the user is dragging files (Finder / another app) on macOS.
 /// Used to punch a hole in click-through so the island can receive the drop.
+///
+/// The drag pasteboard is *not* emptied when a drag ends — it keeps the last
+/// drag's types indefinitely — so "the board has types" reports a drag forever
+/// after the first one, which pins the island's hover padding open and leaves
+/// the full-width overlay swallowing every click. Gate on the left button
+/// actually being held, and on the board having changed since it was last seen
+/// idle, so a leftover board plus an unrelated left-drag doesn't count either.
 pub fn file_drag_active() -> bool {
     #[cfg(target_os = "macos")]
     {
         use objc2::runtime::AnyObject;
         use objc2::*;
+        use std::sync::atomic::Ordering;
+
         unsafe {
             let name: *mut AnyObject = msg_send![
                 class!(NSString),
@@ -122,6 +136,21 @@ pub fn file_drag_active() -> bool {
             if pb.is_null() {
                 return false;
             }
+            let change_count: i64 = msg_send![pb, changeCount];
+
+            // No button down means nothing can be in flight; re-baseline so the
+            // next press only counts once something new lands on the board.
+            let buttons: usize = msg_send![class!(NSEvent), pressedMouseButtons];
+            if buttons & 1 == 0 {
+                DRAG_PB_IDLE.store(change_count, Ordering::Relaxed);
+                return false;
+            }
+            // Launched mid-press: no baseline to compare against, stay quiet.
+            let idle = DRAG_PB_IDLE.load(Ordering::Relaxed);
+            if idle == i64::MIN || change_count == idle {
+                return false;
+            }
+
             let types: *mut AnyObject = msg_send![pb, types];
             if types.is_null() {
                 return false;
@@ -164,7 +193,7 @@ pub fn add_dropped_path(path: &str) -> Result<FileTrayItem, String> {
     })
 }
 
-fn mime_from_path(path: &str) -> String {
+pub(crate) fn mime_from_path(path: &str) -> String {
     match std::path::Path::new(path)
         .extension()
         .and_then(|e| e.to_str())
@@ -177,5 +206,35 @@ fn mime_from_path(path: &str) -> String {
         Some("pdf") => "pdf".into(),
         Some("zip" | "tar" | "gz") => "archive".into(),
         _ => "file".into(),
+    }
+}
+
+pub fn format_size(bytes: i64) -> String {
+    if bytes < 1024 {
+        format!("{bytes} B")
+    } else if bytes < 1024 * 1024 {
+        format!("{:.0} KB", bytes as f64 / 1024.0)
+    } else {
+        format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mime_from_common_extensions() {
+        assert_eq!(mime_from_path("a.PNG"), "image");
+        assert_eq!(mime_from_path("clip.mp4"), "video");
+        assert_eq!(mime_from_path("doc.pdf"), "pdf");
+        assert_eq!(mime_from_path("noext"), "file");
+    }
+
+    #[test]
+    fn format_size_buckets() {
+        assert_eq!(format_size(12), "12 B");
+        assert_eq!(format_size(2048), "2 KB");
+        assert_eq!(format_size(1_572_864), "1.5 MB");
     }
 }
