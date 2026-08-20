@@ -22,6 +22,7 @@ interface SettingsState {
     islandColor: string;
     islandPositionX: number;
     islandPositionY: number;
+    hideWhenMaximized: boolean;
 }
 
 type Tab = 'general' | 'appearance' | 'media' | 'widgets' | 'plugins';
@@ -37,6 +38,7 @@ export default function Settings() {
         islandColor: '#000000',
         islandPositionX: 50,
         islandPositionY: 0,
+        hideWhenMaximized: true,
     });
     const [activeTab, setActiveTab] = useState<Tab>('general');
 
@@ -58,14 +60,17 @@ export default function Settings() {
 
     useEffect(() => {
         const saved = localStorage.getItem('app-settings');
+        let hideWhenMaximized = true;
         if (saved) {
             try {
                 const parsed = JSON.parse(saved);
+                hideWhenMaximized = parsed.hideWhenMaximized ?? true;
                 setSettings({
                     showMedia: true,
                     liquidGlassMode: false,
                     nonNotchMode: false,
                     islandColor: '#000000',
+                    hideWhenMaximized: true,
                     ...parsed,
                     islandPositionX: clampIslandPosition(parsed.islandPositionX, 50),
                     islandPositionY: clampIslandPosition(parsed.islandPositionY, 0),
@@ -74,6 +79,9 @@ export default function Settings() {
                 console.error("Failed to parse settings", e);
             }
         }
+        import('@tauri-apps/api/core').then(({ invoke }) => {
+            invoke('set_hide_when_maximized', { enabled: hideWhenMaximized }).catch(console.error);
+        });
     }, []);
 
     const persistSettings = (next: SettingsState) => {
@@ -90,6 +98,9 @@ export default function Settings() {
                 non_notch_mode: next.nonNotchMode,
                 positionX: next.islandPositionX,
                 positionY: next.islandPositionY,
+            }).catch(console.error);
+            invoke('set_hide_when_maximized', {
+                enabled: next.hideWhenMaximized
             }).catch(console.error);
         });
     };
@@ -265,6 +276,18 @@ export default function Settings() {
                                             aria-label="Island vertical position"
                                         />
                                     </div>
+                                </div>
+                            </div>
+                            <div className="bg-card rounded-2xl mb-6 overflow-hidden border border-border">
+                                <div className="flex items-center justify-between p-3 px-4 border-b border-border last:border-b-0">
+                                    <div className="flex flex-col">
+                                        <Label className="text-[15px] font-normal">Hide When Maximized</Label>
+                                        <span className="text-xs text-muted-foreground mt-0.5">Hide island when another app is maximized</span>
+                                    </div>
+                                    <Switch
+                                        checked={settings.hideWhenMaximized}
+                                        onCheckedChange={(c) => updateSetting('hideWhenMaximized', c)}
+                                    />
                                 </div>
                             </div>
                         </div>

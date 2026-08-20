@@ -824,6 +824,18 @@ pub fn setup_mouse_monitoring(app_handle: tauri::AppHandle) {
         const POLL_MS: u64 = 20; // ~50fps
 
         loop {
+            // Hide-when-maximized: force click-through and skip hover activation.
+            if crate::maximized::should_hide_for_maximized() {
+                if IS_INSIDE.swap(false, Ordering::Relaxed) {
+                    let _ = app_handle.emit("mouse-exited-notch", ());
+                    if let Some(window) = app_handle.get_webview_window("main") {
+                        let _ = window.set_ignore_cursor_events(true);
+                    }
+                }
+                std::thread::sleep(std::time::Duration::from_millis(POLL_MS));
+                continue;
+            }
+
             // Refresh settings and the real window frame so a moved island stays hoverable
             let settings = get_window_settings();
             let (window_x, window_y, win_width, _win_height) = main_window_logical_frame(
@@ -950,6 +962,18 @@ pub fn setup_mouse_monitoring(app_handle: tauri::AppHandle) {
         const POLL_MS: u64 = 20;
 
         loop {
+            // Hide-when-maximized: force click-through and skip hover activation.
+            if crate::maximized::should_hide_for_maximized() {
+                if IS_INSIDE.swap(false, Ordering::Relaxed) {
+                    let _ = app_handle.emit("mouse-exited-notch", ());
+                    if let Some(window) = app_handle.get_webview_window("main") {
+                        let _ = window.set_ignore_cursor_events(true);
+                    }
+                }
+                std::thread::sleep(std::time::Duration::from_millis(POLL_MS));
+                continue;
+            }
+
             // Refresh settings and the real window frame so a moved island stays hoverable
             let settings = get_window_settings();
             let (window_x, window_y, win_width, _win_height) = main_window_logical_frame(

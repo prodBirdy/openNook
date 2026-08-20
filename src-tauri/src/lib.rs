@@ -2,6 +2,7 @@ pub mod audio;
 pub mod calendar;
 pub mod database;
 pub mod files;
+pub mod maximized;
 pub mod models;
 pub mod notes;
 pub mod plugins;
@@ -30,6 +31,7 @@ pub fn run() {
             window::get_window_settings,
             window::update_window_settings,
             window::open_settings,
+            maximized::set_hide_when_maximized,
             audio::get_now_playing,
             audio::get_audio_levels,
             audio::media_play_pause,
@@ -179,6 +181,7 @@ pub fn run() {
                 let _ = window::setup_fixed_window_size(&window);
 
                 window::setup_mouse_monitoring(app.handle().clone());
+                maximized::setup_maximized_monitoring(app.handle().clone());
                 audio::setup_audio_monitoring(app.handle().clone());
             }
             Ok(())
