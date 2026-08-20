@@ -55,6 +55,8 @@ export function DynamicIsland() {
         setLastModeCycleTime,
         isPopoverOpen,
         setIsPopoverOpen,
+        isAppMaximized,
+        setIsAppMaximized,
     } = useDynamicIslandStore();
 
     const islandRef = useRef<HTMLDivElement>(null);
@@ -127,6 +129,7 @@ export function DynamicIsland() {
 
     // Toggle expanded mode
     const handleIslandClick = useCallback(() => {
+        if (settings.hideWhenMaximized && isAppMaximized) return;
         setExpanded(prev => {
             if (!prev) {
                 setIsAnimating(true);
@@ -135,7 +138,7 @@ export function DynamicIsland() {
             invoke('trigger_haptics').catch(console.error);
             return !prev;
         });
-    }, [mode, setExpanded, setIsAnimating, setActiveTab]);
+    }, [mode, setExpanded, setIsAnimating, setActiveTab, settings.hideWhenMaximized, isAppMaximized]);
 
     // Hover handlers for haptics
     const handleHoverStart = useCallback(() => {
@@ -172,14 +175,18 @@ export function DynamicIsland() {
         // Mouse hover listeners
         const unlistenEnter = listen('mouse-entered-notch', () => setIsHovered(true));
         const unlistenExit = listen('mouse-exited-notch', () => setIsHovered(false));
+        const unlistenMaximized = listen('app-maximized', () => setIsAppMaximized(true));
+        const unlistenUnmaximized = listen('app-unmaximized', () => setIsAppMaximized(false));
 
         return () => {
             if (resizeTimeout) clearTimeout(resizeTimeout);
             window.removeEventListener('resize', handleResize);
             unlistenEnter.then(fn => fn());
             unlistenExit.then(fn => fn());
+            unlistenMaximized.then(fn => fn());
+            unlistenUnmaximized.then(fn => fn());
         };
-    }, [setWindowSize, setIsHovered]);
+    }, [setWindowSize, setIsHovered, setIsAppMaximized]);
 
     // Load settings
     useEffect(() => {
@@ -191,6 +198,11 @@ export function DynamicIsland() {
         window.addEventListener('storage', handleStorage);
         return () => window.removeEventListener('storage', handleStorage);
     }, [loadSettings]);
+
+    // Keep native monitoring in sync with the frontend setting
+    useEffect(() => {
+        invoke('set_hide_when_maximized', { enabled: settings.hideWhenMaximized }).catch(console.error);
+    }, [settings.hideWhenMaximized]);
 
     // Media player polling
     useEffect(() => {
@@ -246,8 +258,14 @@ export function DynamicIsland() {
         baseNotchWidth: notchInfo?.notch_width ?? 160,
     }), [notchInfo?.notch_height, notchInfo?.notch_width]);
 
+    const hideForMaximized = settings.hideWhenMaximized && isAppMaximized;
+
     // Memoize target dimensions
     const { targetWidth, targetHeight } = useMemo(() => {
+        if (hideForMaximized) {
+            return { targetWidth: baseNotchWidth, targetHeight: 1 };
+        }
+
         if (expanded) {
             return {
                 targetWidth: Math.min(windowSize.width - 40, 600),
@@ -269,7 +287,14 @@ export function DynamicIsland() {
         }
 
         return { targetWidth: baseNotchWidth + 120, targetHeight: notchHeight };
-    }, [expanded, isHovered, mode, baseNotchWidth, notchHeight, windowSize.width, windowSize.height, settings.nonNotchMode]);
+    }, [hideForMaximized, expanded, isHovered, mode, baseNotchWidth, notchHeight, windowSize.width, windowSize.height, settings.nonNotchMode]);
+
+    // Collapse the island while a maximized app is covering the display
+    useEffect(() => {
+        if (hideForMaximized && expanded) {
+            setExpanded(false);
+        }
+    }, [hideForMaximized, expanded, setExpanded]);
 
     // Reset popover state when island collapses
     useEffect(() => {
@@ -286,7 +311,7 @@ export function DynamicIsland() {
     }, [isHovered, expanded, isAnimating, isPopoverOpen, setExpanded]);
 
     const handleWheel = useCallback((e: React.WheelEvent) => {
-        if (isAnimating) return;
+        if (isAnimating || hideForMaximized) return;
 
         if (!expanded && e.deltaY < -20) {
             setExpanded(true);
@@ -307,7 +332,7 @@ export function DynamicIsland() {
                 cycleMode(e.deltaX > 20 ? 'next' : 'prev');
             }
         }
-    }, [expanded, isAnimating, activeTab, cycleMode, setExpanded, setIsAnimating, setActiveTab, lastModeCycleTime, setLastModeCycleTime]);
+    }, [expanded, isAnimating, hideForMaximized, activeTab, cycleMode, setExpanded, setIsAnimating, setActiveTab, lastModeCycleTime, setLastModeCycleTime]);
 
     const handleChildWheel = useCallback((e: React.WheelEvent) => {
         if (Math.abs(e.deltaY) > Math.abs(e.deltaX)) {
@@ -422,7 +447,8 @@ export function DynamicIsland() {
                     "before:bg-[radial-gradient(circle_at_0_100%,transparent_6px,black_6px)]",
                     "after:content-[''] after:absolute after:top-0 after:-right-[6px] after:w-[6px] after:h-[6px] after:z-10 after:pointer-events-none",
                     "after:bg-[radial-gradient(circle_at_100%_100%,transparent_6px,black_6px)]",
-                    (settings.nonNotchMode && mode === 'idle' && !isHovered && !expanded) && "before:hidden after:hidden"
+                    ((settings.nonNotchMode && mode === 'idle' && !isHovered && !expanded) || hideForMaximized) && "before:hidden after:hidden",
+                    hideForMaximized && "pointer-events-none"
                 )}
                 initial={false}
                 onAnimationComplete={() => setIsAnimating(false)}
@@ -430,12 +456,13 @@ export function DynamicIsland() {
                     width: targetWidth,
                     height: targetHeight,
                     borderRadius: '0px 0px 18px 18px',
+                    opacity: hideForMaximized ? 0 : 1,
                 }}
                 transition={springTransition}
-                onHoverStart={handleHoverStart}
+                onHoverStart={hideForMaximized ? undefined : handleHoverStart}
                 onClick={handleIslandClick}
                 onWheel={handleWheel}
-                style={{ cursor: 'pointer' }}
+                style={{ cursor: hideForMaximized ? 'default' : 'pointer' }}
             >
                 <AnimatePresence mode="wait">
                     <motion.div
@@ -469,7 +496,7 @@ export function DynamicIsland() {
                     </motion.div>
                 </AnimatePresence>
 
-                {!expanded && (
+                {!expanded && !hideForMaximized && (
                     <ModeIndicator
                         availableModes={availableModes}
                         currentMode={mode}

@@ -17,6 +17,7 @@ interface SettingsState {
     showMedia: boolean;
     liquidGlassMode: boolean;
     nonNotchMode: boolean;
+    hideWhenMaximized: boolean;
 }
 
 type Tab = 'general' | 'appearance' | 'media' | 'widgets' | 'plugins';
@@ -29,6 +30,7 @@ export default function Settings() {
         showMedia: true,
         liquidGlassMode: false,
         nonNotchMode: false,
+        hideWhenMaximized: true,
     });
     const [activeTab, setActiveTab] = useState<Tab>('general');
 
@@ -50,19 +52,25 @@ export default function Settings() {
 
     useEffect(() => {
         const saved = localStorage.getItem('app-settings');
+        let hideWhenMaximized = true;
         if (saved) {
             try {
                 const parsed = JSON.parse(saved);
+                hideWhenMaximized = parsed.hideWhenMaximized ?? true;
                 setSettings({
                     showMedia: true,
                     liquidGlassMode: false,
                     nonNotchMode: false,
+                    hideWhenMaximized: true,
                     ...parsed
                 });
             } catch (e) {
                 console.error("Failed to parse settings", e);
             }
         }
+        import('@tauri-apps/api/core').then(({ invoke }) => {
+            invoke('set_hide_when_maximized', { enabled: hideWhenMaximized }).catch(console.error);
+        });
     }, []);
 
     const updateSetting = <K extends keyof SettingsState>(key: K, value: SettingsState[K]) => {
@@ -80,6 +88,9 @@ export default function Settings() {
                     extraWidth: 400.0,
                     extraHeight: 800.0,
                     non_notch_mode: next.nonNotchMode
+                }).catch(console.error);
+                invoke('set_hide_when_maximized', {
+                    enabled: next.hideWhenMaximized
                 }).catch(console.error);
             });
 
@@ -181,6 +192,18 @@ export default function Settings() {
                                     <Switch
                                         checked={settings.nonNotchMode}
                                         onCheckedChange={(c) => updateSetting('nonNotchMode', c)}
+                                    />
+                                </div>
+                            </div>
+                            <div className="bg-card rounded-2xl mb-6 overflow-hidden border border-border">
+                                <div className="flex items-center justify-between p-3 px-4 border-b border-border last:border-b-0">
+                                    <div className="flex flex-col">
+                                        <Label className="text-[15px] font-normal">Hide When Maximized</Label>
+                                        <span className="text-xs text-muted-foreground mt-0.5">Hide island when another app is maximized</span>
+                                    </div>
+                                    <Switch
+                                        checked={settings.hideWhenMaximized}
+                                        onCheckedChange={(c) => updateSetting('hideWhenMaximized', c)}
                                     />
                                 </div>
                             </div>

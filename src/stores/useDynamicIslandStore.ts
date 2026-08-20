@@ -7,6 +7,7 @@ interface Settings {
     showMedia: boolean;
     liquidGlassMode: boolean;
     nonNotchMode: boolean;
+    hideWhenMaximized: boolean;
 }
 
 interface DynamicIslandState {
@@ -19,6 +20,7 @@ interface DynamicIslandState {
     isAnimating: boolean;
     activeTab: 'widgets' | 'files';
     isPopoverOpen: boolean;
+    isAppMaximized: boolean;
 
     // Content state
     notes: string;
@@ -43,6 +45,7 @@ interface DynamicIslandActions {
     setIsAnimating: (value: boolean) => void;
     setActiveTab: (tab: 'widgets' | 'files') => void;
     setIsPopoverOpen: (value: boolean) => void;
+    setIsAppMaximized: (value: boolean) => void;
 
     // Content actions
     setNotes: (notes: string) => void;
@@ -72,6 +75,7 @@ const DEFAULT_SETTINGS: Settings = {
     showMedia: true,
     liquidGlassMode: false,
     nonNotchMode: false,
+    hideWhenMaximized: true,
 };
 
 export const useDynamicIslandStore = create<DynamicIslandStore>((set, get) => ({
@@ -82,6 +86,7 @@ export const useDynamicIslandStore = create<DynamicIslandStore>((set, get) => ({
     isAnimating: false,
     activeTab: 'widgets',
     isPopoverOpen: false,
+    isAppMaximized: false,
     notes: '',
     windowSize: { width: window.innerWidth, height: window.innerHeight },
     settings: DEFAULT_SETTINGS,
@@ -102,6 +107,7 @@ export const useDynamicIslandStore = create<DynamicIslandStore>((set, get) => ({
     setIsAnimating: (value) => set({ isAnimating: value }),
     setActiveTab: (tab) => set({ activeTab: tab }),
     setIsPopoverOpen: (value) => set({ isPopoverOpen: value }),
+    setIsAppMaximized: (value) => set({ isAppMaximized: value }),
 
     // Content actions
     setNotes: (notes) => set({ notes }),
