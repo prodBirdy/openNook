@@ -8,6 +8,8 @@ interface Settings {
     liquidGlassMode: boolean;
     nonNotchMode: boolean;
     islandColor: string;
+    islandPositionX: number;
+    islandPositionY: number;
 }
 
 interface DynamicIslandState {
@@ -67,6 +69,11 @@ interface DynamicIslandActions {
 
 type DynamicIslandStore = DynamicIslandState & DynamicIslandActions;
 
+export function clampIslandPosition(value: unknown, fallback: number): number {
+    const n = typeof value === 'number' ? value : Number(value);
+    return Number.isFinite(n) ? Math.min(100, Math.max(0, n)) : fallback;
+}
+
 const DEFAULT_SETTINGS: Settings = {
     showCalendar: false,
     showReminders: false,
@@ -74,6 +81,8 @@ const DEFAULT_SETTINGS: Settings = {
     liquidGlassMode: false,
     nonNotchMode: false,
     islandColor: '#000000',
+    islandPositionX: 50,
+    islandPositionY: 0,
 };
 
 export const useDynamicIslandStore = create<DynamicIslandStore>((set, get) => ({
@@ -136,12 +145,26 @@ export const useDynamicIslandStore = create<DynamicIslandStore>((set, get) => ({
             try {
                 const parsed = JSON.parse(saved);
                 set((state) => ({
-                    settings: { ...state.settings, ...parsed }
+                    settings: {
+                        ...state.settings,
+                        ...parsed,
+                        islandPositionX: clampIslandPosition(parsed.islandPositionX, DEFAULT_SETTINGS.islandPositionX),
+                        islandPositionY: clampIslandPosition(parsed.islandPositionY, DEFAULT_SETTINGS.islandPositionY),
+                    }
                 }));
             } catch (e) {
                 console.error('Failed to parse settings:', e);
             }
         }
+
+        const { settings } = get();
+        invoke('update_window_settings', {
+            extraWidth: 400.0,
+            extraHeight: 800.0,
+            non_notch_mode: settings.nonNotchMode,
+            positionX: settings.islandPositionX,
+            positionY: settings.islandPositionY,
+        }).catch(console.error);
     },
 
     // Mode cycling

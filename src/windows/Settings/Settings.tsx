@@ -1,9 +1,11 @@
 import { useState, useEffect } from 'react';
 import { useWidgetStore } from '../../stores/useWidgetStore';
+import { clampIslandPosition } from '../../stores/useDynamicIslandStore';
 import { PluginStore } from '../../components/PluginStore';
 import { Switch } from '@/components/ui/switch';
 import { Button } from '@/components/ui/button';
 import { Label } from '@/components/ui/label';
+import { Slider } from '@/components/ui/slider';
 import {
     Settings as SettingsIcon,
     Palette,
@@ -18,6 +20,8 @@ interface SettingsState {
     liquidGlassMode: boolean;
     nonNotchMode: boolean;
     islandColor: string;
+    islandPositionX: number;
+    islandPositionY: number;
 }
 
 type Tab = 'general' | 'appearance' | 'media' | 'widgets' | 'plugins';
@@ -31,6 +35,8 @@ export default function Settings() {
         liquidGlassMode: false,
         nonNotchMode: false,
         islandColor: '#000000',
+        islandPositionX: 50,
+        islandPositionY: 0,
     });
     const [activeTab, setActiveTab] = useState<Tab>('general');
 
@@ -60,7 +66,9 @@ export default function Settings() {
                     liquidGlassMode: false,
                     nonNotchMode: false,
                     islandColor: '#000000',
-                    ...parsed
+                    ...parsed,
+                    islandPositionX: clampIslandPosition(parsed.islandPositionX, 50),
+                    islandPositionY: clampIslandPosition(parsed.islandPositionY, 0),
                 });
             } catch (e) {
                 console.error("Failed to parse settings", e);
@@ -68,24 +76,28 @@ export default function Settings() {
         }
     }, []);
 
+    const persistSettings = (next: SettingsState) => {
+        localStorage.setItem('app-settings', JSON.stringify(next));
+        window.dispatchEvent(new StorageEvent('storage', {
+            key: 'app-settings',
+            newValue: JSON.stringify(next)
+        }));
+
+        import('@tauri-apps/api/core').then(({ invoke }) => {
+            invoke('update_window_settings', {
+                extraWidth: 400.0,
+                extraHeight: 800.0,
+                non_notch_mode: next.nonNotchMode,
+                positionX: next.islandPositionX,
+                positionY: next.islandPositionY,
+            }).catch(console.error);
+        });
+    };
+
     const updateSetting = <K extends keyof SettingsState>(key: K, value: SettingsState[K]) => {
         setSettings(prev => {
             const next = { ...prev, [key]: value };
-            localStorage.setItem('app-settings', JSON.stringify(next));
-            window.dispatchEvent(new StorageEvent('storage', {
-                key: 'app-settings',
-                newValue: JSON.stringify(next)
-            }));
-
-            // Sync window settings to backend
-            import('@tauri-apps/api/core').then(({ invoke }) => {
-                invoke('update_window_settings', {
-                    extraWidth: 400.0,
-                    extraHeight: 800.0,
-                    non_notch_mode: next.nonNotchMode
-                }).catch(console.error);
-            });
-
+            persistSettings(next);
             return next;
         });
     };
@@ -200,6 +212,59 @@ export default function Settings() {
                                         onChange={(e) => updateSetting('islandColor', e.target.value)}
                                         className="h-8 w-8 cursor-pointer rounded-md border border-border bg-transparent p-0.5"
                                     />
+                                </div>
+                            </div>
+                            <div className="bg-card rounded-2xl mb-6 overflow-hidden border border-border">
+                                <div className="flex flex-col gap-4 p-3 px-4">
+                                    <div className="flex items-start justify-between gap-3">
+                                        <div className="flex flex-col">
+                                            <Label className="text-[15px] font-normal">Island Position</Label>
+                                            <span className="text-xs text-muted-foreground mt-0.5">Move the island anywhere on the screen</span>
+                                        </div>
+                                        <Button
+                                            type="button"
+                                            variant="ghost"
+                                            size="sm"
+                                            className="h-7 px-2 text-xs text-muted-foreground"
+                                            onClick={() => {
+                                                setSettings(prev => {
+                                                    const next = { ...prev, islandPositionX: 50, islandPositionY: 0 };
+                                                    persistSettings(next);
+                                                    return next;
+                                                });
+                                            }}
+                                        >
+                                            Reset
+                                        </Button>
+                                    </div>
+                                    <div className="flex flex-col gap-2">
+                                        <div className="flex items-center justify-between">
+                                            <span className="text-xs text-muted-foreground">Horizontal</span>
+                                            <span className="text-xs tabular-nums text-muted-foreground">{Math.round(settings.islandPositionX)}</span>
+                                        </div>
+                                        <Slider
+                                            min={0}
+                                            max={100}
+                                            step={1}
+                                            value={[settings.islandPositionX]}
+                                            onValueChange={([value]) => updateSetting('islandPositionX', value)}
+                                            aria-label="Island horizontal position"
+                                        />
+                                    </div>
+                                    <div className="flex flex-col gap-2">
+                                        <div className="flex items-center justify-between">
+                                            <span className="text-xs text-muted-foreground">Vertical</span>
+                                            <span className="text-xs tabular-nums text-muted-foreground">{Math.round(settings.islandPositionY)}</span>
+                                        </div>
+                                        <Slider
+                                            min={0}
+                                            max={100}
+                                            step={1}
+                                            value={[settings.islandPositionY]}
+                                            onValueChange={([value]) => updateSetting('islandPositionY', value)}
+                                            aria-label="Island vertical position"
+                                        />
+                                    </div>
                                 </div>
                             </div>
                         </div>

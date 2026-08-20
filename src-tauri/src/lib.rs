@@ -174,7 +174,8 @@ pub fn run() {
                 // Initialize audio caches
                 audio::init_audio_state();
 
-                // Initial positioning and sizing - window is always fixed size
+                // Restore persisted window settings, then place the island
+                window::initialize_window_settings_from_db(app.handle());
                 let _ = window::setup_fixed_window_size(&window);
 
                 window::setup_mouse_monitoring(app.handle().clone());
