@@ -7,6 +7,7 @@ interface Settings {
     showMedia: boolean;
     liquidGlassMode: boolean;
     nonNotchMode: boolean;
+    islandColor: string;
 }
 
 interface DynamicIslandState {
@@ -72,6 +73,7 @@ const DEFAULT_SETTINGS: Settings = {
     showMedia: true,
     liquidGlassMode: false,
     nonNotchMode: false,
+    islandColor: '#000000',
 };
 
 export const useDynamicIslandStore = create<DynamicIslandStore>((set, get) => ({

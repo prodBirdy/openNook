@@ -2,7 +2,7 @@ import { motion, AnimatePresence } from 'motion/react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
-import { useEffect, useCallback, useRef, useMemo } from 'react';
+import { useEffect, useCallback, useRef, useMemo, type CSSProperties } from 'react';
 import { useNotchInfo } from '../../hooks/useNotchInfo';
 import { cn } from '../../lib/utils';
 import { CompactMedia } from './CompactMedia';
@@ -360,6 +360,13 @@ export function DynamicIsland() {
 
     const fadeTransition = useMemo(() => ({ duration: 0.3 }), []);
 
+    const islandColor = /^#[0-9a-fA-F]{6}$/.test(settings.islandColor)
+        ? settings.islandColor
+        : '#000000';
+    const islandBackground = settings.liquidGlassMode
+        ? `color-mix(in srgb, ${islandColor} 65%, transparent)`
+        : islandColor;
+
     // Get active widget for compact mode
     const activeWidget = useMemo(() =>
         enabledCompactWidgets.find(w => w.id === mode),
@@ -412,16 +419,16 @@ export function DynamicIsland() {
             <motion.div
                 ref={islandRef}
                 className={cn(
-                    "pointer-events-auto bg-black rounded-b-[20px] overflow-visible flex items-center justify-center relative will-change-[width,height,border-radius]",
+                    "pointer-events-auto rounded-b-[20px] overflow-visible flex items-center justify-center relative will-change-[width,height,border-radius]",
                     // Expanded
                     expanded && "rounded-b-[18px] flex-col justify-start",
                     // Liquid Glass
-                    settings.liquidGlassMode && "bg-black/65 backdrop-blur-[25px] backdrop-saturate-[180%] border border-white/10 shadow-[0_10px_40px_rgba(0,0,0,0.5)]",
+                    settings.liquidGlassMode && "backdrop-blur-[25px] backdrop-saturate-[180%] border border-white/10 shadow-[0_10px_40px_rgba(0,0,0,0.5)]",
                     // Wings
                     "before:content-[''] before:absolute before:top-0 before:-left-[6px] before:w-[6px] before:h-[6px] before:z-10 before:pointer-events-none",
-                    "before:bg-[radial-gradient(circle_at_0_100%,transparent_6px,black_6px)]",
+                    "before:bg-[radial-gradient(circle_at_0_100%,transparent_6px,var(--island-color)_6px)]",
                     "after:content-[''] after:absolute after:top-0 after:-right-[6px] after:w-[6px] after:h-[6px] after:z-10 after:pointer-events-none",
-                    "after:bg-[radial-gradient(circle_at_100%_100%,transparent_6px,black_6px)]",
+                    "after:bg-[radial-gradient(circle_at_100%_100%,transparent_6px,var(--island-color)_6px)]",
                     (settings.nonNotchMode && mode === 'idle' && !isHovered && !expanded) && "before:hidden after:hidden"
                 )}
                 initial={false}
@@ -435,7 +442,11 @@ export function DynamicIsland() {
                 onHoverStart={handleHoverStart}
                 onClick={handleIslandClick}
                 onWheel={handleWheel}
-                style={{ cursor: 'pointer' }}
+                style={{
+                    cursor: 'pointer',
+                    backgroundColor: islandBackground,
+                    '--island-color': islandColor,
+                } as CSSProperties}
             >
                 <AnimatePresence mode="wait">
                     <motion.div

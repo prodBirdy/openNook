@@ -17,6 +17,7 @@ interface SettingsState {
     showMedia: boolean;
     liquidGlassMode: boolean;
     nonNotchMode: boolean;
+    islandColor: string;
 }
 
 type Tab = 'general' | 'appearance' | 'media' | 'widgets' | 'plugins';
@@ -29,6 +30,7 @@ export default function Settings() {
         showMedia: true,
         liquidGlassMode: false,
         nonNotchMode: false,
+        islandColor: '#000000',
     });
     const [activeTab, setActiveTab] = useState<Tab>('general');
 
@@ -57,6 +59,7 @@ export default function Settings() {
                     showMedia: true,
                     liquidGlassMode: false,
                     nonNotchMode: false,
+                    islandColor: '#000000',
                     ...parsed
                 });
             } catch (e) {
@@ -181,6 +184,21 @@ export default function Settings() {
                                     <Switch
                                         checked={settings.nonNotchMode}
                                         onCheckedChange={(c) => updateSetting('nonNotchMode', c)}
+                                    />
+                                </div>
+                            </div>
+                            <div className="bg-card rounded-2xl mb-6 overflow-hidden border border-border">
+                                <div className="flex items-center justify-between p-3 px-4 border-b border-border last:border-b-0">
+                                    <div className="flex flex-col">
+                                        <Label className="text-[15px] font-normal">Island Color</Label>
+                                        <span className="text-xs text-muted-foreground mt-0.5">Background color of the dynamic island</span>
+                                    </div>
+                                    <input
+                                        type="color"
+                                        aria-label="Island color"
+                                        value={/^#[0-9a-fA-F]{6}$/.test(settings.islandColor) ? settings.islandColor : '#000000'}
+                                        onChange={(e) => updateSetting('islandColor', e.target.value)}
+                                        className="h-8 w-8 cursor-pointer rounded-md border border-border bg-transparent p-0.5"
                                     />
                                 </div>
                             </div>
