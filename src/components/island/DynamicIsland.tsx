@@ -13,7 +13,7 @@ import { ModeIndicator } from './ModeIndicator';
 import { ExpandedIsland } from './ExpandedIsland';
 
 import { useMediaPlayerStore } from '../../stores/useMediaPlayerStore';
-import { useDynamicIslandStore } from '../../stores/useDynamicIslandStore';
+import { clampIslandPosition, useDynamicIslandStore } from '../../stores/useDynamicIslandStore';
 import { useWidgetStore } from '../../stores/useWidgetStore';
 import { useDerivedTimers } from '../../stores/useTimerStore';
 import { useSessionsWithElapsed } from '../../stores/useSessionStore';
@@ -271,6 +271,10 @@ export function DynamicIsland() {
         return { targetWidth: baseNotchWidth + 120, targetHeight: notchHeight };
     }, [expanded, isHovered, mode, baseNotchWidth, notchHeight, windowSize.width, windowSize.height, settings.nonNotchMode]);
 
+    const islandPositionX = clampIslandPosition(settings.islandPositionX, 50);
+    const islandPositionY = clampIslandPosition(settings.islandPositionY, 0);
+    const isDockedTop = islandPositionY < 1;
+
     // Reset popover state when island collapses
     useEffect(() => {
         if (!expanded && isPopoverOpen) {
@@ -348,7 +352,7 @@ export function DynamicIsland() {
         // Also send after animation completes to capture final state
         const timeoutId = setTimeout(updateBounds, 350);
         return () => clearTimeout(timeoutId);
-    }, [targetWidth, targetHeight, expanded]);
+    }, [targetWidth, targetHeight, expanded, islandPositionX, islandPositionY]);
 
     // Memoize transitions
     const springTransition = useMemo(() => ({
@@ -412,9 +416,10 @@ export function DynamicIsland() {
             <motion.div
                 ref={islandRef}
                 className={cn(
-                    "pointer-events-auto bg-black rounded-b-[20px] overflow-visible flex items-center justify-center relative will-change-[width,height,border-radius]",
+                    "pointer-events-auto bg-black overflow-visible flex items-center justify-center relative will-change-[width,height,border-radius]",
+                    isDockedTop ? "rounded-b-[20px]" : "rounded-[20px]",
                     // Expanded
-                    expanded && "rounded-b-[18px] flex-col justify-start",
+                    expanded && (isDockedTop ? "rounded-b-[18px] flex-col justify-start" : "rounded-[18px] flex-col justify-start"),
                     // Liquid Glass
                     settings.liquidGlassMode && "bg-black/65 backdrop-blur-[25px] backdrop-saturate-[180%] border border-white/10 shadow-[0_10px_40px_rgba(0,0,0,0.5)]",
                     // Wings
@@ -422,14 +427,14 @@ export function DynamicIsland() {
                     "before:bg-[radial-gradient(circle_at_0_100%,transparent_6px,black_6px)]",
                     "after:content-[''] after:absolute after:top-0 after:-right-[6px] after:w-[6px] after:h-[6px] after:z-10 after:pointer-events-none",
                     "after:bg-[radial-gradient(circle_at_100%_100%,transparent_6px,black_6px)]",
-                    (settings.nonNotchMode && mode === 'idle' && !isHovered && !expanded) && "before:hidden after:hidden"
+                    (!isDockedTop || (settings.nonNotchMode && mode === 'idle' && !isHovered && !expanded)) && "before:hidden after:hidden"
                 )}
                 initial={false}
                 onAnimationComplete={() => setIsAnimating(false)}
                 animate={{
                     width: targetWidth,
                     height: targetHeight,
-                    borderRadius: '0px 0px 18px 18px',
+                    borderRadius: isDockedTop ? '0px 0px 18px 18px' : '18px',
                 }}
                 transition={springTransition}
                 onHoverStart={handleHoverStart}

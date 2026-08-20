@@ -110,6 +110,10 @@ static UI_BOUNDS: std::sync::OnceLock<RwLock<Option<UiBounds>>> = std::sync::Onc
 /// Global storage for window settings
 static WINDOW_SETTINGS: std::sync::OnceLock<RwLock<WindowSettings>> = std::sync::OnceLock::new();
 
+fn default_position_x() -> f64 {
+    50.0
+}
+
 /// Window size settings (adjustable by the user)
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct WindowSettings {
@@ -120,6 +124,12 @@ pub struct WindowSettings {
     /// Whether "non notch mode" is active (hides wings, tighter collision)
     #[serde(default)]
     pub non_notch_mode: bool,
+    /// Horizontal island placement: 0 = left, 50 = center, 100 = right
+    #[serde(default = "default_position_x")]
+    pub position_x: f64,
+    /// Vertical island placement: 0 = top, 100 = bottom
+    #[serde(default)]
+    pub position_y: f64,
 }
 
 impl Default for WindowSettings {
@@ -128,6 +138,8 @@ impl Default for WindowSettings {
             extra_width: 400.0,
             extra_height: 800.0,
             non_notch_mode: false,
+            position_x: 50.0,
+            position_y: 0.0,
         }
     }
 }
@@ -204,6 +216,94 @@ pub fn update_ui_bounds(x: f64, y: f64, width: f64, height: f64) -> Result<(), S
         height,
     });
     Ok(())
+}
+
+/// Compact overlay sized for the expanded island. A full-screen window would
+/// intercept file-drags everywhere; a top-centered strip cannot travel.
+const ISLAND_WINDOW_WIDTH: f64 = 640.0;
+const ISLAND_WINDOW_HEIGHT: f64 = 320.0;
+
+fn clamp_position_pct(value: f64) -> f64 {
+    value.clamp(0.0, 100.0)
+}
+
+fn island_window_size(screen_width: f64, screen_height: f64, notch_height: f64) -> (f64, f64) {
+    let width = screen_width.min(ISLAND_WINDOW_WIDTH);
+    let height = screen_height.min(notch_height + ISLAND_WINDOW_HEIGHT).max(1.0);
+    (width, height)
+}
+
+fn island_window_origin(
+    screen_width: f64,
+    screen_height: f64,
+    width: f64,
+    height: f64,
+    settings: &WindowSettings,
+) -> (f64, f64) {
+    let x = (screen_width - width).max(0.0) * (clamp_position_pct(settings.position_x) / 100.0);
+    let y = (screen_height - height).max(0.0) * (clamp_position_pct(settings.position_y) / 100.0);
+    (x, y)
+}
+
+/// Logical (x, y, width, height) of the main window.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn main_window_logical_frame(
+    app_handle: &AppHandle,
+    screen_width: f64,
+    screen_height: f64,
+    notch_height: f64,
+) -> (f64, f64, f64, f64) {
+    if let Some(window) = app_handle.get_webview_window("main") {
+        if let (Ok(pos), Ok(size)) = (window.outer_position(), window.outer_size()) {
+            let scale = window.scale_factor().unwrap_or(1.0);
+            return (
+                pos.x as f64 / scale,
+                pos.y as f64 / scale,
+                size.width as f64 / scale,
+                size.height as f64 / scale,
+            );
+        }
+    }
+
+    let settings = get_window_settings();
+    let (width, height) = island_window_size(screen_width, screen_height, notch_height);
+    let (x, y) = island_window_origin(screen_width, screen_height, width, height, &settings);
+    (x, y, width, height)
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn point_in_rect(px: f64, py: f64, x: f64, y: f64, w: f64, h: f64, padding: f64) -> bool {
+    px >= (x - padding) && px <= (x + w + padding) && py >= (y - padding) && py <= (y + h + padding)
+}
+
+/// Screen-space UI hit rect. Uses the frontend's window-relative bounds as-is
+/// (no recentering) so a moved island stays hoverable.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn ui_hit_rect(
+    bounds: Option<UiBounds>,
+    window_x: f64,
+    window_y: f64,
+    win_width: f64,
+    notch_width: f64,
+    settings: &WindowSettings,
+) -> (f64, f64, f64, f64) {
+    if let Some(bounds) = bounds {
+        return (
+            window_x + bounds.x,
+            window_y + bounds.y,
+            bounds.width,
+            bounds.height,
+        );
+    }
+
+    let fallback_w = if settings.non_notch_mode {
+        0.0
+    } else {
+        notch_width.min(win_width)
+    };
+    let fallback_h = if settings.non_notch_mode { 1.0 } else { 100.0 };
+    let fallback_x = window_x + (win_width - fallback_w) / 2.0;
+    (fallback_x, window_y, fallback_w, fallback_h)
 }
 
 /// Helper to calculate dynamic notch width based on screen width
@@ -402,6 +502,8 @@ pub fn update_window_settings(
     extra_width: f64,
     extra_height: f64,
     non_notch_mode: bool,
+    position_x: f64,
+    position_y: f64,
 ) -> Result<(), String> {
     // Update the stored settings
     {
@@ -410,6 +512,8 @@ pub fn update_window_settings(
         settings.extra_width = extra_width;
         settings.extra_height = extra_height;
         settings.non_notch_mode = non_notch_mode;
+        settings.position_x = clamp_position_pct(position_x);
+        settings.position_y = clamp_position_pct(position_y);
 
         persist_window_settings(window.app_handle(), &settings);
     }
@@ -422,29 +526,25 @@ pub fn update_window_settings(
     Ok(())
 }
 
-/// Set up the window with a fixed size based on notch dimensions and settings.
-/// The window always uses: width = (notch_width + 160) + extra_width, height = notch_height + extra_height
+/// Set up the window sized for the island and placed from saved position settings.
 pub fn setup_fixed_window_size(window: &WebviewWindow) -> Result<(), String> {
-    let (screen_width, _screen_height, notch_height, _notch_width) =
+    let (screen_width, screen_height, notch_height, _notch_width) =
         get_screen_info(Some(window.app_handle()));
     let settings = get_window_settings();
 
-    // Calculate fixed window dimensions
-    // In non-notch mode, we might want a smaller fixed window if possible, but keeping it consistent is safer for now
-    // unless the "too big" comment refers to the window size itself blocking things?
-    // If the window is transparent and click-through, size shouldn't matter much visually, but might block clicks if implementation is wrong.
-    // We want the window to be full width
-    let target_width = screen_width;
-    let target_height = notch_height + settings.extra_height;
+    let (target_width, target_height) =
+        island_window_size(screen_width, screen_height, notch_height);
+    let (x, y) = island_window_origin(
+        screen_width,
+        screen_height,
+        target_width,
+        target_height,
+        &settings,
+    );
 
-    // Resize the window
     window
         .set_size(LogicalSize::new(target_width, target_height))
         .map_err(|e| e.to_string())?;
-
-    // Center horizontally, position at very top (y=0) to overlap with notch
-    let x = 0.0;
-    let y = 0.0;
 
     window
         .set_position(LogicalPosition::new(x, y))
@@ -711,26 +811,6 @@ pub fn setup_mouse_monitoring(app_handle: tauri::AppHandle) {
     let (screen_width, screen_height, notch_height, notch_width) =
         get_screen_info(Some(&app_handle));
 
-    // Pre-compute window position (window is centered at top)
-    let settings = get_window_settings();
-    let win_width = notch_width + 160.0 + settings.extra_width;
-    let window_x = (screen_width - win_width) / 2.0;
-
-    // Compute fallback detection area
-    let effective_notch_width = if settings.non_notch_mode {
-        0.0
-    } else {
-        notch_width
-    };
-
-    let fallback_x_start = (screen_width - effective_notch_width) / 2.0;
-    let _fallback_x_end = fallback_x_start + effective_notch_width;
-    let _fallback_y_end = if settings.non_notch_mode {
-        1.0
-    } else {
-        notch_height
-    };
-
     // Spawn monitoring thread
     std::thread::spawn(move || {
         let mut cached_screen_height = screen_height;
@@ -744,21 +824,23 @@ pub fn setup_mouse_monitoring(app_handle: tauri::AppHandle) {
         const POLL_MS: u64 = 20; // ~50fps
 
         loop {
-            // Refresh settings and dimensions on every iteration to handle runtime toggles
+            // Refresh settings and the real window frame so a moved island stays hoverable
             let settings = get_window_settings();
-            let effective_notch_width = if settings.non_notch_mode {
-                0.0
-            } else {
-                notch_width
-            };
-
-            let fallback_x_start = (screen_width - effective_notch_width) / 2.0;
-            let fallback_x_end = fallback_x_start + effective_notch_width;
-            let fallback_y_end = if settings.non_notch_mode {
-                1.0
-            } else {
-                notch_height
-            };
+            let (window_x, window_y, win_width, _win_height) = main_window_logical_frame(
+                &app_handle,
+                screen_width,
+                cached_screen_height,
+                notch_height,
+            );
+            let bounds = get_ui_bounds_store().try_read().ok().and_then(|guard| *guard);
+            let (hit_x, hit_y, hit_w, hit_h) = ui_hit_rect(
+                bounds,
+                window_x,
+                window_y,
+                win_width,
+                notch_width,
+                &settings,
+            );
 
             // Get mouse position
             let (mouse_x, flipped_y) = unsafe {
@@ -776,15 +858,10 @@ pub fn setup_mouse_monitoring(app_handle: tauri::AppHandle) {
 
             let was_inside = IS_INSIDE.load(Ordering::Relaxed);
 
-            // OPTIMIZATION: Broad interaction zone check.
-            // Only perform precise bounds checks if the mouse is roughly in the top-middle area.
-            // In non-notch mode, we want a much tighter broad check to avoid accidental triggers.
-            let broad_padding_x = if settings.non_notch_mode { 60.0 } else { 300.0 };
-            let broad_limit_y = if settings.non_notch_mode { 50.0 } else { 250.0 };
-
-            let is_in_interaction_zone = mouse_x >= (fallback_x_start - broad_padding_x)
-                && mouse_x <= (fallback_x_end + broad_padding_x)
-                && flipped_y <= broad_limit_y;
+            // Broad zone follows the actual island, not the top-center notch.
+            let broad_padding = if settings.non_notch_mode { 60.0 } else { 80.0 };
+            let is_in_interaction_zone =
+                point_in_rect(mouse_x, flipped_y, hit_x, hit_y, hit_w, hit_h, broad_padding);
 
             if !is_in_interaction_zone && !was_inside {
                 std::thread::sleep(std::time::Duration::from_millis(POLL_MS));
@@ -797,47 +874,22 @@ pub fn setup_mouse_monitoring(app_handle: tauri::AppHandle) {
                 PADDING_ENTER
             };
 
-            // Check UI bounds or fallback to notch area
-            let in_ui_area = if let Ok(guard) = get_ui_bounds_store().try_read() {
-                if let Some(bounds) = *guard {
-                    // Center the bounds within the window
-                    // win_width is the total window width, bounds.width is the UI element width
-                    // This centers the activation zone regardless of where the element is positioned
-                    let screen_x = window_x + (win_width - bounds.width) / 2.0;
-                    let screen_y = bounds.y; // Window is at y=0, so bounds.y is already screen-relative
-                    mouse_x >= (screen_x - padding)
-                        && mouse_x <= (screen_x + bounds.width + padding)
-                        && flipped_y >= (screen_y - padding)
-                        && flipped_y <= (screen_y + bounds.height + padding)
-                } else {
-                    mouse_x >= (fallback_x_start - padding)
-                        && mouse_x <= (fallback_x_end + padding)
-                        && flipped_y >= -padding
-                        && flipped_y <= (fallback_y_end + padding)
-                }
-            } else {
-                mouse_x >= (fallback_x_start - padding)
-                    && mouse_x <= (fallback_x_end + padding)
-                    && flipped_y >= -padding
-                    && flipped_y <= (fallback_y_end + padding)
-            };
+            let in_ui_area =
+                point_in_rect(mouse_x, flipped_y, hit_x, hit_y, hit_w, hit_h, padding);
 
             // State transitions - emit events immediately
             if in_ui_area && !was_inside {
                 IS_INSIDE.store(true, Ordering::Relaxed);
 
-                if let Ok(guard) = get_ui_bounds_store().try_read() {
-                    if let Some(bounds) = *guard {
-                        let centered_x = window_x + (win_width - bounds.width) / 2.0;
-                        log::debug!("[mouse] ENTERED UI bounds - mouse: ({:.0}, {:.0}), bounds: x={:.0}, y={:.0}, w={:.0}, h={:.0}",
-                            mouse_x, flipped_y, centered_x, bounds.y, bounds.width, bounds.height);
-                    } else {
-                        log::debug!(
-                            "[mouse] ENTERED UI bounds (fallback) - mouse: ({:.0}, {:.0})",
-                            mouse_x,
-                            flipped_y
-                        );
-                    }
+                if bounds.is_some() {
+                    log::debug!("[mouse] ENTERED UI bounds - mouse: ({:.0}, {:.0}), bounds: x={:.0}, y={:.0}, w={:.0}, h={:.0}",
+                        mouse_x, flipped_y, hit_x, hit_y, hit_w, hit_h);
+                } else {
+                    log::debug!(
+                        "[mouse] ENTERED UI bounds (fallback) - mouse: ({:.0}, {:.0})",
+                        mouse_x,
+                        flipped_y
+                    );
                 }
 
                 // Emit event first for UI responsiveness
@@ -858,17 +910,15 @@ pub fn setup_mouse_monitoring(app_handle: tauri::AppHandle) {
             } else if !in_ui_area && was_inside {
                 IS_INSIDE.store(false, Ordering::Relaxed);
 
-                if let Ok(guard) = get_ui_bounds_store().try_read() {
-                    if let Some(bounds) = *guard {
-                        log::debug!("[mouse] EXITED UI bounds - mouse: ({:.0}, {:.0}), bounds: x={:.0}, y={:.0}, w={:.0}, h={:.0}",
-                            mouse_x, flipped_y, window_x + bounds.x, bounds.y, bounds.width, bounds.height);
-                    } else {
-                        log::debug!(
-                            "[mouse] EXITED UI bounds (fallback) - mouse: ({:.0}, {:.0})",
-                            mouse_x,
-                            flipped_y
-                        );
-                    }
+                if bounds.is_some() {
+                    log::debug!("[mouse] EXITED UI bounds - mouse: ({:.0}, {:.0}), bounds: x={:.0}, y={:.0}, w={:.0}, h={:.0}",
+                        mouse_x, flipped_y, hit_x, hit_y, hit_w, hit_h);
+                } else {
+                    log::debug!(
+                        "[mouse] EXITED UI bounds (fallback) - mouse: ({:.0}, {:.0})",
+                        mouse_x,
+                        flipped_y
+                    );
                 }
 
                 // Emit event first
@@ -893,51 +943,34 @@ pub fn setup_mouse_monitoring(app_handle: tauri::AppHandle) {
     // Track whether mouse is currently in the UI area
     static IS_INSIDE: AtomicBool = AtomicBool::new(false);
 
-    let (screen_width, _screen_height, _notch_height, notch_width) =
+    let (screen_width, screen_height, notch_height, notch_width) =
         get_screen_info(Some(&app_handle));
 
     std::thread::spawn(move || {
         const POLL_MS: u64 = 20;
 
         loop {
-            // Refresh settings on every iteration to handle runtime toggles
-            // This is intentional - settings can be changed via update_window_settings
-            // and we need to immediately reflect those changes in mouse detection
+            // Refresh settings and the real window frame so a moved island stays hoverable
             let settings = get_window_settings();
-
-            let effective_notch_width = if settings.non_notch_mode {
-                0.0
-            } else {
-                notch_width
-            };
-
-            // Get actual window position instead of calculating it
-            // This ensures we match the real window position even with DPI scaling
-            // Get actual window position instead of calculating it
-            // This ensures we match the real window position even with DPI scaling
-            let (window_x, win_width, scale_factor) =
-                if let Some(window) = app_handle.get_webview_window("main") {
-                    if let (Ok(pos), Ok(size)) = (window.outer_position(), window.outer_size()) {
-                        let scale = window.scale_factor().unwrap_or(1.0);
-                        ((pos.x as f64) / scale, (size.width as f64) / scale, scale)
-                    } else {
-                        // Fallback calculation
-                        let win_w = if effective_notch_width > 0.0 {
-                            effective_notch_width + 160.0 + settings.extra_width
-                        } else {
-                            800.0 + settings.extra_width
-                        };
-                        ((screen_width - win_w) / 2.0, win_w, 1.0)
-                    }
-                } else {
-                    // Fallback if window not available
-                    let win_w = if effective_notch_width > 0.0 {
-                        effective_notch_width + 160.0 + settings.extra_width
-                    } else {
-                        800.0 + settings.extra_width
-                    };
-                    ((screen_width - win_w) / 2.0, win_w, 1.0)
-                };
+            let (window_x, window_y, win_width, _win_height) = main_window_logical_frame(
+                &app_handle,
+                screen_width,
+                screen_height,
+                notch_height,
+            );
+            let scale_factor = app_handle
+                .get_webview_window("main")
+                .and_then(|window| window.scale_factor().ok())
+                .unwrap_or(1.0);
+            let bounds = get_ui_bounds_store().try_read().ok().and_then(|guard| *guard);
+            let (hit_x, hit_y, hit_w, hit_h) = ui_hit_rect(
+                bounds,
+                window_x,
+                window_y,
+                win_width,
+                notch_width,
+                &settings,
+            );
 
             let mut point = POINT::default();
             let success = unsafe { GetCursorPos(&mut point) };
@@ -949,36 +982,9 @@ pub fn setup_mouse_monitoring(app_handle: tauri::AppHandle) {
 
                 let was_inside = IS_INSIDE.load(Ordering::Relaxed);
 
-                // Logic adapted from macOS version
                 let padding = if was_inside { 30.0 } else { 20.0 };
-
-                let in_ui_area = if let Ok(guard) = get_ui_bounds_store().try_read() {
-                    if let Some(bounds) = *guard {
-                        // Center the bounds within the window (same as macOS)
-                        let screen_x = window_x + (win_width - bounds.width) / 2.0;
-                        let screen_y = bounds.y;
-                        mouse_x >= (screen_x - padding)
-                            && mouse_x <= (screen_x + bounds.width + padding)
-                            && mouse_y >= (screen_y - padding)
-                            && mouse_y <= (screen_y + bounds.height + padding)
-                    } else {
-                        // Fallback zone at top center
-                        // In non-notch mode we use a very small height for fallback
-                        let fallback_height = if settings.non_notch_mode { 1.0 } else { 100.0 };
-
-                        mouse_x >= (window_x - padding)
-                            && mouse_x <= (window_x + win_width + padding)
-                            && mouse_y >= 0.0
-                            && mouse_y <= (fallback_height + padding)
-                    }
-                } else {
-                    let fallback_height = if settings.non_notch_mode { 1.0 } else { 100.0 };
-
-                    mouse_x >= (window_x - padding)
-                        && mouse_x <= (window_x + win_width + padding)
-                        && mouse_y >= 0.0
-                        && mouse_y <= (fallback_height + padding)
-                };
+                let in_ui_area =
+                    point_in_rect(mouse_x, mouse_y, hit_x, hit_y, hit_w, hit_h, padding);
 
                 if in_ui_area && !was_inside {
                     IS_INSIDE.store(true, Ordering::Relaxed);
