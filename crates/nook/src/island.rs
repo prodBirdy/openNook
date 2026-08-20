@@ -1,3 +1,4 @@
+use crate::icons::lucide;
 use crate::platform;
 use crate::theme;
 use gpui::{
@@ -173,8 +174,13 @@ impl Island {
                     let dragging = nook_core::files::file_drag_active();
                     if this.file_drag != dragging {
                         this.file_drag = dragging;
-                        if dragging && inside {
-                            this.arm_dropzone(cx);
+                        if dragging {
+                            // Lift click-through now, not on the next paint —
+                            // Finder must see the window before the cursor enters.
+                            platform::set_click_through_current(false);
+                            if inside {
+                                this.arm_dropzone(cx);
+                            }
                         }
                         dirty = true;
                     }
@@ -420,11 +426,12 @@ impl Island {
         let delta = event.delta.pixel_delta(px(16.0));
         let dx: f32 = delta.x.into();
         let dy: f32 = delta.y.into();
-        if !self.expanded && dy < -20.0 {
+        // AppKit scrollingDeltaY: two-finger swipe *down* is positive.
+        if !self.expanded && dy > 20.0 {
             self.expanded = true;
             nook_core::haptics::trigger(None);
             cx.notify();
-        } else if self.expanded && dy > 20.0 {
+        } else if self.expanded && dy < -20.0 {
             self.expanded = false;
             nook_core::haptics::trigger(None);
             cx.notify();
@@ -561,6 +568,9 @@ impl Render for Island {
             .items_center()
             .justify_start()
             .bg(rgba(0x00000000))
+            .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _, cx| {
+                this.on_wheel(event, cx);
+            }))
             .font(gpui::Font {
                 family: "SF Pro".into(),
                 features: gpui::FontFeatures::default(),
@@ -671,11 +681,39 @@ impl Island {
     ) -> AnyElement {
         match mode {
             CompactMode::Media => album_chip(&self.now_playing, cx).into_any_element(),
-            CompactMode::Files => label("📁", 14.0, true).into_any_element(),
-            CompactMode::Timer => label("⏱", 14.0, true).into_any_element(),
+            CompactMode::Files => lucide("image", 16.0).into_any_element(),
+            CompactMode::Timer => self.compact_timer_left(cx),
             CompactMode::Onboard => label("openNook", 12.0, true).into_any_element(),
             CompactMode::Idle => div().into_any_element(),
         }
+    }
+
+    fn compact_timer_left(&self, cx: &mut Context<Self>) -> AnyElement {
+        let timer = self.running_timer().or_else(|| self.timers.first());
+        let Some(timer) = timer else {
+            return lucide("clock", 18.0).into_any_element();
+        };
+        let total = timer.total.max(1);
+        let progress = 1.0 - timer.remaining as f32 / total as f32;
+        let id = timer.id;
+        div()
+            .id("timer-ring")
+            .size(px(22.))
+            .flex()
+            .items_center()
+            .justify_center()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                    cx.stop_propagation();
+                    if let Some(t) = this.timers.iter_mut().find(|t| t.id == id) {
+                        t.running = !t.running;
+                    }
+                    cx.notify();
+                }),
+            )
+            .child(timer_ring(progress.clamp(0.0, 1.0), 22.0))
+            .into_any_element()
     }
 
     fn compact_right(
@@ -694,11 +732,12 @@ impl Island {
             CompactMode::Timer => {
                 let text = self
                     .running_timer()
+                    .or_else(|| self.timers.first())
                     .map(|t| Self::format_time(t.remaining))
                     .unwrap_or_else(|| "0:00".into());
                 label(text, 13.0, true).into_any_element()
             }
-            CompactMode::Onboard if hovered => label("github", 11.0, false).into_any_element(),
+            CompactMode::Onboard if hovered => lucide("github", 16.0).into_any_element(),
             _ => div().into_any_element(),
         }
     }
@@ -748,7 +787,7 @@ impl Island {
                     .hover(|s| s.bg(theme::SURFACE_HOVER))
                     .active(|s| s.opacity(0.85))
                     .cursor(CursorStyle::PointingHand)
-                    .child(label("􀍟", 13.0, false))
+                    .child(lucide("settings", 16.0))
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(|this, event: &MouseDownEvent, _, cx| {
@@ -849,6 +888,7 @@ impl Island {
                 .mx_4()
                 .rounded(px(theme::INNER_RADIUS))
                 .when(hot, |d| d.border_1().border_color(rgb(0xffffff)))
+                .child(lucide(if hot { "plus" } else { "upload" }, 22.0))
                 .child(label(
                     if hot {
                         "Release to add"
@@ -955,6 +995,53 @@ fn island_chrome(body_w: f32, body_h: f32, wing: f32, color: gpui::Rgba) -> impl
     .h(px(body_h))
 }
 
+/// Original compact timer: 24px ring, progress from 12 o'clock.
+fn timer_ring(progress: f32, size: f32) -> impl IntoElement {
+    canvas(
+        |bounds, _, _| bounds,
+        move |bounds, _, window, _| {
+            let cx: f32 = bounds.center().x.into();
+            let cy: f32 = bounds.center().y.into();
+            let dim: f32 = bounds.size.width.into();
+            let radius = dim * 0.36;
+            let stroke = dim * 0.14;
+            let p = |x: f32, y: f32| point(px(x), px(y));
+
+            let mut circle = |color: gpui::Rgba, start: f32, end: f32| {
+                let steps = ((end - start).abs() * 24.0).ceil().max(2.0) as i32;
+                let mut path = PathBuilder::stroke(px(stroke));
+                for i in 0..=steps {
+                    let t = i as f32 / steps as f32;
+                    let a = start + (end - start) * t;
+                    let x = cx + radius * a.cos();
+                    let y = cy + radius * a.sin();
+                    if i == 0 {
+                        path.move_to(p(x, y));
+                    } else {
+                        path.line_to(p(x, y));
+                    }
+                }
+                if let Ok(built) = path.build() {
+                    window.paint_path(built, color);
+                }
+            };
+
+            // SVG circles start at 3 o'clock; rotate so 0 is 12 o'clock.
+            let start = -std::f32::consts::FRAC_PI_2;
+            circle(rgba(0xffffff40), start, start + std::f32::consts::TAU);
+            if progress > 0.01 {
+                circle(
+                    rgb(0xffffff),
+                    start,
+                    start + progress * std::f32::consts::TAU,
+                );
+            }
+        },
+    )
+    .w(px(size))
+    .h(px(size))
+}
+
 fn drop_veil() -> impl IntoElement {
     div()
         .absolute()
@@ -985,7 +1072,7 @@ fn tab_switch(widgets_active: bool, cx: &mut Context<Island>) -> impl IntoElemen
                 .rounded_full()
                 .when(widgets_active, |d| d.bg(theme::SURFACE_HOVER))
                 .cursor(CursorStyle::PointingHand)
-                .child(label("􀛧", 12.0, widgets_active))
+                .child(lucide("layout-grid", 14.0))
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(|this, event: &MouseDownEvent, _, cx| {
@@ -1005,7 +1092,7 @@ fn tab_switch(widgets_active: bool, cx: &mut Context<Island>) -> impl IntoElemen
                 .rounded_full()
                 .when(!widgets_active, |d| d.bg(theme::SURFACE_HOVER))
                 .cursor(CursorStyle::PointingHand)
-                .child(label("􀈕", 12.0, !widgets_active))
+                .child(lucide("files", 14.0))
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(|this, event: &MouseDownEvent, _, cx| {
@@ -1017,7 +1104,11 @@ fn tab_switch(widgets_active: bool, cx: &mut Context<Island>) -> impl IntoElemen
         )
 }
 
-fn widget_shell(title: impl Into<SharedString>, child: impl IntoElement) -> impl IntoElement {
+fn widget_shell(
+    icon: &'static str,
+    title: impl Into<SharedString>,
+    child: impl IntoElement,
+) -> impl IntoElement {
     div()
         .flex()
         .flex_col()
@@ -1028,11 +1119,18 @@ fn widget_shell(title: impl Into<SharedString>, child: impl IntoElement) -> impl
         .rounded(px(theme::WIDGET_RADIUS))
         .child(
             div()
-                .text_color(theme::TEXT_FAINT)
-                .text_size(px(10.))
-                .font_weight(FontWeight::SEMIBOLD)
+                .flex()
+                .items_center()
+                .gap_1()
                 .mb_2()
-                .child(title.into()),
+                .child(lucide(icon, 12.0))
+                .child(
+                    div()
+                        .text_color(theme::TEXT_FAINT)
+                        .text_size(px(10.))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child(title.into()),
+                ),
         )
         .child(child)
 }
@@ -1050,6 +1148,7 @@ fn media_card(np: &NowPlayingData, cx: &mut Context<Island>) -> impl IntoElement
     };
 
     widget_shell(
+        "music",
         "Now Playing",
         div()
             .flex()
@@ -1076,17 +1175,17 @@ fn media_card(np: &NowPlayingData, cx: &mut Context<Island>) -> impl IntoElement
                     .flex()
                     .justify_center()
                     .gap_3()
-                    .child(icon_btn("􀊊", cx, |_, _, _| {
+                    .child(icon_btn("skip-back", cx, |_, _, _| {
                         nook_core::runtime().spawn(async {
                             let _ = nook_core::audio::media_previous_track().await;
                         });
                     }))
-                    .child(icon_btn(if playing { "􀊆" } else { "􀊄" }, cx, |_, _, _| {
+                    .child(icon_btn(if playing { "pause" } else { "play" }, cx, |_, _, _| {
                         nook_core::runtime().spawn(async {
                             let _ = nook_core::audio::media_play_pause().await;
                         });
                     }))
-                    .child(icon_btn("􀊌", cx, |_, _, _| {
+                    .child(icon_btn("skip-forward", cx, |_, _, _| {
                         nook_core::runtime().spawn(async {
                             let _ = nook_core::audio::media_next_track().await;
                         });
@@ -1111,6 +1210,7 @@ fn calendar_card(events: &[CalendarEvent], cx: &mut Context<Island>) -> impl Int
         }
     }
     widget_shell(
+        "calendar",
         "Calendar",
         div()
             .flex()
@@ -1163,7 +1263,7 @@ fn reminders_card(reminders: &[Reminder], cx: &mut Context<Island>) -> impl Into
             );
         }
     }
-    widget_shell("Reminders", body)
+    widget_shell("list-checks", "Reminders", body)
 }
 
 fn timer_card(timers: &[Timer], cx: &mut Context<Island>) -> impl IntoElement {
@@ -1180,7 +1280,7 @@ fn timer_card(timers: &[Timer], cx: &mut Context<Island>) -> impl IntoElement {
                     .justify_between()
                     .child(label(Island::format_time(t.remaining), 16.0, true))
                     .child(icon_btn(
-                        if t.running { "􀊆" } else { "􀊄" },
+                        if t.running { "pause" } else { "play" },
                         cx,
                         move |this, _, cx| {
                             if let Some(timer) = this.timers.iter_mut().find(|x| x.id == id) {
@@ -1209,7 +1309,7 @@ fn timer_card(timers: &[Timer], cx: &mut Context<Island>) -> impl IntoElement {
                 cx.notify();
             })),
     );
-    widget_shell("Timers", body)
+    widget_shell("clock", "Timers", body)
 }
 
 fn notes_card(notes: &str, _cx: &mut Context<Island>) -> impl IntoElement {
@@ -1218,7 +1318,7 @@ fn notes_card(notes: &str, _cx: &mut Context<Island>) -> impl IntoElement {
     } else {
         notes.chars().take(120).collect()
     };
-    widget_shell("Notes", label(preview, 12.0, false))
+    widget_shell("notebook", "Notes", label(preview, 12.0, false))
 }
 
 fn speed_card(
@@ -1235,6 +1335,7 @@ fn speed_card(
         "Tap to test".into()
     };
     widget_shell(
+        "gauge",
         "Speed",
         div()
             .flex()
@@ -1294,7 +1395,7 @@ fn album_chip(np: &NowPlayingData, cx: &mut Context<Island>) -> impl IntoElement
                 });
             }),
         )
-        .child(label(if playing { "􀊆" } else { "􀑪" }, 11.0, true))
+        .child(lucide(if playing { "pause" } else { "music" }, 14.0))
 }
 
 fn visualizer(levels: &[f64], playing: bool) -> impl IntoElement {
@@ -1331,17 +1432,13 @@ fn label(text: impl Into<SharedString>, size: f32, strong: bool) -> impl IntoEle
         .child(text.into())
 }
 
-fn glyph(text: &'static str, size: f32) -> impl IntoElement {
-    label(text, size, true)
-}
-
 fn icon_btn(
-    glyph: &'static str,
+    name: &'static str,
     cx: &mut Context<Island>,
     on_click: impl Fn(&mut Island, &MouseDownEvent, &mut Context<Island>) + 'static,
 ) -> impl IntoElement {
     div()
-        .id(SharedString::from(format!("ibtn-{glyph}")))
+        .id(SharedString::from(format!("ibtn-{name}")))
         .size(px(28.))
         .rounded_full()
         .flex()
@@ -1350,7 +1447,7 @@ fn icon_btn(
         .hover(|s| s.bg(theme::SURFACE_HOVER))
         .active(|s| s.opacity(0.85))
         .cursor(CursorStyle::PointingHand)
-        .child(label(glyph, 12.0, true))
+        .child(lucide(name, 14.0))
         .on_mouse_down(
             MouseButton::Left,
             cx.listener(move |this, event: &MouseDownEvent, _, cx| {

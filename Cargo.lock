@@ -3575,6 +3575,7 @@ dependencies = [
  "objc2",
  "open",
  "raw-window-handle",
+ "rust-embed",
  "serde",
  "serde_json",
 ]

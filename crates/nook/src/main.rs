@@ -1,3 +1,4 @@
+mod icons;
 mod island;
 mod platform;
 mod theme;
@@ -10,7 +11,9 @@ actions!(nook, [Quit]);
 fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
-    Application::new().run(|cx: &mut App| {
+    Application::new()
+        .with_assets(icons::Assets)
+        .run(|cx: &mut App| {
         platform::install();
         cx.on_action(|_: &Quit, cx| cx.quit());
         cx.bind_keys([KeyBinding::new("cmd-q", Quit, None)]);

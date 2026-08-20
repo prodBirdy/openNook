@@ -26,6 +26,7 @@ open = "5"
 image = "0.25"
 chrono = { version = "0.4", features = ["clock"] }
 raw-window-handle = "0.6"
+rust-embed = "8"
 
 [profile.release]
 lto = true

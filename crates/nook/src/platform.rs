@@ -146,6 +146,25 @@ unsafe fn style_island_window(ns_win: *mut objc2::runtime::AnyObject) {
     let _: () = msg_send![ns_win, setTitle: title];
     let clear: *mut AnyObject = msg_send![class!(NSColor), clearColor];
     let _: () = msg_send![ns_win, setBackgroundColor: clear];
+    // setStyleMask drops GPUI's registerForDraggedTypes; without it Finder
+    // never delivers draggingEntered to GPUIPanel.
+    register_file_drops(ns_win);
+}
+
+/// GPUI registers NSFilenamesPboardType on the window at creation. Restyle
+/// (borderless / nonactivating) clears that list, so the island stops being
+/// a drop target until we put it back.
+#[cfg(target_os = "macos")]
+unsafe fn register_file_drops(ns_win: *mut objc2::runtime::AnyObject) {
+    use objc2::runtime::AnyObject;
+    use objc2::*;
+
+    let filenames: *mut AnyObject = msg_send![
+        class!(NSString),
+        stringWithUTF8String: c"NSFilenamesPboardType".as_ptr()
+    ];
+    let types: *mut AnyObject = msg_send![class!(NSArray), arrayWithObject: filenames];
+    let _: () = msg_send![ns_win, registerForDraggedTypes: types];
 }
 
 #[cfg(target_os = "macos")]
@@ -311,6 +330,9 @@ pub fn set_click_through_current(ignore: bool) {
         for_each_island_window(|w| {
             use objc2::*;
             let _: () = msg_send![w, setIgnoresMouseEvents: ignore];
+            if !ignore {
+                register_file_drops(w);
+            }
         });
     }
     #[cfg(not(target_os = "macos"))]
@@ -323,6 +345,9 @@ pub fn set_click_through(window: &Window, ignore: bool) {
         if let Some(ns_win) = ns_window(window) {
             use objc2::*;
             let _: () = msg_send![ns_win, setIgnoresMouseEvents: ignore];
+            if !ignore {
+                register_file_drops(ns_win);
+            }
         } else {
             set_click_through_current(ignore);
         }
