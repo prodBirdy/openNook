@@ -128,7 +128,9 @@ pub fn file_drag_active() -> bool {
             }
             // Any type on the drag pasteboard means a drag is in progress.
             // Finder often exposes promised-file / dyn.* UTIs that do not
-            // contain the substring "file".
+            // contain the substring "file", so a name filter misses the drag
+            // and click-through stays on until the cursor is already inside
+            // the overlay — at which point AppKit never sends draggingEntered.
             let count: usize = msg_send![types, count];
             count > 0
         }

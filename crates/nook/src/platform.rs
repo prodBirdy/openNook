@@ -159,6 +159,7 @@ unsafe fn register_file_drops(ns_win: *mut objc2::runtime::AnyObject) {
     use objc2::runtime::AnyObject;
     use objc2::*;
 
+    // Same type GPUI's draggingEntered reads via propertyListForType.
     let filenames: *mut AnyObject = msg_send![
         class!(NSString),
         stringWithUTF8String: c"NSFilenamesPboardType".as_ptr()
