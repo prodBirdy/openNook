@@ -173,8 +173,13 @@ impl Island {
                     let dragging = nook_core::files::file_drag_active();
                     if this.file_drag != dragging {
                         this.file_drag = dragging;
-                        if dragging && inside {
-                            this.arm_dropzone(cx);
+                        if dragging {
+                            // Lift click-through now, not on the next paint —
+                            // Finder must see the window before the cursor enters.
+                            platform::set_click_through_current(false);
+                            if inside {
+                                this.arm_dropzone(cx);
+                            }
                         }
                         dirty = true;
                     }

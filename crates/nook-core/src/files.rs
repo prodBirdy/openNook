@@ -126,20 +126,13 @@ pub fn file_drag_active() -> bool {
             if types.is_null() {
                 return false;
             }
+            // Any type on the drag pasteboard means a drag is in progress.
+            // Finder often exposes promised-file / dyn.* UTIs that do not
+            // contain the substring "file", so a name filter misses the drag
+            // and click-through stays on until the cursor is already inside
+            // the overlay — at which point AppKit never sends draggingEntered.
             let count: usize = msg_send![types, count];
-            for i in 0..count {
-                let t: *mut AnyObject = msg_send![types, objectAtIndex: i];
-                let cstr: *const i8 = msg_send![t, UTF8String];
-                if cstr.is_null() {
-                    continue;
-                }
-                let s = std::ffi::CStr::from_ptr(cstr).to_string_lossy();
-                if s.contains("file") || s.contains("filename") || s.contains("public.file-url")
-                {
-                    return true;
-                }
-            }
-            false
+            count > 0
         }
     }
     #[cfg(not(target_os = "macos"))]
