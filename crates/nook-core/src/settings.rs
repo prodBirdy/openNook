@@ -1,4 +1,5 @@
 use crate::database;
+use crate::observe::ObserveConfig;
 use serde::{Deserialize, Serialize};
 use std::sync::RwLock;
 
@@ -28,6 +29,10 @@ pub struct AppSettings {
     pub show_calendar: bool,
     #[serde(default)]
     pub show_reminders: bool,
+    #[serde(default = "default_true")]
+    pub show_observe: bool,
+    #[serde(default)]
+    pub observe: ObserveConfig,
     #[serde(default)]
     pub liquid_glass_mode: bool,
     #[serde(default)]
@@ -46,6 +51,8 @@ impl Default for AppSettings {
             show_media: true,
             show_calendar: true,
             show_reminders: true,
+            show_observe: true,
+            observe: ObserveConfig::default(),
             liquid_glass_mode: false,
             non_notch_mode: false,
             window: WindowSettings::default(),

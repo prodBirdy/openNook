@@ -3,14 +3,15 @@ use crate::platform;
 use crate::theme;
 use gpui::{
     canvas, div, point, prelude::*, px, relative, rgb, rgba, size, AnyElement, App, Bounds,
-    Context, CursorStyle, ExternalPaths, FontFallbacks, FontWeight, MouseButton, MouseDownEvent,
-    PathBuilder, ScrollWheelEvent, SharedString, Window, WindowBackgroundAppearance, WindowBounds,
-    WindowKind, WindowOptions,
+    Context, CursorStyle, ExternalPaths, FocusHandle, FontFallbacks, FontWeight, KeyDownEvent,
+    MouseButton, MouseDownEvent, PathBuilder, ScrollWheelEvent, SharedString, Window,
+    WindowBackgroundAppearance, WindowBounds, WindowKind, WindowOptions,
 };
 use nook_core::calendar::{CalendarEvent, Reminder};
 use nook_core::files::FileTrayItem;
 use nook_core::models::NowPlayingData;
 use nook_core::notch;
+use nook_core::observe::ObserveSnapshot;
 use nook_core::settings::AppSettings;
 use std::any::Any;
 use std::time::{Duration, Instant};
@@ -23,6 +24,7 @@ pub enum CompactMode {
     Media,
     Files,
     Timer,
+    Observe,
     Onboard,
 }
 
@@ -62,6 +64,7 @@ pub struct Island {
     pub speed_mbps: Option<f64>,
     pub speed_progress: f64,
     pub speed_running: bool,
+    pub observe: ObserveSnapshot,
     pub last_tick: Instant,
     pub settings_open: bool,
     chrome_applied: bool,
@@ -117,6 +120,7 @@ impl Island {
             speed_mbps: None,
             speed_progress: 0.0,
             speed_running: false,
+            observe: ObserveSnapshot::default(),
             last_tick: Instant::now(),
             settings_open: false,
             chrome_applied: false,
@@ -208,72 +212,99 @@ impl Island {
         })
         .detach();
 
-        cx.spawn(async move |this, cx| {
-            loop {
-                let playing = cx
-                    .background_executor()
-                    .spawn(async { nook_core::runtime().block_on(nook_core::audio::get_now_playing()) })
-                    .await;
-                this.update(cx, |this, cx| {
-                    let was_media = this.has_media();
-                    this.now_playing = playing;
-                    if !was_media && this.has_media() {
-                        this.preferred = Some(CompactMode::Media);
-                    }
-                    let now = Instant::now();
-                    if now.duration_since(this.last_tick) >= Duration::from_secs(1) {
-                        this.last_tick = now;
-                        for t in &mut this.timers {
-                            if t.running && t.remaining > 0 {
-                                t.remaining -= 1;
-                                if t.remaining == 0 {
-                                    t.running = false;
-                                    nook_core::haptics::trigger(Some(nook_core::haptics::HapticConfig {
+        cx.spawn(async move |this, cx| loop {
+            let playing = cx
+                .background_executor()
+                .spawn(async { nook_core::runtime().block_on(nook_core::audio::get_now_playing()) })
+                .await;
+            this.update(cx, |this, cx| {
+                let was_media = this.has_media();
+                this.now_playing = playing;
+                if !was_media && this.has_media() {
+                    this.preferred = Some(CompactMode::Media);
+                }
+                let now = Instant::now();
+                if now.duration_since(this.last_tick) >= Duration::from_secs(1) {
+                    this.last_tick = now;
+                    for t in &mut this.timers {
+                        if t.running && t.remaining > 0 {
+                            t.remaining -= 1;
+                            if t.remaining == 0 {
+                                t.running = false;
+                                nook_core::haptics::trigger(Some(
+                                    nook_core::haptics::HapticConfig {
                                         pattern: nook_core::haptics::HapticPattern::Success,
                                         intensity: 1.0,
-                                    }));
-                                }
+                                    },
+                                ));
                             }
                         }
                     }
-                    cx.notify();
-                })
-                .ok();
-                cx.background_executor()
-                    .timer(Duration::from_millis(400))
-                    .await;
-            }
+                }
+                cx.notify();
+            })
+            .ok();
+            cx.background_executor()
+                .timer(Duration::from_millis(400))
+                .await;
         })
         .detach();
 
-        cx.spawn(async move |this, cx| {
-            loop {
-                let events = cx
-                    .background_executor()
-                    .spawn(async {
-                        nook_core::runtime()
-                            .block_on(nook_core::calendar::get_upcoming_events(Some(false)))
-                            .unwrap_or_default()
-                    })
-                    .await;
-                let reminders = cx
-                    .background_executor()
-                    .spawn(async {
-                        nook_core::runtime()
-                            .block_on(nook_core::calendar::get_reminders(Some(false)))
-                            .unwrap_or_default()
-                    })
-                    .await;
-                this.update(cx, |this, cx| {
-                    this.events = events;
-                    this.reminders = reminders;
-                    cx.notify();
+        cx.spawn(async move |this, cx| loop {
+            let events = cx
+                .background_executor()
+                .spawn(async {
+                    nook_core::runtime()
+                        .block_on(nook_core::calendar::get_upcoming_events(Some(false)))
+                        .unwrap_or_default()
                 })
-                .ok();
+                .await;
+            let reminders = cx
+                .background_executor()
+                .spawn(async {
+                    nook_core::runtime()
+                        .block_on(nook_core::calendar::get_reminders(Some(false)))
+                        .unwrap_or_default()
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                this.events = events;
+                this.reminders = reminders;
+                cx.notify();
+            })
+            .ok();
+            cx.background_executor()
+                .timer(Duration::from_secs(30))
+                .await;
+        })
+        .detach();
+
+        cx.spawn(async move |this, cx| loop {
+            let settings = nook_core::settings::get_app_settings();
+            let snapshot = if settings.show_observe {
                 cx.background_executor()
-                    .timer(Duration::from_secs(30))
-                    .await;
-            }
+                    .spawn(async move {
+                        nook_core::runtime().block_on(nook_core::observe::poll(&settings.observe))
+                    })
+                    .await
+            } else {
+                ObserveSnapshot::default()
+            };
+            let connected = snapshot.connected;
+            this.update(cx, |this, cx| {
+                let was_quiet = !this.observe.has_outage();
+                this.observe = snapshot;
+                if was_quiet && this.observe.has_outage() {
+                    this.preferred = Some(CompactMode::Observe);
+                    nook_core::haptics::trigger(None);
+                }
+                cx.notify();
+            })
+            .ok();
+            let wait = if connected { 15 } else { 5 };
+            cx.background_executor()
+                .timer(Duration::from_secs(wait))
+                .await;
         })
         .detach();
     }
@@ -306,6 +337,7 @@ impl Island {
             CompactMode::Media => self.has_media(),
             CompactMode::Files => !self.files.is_empty(),
             CompactMode::Timer => self.running_timer().is_some(),
+            CompactMode::Observe => self.settings.show_observe && self.observe.has_outage(),
             CompactMode::Onboard => self.first_run,
             CompactMode::Idle => true,
         }
@@ -313,6 +345,9 @@ impl Island {
 
     fn available_modes(&self) -> Vec<CompactMode> {
         let mut modes = Vec::new();
+        if self.settings.show_observe && self.observe.has_outage() {
+            modes.push(CompactMode::Observe);
+        }
         if self.has_media() {
             modes.push(CompactMode::Media);
         }
@@ -452,7 +487,7 @@ impl Island {
         self.settings_open = true;
         platform::set_accessory(false);
         platform::activate_app();
-        let bounds = Bounds::centered(None, size(px(420.), px(360.)), cx);
+        let bounds = Bounds::centered(None, size(px(440.), px(560.)), cx);
         cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
@@ -467,7 +502,7 @@ impl Island {
                 show: true,
                 ..Default::default()
             },
-            |_, cx| cx.new(|_| SettingsView),
+            |_, cx| cx.new(|cx| SettingsView::new(cx)),
         )
         .ok();
         cx.notify();
@@ -683,6 +718,7 @@ impl Island {
             CompactMode::Media => album_chip(&self.now_playing, cx).into_any_element(),
             CompactMode::Files => lucide("image", 16.0).into_any_element(),
             CompactMode::Timer => self.compact_timer_left(cx),
+            CompactMode::Observe => lucide("triangle-alert", 16.0).into_any_element(),
             CompactMode::Onboard => label("openNook", 12.0, true).into_any_element(),
             CompactMode::Idle => div().into_any_element(),
         }
@@ -724,11 +760,16 @@ impl Island {
     ) -> AnyElement {
         match mode {
             CompactMode::Media => visualizer(
-                self.now_playing.audio_levels.as_deref().unwrap_or(&[0.2; 6]),
+                self.now_playing
+                    .audio_levels
+                    .as_deref()
+                    .unwrap_or(&[0.2; 6]),
                 self.now_playing.is_playing,
             )
             .into_any_element(),
-            CompactMode::Files => label(self.files.len().to_string(), 13.0, true).into_any_element(),
+            CompactMode::Files => {
+                label(self.files.len().to_string(), 13.0, true).into_any_element()
+            }
             CompactMode::Timer => {
                 let text = self
                     .running_timer()
@@ -736,6 +777,9 @@ impl Island {
                     .map(|t| Self::format_time(t.remaining))
                     .unwrap_or_else(|| "0:00".into());
                 label(text, 13.0, true).into_any_element()
+            }
+            CompactMode::Observe => {
+                label(self.observe.firing_count().to_string(), 13.0, true).into_any_element()
             }
             CompactMode::Onboard if hovered => lucide("github", 16.0).into_any_element(),
             _ => div().into_any_element(),
@@ -816,6 +860,9 @@ impl Island {
         if self.settings.show_reminders {
             row = row.child(reminders_card(&self.reminders, cx));
         }
+        if self.settings.show_observe {
+            row = row.child(observe_card(&self.observe, &self.settings, cx));
+        }
         row = row.child(timer_card(&self.timers, cx));
         row = row.child(notes_card(&self.notes, cx));
         row = row.child(speed_card(
@@ -847,6 +894,7 @@ impl Island {
                 CompactMode::Media => "media",
                 CompactMode::Files => "files",
                 CompactMode::Timer => "timer",
+                CompactMode::Observe => "observe",
                 CompactMode::Onboard => "onboard",
             };
             row = row.child(
@@ -898,7 +946,11 @@ impl Island {
                     13.0,
                     true,
                 ))
-                .child(label("They stay here until you open or clear them.", 11.0, false))
+                .child(label(
+                    "They stay here until you open or clear them.",
+                    11.0,
+                    false,
+                ))
                 .into_any_element();
         }
         let mut list = div()
@@ -1180,11 +1232,15 @@ fn media_card(np: &NowPlayingData, cx: &mut Context<Island>) -> impl IntoElement
                             let _ = nook_core::audio::media_previous_track().await;
                         });
                     }))
-                    .child(icon_btn(if playing { "pause" } else { "play" }, cx, |_, _, _| {
-                        nook_core::runtime().spawn(async {
-                            let _ = nook_core::audio::media_play_pause().await;
-                        });
-                    }))
+                    .child(icon_btn(
+                        if playing { "pause" } else { "play" },
+                        cx,
+                        |_, _, _| {
+                            nook_core::runtime().spawn(async {
+                                let _ = nook_core::audio::media_play_pause().await;
+                            });
+                        },
+                    ))
                     .child(icon_btn("skip-forward", cx, |_, _, _| {
                         nook_core::runtime().spawn(async {
                             let _ = nook_core::audio::media_next_track().await;
@@ -1212,22 +1268,25 @@ fn calendar_card(events: &[CalendarEvent], cx: &mut Context<Island>) -> impl Int
     widget_shell(
         "calendar",
         "Calendar",
-        div()
-            .flex()
-            .flex_col()
-            .gap_2()
-            .child(body)
-            .child(text_btn("Open Calendar", cx, |_, _, _| {
+        div().flex().flex_col().gap_2().child(body).child(text_btn(
+            "Open Calendar",
+            cx,
+            |_, _, _| {
                 nook_core::runtime().spawn(async {
                     let _ = nook_core::calendar::open_calendar_app().await;
                 });
-            })),
+            },
+        )),
     )
 }
 
 fn reminders_card(reminders: &[Reminder], cx: &mut Context<Island>) -> impl IntoElement {
     let mut body = div().flex().flex_col().gap_1();
-    let open: Vec<_> = reminders.iter().filter(|r| !r.is_completed).take(4).collect();
+    let open: Vec<_> = reminders
+        .iter()
+        .filter(|r| !r.is_completed)
+        .take(4)
+        .collect();
     if open.is_empty() {
         body = body.child(label("Inbox zero", 12.0, false));
     } else {
@@ -1375,6 +1434,65 @@ fn speed_card(
     )
 }
 
+fn observe_card(
+    snap: &ObserveSnapshot,
+    settings: &AppSettings,
+    _cx: &mut Context<Island>,
+) -> impl IntoElement {
+    let mut body = div().flex().flex_col().gap_1();
+    let url = settings.observe.prometheus_url.trim();
+    if url.is_empty() {
+        body = body.child(label("Set a Prometheus URL in Settings", 12.0, false));
+    } else {
+        if let Some(err) = &snap.error {
+            body = body.child(label(err.clone(), 11.0, false));
+        }
+        if snap.has_outage() {
+            body = body.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .child(div().size(px(8.)).rounded_full().bg(rgb(0xff453a)))
+                    .child(label(format!("{} firing", snap.firing_count()), 11.0, true)),
+            );
+            for alert in snap.alerts.iter().take(3) {
+                let line = if alert.summary.is_empty() {
+                    alert.name.clone()
+                } else {
+                    format!("{} — {}", alert.name, alert.summary)
+                };
+                body = body.child(label(line, 12.0, true));
+            }
+        } else if snap.connected {
+            body = body.child(label("No firing alerts", 11.0, false));
+        }
+        for reading in snap.metrics.iter().take(4) {
+            let value = if let Some(err) = &reading.error {
+                err.clone()
+            } else if let Some(first) = reading.values.first() {
+                let extra = if reading.values.len() > 1 {
+                    format!(" (+{})", reading.values.len() - 1)
+                } else {
+                    String::new()
+                };
+                format!("{}{extra}", nook_core::observe::format_sample(first.value))
+            } else {
+                "—".into()
+            };
+            body = body.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(label(reading.label.clone(), 11.0, false))
+                    .child(label(value, 12.0, true)),
+            );
+        }
+    }
+    widget_shell("activity", "Observe", body)
+}
+
 fn album_chip(np: &NowPlayingData, cx: &mut Context<Island>) -> impl IntoElement {
     let playing = np.is_playing;
     div()
@@ -1420,7 +1538,11 @@ fn visualizer(levels: &[f64], playing: bool) -> impl IntoElement {
 
 fn label(text: impl Into<SharedString>, size: f32, strong: bool) -> impl IntoElement {
     div()
-        .text_color(if strong { theme::TEXT } else { theme::TEXT_MUTED })
+        .text_color(if strong {
+            theme::TEXT
+        } else {
+            theme::TEXT_MUTED
+        })
         .text_size(px(size))
         .font_weight(if strong {
             FontWeight::SEMIBOLD
@@ -1501,19 +1623,126 @@ fn format_ts(ts: f64) -> String {
     }
 }
 
-struct SettingsView;
+struct SettingsView {
+    url_focus: FocusHandle,
+    query_focus: FocusHandle,
+    url_draft: String,
+    query_draft: String,
+    catalog: Vec<String>,
+    catalog_error: Option<String>,
+    catalog_loading: bool,
+}
+
+impl SettingsView {
+    fn new(cx: &mut Context<Self>) -> Self {
+        let settings = nook_core::settings::get_app_settings();
+        Self {
+            url_focus: cx.focus_handle(),
+            query_focus: cx.focus_handle(),
+            url_draft: settings.observe.prometheus_url,
+            query_draft: String::new(),
+            catalog: Vec::new(),
+            catalog_error: None,
+            catalog_loading: false,
+        }
+    }
+
+    fn persist_url(&self) {
+        let draft = self.url_draft.trim().to_string();
+        if !draft.is_empty() && nook_core::observe::normalize_base_url(&draft).is_err() {
+            return;
+        }
+        let mut s = nook_core::settings::get_app_settings();
+        if s.observe.prometheus_url == draft {
+            return;
+        }
+        s.observe.prometheus_url = draft;
+        nook_core::settings::update_app_settings(s);
+    }
+
+    fn persist_observe(tweak: impl FnOnce(&mut AppSettings)) {
+        let mut s = nook_core::settings::get_app_settings();
+        tweak(&mut s);
+        nook_core::settings::update_app_settings(s);
+    }
+
+    fn apply_key(draft: &mut String, event: &KeyDownEvent, cx: &Context<Self>) -> bool {
+        let ks = &event.keystroke;
+        if ks.modifiers.secondary() && ks.key == "v" {
+            if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
+                *draft = text.trim().to_string();
+                return true;
+            }
+            return false;
+        }
+        if ks.modifiers.platform || ks.modifiers.control {
+            return false;
+        }
+        match ks.key.as_str() {
+            "backspace" => {
+                draft.pop();
+                true
+            }
+            _ => {
+                if let Some(ch) = &ks.key_char {
+                    if !ch.chars().any(|c| c.is_control()) {
+                        draft.push_str(ch);
+                        return true;
+                    }
+                }
+                false
+            }
+        }
+    }
+
+    fn browse_metrics(&mut self, cx: &mut Context<Self>) {
+        if self.catalog_loading {
+            return;
+        }
+        self.persist_url();
+        self.catalog_loading = true;
+        self.catalog_error = None;
+        cx.notify();
+        let config = nook_core::settings::get_app_settings().observe;
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    nook_core::runtime().block_on(nook_core::observe::list_metric_names(&config))
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                this.catalog_loading = false;
+                match result {
+                    Ok(names) => {
+                        this.catalog = names;
+                        this.catalog_error = None;
+                    }
+                    Err(err) => this.catalog_error = Some(err),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+}
 
 impl Render for SettingsView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let settings = nook_core::settings::get_app_settings();
+        let url_focused = self.url_focus.is_focused(window);
+        let query_focused = self.query_focus.is_focused(window);
         div()
+            .id("settings-root")
             .size_full()
             .flex()
             .flex_col()
             .bg(rgb(0x111111))
             .text_color(rgb(0xffffff))
             .p_6()
-            .gap_4()
+            .gap_3()
+            .overflow_y_scroll()
             .child(
                 div()
                     .text_size(px(18.))
@@ -1530,6 +1759,14 @@ impl Render for SettingsView {
                 s.show_reminders = !s.show_reminders;
             }))
             .child(toggle_row(
+                "Observability",
+                settings.show_observe,
+                cx,
+                |s| {
+                    s.show_observe = !s.show_observe;
+                },
+            ))
+            .child(toggle_row(
                 "Liquid glass",
                 settings.liquid_glass_mode,
                 cx,
@@ -1544,14 +1781,274 @@ impl Render for SettingsView {
                     s.window.non_notch_mode = s.non_notch_mode;
                 },
             ))
+            .child(self.render_observe_settings(&settings, url_focused, query_focused, cx))
             .child(
                 div()
-                    .mt_4()
+                    .mt_2()
                     .text_size(px(11.))
                     .text_color(theme::TEXT_FAINT)
                     .child("Native GPUI rewrite of openNook. Same Rust core, no WebView."),
             )
     }
+}
+
+impl SettingsView {
+    fn render_observe_settings(
+        &self,
+        settings: &AppSettings,
+        url_focused: bool,
+        query_focused: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let mut pinned = div().flex().flex_col().gap_1();
+        if settings.observe.metrics.is_empty() {
+            pinned = pinned.child(label("No pinned metrics", 11.0, false));
+        } else {
+            for metric in &settings.observe.metrics {
+                let query = metric.query.clone();
+                pinned = pinned.child(
+                    div()
+                        .id(SharedString::from(format!("pin-{}", metric.query)))
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .px_2()
+                        .py_1()
+                        .rounded(px(8.))
+                        .bg(theme::SURFACE)
+                        .child(label(
+                            format!("{}  {}", metric.label, metric.query),
+                            11.0,
+                            true,
+                        ))
+                        .child(
+                            div()
+                                .id(SharedString::from(format!("unpin-{}", metric.query)))
+                                .cursor(CursorStyle::PointingHand)
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(move |_, _, _, cx| {
+                                        cx.stop_propagation();
+                                        SettingsView::persist_observe(|s| {
+                                            nook_core::observe::unpin_metric(
+                                                &mut s.observe,
+                                                &query,
+                                            );
+                                        });
+                                        cx.notify();
+                                    }),
+                                )
+                                .child(label("Remove", 11.0, false)),
+                        ),
+                );
+            }
+        }
+
+        let mut catalog = div().flex().flex_col().gap_1();
+        if self.catalog_loading {
+            catalog = catalog.child(label("Loading metric names…", 11.0, false));
+        } else if let Some(err) = &self.catalog_error {
+            catalog = catalog.child(label(err.clone(), 11.0, false));
+        }
+        for name in self.catalog.iter().take(12) {
+            let query = name.clone();
+            let label_text = name.clone();
+            catalog = catalog.child(
+                div()
+                    .id(SharedString::from(format!("cat-{name}")))
+                    .px_2()
+                    .py_1()
+                    .rounded(px(8.))
+                    .bg(theme::SURFACE)
+                    .hover(|s| s.bg(theme::SURFACE_HOVER))
+                    .cursor(CursorStyle::PointingHand)
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |_, _, _, cx| {
+                            cx.stop_propagation();
+                            let query = query.clone();
+                            let label_text = label_text.clone();
+                            SettingsView::persist_observe(|s| {
+                                let _ = nook_core::observe::pin_metric(
+                                    &mut s.observe,
+                                    &label_text,
+                                    &query,
+                                );
+                            });
+                            cx.notify();
+                        }),
+                    )
+                    .child(label(name.clone(), 11.0, true)),
+            );
+        }
+
+        let url_placeholder = self.url_draft.is_empty();
+        let url_text = if url_placeholder {
+            "http://127.0.0.1:9090"
+        } else {
+            self.url_draft.as_str()
+        };
+        let query_placeholder = self.query_draft.is_empty();
+        let query_text = if query_placeholder {
+            "PromQL, e.g. up"
+        } else {
+            self.query_draft.as_str()
+        };
+
+        div()
+            .mt_2()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(label("Prometheus", 12.0, true))
+            .child(label(
+                "Point at Prometheus. Grafana / Alertmanager / fm-observe are later sources.",
+                11.0,
+                false,
+            ))
+            .child(
+                div()
+                    .id("prom-url")
+                    .track_focus(&self.url_focus)
+                    .px_2()
+                    .py_2()
+                    .rounded(px(8.))
+                    .bg(theme::SURFACE)
+                    .when(url_focused, |d| {
+                        d.border_1().border_color(theme::ACCENT_FALLBACK)
+                    })
+                    .cursor(CursorStyle::IBeam)
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, window, cx| {
+                            cx.stop_propagation();
+                            window.focus(&this.url_focus);
+                            cx.notify();
+                        }),
+                    )
+                    .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+                        if SettingsView::apply_key(&mut this.url_draft, event, cx) {
+                            this.persist_url();
+                            cx.notify();
+                        } else if event.keystroke.key == "enter" {
+                            this.persist_url();
+                            cx.notify();
+                        }
+                    }))
+                    .child(
+                        div()
+                            .text_color(if url_placeholder {
+                                theme::TEXT_FAINT
+                            } else {
+                                theme::TEXT
+                            })
+                            .text_size(px(12.))
+                            .child(SharedString::from(url_text.to_string())),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .gap_2()
+                    .child(settings_chip("Paste URL", cx, |this, _, cx| {
+                        if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
+                            this.url_draft = text.trim().to_string();
+                            this.persist_url();
+                            cx.notify();
+                        }
+                    }))
+                    .child(settings_chip("Browse names", cx, |this, _, cx| {
+                        this.browse_metrics(cx);
+                    })),
+            )
+            .child(label("Pinned metrics", 12.0, true))
+            .child(pinned)
+            .child(
+                div()
+                    .id("prom-query")
+                    .track_focus(&self.query_focus)
+                    .px_2()
+                    .py_2()
+                    .rounded(px(8.))
+                    .bg(theme::SURFACE)
+                    .when(query_focused, |d| {
+                        d.border_1().border_color(theme::ACCENT_FALLBACK)
+                    })
+                    .cursor(CursorStyle::IBeam)
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, window, cx| {
+                            cx.stop_propagation();
+                            window.focus(&this.query_focus);
+                            cx.notify();
+                        }),
+                    )
+                    .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+                        if event.keystroke.key == "enter" {
+                            let query = this.query_draft.trim().to_string();
+                            if !query.is_empty() {
+                                SettingsView::persist_observe(|s| {
+                                    let _ = nook_core::observe::pin_metric(
+                                        &mut s.observe,
+                                        &query,
+                                        &query,
+                                    );
+                                });
+                                this.query_draft.clear();
+                                cx.notify();
+                            }
+                        } else if SettingsView::apply_key(&mut this.query_draft, event, cx) {
+                            cx.notify();
+                        }
+                    }))
+                    .child(
+                        div()
+                            .text_color(if query_placeholder {
+                                theme::TEXT_FAINT
+                            } else {
+                                theme::TEXT
+                            })
+                            .text_size(px(12.))
+                            .child(SharedString::from(query_text.to_string())),
+                    ),
+            )
+            .child(settings_chip("Pin query", cx, |this, _, cx| {
+                let query = this.query_draft.trim().to_string();
+                if query.is_empty() {
+                    return;
+                }
+                SettingsView::persist_observe(|s| {
+                    let _ = nook_core::observe::pin_metric(&mut s.observe, &query, &query);
+                });
+                this.query_draft.clear();
+                cx.notify();
+            }))
+            .child(catalog)
+    }
+}
+
+fn settings_chip(
+    caption: impl Into<SharedString>,
+    cx: &mut Context<SettingsView>,
+    on_click: impl Fn(&mut SettingsView, &mut Window, &mut Context<SettingsView>) + 'static,
+) -> impl IntoElement {
+    let caption = caption.into();
+    div()
+        .id(caption.clone())
+        .px_2()
+        .py_1()
+        .rounded(px(8.))
+        .bg(theme::SURFACE_HOVER)
+        .hover(|s| s.opacity(0.9))
+        .cursor(CursorStyle::PointingHand)
+        .child(label(caption, 11.0, true))
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, _, window, cx| {
+                cx.stop_propagation();
+                on_click(this, window, cx);
+            }),
+        )
 }
 
 fn toggle_row(
@@ -1582,7 +2079,11 @@ fn toggle_row(
                 .w(px(36.))
                 .h(px(20.))
                 .rounded_full()
-                .bg(if on { theme::ACCENT_FALLBACK } else { theme::SURFACE })
+                .bg(if on {
+                    theme::ACCENT_FALLBACK
+                } else {
+                    theme::SURFACE
+                })
                 .flex()
                 .items_center()
                 .when(on, |d| d.justify_end())

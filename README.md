@@ -36,7 +36,8 @@ On macOS the process is an accessory (`LSUIElement` / `NSApplicationActivationPo
 - Now Playing with play/pause/skip (MediaPlayer + simulation visualizer)
 - Calendar and Reminders (EventKit)
 - File tray, notes, timers, Cloudflare speed test
-- Settings window (media/calendar/reminders, liquid glass, non-notch mode)
+- Prometheus observe widget (pinned PromQL + firing alerts on the island)
+- Settings window (media/calendar/reminders/observability, liquid glass, non-notch mode)
 
 No plugin system in this build. Built-in widgets only.
 

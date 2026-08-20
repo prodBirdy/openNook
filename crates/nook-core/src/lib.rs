@@ -12,6 +12,7 @@ pub mod models;
 pub mod mouse;
 pub mod notes;
 pub mod notch;
+pub mod observe;
 pub mod runtime;
 pub mod settings;
 pub mod utils;

@@ -74,6 +74,7 @@ fn install_macos() {
 }
 
 /// Style + pin every GPUI island panel. Does not touch GPUI `Window`.
+#[cfg(target_os = "macos")]
 pub fn apply_island_chrome() {
     #[cfg(target_os = "macos")]
     {
