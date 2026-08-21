@@ -1,6 +1,6 @@
 //! Week strip + empty/event state for the Nook calendar pane.
 
-use crate::icons::lucide_color;
+use crate::island::ui::{nook_accent_bar, nook_empty};
 use crate::island::Island;
 use crate::theme;
 use chrono::{Datelike, Local, TimeZone, Weekday};
@@ -51,22 +51,7 @@ pub(crate) fn calendar_card(
         "No events"
     };
     let body = if filtered.is_empty() {
-        div()
-            .flex_1()
-            .flex()
-            .flex_col()
-            .items_center()
-            .justify_center()
-            .gap(px(6.))
-            .child(lucide_color("calendar", 16.0, theme::TERTIARY_LABEL))
-            .child(
-                div()
-                    .text_size(px(12.))
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_color(theme::TERTIARY_LABEL)
-                    .child(empty_copy),
-            )
-            .into_any_element()
+        nook_empty("calendar", empty_copy).into_any_element()
     } else {
         let mut col = div().flex().flex_col().gap_2().pt(px(8.));
         for event in filtered.into_iter().take(2) {
@@ -77,8 +62,7 @@ pub(crate) fn calendar_card(
 
     div()
         .id("nook-calendar")
-        .flex_1()
-        .min_w(px(220.))
+        .w_full()
         .h_full()
         .flex()
         .flex_col()
@@ -226,15 +210,7 @@ fn event_row(event: &CalendarEvent, cx: &mut Context<Island>) -> impl IntoElemen
                         .child(time),
                 ),
         )
-        .child(
-            div()
-                .w(px(3.))
-                .h(px(32.))
-                .rounded(px(2.))
-                .mr_3()
-                .flex_shrink_0()
-                .bg(theme::accent()),
-        )
+        .child(nook_accent_bar(theme::accent()))
         .child(
             div()
                 .flex_1()

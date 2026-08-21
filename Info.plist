@@ -13,9 +13,9 @@
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleVersion</key>
-	<string>0.1.0</string>
+	<string>0.2.0</string>
 	<key>CFBundleShortVersionString</key>
-	<string>0.1.0</string>
+	<string>0.2.0</string>
 	<key>CFBundleIconFile</key>
 	<string>icon.png</string>
 	<key>LSUIElement</key>
@@ -26,6 +26,8 @@
 	<string>openNook shows upcoming events in the island so you can glance at the next thing on your calendar.</string>
 	<key>NSRemindersUsageDescription</key>
 	<string>openNook shows reminders in the island and lets you mark them complete from there.</string>
+	<key>NSCameraUsageDescription</key>
+	<string>openNook shows a live camera preview in the Mirror control so you can check yourself before a call.</string>
 	<key>NSAppleEventsUsageDescription</key>
 	<string>openNook uses Automation to pause or skip Music, Spotify, and Safari if system media controls are unavailable, and to read the current Safari or Chrome tab URL so the island can show a YouTube thumbnail or site icon when the browser does not provide artwork.</string>
 </dict>

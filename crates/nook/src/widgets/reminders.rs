@@ -1,85 +1,96 @@
-//! Reminders card — tap the circle to complete it.
-//! Layout matches the React `RemindersWidget`.
+//! Reminders Nook pane — tap the circle to complete it.
 
-use crate::island::ui::{empty_state, header_icon_btn, pill_btn, widget_shell_actions};
+use crate::island::ui::{nook_display, nook_empty, nook_icon_btn, nook_pane, nook_row};
 use crate::island::Island;
 use crate::theme;
 use chrono::{Local, TimeZone};
 use gpui::{
-    div, prelude::*, px, rgba, Context, FontWeight, MouseButton, MouseDownEvent, SharedString,
+    div, prelude::*, px, rgba, Context, CursorStyle, FontWeight, MouseButton, MouseDownEvent,
+    SharedString,
 };
 use nook_core::calendar::Reminder;
 
 pub(crate) fn reminders_card(reminders: &[Reminder], cx: &mut Context<Island>) -> impl IntoElement {
-    let actions = div()
-        .flex()
-        .gap_1()
-        .child(header_icon_btn("plus", "rem-add", cx, |_, _, _, _| {
-            nook_core::runtime().spawn(async {
-                let _ = nook_core::calendar::open_reminders_app().await;
-            });
-        }))
-        .child(header_icon_btn(
-            "rotate-ccw",
-            "rem-refresh",
-            cx,
-            |this, _, _, cx| {
-                this.refresh_calendar(cx);
-            },
-        ));
-
-    let open: Vec<_> = reminders
-        .iter()
-        .filter(|r| !r.is_completed)
-        .take(10)
-        .collect();
+    let open: Vec<_> = reminders.iter().filter(|r| !r.is_completed).collect();
+    let count = open.len();
 
     let body = if open.is_empty() {
-        empty_state(
-            "No reminders",
-            pill_btn("Create Reminder", cx, |_, _, _| {
-                nook_core::runtime().spawn(async {
-                    let _ = nook_core::calendar::open_reminders_app().await;
-                });
-            }),
-        )
-        .into_any_element()
+        div()
+            .id("rem-empty")
+            .flex_1()
+            .cursor(CursorStyle::PointingHand)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|_, _: &MouseDownEvent, _, cx| {
+                    cx.stop_propagation();
+                    nook_core::runtime().spawn(async {
+                        let _ = nook_core::calendar::open_reminders_app().await;
+                    });
+                }),
+            )
+            .child(nook_empty("list-checks", "No reminders"))
+            .into_any_element()
     } else {
-        let mut list = div().flex().flex_col().gap_1();
-        for reminder in open {
+        let mut list = div().flex().flex_col().flex_1();
+        for reminder in open.into_iter().take(2) {
             list = list.child(reminder_row(reminder, cx));
         }
         list.into_any_element()
     };
 
-    widget_shell_actions("reminders-scroll", "Reminders", actions, body)
+    nook_pane("nook-reminders")
+        .w_full()
+        .when(count > 0, |d| {
+            d.child(
+                div()
+                    .flex()
+                    .items_end()
+                    .gap(px(16.))
+                    .flex_shrink_0()
+                    .child(nook_display(count.to_string()))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(4.))
+                            .pb(px(4.))
+                            .child(nook_icon_btn("plus", "rem-add", cx, |_, _, _, _| {
+                                nook_core::runtime().spawn(async {
+                                    let _ = nook_core::calendar::open_reminders_app().await;
+                                });
+                            }))
+                            .child(nook_icon_btn(
+                                "rotate-ccw",
+                                "rem-refresh",
+                                cx,
+                                |this, _, _, cx| {
+                                    this.refresh_calendar(cx);
+                                },
+                            )),
+                    ),
+            )
+        })
+        .child(body)
 }
 
 fn reminder_row(reminder: &Reminder, cx: &mut Context<Island>) -> impl IntoElement {
     let id = reminder.id.clone();
     let color = theme::parse_hex(&reminder.list_color);
     let due = reminder.due_date.and_then(format_due);
-    div()
-        .id(SharedString::from(format!("rem-{id}")))
-        .flex()
-        .items_center()
-        .gap_3()
-        .px(px(16.))
-        .py(px(12.))
-        .rounded(px(theme::ROW_RADIUS))
-        .hover(|s| s.bg(rgba(0xFFFFFF0D)))
+    nook_row(SharedString::from(format!("rem-{id}")))
         .child(
             div()
                 .id(SharedString::from(format!("rem-check-{id}")))
-                .size(px(32.))
+                .size(px(22.))
                 .flex_shrink_0()
+                .mr_3()
                 .rounded_full()
                 .border_2()
                 .border_color(color)
                 .flex()
                 .items_center()
                 .justify_center()
-                .cursor(gpui::CursorStyle::PointingHand)
+                .cursor(CursorStyle::PointingHand)
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(move |this, _: &MouseDownEvent, _, cx| {
@@ -92,7 +103,7 @@ fn reminder_row(reminder: &Reminder, cx: &mut Context<Island>) -> impl IntoEleme
                         cx.notify();
                     }),
                 )
-                .child(div().size(px(16.)).rounded_full().bg(color).opacity(0.4)),
+                .child(div().size(px(8.)).rounded_full().bg(color).opacity(0.45)),
         )
         .child(
             div()
@@ -104,44 +115,27 @@ fn reminder_row(reminder: &Reminder, cx: &mut Context<Island>) -> impl IntoEleme
                 .overflow_hidden()
                 .child(
                     div()
-                        .flex()
-                        .items_center()
-                        .justify_between()
-                        .gap_2()
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w(px(0.))
-                                .text_size(px(17.))
-                                .font_weight(FontWeight::MEDIUM)
-                                .text_color(rgba(0xFFFFFFF2))
-                                .whitespace_nowrap()
-                                .overflow_hidden()
-                                .text_ellipsis()
-                                .child(reminder.title.clone()),
-                        )
-                        .when(!reminder.list_name.is_empty(), |d| {
-                            d.child(
-                                div()
-                                    .text_size(px(13.))
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .text_color(color)
-                                    .opacity(0.6)
-                                    .child(reminder.list_name.clone()),
-                            )
-                        }),
+                        .text_size(px(14.))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(theme::LABEL)
+                        .whitespace_nowrap()
+                        .overflow_hidden()
+                        .text_ellipsis()
+                        .child(reminder.title.clone()),
                 )
                 .when_some(due, |d, (text, overdue)| {
                     d.child(
                         div()
-                            .text_size(px(13.))
-                            .font_weight(FontWeight::MEDIUM)
+                            .text_size(px(11.))
                             .text_color(if overdue {
                                 theme::DESTRUCTIVE
                             } else {
-                                rgba(0xffffff66)
+                                rgba(0xffffff80)
                             })
-                            .mt(px(2.))
+                            .mt(px(1.))
+                            .whitespace_nowrap()
+                            .overflow_hidden()
+                            .text_ellipsis()
                             .child(text),
                     )
                 }),

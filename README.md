@@ -34,6 +34,15 @@ cd ~/openNook-gpui
 open target/OpenNook.app
 ```
 
+Release installer (DMG with an Applications drop):
+
+```bash
+./scripts/with-metal.sh ./scripts/installer.sh
+open target/openNook-0.2.0.dmg
+```
+
+See [CHANGELOG.md](CHANGELOG.md) for what landed in 0.2.0.
+
 On macOS the process is an accessory (`LSUIElement` / `NSApplicationActivationPolicyAccessory`): no dock icon. Hover the notch to take mouse events; click or scroll up to expand. Quit and Settings live on the **Nook** menu-bar extra.
 
 ## Features (v1)
@@ -44,7 +53,7 @@ On macOS the process is an accessory (`LSUIElement` / `NSApplicationActivationPo
 - Calendar and Reminders (EventKit)
 - File tray (open / drag out to Finder / remove / clear), notes (external editor), timers, Cloudflare speed test
 - Prometheus observe widget (pinned PromQL, time-range sparklines, hover point detail, firing alerts)
-- Settings window (Nook chrome: General / Custom Widgets, per-module toggles, Observe metrics, liquid glass, non-notch mode)
+- Settings window (Nook chrome: General / Custom Widgets, per-module toggles, Observe metrics, liquid glass, island color, position, hide when an app fills the display, non-notch mode)
 
 No plugin system in this build. Built-in widgets only.
 

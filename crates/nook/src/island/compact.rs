@@ -36,7 +36,7 @@ impl Island {
                     .items_center()
                     .justify_start()
                     .overflow_hidden()
-                    .child(self.compact_left(mode, hovered, cx)),
+                    .child(self.compact_left(mode, cx)),
             )
             .child(div().w(px(notch_w)).flex_shrink_0().h_full())
             .child(
@@ -52,19 +52,11 @@ impl Island {
             )
     }
 
-    fn compact_left(
-        &self,
-        mode: CompactMode,
-        hovered: bool,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
+    fn compact_left(&self, mode: CompactMode, cx: &mut Context<Self>) -> AnyElement {
         match mode {
-            CompactMode::Media => album_chip(
-                &self.now_playing,
-                super::media::album_overlay_visible(hovered, self.album_hovered),
-                cx,
-            )
-            .into_any_element(),
+            CompactMode::Media => {
+                album_chip(&self.now_playing, self.overlay_fade.value, cx).into_any_element()
+            }
             CompactMode::Agents => widgets::agents_compact_left(&self.agents, self.pixel_t),
             CompactMode::Files => super::files::compact_left(&self.files),
             CompactMode::Timer => widgets::timer_compact_left(self, cx),

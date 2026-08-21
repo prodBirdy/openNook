@@ -1,11 +1,14 @@
-//! Coding-agent card + compact island faces.
+//! Coding-agent Nook pane + compact island faces.
 
 use crate::dotmatrix;
 use crate::icons::lucide_color;
-use crate::island::ui::{card_row, label, slide_label, widget_shell_actions};
+use crate::island::ui::{label, nook_empty, nook_pane, nook_row, scroll_body, slide_label};
 use crate::island::Island;
 use crate::theme;
-use gpui::{div, prelude::*, AnyElement, Context, MouseButton, MouseDownEvent, SharedString};
+use gpui::{
+    div, prelude::*, px, rgba, AnyElement, Context, CursorStyle, MouseButton, MouseDownEvent,
+    SharedString,
+};
 use nook_core::agents::AgentSession;
 
 pub(crate) fn compact_left(agents: &[AgentSession], pixel_t: f32) -> AnyElement {
@@ -44,62 +47,65 @@ pub(crate) fn agents_card(
     now: f32,
     cx: &mut Context<Island>,
 ) -> impl IntoElement {
-    let mut body = div().flex().flex_col().gap_1();
-    if agents.is_empty() {
-        body = body
-            .child(label("No coding agents running", theme::CALLOUT, true))
-            .child(label(
-                "Start an agent in a project to see it here.",
-                theme::SUBHEADLINE,
-                false,
-            ));
+    let body = if agents.is_empty() {
+        nook_empty("bot", "No agents").into_any_element()
     } else {
-        for agent in agents.iter().take(4) {
-            let pid = agent.pid;
-            let working = agent.status.is_working();
-            body = body.child(
-                card_row(SharedString::from(format!("agent-{}", agent.pid)))
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |_, _: &MouseDownEvent, _, cx| {
-                            cx.stop_propagation();
-                            let _ = nook_core::agents::focus(pid);
-                        }),
-                    )
-                    .child(dotmatrix::element(
-                        dotmatrix::pick(agent.pid),
-                        now,
-                        working,
-                        dotmatrix::WIDGET_SIZE,
-                    ))
-                    .child(
-                        div()
-                            .flex_1()
-                            // Without this the column keeps its content width and
-                            // the title overflows the card instead of truncating.
-                            .min_w_0()
-                            .flex()
-                            .flex_col()
-                            .child(
-                                slide_label(agent.title().to_string(), theme::CALLOUT, true)
-                                    .w_full(),
-                            )
-                            .child(
-                                slide_label(agent_detail_line(agent), theme::SUBHEADLINE, false)
-                                    .w_full(),
-                            ),
-                    ),
-            );
+        let mut col = div().flex().flex_col().w_full();
+        for agent in agents {
+            col = col.child(agent_row(agent, now, cx));
         }
-        if agents.len() > 4 {
-            body = body.child(label(
-                format!("{} more", agents.len() - 4),
-                theme::SUBHEADLINE,
-                false,
-            ));
-        }
+        scroll_body("agents-scroll", col).into_any_element()
+    };
+    nook_pane("nook-agents").w_full().child(body)
+}
+
+fn agent_row(agent: &AgentSession, now: f32, cx: &mut Context<Island>) -> impl IntoElement {
+    let pid = agent.pid;
+    let cwd = agent.cwd.clone();
+    let working = agent.status.is_working();
+    nook_row(SharedString::from(format!("agent-{pid}")))
+        .min_h(px(theme::HIT_MIN))
+        .gap(px(8.))
+        .cursor(CursorStyle::PointingHand)
+        .hover(|s| s.bg(rgba(0xFFFFFF0D)))
+        .active(|s| s.opacity(0.85))
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |_, _: &MouseDownEvent, _, cx| {
+                cx.stop_propagation();
+                open_agent(pid, &cwd);
+            }),
+        )
+        .child(
+            div()
+                .w(px(20.))
+                .flex_shrink_0()
+                .flex()
+                .justify_center()
+                .child(dotmatrix::element(
+                    dotmatrix::pick(agent.pid),
+                    now,
+                    working,
+                    dotmatrix::WIDGET_SIZE,
+                )),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w(px(0.))
+                .flex()
+                .flex_col()
+                .justify_center()
+                .overflow_hidden()
+                .child(slide_label(agent.title().to_string(), theme::CALLOUT, true).w_full())
+                .child(slide_label(agent_detail_line(agent), theme::SUBHEADLINE, false).w_full()),
+        )
+}
+
+fn open_agent(pid: u32, cwd: &str) {
+    if !nook_core::agents::focus(pid) {
+        nook_core::agents::reveal(cwd);
     }
-    widget_shell_actions("agents-scroll", "Agents", div(), body)
 }
 
 fn agent_detail_line(agent: &AgentSession) -> String {

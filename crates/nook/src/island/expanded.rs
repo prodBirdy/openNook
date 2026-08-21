@@ -8,9 +8,10 @@ use crate::widgets::{
     agents_card, calendar_card, notes_card, observe_card, reminders_card, speed_card, timer_card,
 };
 use gpui::{
-    div, prelude::*, px, rgba, AnyElement, Context, CursorStyle, Div, FontWeight, MouseButton,
-    MouseDownEvent, ScrollWheelEvent, Stateful,
+    div, img, prelude::*, px, rgba, AnyElement, Context, CursorStyle, FontWeight, MouseButton,
+    MouseDownEvent, ObjectFit, RenderImage, ScrollWheelEvent,
 };
+use nook_core::settings::WidgetModule;
 
 impl Island {
     pub(super) fn render_expanded(
@@ -84,6 +85,83 @@ impl Island {
     }
 
     fn render_nook(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        let mut kids: Vec<AnyElement> = Vec::new();
+        let add = |kids: &mut Vec<AnyElement>, child: AnyElement| {
+            if !kids.is_empty() {
+                kids.push(pane_divider().into_any_element());
+            }
+            kids.push(child);
+        };
+
+        for module in self.settings.ordered_widgets() {
+            match module {
+                WidgetModule::Music if self.settings.show_media => add(
+                    &mut kids,
+                    cell_pane(
+                        self.settings.cells_for(module),
+                        nook_media_pane(&self.now_playing, cx),
+                    ),
+                ),
+                WidgetModule::Calendar => {
+                    if self.settings.show_calendar {
+                        add(
+                            &mut kids,
+                            cell_pane(
+                                self.settings.cells_for(module),
+                                calendar_card(&self.events, self.calendar_day, cx),
+                            ),
+                        );
+                    }
+                    add(&mut kids, mirror_pane(self, cx).into_any_element());
+                }
+                WidgetModule::Agents if self.settings.show_agents => add(
+                    &mut kids,
+                    cell_pane(
+                        self.settings.cells_for(module),
+                        agents_card(&self.agents, self.pixel_t, cx),
+                    ),
+                ),
+                WidgetModule::Observe if self.settings.show_observe => add(
+                    &mut kids,
+                    cell_pane(
+                        self.settings.cells_for(module),
+                        observe_card(
+                            &self.observe,
+                            &self.settings,
+                            self.observe_hover.as_ref(),
+                            cx,
+                        ),
+                    ),
+                ),
+                WidgetModule::Reminders if self.settings.show_reminders => add(
+                    &mut kids,
+                    cell_pane(
+                        self.settings.cells_for(module),
+                        reminders_card(&self.reminders, cx),
+                    ),
+                ),
+                WidgetModule::Timers if self.settings.show_timers => add(
+                    &mut kids,
+                    cell_pane(
+                        self.settings.cells_for(module),
+                        timer_card(&self.timers, self.timer_composer, cx),
+                    ),
+                ),
+                WidgetModule::Notes if self.settings.show_notes => add(
+                    &mut kids,
+                    cell_pane(self.settings.cells_for(module), notes_card(self, cx)),
+                ),
+                WidgetModule::Speed if self.settings.show_speed => add(
+                    &mut kids,
+                    cell_pane(
+                        self.settings.cells_for(module),
+                        speed_card(self.speed_mbps, self.speed_progress, self.speed_running, cx),
+                    ),
+                ),
+                _ => {}
+            }
+        }
+
         let mut row = div()
             .id("nook-row")
             .flex()
@@ -95,70 +173,21 @@ impl Island {
             .on_scroll_wheel(cx.listener(|_, _: &ScrollWheelEvent, _, cx| {
                 cx.stop_propagation();
             }));
-
-        let mut first = true;
-        let mut push = |row: Stateful<Div>, child: AnyElement| {
-            let row = if first {
-                first = false;
-                row
-            } else {
-                row.child(pane_divider())
-            };
-            row.child(child)
-        };
-
-        if self.settings.show_media {
-            row = push(row, nook_media_pane(&self.now_playing, cx).into_any_element());
-        }
-        if self.settings.show_calendar {
-            row = push(
-                row,
-                calendar_card(&self.events, self.calendar_day, cx).into_any_element(),
-            );
-        }
-        row = push(row, mirror_pane(cx).into_any_element());
-
-        if self.settings.show_agents {
-            row = push(row, agents_card(&self.agents, self.pixel_t, cx).into_any_element());
-        }
-        if self.settings.show_observe {
-            row = push(
-                row,
-                observe_card(
-                    &self.observe,
-                    &self.settings,
-                    self.observe_hover.as_ref(),
-                    cx,
-                )
-                .into_any_element(),
-            );
-        }
-        if self.settings.show_reminders {
-            row = push(row, reminders_card(&self.reminders, cx).into_any_element());
-        }
-        if self.settings.show_timers {
-            row = push(
-                row,
-                timer_card(&self.timers, self.timer_composer, cx).into_any_element(),
-            );
-        }
-        if self.settings.show_notes {
-            row = push(row, notes_card(self, cx).into_any_element());
-        }
-        if self.settings.show_speed {
-            row = push(
-                row,
-                speed_card(
-                    self.speed_mbps,
-                    self.speed_progress,
-                    self.speed_running,
-                    cx,
-                )
-                .into_any_element(),
-            );
+        for child in kids {
+            row = row.child(child);
         }
         row
     }
+}
+
+fn cell_pane(cells: u8, child: impl IntoElement) -> AnyElement {
+    div()
+        .w(px(cells as f32 * theme::NOOK_CELL))
+        .h_full()
+        .flex_shrink_0()
+        .overflow_hidden()
+        .child(child)
+        .into_any_element()
 }
 
 fn pane_divider() -> impl IntoElement {
@@ -213,13 +242,7 @@ fn labeled_tab(
         .gap(px(6.))
         .rounded_full()
         .when(selected, |d| d.bg(rgba(0xffffff18)))
-        .hover(|s| {
-            if selected {
-                s
-            } else {
-                s.bg(rgba(0xffffff0D))
-            }
-        })
+        .hover(|s| if selected { s } else { s.bg(rgba(0xffffff0D)) })
         .active(|s| s.opacity(0.85))
         .cursor(CursorStyle::PointingHand)
         .child(lucide_color(
@@ -253,7 +276,9 @@ fn labeled_tab(
         )
 }
 
-fn mirror_pane(cx: &mut Context<Island>) -> impl IntoElement {
+fn mirror_pane(island: &Island, cx: &mut Context<Island>) -> impl IntoElement {
+    let live = island.mirror_on;
+    let frame = island.mirror_frame.clone();
     div()
         .id("mirror-pane")
         .flex_shrink_0()
@@ -268,28 +293,57 @@ fn mirror_pane(cx: &mut Context<Island>) -> impl IntoElement {
                 .size(px(88.))
                 .rounded_full()
                 .bg(rgba(0xffffff14))
-                .flex()
-                .flex_col()
-                .items_center()
-                .justify_center()
-                .gap(px(6.))
                 .cursor(CursorStyle::PointingHand)
-                .hover(|s| s.bg(rgba(0xffffff1F)))
+                .hover(|s| if live { s } else { s.bg(rgba(0xffffff1F)) })
                 .active(|s| s.opacity(0.9))
-                .child(lucide_color("webcam", 22.0, theme::SECONDARY_LABEL))
-                .child(
-                    div()
-                        .text_size(px(11.))
-                        .line_height(px(13.))
-                        .font_weight(FontWeight::MEDIUM)
-                        .text_color(theme::SECONDARY_LABEL)
-                        .child("Mirror"),
-                )
                 .on_mouse_down(
                     MouseButton::Left,
-                    cx.listener(|_, _: &MouseDownEvent, _, _| {
-                        crate::platform::open_mirror();
+                    cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                        cx.stop_propagation();
+                        this.toggle_mirror(cx);
                     }),
-                ),
+                )
+                .when(live, |d| d.child(mirror_frame_el(frame)))
+                .when(!live, |d| {
+                    d.flex()
+                        .flex_col()
+                        .items_center()
+                        .justify_center()
+                        .gap(px(6.))
+                        .child(lucide_color("webcam", 22.0, theme::SECONDARY_LABEL))
+                        .child(
+                            div()
+                                .text_size(px(11.))
+                                .line_height(px(13.))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(theme::SECONDARY_LABEL)
+                                .child("Mirror"),
+                        )
+                }),
         )
+}
+
+fn mirror_frame_el(frame: Option<std::sync::Arc<RenderImage>>) -> AnyElement {
+    match frame {
+        Some(image) => {
+            // Fill, not Cover: Cover paints a larger quad so the corner
+            // radii miss the visible box and the frame sticks out square.
+            // RenderImage (not Image): JPEG assets flash a 200ms loading
+            // placeholder on every camera tick, which looks like a reinit.
+            img(image)
+                .id("mirror-video")
+                .size(px(88.))
+                .rounded_full()
+                .object_fit(ObjectFit::Fill)
+                .into_any_element()
+        }
+        None => div()
+            .size(px(88.))
+            .rounded_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(lucide_color("webcam", 22.0, theme::LABEL))
+            .into_any_element(),
+    }
 }

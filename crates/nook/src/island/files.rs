@@ -1,6 +1,6 @@
 //! Expanded files tab: drop zone, grid, and tiles.
 
-use super::ui::{label, text_btn};
+use super::ui::label;
 use super::{Island, Tab};
 use crate::icons::{lucide, lucide_color};
 use crate::theme;
@@ -11,11 +11,15 @@ use gpui::{
 use nook_core::files::FileTrayItem;
 use std::path::PathBuf;
 
-/// React FileTray: `grid-cols-[repeat(auto-fill,minmax(100px,1fr))]` with 12px gaps.
+/// Dashed drop-zone chrome. Tiles are a compact horizontal row, not a grid.
 const FILES_BORDER: f32 = 2.0;
-const FILES_GAP: f32 = 12.0;
-const FILES_MIN_TILE: f32 = 100.0;
-const TILE_RADIUS: f32 = 12.0;
+const FILES_GAP: f32 = 16.0;
+const FILES_MIN_TILE: f32 = 64.0;
+const TILE_RADIUS: f32 = 8.0;
+const TRAY_PREVIEW: f32 = 48.0;
+const TRAY_PAD: f32 = 16.0;
+const TRAY_ZONE_RADIUS: f32 = 22.0;
+const AIRDROP_W: f32 = 156.0;
 /// Same face as the compact album chip.
 const COMPACT_PREVIEW: f32 = theme::COMPACT_FACE;
 const COMPACT_PREVIEW_RADIUS: f32 = 5.0;
@@ -23,11 +27,8 @@ const COMPACT_STACK_MAX: usize = 3;
 const COMPACT_STACK_DX: f32 = 4.0;
 const COMPACT_STACK_DY: f32 = 3.0;
 const FILES_NAME: f32 = 12.0;
-const FILES_SIZE: f32 = 10.0;
 const FILES_CAPTION_GAP: f32 = 2.0;
 const FILES_CAPTION_PT: f32 = 8.0;
-/// `text_btn` row under the grid (`pb_2`).
-const FILES_CLEAR_PB: f32 = 8.0;
 
 /// Content width the grid tracks actually lay out in: expanded island minus
 /// the widgets/files pane inset, the dashed drop-zone border, and the grid pad.
@@ -46,17 +47,16 @@ pub(crate) fn file_grid_metrics(island_w: f32) -> (u16, f32) {
 }
 
 fn file_caption_height() -> f32 {
-    FILES_CAPTION_PT + FILES_NAME + FILES_CAPTION_GAP + FILES_SIZE + theme::CONTENT_INSET
+    FILES_CAPTION_PT + FILES_NAME * 2.0 + FILES_CAPTION_GAP
 }
 
-pub(crate) fn file_tile_height(tile_w: f32) -> f32 {
-    tile_w + file_caption_height()
+pub(crate) fn file_tile_height(_tile_w: f32) -> f32 {
+    TRAY_PREVIEW + file_caption_height()
 }
 
-/// Drop-zone chrome around one row of tiles: dashed border, grid pad, Clear All.
-pub(crate) fn files_pane_min_height(island_w: f32) -> f32 {
-    let (_, tile) = file_grid_metrics(island_w);
-    FILES_BORDER * 2.0 + FILES_GAP * 2.0 + file_tile_height(tile) + theme::HIT_MIN + FILES_CLEAR_PB
+/// Drop-zone chrome around one row of compact tiles.
+pub(crate) fn files_pane_min_height(_island_w: f32) -> f32 {
+    FILES_BORDER * 2.0 + TRAY_PAD * 2.0 + file_tile_height(TRAY_PREVIEW)
 }
 
 /// Newest files first, then reversed so the oldest of that set paints at the
@@ -145,26 +145,98 @@ pub(super) fn drop_veil() -> impl IntoElement {
         .child(label("Release to Add", theme::BODY, true))
 }
 
-fn file_card(file: &FileTrayItem, tile_w: f32, cx: &mut Context<Island>) -> impl IntoElement {
-    let path = file.path.clone();
-    let path_rm = file.path.clone();
-    let img_path = file.path.clone();
-    let name = file.name.clone();
-    let size = file.size;
-    let show_img = file.mime_type.starts_with("image");
+const AIRDROP_BLUE: gpui::Rgba = gpui::Rgba {
+    r: 0.08,
+    g: 0.42,
+    b: 0.86,
+    a: 1.0,
+};
 
-    // Do not overflow_hidden this card: grid items with Hidden overflow get
-    // min-size 0 and auto rows collapse, so the tile paints at 0 height.
+fn airdrop_target(cx: &mut Context<Island>) -> impl IntoElement {
+    div()
+        .id("airdrop-target")
+        .flex_shrink_0()
+        .h_full()
+        .w(px(AIRDROP_W))
+        .rounded(px(TRAY_ZONE_RADIUS))
+        .bg(AIRDROP_BLUE)
+        .flex()
+        .flex_col()
+        .items_center()
+        .justify_center()
+        .gap(px(10.))
+        .cursor(CursorStyle::PointingHand)
+        .hover(|s| s.opacity(0.92))
+        .can_drop(|drag: &dyn std::any::Any, _, _| {
+            drag.downcast_ref::<gpui::ExternalPaths>().is_some()
+        })
+        .on_drop(cx.listener(|this, paths: &gpui::ExternalPaths, _, cx| {
+            cx.stop_propagation();
+            this.airdrop_paths(paths, cx);
+        }))
+        .child(lucide_color("airdrop", 28.0, rgb(0xffffff)))
+        .child(
+            div()
+                .text_size(px(15.))
+                .line_height(px(18.))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(rgb(0xffffff))
+                .child("AirDrop"),
+        )
+}
+
+fn is_pdf(file: &FileTrayItem) -> bool {
+    file.mime_type.to_ascii_lowercase().contains("pdf")
+        || file.name.to_ascii_lowercase().ends_with(".pdf")
+}
+
+fn file_preview(file: &FileTrayItem) -> impl IntoElement {
+    let show_img = file.mime_type.starts_with("image");
+    let img_path = file.path.clone();
+    div()
+        .size(px(TRAY_PREVIEW))
+        .flex_shrink_0()
+        .rounded(px(TILE_RADIUS))
+        .overflow_hidden()
+        .bg(rgb(0xffffff))
+        .flex()
+        .items_center()
+        .justify_center()
+        .when(show_img, |d| {
+            d.bg(rgba(0xffffff14)).child(
+                img(PathBuf::from(img_path))
+                    .object_fit(ObjectFit::Fill)
+                    .size(px(TRAY_PREVIEW))
+                    .rounded(px(TILE_RADIUS)),
+            )
+        })
+        .when(is_pdf(file) && !show_img, |d| {
+            d.flex_col().gap(px(2.)).child(
+                div()
+                    .text_size(px(9.))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(rgb(0xE23D3D))
+                    .child("PDF"),
+            )
+        })
+        .when(!show_img && !is_pdf(file), |d| {
+            d.bg(rgba(0xffffff14))
+                .child(lucide_color("files", 22.0, theme::TERTIARY_LABEL))
+        })
+}
+
+fn file_card(file: &FileTrayItem, cx: &mut Context<Island>) -> impl IntoElement {
+    let path = file.path.clone();
+    let name = file.name.clone();
+
     div()
         .id(SharedString::from(format!("file-{}", file.path)))
-        .relative()
-        .w(px(tile_w))
+        .w(px(FILES_MIN_TILE))
         .flex()
         .flex_col()
         .flex_shrink_0()
-        .rounded(px(TILE_RADIUS))
-        .bg(rgba(0xffffff14))
-        .hover(|s| s.bg(rgba(0xFFFFFF1F)))
+        .items_center()
+        .gap(px(FILES_CAPTION_PT))
         .cursor(CursorStyle::PointingHand)
         .on_mouse_down(
             MouseButton::Left,
@@ -190,180 +262,96 @@ fn file_card(file: &FileTrayItem, tile_w: f32, cx: &mut Context<Island>) -> impl
                 }
             }),
         )
-        .child(
-            div()
-                .w(px(tile_w))
-                .h(px(tile_w))
-                .flex_shrink_0()
-                // Same radius as the card's bottom corners. Do not
-                // overflow_hidden: GPUI's overflow clip is a rectangle, so it
-                // would square the top that the card rounds at the bottom.
-                .rounded_t(px(TILE_RADIUS))
-                .bg(rgba(0xFFFFFF0D))
-                .flex()
-                .items_center()
-                .justify_center()
-                .when(show_img, |d| {
-                    d.child(
-                        img(PathBuf::from(img_path))
-                            .object_fit(ObjectFit::Fill)
-                            .size(px(tile_w))
-                            .rounded_t(px(TILE_RADIUS)),
-                    )
-                })
-                .when(!show_img, |d| {
-                    d.child(lucide_color("files", 28.0, theme::TERTIARY_LABEL))
-                }),
-        )
+        .child(file_preview(file))
         .child(
             div()
                 .w_full()
-                .flex()
-                .flex_col()
-                .gap(px(FILES_CAPTION_GAP))
-                .px(px(theme::CONTENT_INSET))
-                .pt(px(FILES_CAPTION_PT))
-                .pb(px(theme::CONTENT_INSET))
-                .child(
-                    div()
-                        .w_full()
-                        .text_size(px(FILES_NAME))
-                        .line_height(px(FILES_NAME))
-                        .text_color(rgba(0xFFFFFFE6))
-                        .font_weight(FontWeight::NORMAL)
-                        .truncate()
-                        .child(name),
-                )
-                .when(size > 0, |d| {
-                    d.child(
-                        div()
-                            .text_size(px(FILES_SIZE))
-                            .line_height(px(FILES_SIZE))
-                            .text_color(rgba(0xffffff80))
-                            .child(nook_core::files::format_size(size)),
-                    )
-                }),
-        )
-        .child(
-            div()
-                .id(SharedString::from(format!("file-rm-{}", file.path)))
-                .absolute()
-                .top(px(4.))
-                .right(px(4.))
-                .size(px(theme::HIT_MIN))
-                .rounded_full()
-                .bg(theme::FILL)
-                .flex()
-                .items_center()
-                .justify_center()
-                .hover(|s| s.bg(theme::FILL_SECONDARY))
-                .active(|s| s.opacity(0.85))
-                .cursor(CursorStyle::PointingHand)
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(move |this, _: &MouseDownEvent, _, cx| {
-                        cx.stop_propagation();
-                        this.remove_file(&path_rm, cx);
-                    }),
-                )
-                .child(lucide_color("x", 12.0, theme::DESTRUCTIVE)),
+                .text_size(px(FILES_NAME))
+                .line_height(px(FILES_NAME + 2.0))
+                .text_color(theme::LABEL)
+                .font_weight(FontWeight::MEDIUM)
+                .truncate()
+                .child(name),
         )
 }
 
 impl Island {
     pub(super) fn render_files(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let hot = self.file_drag;
-        let body = if self.files.is_empty() {
-            div()
-                .size_full()
-                .flex()
-                .flex_col()
-                .items_center()
-                .justify_center()
-                .gap(px(10.))
-                .rounded(px(theme::INNER_RADIUS))
-                .when(hot, |d| {
-                    d.bg(theme::FILL).border_1().border_color(rgb(0xffffff))
-                })
-                .child(lucide_color(
-                    if hot { "plus" } else { "upload-thin" },
-                    48.0,
-                    if hot {
-                        theme::LABEL
-                    } else {
-                        theme::TERTIARY_LABEL
-                    },
-                ))
-                .child(label(
-                    if hot {
-                        "Release to Add"
-                    } else {
-                        "Drop files onto the island"
-                    },
-                    theme::BODY,
-                    true,
-                ))
-                .child(label(
-                    "They stay here until you open or clear them.",
-                    theme::SUBHEADLINE,
-                    false,
-                ))
-                .into_any_element()
-        } else {
-            let (cols, tile_w) = self.file_layout();
-            let mut grid = div().grid().grid_cols(cols).gap(px(FILES_GAP)).w_full();
-            for file in &self.files {
-                grid = grid.child(file_card(file, tile_w, cx));
-            }
-            div()
-                .flex()
-                .flex_col()
-                .size_full()
-                .child(
-                    div()
-                        .id("files-list")
-                        .flex_1()
-                        .min_h(px(0.))
-                        .w_full()
-                        .p(px(FILES_GAP))
-                        .overflow_y_scroll()
-                        .on_scroll_wheel(cx.listener(|_, _: &ScrollWheelEvent, _, cx| {
-                            cx.stop_propagation();
-                        }))
-                        .child(grid),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .justify_end()
-                        .flex_shrink_0()
-                        .px_3()
-                        .pb(px(FILES_CLEAR_PB))
-                        .child(text_btn("Clear All", cx, |this, _, cx| {
-                            this.clear_files(cx);
-                        })),
-                )
-                .into_any_element()
-        };
-
-        // React FileTray: bg-white/5 rounded-[16px] border-2 border-dashed border-white/10
-        div()
-            .relative()
+        let mut row = div()
+            .id("files-list")
+            .flex()
+            .flex_row()
+            .items_start()
+            .gap(px(FILES_GAP))
             .size_full()
+            .p(px(TRAY_PAD))
+            .overflow_x_scroll()
+            .on_scroll_wheel(cx.listener(|_, _: &ScrollWheelEvent, _, cx| {
+                cx.stop_propagation();
+            }));
+        for file in &self.files {
+            row = row.child(file_card(file, cx));
+        }
+        if self.files.is_empty() {
+            row = row.child(
+                div()
+                    .flex_1()
+                    .h_full()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .justify_center()
+                    .gap(px(6.))
+                    .child(lucide_color(
+                        if hot { "plus" } else { "upload-thin" },
+                        28.0,
+                        if hot {
+                            theme::LABEL
+                        } else {
+                            theme::TERTIARY_LABEL
+                        },
+                    ))
+                    .child(label(
+                        if hot {
+                            "Release to add"
+                        } else {
+                            "Drop files here"
+                        },
+                        theme::CALLOUT,
+                        true,
+                    )),
+            );
+        }
+
+        let zone = div()
+            .relative()
+            .flex_1()
+            .h_full()
+            .min_w(px(0.))
             .overflow_hidden()
-            .rounded(px(16.))
-            .bg(rgba(0xFFFFFF0D))
+            .rounded(px(TRAY_ZONE_RADIUS))
             .border_2()
             .border_dashed()
-            .border_color(rgba(0xFFFFFF1A))
-            .child(body)
-            .when(self.file_drag, |d| d.child(drop_veil()))
+            .border_color(if hot {
+                rgba(0xFFFFFF55)
+            } else {
+                rgba(0xFFFFFF2E)
+            })
+            .child(row);
+
+        let mut pane = div().flex().size_full().gap(px(12.)).child(zone);
+        if hot {
+            pane = pane.child(airdrop_target(cx));
+        }
+        pane
     }
 
     pub(super) fn file_layout(&self) -> (u16, f32) {
         file_grid_metrics(self.expanded_width())
     }
 
+    #[allow(dead_code)]
     pub(crate) fn clear_files(&mut self, cx: &mut Context<Self>) {
         self.files.clear();
         let _ = nook_core::files::save_file_tray(self.files.clone());
@@ -441,15 +429,14 @@ mod tests {
     #[test]
     fn files_pane_is_at_least_one_tile_tall() {
         for w in [300.0, 400.0, 548.0, 600.0, 1280.0] {
-            let (_, tile) = file_grid_metrics(w);
             let pane = files_pane_min_height(w);
-            let chrome = FILES_BORDER * 2.0 + FILES_GAP * 2.0 + theme::HIT_MIN + FILES_CLEAR_PB;
+            let tile_h = file_tile_height(TRAY_PREVIEW);
+            let chrome = FILES_BORDER * 2.0 + TRAY_PAD * 2.0;
             assert!(
-                pane + 0.05 >= chrome + file_tile_height(tile),
-                "w={w} pane={pane} tile_h={} chrome={chrome}",
-                file_tile_height(tile)
+                pane + 0.05 >= chrome + tile_h,
+                "w={w} pane={pane} tile_h={tile_h} chrome={chrome}"
             );
-            assert!(file_tile_height(tile) > tile);
+            assert!(tile_h > TRAY_PREVIEW);
         }
     }
 }

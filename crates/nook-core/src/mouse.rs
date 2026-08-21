@@ -131,7 +131,10 @@ fn hit_region(padding: f64) -> (f64, f64, f64, f64) {
             // misses Finder drags that come in along the menu bar from the
             // sides. During a drag, take the whole top strip so click-through
             // lifts before the cursor reaches the painted island.
-            if padding > 0.0 {
+            if padding > 0.0 && bounds.y <= 2.0 {
+                // Attached to the menu bar: a Finder drag along the top
+                // strip has to lift click-through before it reaches the pill.
+                // A moved island is hit through the padded box alone.
                 let (screen_width, _, _, _) = get_screen_info();
                 return (0.0, screen_width, y0.max(0.0), y1);
             }
@@ -320,5 +323,18 @@ mod tests {
         assert!(!hit_test_exact(10.0, 10.0));
         super::DRAG_ACTIVE.store(false, Ordering::Relaxed);
         assert!(!hit_test(10.0, 10.0));
+    }
+
+    #[test]
+    fn finder_drag_does_not_open_a_top_strip_when_the_island_moved() {
+        let _guard = lock();
+        update_ui_bounds(790.0, 200.0, 220.0, 38.0);
+        super::DRAG_ACTIVE.store(true, Ordering::Relaxed);
+        assert!(
+            !hit_test(10.0, 10.0),
+            "a moved island does not steal the menu bar"
+        );
+        assert!(hit_test(800.0, 210.0), "padded box around the island still works");
+        super::DRAG_ACTIVE.store(false, Ordering::Relaxed);
     }
 }

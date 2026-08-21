@@ -98,6 +98,7 @@ pub(crate) use super::marquee::slide_label;
 /// highlight is inset back out of the card's 12 pt content margin by 6 pt and
 /// rounded concentrically with the card (14 pt outer − 6 pt gap = 8 pt inner)
 /// rather than running square-cornered to the card's edges.
+#[allow(dead_code)]
 pub(crate) fn card_row(id: impl Into<ElementId>) -> Stateful<Div> {
     div()
         .id(id)
@@ -114,6 +115,7 @@ pub(crate) fn card_row(id: impl Into<ElementId>) -> Stateful<Div> {
         .active(|s| s.bg(theme::FILL_SECONDARY))
 }
 
+#[allow(dead_code)]
 pub(crate) fn text_btn(
     caption: impl Into<SharedString>,
     cx: &mut Context<Island>,
@@ -143,6 +145,7 @@ pub(crate) fn text_btn(
 }
 
 /// Header + / refresh on React widgets: 18px icon, round, white/40.
+#[allow(dead_code)]
 pub(crate) fn header_icon_btn(
     name: &'static str,
     elem_id: impl Into<SharedString>,
@@ -170,6 +173,7 @@ pub(crate) fn header_icon_btn(
 }
 
 /// Empty-state CTA (`Create Timer`, `Create Reminder`): `rounded-[20px]`.
+#[allow(dead_code)]
 pub(crate) fn pill_btn(
     caption: impl Into<SharedString>,
     cx: &mut Context<Island>,
@@ -204,6 +208,7 @@ pub(crate) fn pill_btn(
         )
 }
 
+#[allow(dead_code)]
 pub(crate) fn empty_state(
     message: impl Into<SharedString>,
     action: impl IntoElement,
@@ -225,6 +230,7 @@ pub(crate) fn empty_state(
         .child(action)
 }
 
+#[allow(dead_code)]
 pub(crate) fn widget_title(title: impl Into<SharedString>) -> Div {
     div()
         .text_size(px(17.))
@@ -232,6 +238,96 @@ pub(crate) fn widget_title(title: impl Into<SharedString>) -> Div {
         .font_weight(FontWeight::SEMIBOLD)
         .text_color(rgba(0xFFFFFFF2))
         .child(title.into())
+}
+
+/// Full-height Nook pane. Same chrome as Now Playing and Calendar: no fill,
+/// no card radius — content sits in the scrolling row behind a 1px divider.
+pub(crate) fn nook_pane(id: impl Into<ElementId>) -> Stateful<Div> {
+    div()
+        .id(id)
+        .flex_shrink_0()
+        .h_full()
+        .flex()
+        .flex_col()
+        .overflow_hidden()
+}
+
+/// Calendar empty copy: 16px glyph + 12pt medium tertiary label, centered.
+pub(crate) fn nook_empty(icon: &'static str, message: impl Into<SharedString>) -> impl IntoElement {
+    div()
+        .flex_1()
+        .flex()
+        .flex_col()
+        .items_center()
+        .justify_center()
+        .gap(px(6.))
+        .child(lucide_color(icon, 16.0, theme::TERTIARY_LABEL))
+        .child(
+            div()
+                .text_size(px(12.))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(theme::TERTIARY_LABEL)
+                .child(message.into()),
+        )
+}
+
+/// Calendar month numeral: 32/36 bold primary label.
+pub(crate) fn nook_display(text: impl Into<SharedString>) -> Div {
+    div()
+        .text_size(px(32.))
+        .line_height(px(36.))
+        .font_weight(FontWeight::BOLD)
+        .text_color(theme::LABEL)
+        .child(text.into())
+}
+
+/// Calendar event row: hairline, vertical padding, no card fill.
+pub(crate) fn nook_row(id: impl Into<ElementId>) -> Stateful<Div> {
+    div()
+        .id(id)
+        .flex()
+        .items_center()
+        .py_2()
+        .border_b_1()
+        .border_color(rgba(0xFFFFFF0D))
+}
+
+/// 3×32pt accent rail used beside Calendar event titles.
+pub(crate) fn nook_accent_bar(color: gpui::Rgba) -> Div {
+    div()
+        .w(px(3.))
+        .h(px(32.))
+        .rounded(px(2.))
+        .mr_3()
+        .flex_shrink_0()
+        .bg(color)
+}
+
+/// Now Playing skip/play glyph: 22pt face, opacity press, no fill.
+pub(crate) fn nook_icon_btn(
+    name: &'static str,
+    elem_id: impl Into<SharedString>,
+    cx: &mut Context<Island>,
+    on_click: impl Fn(&mut Island, &MouseDownEvent, &mut Window, &mut Context<Island>) + 'static,
+) -> impl IntoElement {
+    div()
+        .id(elem_id.into())
+        .size(px(22.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .opacity(0.9)
+        .hover(|s| s.opacity(1.0))
+        .active(|s| s.opacity(0.75))
+        .cursor(CursorStyle::PointingHand)
+        .child(lucide_color(name, 16.0, theme::LABEL))
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                cx.stop_propagation();
+                on_click(this, event, window, cx);
+            }),
+        )
 }
 
 /// React `WidgetWrapper`: `min-w-[300px]`.
@@ -246,6 +342,7 @@ pub(crate) const MEDIA_TIME_PAD_GAP: f32 = 6.0;
 
 /// Expanded-card chrome matching React `WidgetWrapper`: 28px corners, 16px
 /// pad, hairline, stretch to the row height.
+#[allow(dead_code)]
 pub(crate) fn card_chrome(width: f32) -> Div {
     div()
         .relative()
@@ -279,6 +376,7 @@ fn card_scroll(id: &ElementId) -> ScrollHandle {
     CARD_SCROLLS.with_borrow_mut(|handles| handles.entry(id.clone()).or_default().clone())
 }
 
+#[allow(dead_code)]
 pub(crate) fn widget_shell_actions(
     id: impl Into<ElementId>,
     title: impl Into<SharedString>,
@@ -300,6 +398,7 @@ pub(crate) fn widget_shell_actions(
         .child(scroll_body(id, child))
 }
 
+#[allow(dead_code)]
 pub(crate) fn widget_shell_w(
     id: impl Into<ElementId>,
     width: f32,
@@ -308,7 +407,7 @@ pub(crate) fn widget_shell_w(
     card_chrome(width).child(scroll_body(id, child))
 }
 
-fn scroll_body(id: impl Into<ElementId>, child: impl IntoElement) -> impl IntoElement {
+pub(crate) fn scroll_body(id: impl Into<ElementId>, child: impl IntoElement) -> impl IntoElement {
     let id = id.into();
     let scroll = card_scroll(&id);
     let mut body = div()

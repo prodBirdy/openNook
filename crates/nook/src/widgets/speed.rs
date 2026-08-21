@@ -1,10 +1,10 @@
-//! Cloudflare speed-test card.
+//! Cloudflare speed-test Nook pane.
 
 use crate::icons::lucide_color;
-use crate::island::ui::{card_chrome, widget_title, WIDGET_CARD_WIDTH};
+use crate::island::ui::{nook_display, nook_pane};
 use crate::island::Island;
 use crate::theme;
-use gpui::{div, prelude::*, px, relative, rgba, Context};
+use gpui::{div, prelude::*, px, relative, rgba, Context, CursorStyle, FontWeight};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -19,14 +19,9 @@ pub(crate) fn speed_card(
     let t = (progress as f32 / 100.0).clamp(0.0, 1.0);
     let show_bar = running || progress > 0.0;
 
-    // In-flow footer, same as Now Playing's seek bar. Absolute/bottom-0 was
-    // resolving against the island (GPUI overflow is a rectangle, not a
-    // rounded clip), which is why the accent painted under the card.
-    card_chrome(WIDGET_CARD_WIDTH)
-        .pt(px(theme::WIDGET_PAD))
-        .px(px(theme::WIDGET_PAD))
-        .pb(px(if show_bar { 10. } else { theme::WIDGET_PAD }))
-        .child(widget_title("Speed Test"))
+    nook_pane("nook-speed")
+        .w_full()
+        .pr(px(4.))
         .child(
             div()
                 .flex_1()
@@ -34,47 +29,42 @@ pub(crate) fn speed_card(
                 .flex()
                 .items_center()
                 .justify_between()
-                .px(px(4.))
+                .gap(px(12.))
                 .child(
                     div()
                         .flex()
                         .items_end()
-                        .gap_2()
+                        .gap(px(8.))
+                        .child(nook_display(value))
                         .child(
                             div()
-                                .text_size(px(36.))
-                                .font_weight(gpui::FontWeight::BOLD)
-                                .text_color(theme::LABEL)
-                                .line_height(px(36.))
-                                .child(value),
-                        )
-                        .child(
-                            div()
+                                .pb(px(4.))
                                 .text_size(px(11.))
-                                .font_weight(gpui::FontWeight::SEMIBOLD)
-                                .text_color(rgba(0xffffff66))
+                                .line_height(px(14.))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(theme::SECONDARY_LABEL)
                                 .child(unit),
                         ),
                 )
                 .child(run_btn(running, cx)),
         )
-        .when(show_bar, |d| {
-            d.child(
-                div()
-                    .w_full()
-                    .h(px(3.))
-                    .flex_shrink_0()
-                    .rounded_full()
-                    .overflow_hidden()
-                    .child(
-                        div()
-                            .h_full()
-                            .w(relative(t))
-                            .rounded_full()
-                            .bg(theme::accent()),
-                    ),
-            )
-        })
+        .child(
+            div()
+                .w_full()
+                .h(px(3.))
+                .flex_shrink_0()
+                .rounded_full()
+                .overflow_hidden()
+                .bg(rgba(0xffffff26))
+                .opacity(if show_bar { 1.0 } else { 0.45 })
+                .child(
+                    div()
+                        .h_full()
+                        .w(relative(t))
+                        .rounded_full()
+                        .bg(theme::accent()),
+                ),
+        )
 }
 
 fn format_speed(val: f64) -> (String, &'static str) {
@@ -90,22 +80,16 @@ fn format_speed(val: f64) -> (String, &'static str) {
 fn run_btn(running: bool, cx: &mut Context<Island>) -> impl IntoElement {
     div()
         .id("speed-run")
+        .size(px(22.))
         .flex()
         .items_center()
-        .gap_2()
-        .px(px(20.))
-        .py(px(8.))
-        .rounded_full()
-        .when(running, |d| {
-            d.bg(rgba(0xff453a26)).hover(|s| s.bg(rgba(0xff453a40)))
-        })
-        .when(!running, |d| {
-            d.bg(rgba(0xFFFFFF1A)).hover(|s| s.bg(rgba(0xffffff33)))
-        })
-        .active(|s| s.opacity(0.9))
-        .cursor(gpui::CursorStyle::PointingHand)
+        .justify_center()
+        .opacity(0.9)
+        .hover(|s| s.opacity(1.0))
+        .active(|s| s.opacity(0.75))
+        .cursor(CursorStyle::PointingHand)
         .child(lucide_color(
-            if running { "pause-fill" } else { "play-fill" },
+            if running { "pause" } else { "play" },
             16.0,
             if running {
                 theme::DESTRUCTIVE
@@ -113,17 +97,6 @@ fn run_btn(running: bool, cx: &mut Context<Island>) -> impl IntoElement {
                 theme::LABEL
             },
         ))
-        .child(
-            div()
-                .text_size(px(14.))
-                .font_weight(gpui::FontWeight::MEDIUM)
-                .text_color(if running {
-                    theme::DESTRUCTIVE
-                } else {
-                    theme::LABEL
-                })
-                .child(if running { "Stop" } else { "Run" }),
-        )
         .on_mouse_down(
             gpui::MouseButton::Left,
             cx.listener(|this, _, _, cx| {

@@ -14,20 +14,24 @@ pub(super) fn hitbox_debug() -> bool {
     })
 }
 
-/// One filled silhouette: flat top, concave 6px wings, rounded bottom.
-/// GPUI's per-corner radius was turning the compact island into a capsule.
+/// One filled silhouette.
+///
+/// Notch-attached: flat top, concave 6px wings, rounded bottom — GPUI's
+/// per-corner radius was turning that into a capsule. Detached (moved off the
+/// top edge): a rounded rect so the top corners are visible.
 pub(super) fn island_chrome(
     body_w: f32,
     body_h: f32,
     wing: f32,
     color: gpui::Rgba,
+    attached: bool,
 ) -> impl IntoElement {
     canvas(
         |bounds, _, _| bounds,
         move |bounds, _, window, _| {
             let ox: f32 = bounds.origin.x.into();
             let oy: f32 = bounds.origin.y.into();
-            let g = wing;
+            let g = if attached { wing } else { 0.0 };
             let w = body_w;
             let h = body_h;
             let r = if h > 80.0 {
@@ -35,7 +39,8 @@ pub(super) fn island_chrome(
             } else {
                 theme::COMPACT_RADIUS
             }
-            .min(h * 0.5);
+            .min(h * 0.5)
+            .min(w * 0.5);
             let k = 0.552_284_8;
             let p = |x: f32, y: f32| point(px(ox + x), px(oy + y));
             let cubic = |path: &mut PathBuilder, to: (f32, f32), c1: (f32, f32), c2: (f32, f32)| {
@@ -43,31 +48,44 @@ pub(super) fn island_chrome(
             };
 
             let mut path = PathBuilder::fill();
-            path.move_to(p(0.0, 0.0));
-            path.line_to(p(g + w + g, 0.0));
-            if g > 0.5 {
-                let kk = k * g;
+            if attached {
+                path.move_to(p(0.0, 0.0));
+                path.line_to(p(g + w + g, 0.0));
+                if g > 0.5 {
+                    let kk = k * g;
+                    cubic(
+                        &mut path,
+                        (g + w, g),
+                        (g + w + g - kk, 0.0),
+                        (g + w, g - kk),
+                    );
+                }
+                path.line_to(p(g + w, h - r));
+                let rk = k * r;
                 cubic(
                     &mut path,
-                    (g + w, g),
-                    (g + w + g - kk, 0.0),
-                    (g + w, g - kk),
+                    (g + w - r, h),
+                    (g + w, h - r + rk),
+                    (g + w - r + rk, h),
                 );
-            }
-            path.line_to(p(g + w, h - r));
-            let rk = k * r;
-            cubic(
-                &mut path,
-                (g + w - r, h),
-                (g + w, h - r + rk),
-                (g + w - r + rk, h),
-            );
-            path.line_to(p(g + r, h));
-            cubic(&mut path, (g, h - r), (g + r - rk, h), (g, h - r + rk));
-            path.line_to(p(g, g.max(0.0)));
-            if g > 0.5 {
-                let kk = k * g;
-                cubic(&mut path, (0.0, 0.0), (g, g - kk), (kk, 0.0));
+                path.line_to(p(g + r, h));
+                cubic(&mut path, (g, h - r), (g + r - rk, h), (g, h - r + rk));
+                path.line_to(p(g, g.max(0.0)));
+                if g > 0.5 {
+                    let kk = k * g;
+                    cubic(&mut path, (0.0, 0.0), (g, g - kk), (kk, 0.0));
+                }
+            } else {
+                let rk = k * r;
+                path.move_to(p(r, 0.0));
+                path.line_to(p(w - r, 0.0));
+                cubic(&mut path, (w, r), (w - r + rk, 0.0), (w, r - rk));
+                path.line_to(p(w, h - r));
+                cubic(&mut path, (w - r, h), (w, h - r + rk), (w - r + rk, h));
+                path.line_to(p(r, h));
+                cubic(&mut path, (0.0, h - r), (r - rk, h), (0.0, h - r + rk));
+                path.line_to(p(0.0, r));
+                cubic(&mut path, (r, 0.0), (0.0, r - rk), (r - rk, 0.0));
             }
             path.close();
             match path.build() {
@@ -76,6 +94,6 @@ pub(super) fn island_chrome(
             }
         },
     )
-    .w(px(body_w + wing * 2.0))
+    .w(px(body_w + if attached { wing * 2.0 } else { 0.0 }))
     .h(px(body_h))
 }

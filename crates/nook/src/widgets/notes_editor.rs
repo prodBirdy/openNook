@@ -736,12 +736,11 @@ fn paint_placeholder(bounds: Bounds<Pixels>, window: &mut Window, cx: &mut App) 
 }
 
 impl Render for NotesEditor {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let entity = cx.entity();
         let focus = self.focus.clone();
         let layout_cell = self.layout.clone();
         let bounds_cell = self.bounds.clone();
-        let focused = focus.is_focused(window);
         let min_h = self.content_height.max(LINE_HEIGHT);
         div()
             .id("notes-editor")
@@ -749,10 +748,6 @@ impl Render for NotesEditor {
             .min_h(relative(1.))
             .flex()
             .flex_col()
-            .p_2()
-            .rounded(px(theme::INNER_RADIUS))
-            .bg(theme::FILL_TERTIARY)
-            .when(focused, |d| d.border_1().border_color(theme::accent()))
             .cursor(CursorStyle::IBeam)
             .track_focus(&focus)
             .on_mouse_down(

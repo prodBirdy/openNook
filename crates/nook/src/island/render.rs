@@ -17,37 +17,84 @@ use std::any::Any;
 impl gpui::Render for Island {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_geometry(window);
+        if self.suppressed {
+            nook_core::mouse::update_ui_bounds(0.0, -100.0, 0.0, 0.0);
+            platform::sync_island_glass(None);
+        }
         // Click-through is driven by the mouse poll loop against the painted
         // bounds, not from here — paint only publishes where those bounds are.
-        let (tw, th) = (self.anim_w, self.anim_h);
-        nook_core::mouse::update_ui_bounds(
-            ((self.screen_width - tw) / 2.0) as f64,
-            0.0,
-            tw as f64,
-            th as f64,
+        let (tw, th) = (self.anim_w.value, self.anim_h.value);
+        let attached = self.settings.island_attached(self.screen_height);
+        let (body_left, body_top) = self.settings.island_origin(
+            self.screen_width,
+            self.screen_height,
+            tw.max(1.0),
+            th.max(1.0),
         );
+        if !self.suppressed {
+            nook_core::mouse::update_ui_bounds(
+                body_left as f64,
+                body_top as f64,
+                tw as f64,
+                th as f64,
+            );
+        }
 
-        // HIG > Materials: materials must "respond to system settings such as
-        // reduced transparency", and translucency here is opt-in, so the system
-        // setting overrides it.
-        let island_bg =
-            if self.settings.liquid_glass_mode && !crate::platform::reduce_transparency() {
-                theme::ISLAND_GLASS
-            } else {
-                theme::ISLAND
-            };
         let mode = self.mode();
         let expanded = self.expanded;
         let hovered = self.hovered;
         let notch_w = self.notch_width.max(180.0);
         let dropping = self.file_drag && (self.hovered || self.expanded);
-        let show_wings = th > 4.0
+        let show_wings = attached
+            && th > 4.0
             && (!self.settings.non_notch_mode || mode != CompactMode::Idle || hovered || expanded);
 
         let wing = if show_wings { WING } else { 0.0 };
         let chrome_w = tw.max(1.0) + wing * 2.0;
         let chrome_h = th.max(1.0);
+        let chrome_left = (body_left - wing).max(0.0);
+        let radius = if chrome_h > 80.0 {
+            theme::EXPANDED_RADIUS
+        } else {
+            theme::COMPACT_RADIUS
+        }
+        .min(chrome_h * 0.5);
+        // HIG › Materials: Liquid Glass must yield to Reduce Transparency.
+        // Native glass sits behind Metal; a transparent fill lets it show.
+        let want_glass = platform::island_glass_setting_on() && !self.suppressed;
+        let tint = self.settings.island_color.map(|rgb| {
+            let c = theme::rgba_from_u32(rgb, 1.0);
+            (c.r, c.g, c.b)
+        });
+        let native_glass = if want_glass {
+            let ok = platform::sync_island_glass(Some(platform::IslandGlass {
+                x: chrome_left as f64,
+                y: body_top as f64,
+                w: chrome_w as f64,
+                h: chrome_h as f64,
+                radius: radius as f64,
+                wing: wing as f64,
+                tint,
+            }));
+            // If this tick failed to talk to AppKit, keep the live underlay
+            // rather than painting the 82% black fallback over it.
+            ok || platform::island_glass_attached()
+        } else {
+            platform::sync_island_glass(None)
+        };
+        let island_bg = if native_glass {
+            rgba(0x00000000)
+        } else if want_glass {
+            theme::island_fill_glass(self.settings.island_color)
+        } else {
+            theme::island_fill(self.settings.island_color)
+        };
         let debug_hitbox = hitbox_debug();
+        let content_radius = if expanded {
+            theme::EXPANDED_RADIUS
+        } else {
+            theme::COMPACT_RADIUS
+        };
 
         // The root is the whole display. Every layer inside is absolutely
         // positioned, so the island keeps its exact top-centre placement while
@@ -62,7 +109,11 @@ impl gpui::Render for Island {
             .relative()
             .overflow_hidden()
             .bg(rgba(0x00000000))
-            .on_mouse_move(cx.listener(|this, _: &MouseMoveEvent, window, cx| {
+            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
+                if this.repositioning {
+                    this.apply_reposition(event.position.x.into(), event.position.y.into());
+                    cx.notify();
+                }
                 if this.poll_pending_file_drag(Some(window)) {
                     cx.notify();
                 }
@@ -70,7 +121,9 @@ impl gpui::Render for Island {
             .on_mouse_up(
                 MouseButton::Left,
                 cx.listener(|this, _: &MouseUpEvent, _, cx| {
-                    if this.finish_file_press() {
+                    let moved = this.finish_reposition();
+                    let file = this.finish_file_press();
+                    if moved || file {
                         cx.notify();
                     }
                 }),
@@ -87,67 +140,71 @@ impl gpui::Render for Island {
                 style: gpui::FontStyle::Normal,
             });
         let root = self.accept_file_drop(root, cx);
-        root.child(
-            div()
-                .absolute()
-                .top_0()
-                .left_0()
-                .w_full()
-                .h(px(chrome_h))
-                .flex()
-                .justify_center()
-                .child(
-                    self.accept_file_drop(
-                        div()
-                            .id("island")
-                            .relative()
-                            .w(px(chrome_w))
-                            .h(px(chrome_h))
-                            .overflow_hidden()
-                            .cursor(CursorStyle::PointingHand),
-                        cx,
-                    )
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|this, _: &MouseDownEvent, _, cx| {
-                            this.toggle_expanded(cx);
-                        }),
-                    )
-                    .when(!expanded, |d| {
-                        d.on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _, cx| {
-                            this.on_wheel(event, cx);
-                        }))
-                    })
-                    .child(div().absolute().inset_0().child(island_chrome(
-                        tw.max(1.0),
-                        th.max(1.0),
-                        wing,
-                        island_bg,
-                    )))
+        root.when(!self.suppressed, |root| {
+            root.child(
+                div()
+                    .absolute()
+                    .top(px(body_top))
+                    .left(px(chrome_left))
+                    .w(px(chrome_w))
+                    .h(px(chrome_h))
                     .child(
-                        div()
-                            .absolute()
-                            .top_0()
-                            .left(px(wing))
-                            .w(px(tw.max(1.0)))
-                            .h(px(th.max(1.0)))
-                            .overflow_hidden()
-                            .rounded_bl(px(if expanded {
-                                theme::EXPANDED_RADIUS
-                            } else {
-                                theme::COMPACT_RADIUS
-                            }))
-                            .rounded_br(px(if expanded {
-                                theme::EXPANDED_RADIUS
-                            } else {
-                                theme::COMPACT_RADIUS
-                            }))
-                            .child(self.content_stack(expanded, mode, hovered, notch_w, cx))
-                            .when(dropping && !expanded, |d| d.child(drop_veil()))
-                            .when(!expanded, |d| d.child(self.mode_dots(cx))),
+                        self.accept_file_drop(
+                            div()
+                                .id("island")
+                                .relative()
+                                .w(px(chrome_w))
+                                .h(px(chrome_h))
+                                .overflow_hidden()
+                                .cursor(if self.repositioning {
+                                    CursorStyle::ClosedHand
+                                } else {
+                                    CursorStyle::PointingHand
+                                }),
+                            cx,
+                        )
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, event: &MouseDownEvent, _, cx| {
+                                this.on_island_press(event, cx);
+                            }),
+                        )
+                        .when(!expanded, |d| {
+                            d.on_scroll_wheel(cx.listener(
+                                |this, event: &ScrollWheelEvent, _, cx| {
+                                    this.on_wheel(event, cx);
+                                },
+                            ))
+                        })
+                        .when(!native_glass, |d| {
+                            d.child(div().absolute().inset_0().child(island_chrome(
+                                tw.max(1.0),
+                                th.max(1.0),
+                                wing,
+                                island_bg,
+                                attached,
+                            )))
+                        })
+                        .child(
+                            div()
+                                .absolute()
+                                .top_0()
+                                .left(px(wing))
+                                .w(px(tw.max(1.0)))
+                                .h(px(th.max(1.0)))
+                                .overflow_hidden()
+                                .when(attached, |d| {
+                                    d.rounded_bl(px(content_radius))
+                                        .rounded_br(px(content_radius))
+                                })
+                                .when(!attached, |d| d.rounded(px(content_radius)))
+                                .child(self.content_stack(expanded, mode, hovered, notch_w, cx))
+                                .when(dropping && !expanded, |d| d.child(drop_veil()))
+                                .when(!expanded, |d| d.child(self.mode_dots(cx))),
+                        ),
                     ),
-                ),
-        )
+            )
+        })
         .when(debug_hitbox, |d| d.child(self.hitbox_overlay()))
     }
 }
@@ -212,7 +269,7 @@ impl Island {
         notch_w: f32,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let alpha = self.content_opacity.clamp(0.0, 1.0);
+        let alpha = self.content_fade.value.clamp(0.0, 1.0);
         // A Finder drag needs the root's drop hitbox reachable, and the crisp
         // layer below blocks the mouse to keep the taps inert — so no smear
         // while something is being dragged onto us.
@@ -269,8 +326,8 @@ impl Island {
                         // expand toggle the blocked root would have handled.
                         d.block_mouse_except_scroll().on_mouse_down(
                             MouseButton::Left,
-                            cx.listener(|this, _: &MouseDownEvent, _, cx| {
-                                this.toggle_expanded(cx);
+                            cx.listener(|this, event: &MouseDownEvent, _, cx| {
+                                this.on_island_press(event, cx);
                             }),
                         )
                     })
@@ -309,6 +366,7 @@ impl Island {
             32.0
         };
         self.screen_width = info.screen_width as f32;
+        self.screen_height = info.screen_height as f32;
         let (w, h) = notch::overlay_window_size();
         window.resize(size(px(w as f32), px(h as f32)));
         platform::pin_island_windows();

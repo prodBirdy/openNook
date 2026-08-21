@@ -1,16 +1,15 @@
-//! Scratchpad notes card.
+//! Scratchpad notes Nook pane.
 //!
 //! Preview renders the note as markdown (pulldown-cmark mapped to styled
 //! divs); the pencil toggle swaps in [`NotesEditor`] for raw-markdown editing.
 //! Inline styles flow at span granularity, so a paragraph with mixed bold /
 //! italic runs wraps between spans rather than mid-span.
 
-use crate::island::ui::{header_icon_btn, widget_shell_actions};
+use crate::island::ui::{nook_empty, nook_icon_btn, nook_pane, scroll_body};
 use crate::island::Island;
 use crate::theme;
 use gpui::{
-    div, prelude::*, px, relative, rgba, Context, CursorStyle, FontWeight, MouseButton,
-    MouseDownEvent,
+    div, prelude::*, px, relative, Context, CursorStyle, FontWeight, MouseButton, MouseDownEvent,
 };
 use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 
@@ -19,7 +18,7 @@ const MONO_FAMILY: &str = "SF Mono";
 
 pub(crate) fn notes_card(island: &mut Island, cx: &mut Context<Island>) -> impl IntoElement {
     let editing = island.notes_editing;
-    let toggle = header_icon_btn(
+    let toggle = nook_icon_btn(
         if editing { "eye" } else { "pencil" },
         "notes-toggle",
         cx,
@@ -46,7 +45,11 @@ pub(crate) fn notes_card(island: &mut Island, cx: &mut Context<Island>) -> impl 
     } else {
         preview_body(island.notes.trim().is_empty(), island.notes.clone(), cx).into_any_element()
     };
-    widget_shell_actions("notes-scroll", "Notes", toggle, body)
+    nook_pane("nook-notes")
+        .relative()
+        .w_full()
+        .child(scroll_body("notes-scroll", body))
+        .child(div().absolute().top(px(0.)).right(px(0.)).child(toggle))
 }
 
 fn preview_body(empty: bool, notes: String, cx: &mut Context<Island>) -> impl IntoElement {
@@ -66,13 +69,7 @@ fn preview_body(empty: bool, notes: String, cx: &mut Context<Island>) -> impl In
             }),
         )
         .when(empty, |d| {
-            d.items_center().justify_center().child(
-                div()
-                    .italic()
-                    .text_size(px(14.))
-                    .text_color(rgba(0xffffff33))
-                    .child("Click to add notes"),
-            )
+            d.child(nook_empty("notebook", "Click to add notes"))
         })
         .when(!empty, |d| d.child(markdown_preview(&notes)))
 }

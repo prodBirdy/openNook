@@ -1,11 +1,7 @@
-//! Compact timer ring + expanded timers card.
-//! Layout matches the React `TimerWidget` / `CompactTimer`.
+//! Compact timer ring + expanded timers Nook pane.
 
 use crate::icons::{lucide, lucide_color};
-use crate::island::ui::{
-    empty_state, format_timer, header_icon_btn, pill_btn, text_btn, timer_text,
-    widget_shell_actions,
-};
+use crate::island::ui::{format_timer, nook_display, nook_empty, nook_icon_btn, nook_pane};
 use crate::island::{Island, Timer};
 use crate::theme;
 use gpui::{
@@ -13,9 +9,14 @@ use gpui::{
     MouseDownEvent, PathBuilder, Rgba, SharedString,
 };
 
-const PRESETS: [(&str, u32); 4] = [("5m", 300), ("15m", 900), ("25m", 1500), ("1h", 3600)];
+const PRESETS: [(&str, &str, &str, u32); 4] = [
+    ("5m", "M", "05", 300),
+    ("15m", "M", "15", 900),
+    ("25m", "M", "25", 1500),
+    ("1h", "H", "01", 3600),
+];
 const COMPACT_RING: f32 = 24.0;
-const EXPANDED_RING: f32 = 44.0;
+const FEATURED_RING: f32 = 56.0;
 
 pub(crate) fn compact_left(island: &Island, cx: &mut Context<Island>) -> AnyElement {
     let timer = island.face_timer();
@@ -106,50 +107,82 @@ pub(crate) fn timer_ring(
 
 pub(crate) fn timer_card(
     timers: &[Timer],
-    composer: bool,
+    _composer: bool,
     cx: &mut Context<Island>,
 ) -> impl IntoElement {
-    let add = header_icon_btn("plus", "timer-add", cx, |this, _, _, cx| {
-        this.timer_composer = !this.timer_composer;
-        cx.notify();
-    });
+    let mut week = div().flex().items_end().gap(px(10.));
+    for (id, unit, num, seconds) in PRESETS {
+        week = week.child(preset_col(id, unit, num, seconds, cx));
+    }
 
-    let body = if timers.is_empty() && !composer {
-        empty_state(
-            "No active timers",
-            pill_btn("Create Timer", cx, |this, _, cx| {
-                this.timer_composer = true;
+    let remaining = timers.first().map(|t| format_timer(t.remaining));
+    let body = if timers.is_empty() {
+        nook_empty("clock", "No timers").into_any_element()
+    } else {
+        let mut col = div().flex().flex_col().flex_1().min_w(px(0.));
+        if let Some(first) = timers.first() {
+            col = col.child(featured_timer(first, cx));
+        }
+        col.into_any_element()
+    };
+
+    nook_pane("nook-timers")
+        .w_full()
+        .child(
+            div()
+                .flex()
+                .items_end()
+                .gap(px(16.))
+                .flex_shrink_0()
+                .when_some(remaining, |d, text| d.child(nook_display(text)))
+                .child(week),
+        )
+        .child(body)
+}
+
+fn preset_col(
+    id: &'static str,
+    unit: &'static str,
+    num: &'static str,
+    seconds: u32,
+    cx: &mut Context<Island>,
+) -> impl IntoElement {
+    div()
+        .id(SharedString::from(format!("timer-preset-{id}")))
+        .flex()
+        .flex_col()
+        .items_center()
+        .gap(px(4.))
+        .cursor(gpui::CursorStyle::PointingHand)
+        .hover(|s| s.opacity(0.85))
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                cx.stop_propagation();
+                this.add_timer(seconds);
+                this.timer_composer = false;
                 cx.notify();
             }),
         )
-        .into_any_element()
-    } else {
-        let mut list = div().flex().flex_col().gap_1().flex_1().min_h(px(0.));
-        if composer {
-            list = list.child(preset_row(cx));
-        }
-        for t in timers {
-            list = list.child(timer_row(t, cx));
-        }
-        list.into_any_element()
-    };
-
-    widget_shell_actions("timers-scroll", "Timers", add, body)
+        .child(
+            div()
+                .text_size(px(9.))
+                .line_height(px(11.))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(theme::SECONDARY_LABEL)
+                .child(unit),
+        )
+        .child(
+            div()
+                .text_size(px(15.))
+                .line_height(px(18.))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(theme::LABEL)
+                .child(num),
+        )
 }
 
-fn preset_row(cx: &mut Context<Island>) -> impl IntoElement {
-    let mut row = div().flex().gap_2().flex_wrap().px(px(4.)).py(px(4.));
-    for (label, seconds) in PRESETS {
-        row = row.child(text_btn(label, cx, move |this, _, cx| {
-            this.add_timer(seconds);
-            this.timer_composer = false;
-            cx.notify();
-        }));
-    }
-    row
-}
-
-fn timer_row(timer: &Timer, cx: &mut Context<Island>) -> impl IntoElement {
+fn featured_timer(timer: &Timer, cx: &mut Context<Island>) -> impl IntoElement {
     let id = timer.id;
     let done = timer.remaining == 0;
     let progress = if timer.total > 0 {
@@ -169,57 +202,24 @@ fn timer_row(timer: &Timer, cx: &mut Context<Island>) -> impl IntoElement {
     };
 
     div()
-        .id(SharedString::from(format!("timer-row-{id}")))
+        .id(SharedString::from(format!("timer-featured-{id}")))
         .flex()
         .items_center()
-        .gap_2()
-        .px(px(16.))
-        .py(px(12.))
-        .rounded(px(theme::ROW_RADIUS))
-        .when(done, |d| {
-            d.bg(rgba(0xFF453A1A))
-                .border_1()
-                .border_color(rgba(0xff453a33))
-        })
-        .when(!done, |d| d.hover(|s| s.bg(rgba(0xFFFFFF0D))))
-        .child(
-            div()
-                .id(SharedString::from(format!("timer-toggle-{id}")))
-                .relative()
-                .size(px(EXPANDED_RING))
-                .flex_shrink_0()
-                .cursor(gpui::CursorStyle::PointingHand)
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(move |this, _: &MouseDownEvent, _, cx| {
-                        cx.stop_propagation();
-                        if let Some(t) = this.timers.iter_mut().find(|t| t.id == id) {
-                            t.running = !t.running;
-                        }
-                        cx.notify();
-                    }),
-                )
-                .child(timer_ring(
-                    progress.clamp(0.0, 1.0),
-                    EXPANDED_RING,
-                    20.0,
-                    3.0,
-                    ring_color,
-                    rgba(0xFFFFFF1A),
-                ))
-                .when(!done, |d| {
-                    d.child(
-                        div()
-                            .absolute()
-                            .inset_0()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .when(!timer.running, |d| d.pl(px(1.)).opacity(0.5))
-                            .child(lucide_color(play_icon, 16.0, rgb(0xffffff))),
-                    )
-                }),
-        )
+        .gap(px(14.))
+        .flex_1()
+        .min_h(px(0.))
+        .child(timer_face(
+            id,
+            progress,
+            FEATURED_RING,
+            24.0,
+            3.5,
+            ring_color,
+            play_icon,
+            done,
+            timer.running,
+            cx,
+        ))
         .child(
             div()
                 .flex_1()
@@ -227,79 +227,99 @@ fn timer_row(timer: &Timer, cx: &mut Context<Island>) -> impl IntoElement {
                 .flex()
                 .flex_col()
                 .justify_center()
+                .overflow_hidden()
                 .child(
-                    timer_text(format_timer(timer.remaining), theme::TITLE_2)
-                        .text_size(px(26.))
-                        .line_height(px(26.)),
+                    div()
+                        .text_size(px(14.))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(theme::LABEL)
+                        .child(if timer.name.is_empty() {
+                            if done {
+                                "Done"
+                            } else if timer.running {
+                                "Running"
+                            } else {
+                                "Paused"
+                            }
+                            .to_string()
+                        } else {
+                            timer.name.clone()
+                        }),
                 )
-                .when(!timer.name.is_empty(), |d| {
-                    d.child(
-                        div()
-                            .text_size(px(13.))
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(rgba(0xffffff66))
-                            .mt(px(2.))
-                            .child(timer.name.clone()),
-                    )
-                }),
-        )
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .gap_1()
-                .child(round_tool(
-                    "rotate-ccw",
-                    format!("timer-reset-{id}"),
-                    false,
-                    cx,
-                    move |this, _, cx| {
-                        this.reset_timer(id);
-                        cx.notify();
-                    },
-                ))
-                .child(round_tool(
-                    "trash-2",
-                    format!("timer-del-{id}"),
-                    true,
-                    cx,
-                    move |this, _, cx| {
-                        this.remove_timer(id);
-                        cx.notify();
-                    },
-                )),
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(4.))
+                        .mt(px(4.))
+                        .child(nook_icon_btn(
+                            "rotate-ccw",
+                            format!("timer-reset-{id}"),
+                            cx,
+                            move |this, _, _, cx| {
+                                this.reset_timer(id);
+                                cx.notify();
+                            },
+                        ))
+                        .child(nook_icon_btn(
+                            "trash-2",
+                            format!("timer-del-{id}"),
+                            cx,
+                            move |this, _, _, cx| {
+                                this.remove_timer(id);
+                                cx.notify();
+                            },
+                        )),
+                ),
         )
 }
 
-fn round_tool(
-    icon: &'static str,
-    elem_id: String,
-    destructive: bool,
+fn timer_face(
+    id: u64,
+    progress: f32,
+    size: f32,
+    radius: f32,
+    stroke: f32,
+    color: Rgba,
+    play_icon: &'static str,
+    done: bool,
+    running: bool,
     cx: &mut Context<Island>,
-    on_click: impl Fn(&mut Island, &MouseDownEvent, &mut Context<Island>) + 'static,
 ) -> impl IntoElement {
     div()
-        .id(SharedString::from(elem_id))
-        .size(px(32.))
-        .rounded_full()
-        .bg(rgba(0xFFFFFF1A))
-        .flex()
-        .items_center()
-        .justify_center()
-        .hover(|s| {
-            if destructive {
-                s.bg(rgba(0xff453a33)).text_color(theme::DESTRUCTIVE)
-            } else {
-                s.bg(rgba(0xffffff33))
-            }
-        })
+        .id(SharedString::from(format!("timer-toggle-{id}-{size}")))
+        .relative()
+        .size(px(size))
+        .flex_shrink_0()
         .cursor(gpui::CursorStyle::PointingHand)
-        .child(lucide_color(icon, 16.0, theme::LABEL))
         .on_mouse_down(
             MouseButton::Left,
-            cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+            cx.listener(move |this, _: &MouseDownEvent, _, cx| {
                 cx.stop_propagation();
-                on_click(this, event, cx);
+                if let Some(t) = this.timers.iter_mut().find(|t| t.id == id) {
+                    t.running = !t.running;
+                }
+                cx.notify();
             }),
         )
+        .child(timer_ring(
+            progress.clamp(0.0, 1.0),
+            size,
+            radius,
+            stroke,
+            color,
+            rgba(0xFFFFFF1A),
+        ))
+        .when(!done, |d| {
+            d.child(
+                div()
+                    .absolute()
+                    .inset_0()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .when(!running, |d| d.pl(px(1.)).opacity(0.5))
+                    .child(lucide_color(play_icon, 16.0, rgb(0xffffff))),
+            )
+        })
 }

@@ -38,4 +38,7 @@ pub struct NowPlayingData {
     pub audio_levels: Option<Vec<f64>>,
     /// Name of the app playing the media (Spotify, Music, Safari)
     pub app_name: Option<String>,
+    /// Bundle identifier of that app, used to load its icon.
+    #[serde(default)]
+    pub bundle_id: Option<String>,
 }

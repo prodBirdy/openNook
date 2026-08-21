@@ -8,14 +8,39 @@ pub const ISLAND: Rgba = Rgba {
     b: 0.0,
     a: 1.0,
 };
-/// Regular-material fallback when people turn on translucency. More opaque
-/// than a demo glass so labels stay legible over wallpaper.
+/// Painted fallback when native `NSGlassEffectView` / HUD vibrancy is not
+/// available. More opaque than a demo glass so labels stay legible.
 pub const ISLAND_GLASS: Rgba = Rgba {
     r: 0.0,
     g: 0.0,
     b: 0.0,
     a: 0.82,
 };
+
+pub fn rgba_from_u32(rgb: u32, a: f32) -> Rgba {
+    Rgba {
+        r: ((rgb >> 16) & 0xff) as f32 / 255.0,
+        g: ((rgb >> 8) & 0xff) as f32 / 255.0,
+        b: (rgb & 0xff) as f32 / 255.0,
+        a,
+    }
+}
+
+/// Solid island fill from Settings, or the default black.
+pub fn island_fill(color: Option<u32>) -> Rgba {
+    match color {
+        Some(rgb) => rgba_from_u32(rgb, 1.0),
+        None => ISLAND,
+    }
+}
+
+/// Glass fallback fill from Settings. Same hue, 82% opaque like `ISLAND_GLASS`.
+pub fn island_fill_glass(color: Option<u32>) -> Rgba {
+    match color {
+        Some(rgb) => rgba_from_u32(rgb, 0.82),
+        None => ISLAND_GLASS,
+    }
+}
 
 /// Semantic dark-overlay roles (HIG Color: label / fill / separator).
 pub const LABEL: Rgba = Rgba {
@@ -145,10 +170,13 @@ pub const CONTENT_INSET: f32 = 12.0;
 /// React expanded pane `p-5` (files tab still uses this).
 pub const EXPANDED_PAD: f32 = 20.0;
 /// Nook tab body: one row under the notch, matching the capsule layout.
-pub const NOOK_BODY: f32 = 112.0;
+pub const NOOK_BODY: f32 = 128.0;
 pub const NOOK_INSET: f32 = 16.0;
+/// One Customize-widgets cell on the expanded Nook row.
+pub const NOOK_CELL: f32 = 56.0;
 pub const EXPANDED_MAX_WIDTH: f32 = 780.0;
 /// React widgets row `gap-4`.
+#[allow(dead_code)]
 pub const WIDGET_GAP: f32 = 16.0;
 /// React `WidgetWrapper` padding (`1rem`).
 pub const WIDGET_PAD: f32 = 16.0;

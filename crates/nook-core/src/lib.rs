@@ -17,6 +17,7 @@ pub mod mouse;
 pub mod notch;
 pub mod notes;
 pub mod observe;
+pub mod occupancy;
 pub mod settings;
 pub mod utils;
 pub mod widgets;

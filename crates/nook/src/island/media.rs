@@ -36,16 +36,21 @@ const VIS_DEFAULT: Rgba = Rgba {
     a: 1.0,
 };
 
-/// Compact play/pause overlay. GPUI `.hover()` sticks after the full-screen
-/// overlay goes click-through (MouseLeave never arrives), so this is the
-/// intersection of the polled island hover pad and the chip's `on_hover`.
-pub(super) fn album_overlay_visible(island_hovered: bool, cover_hovered: bool) -> bool {
-    island_hovered && cover_hovered
+/// Target opacity for the compact play/pause scrim; `Island::overlay_fade`
+/// springs to it on `motion::REVEAL`. GPUI `.hover()` / `on_hover` stick
+/// after the full-screen overlay goes click-through (no MouseMove, so no
+/// MouseLeave) — drive this from the polled island hover pad instead.
+pub(super) fn album_overlay_target(island_hovered: bool) -> f32 {
+    if island_hovered {
+        1.0
+    } else {
+        0.0
+    }
 }
 
 pub(super) fn album_chip(
     np: &NowPlayingData,
-    show_overlay: bool,
+    overlay_alpha: f32,
     cx: &mut Context<Island>,
 ) -> impl IntoElement {
     let playing = np.is_playing;
@@ -81,7 +86,6 @@ pub(super) fn album_chip(
         .child(art.unwrap_or_else(placeholder_art))
         .child(
             div()
-                .id("album-overlay")
                 .absolute()
                 .inset_0()
                 .rounded(px(COMPACT_ART_RADIUS))
@@ -89,13 +93,7 @@ pub(super) fn album_chip(
                 .flex()
                 .items_center()
                 .justify_center()
-                .opacity(if show_overlay { 1. } else { 0. })
-                .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
-                    if this.album_hovered != *hovered {
-                        this.album_hovered = *hovered;
-                        cx.notify();
-                    }
-                }))
+                .opacity(overlay_alpha.clamp(0.0, 1.0))
                 .when(!playing, |d| d.pl(px(1.)))
                 .child(lucide_color(overlay_icon, 14.0, rgb(0xffffff))),
         )
@@ -119,12 +117,7 @@ fn placeholder_art() -> AnyElement {
 
 fn artwork_element(b64: &str, size: f32, radius: f32) -> Option<AnyElement> {
     let bytes = artwork_bytes(b64)?;
-    let format = if bytes.len() >= 8 && bytes.starts_with(&[0x89, b'P', b'N', b'G']) {
-        gpui::ImageFormat::Png
-    } else {
-        gpui::ImageFormat::Jpeg
-    };
-    let image = std::sync::Arc::new(Image::from_bytes(format, bytes));
+    let image = std::sync::Arc::new(Image::from_bytes(gpui_format(&bytes), bytes));
     // Overflow clip is a rect; the sprite only rounds via its own corner_radii.
     // Fill keeps the painted quad equal to `size` so those radii land on the
     // visible box (Cover can paint a larger quad and leave square corners).
@@ -138,12 +131,32 @@ fn artwork_element(b64: &str, size: f32, radius: f32) -> Option<AnyElement> {
 }
 
 fn artwork_bytes(b64: &str) -> Option<Vec<u8>> {
-    use base64::Engine;
-    use std::io::Cursor;
+    use std::hash::{DefaultHasher, Hash, Hasher};
 
     if b64.len() > MAX_ARTWORK_BYTES.div_ceil(3) * 4 {
         return None;
     }
+    let mut hasher = DefaultHasher::new();
+    b64.hash(&mut hasher);
+    let key = hasher.finish();
+    static CACHE: OnceLock<Mutex<(u64, Option<Vec<u8>>)>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new((0, None)));
+    if let Ok(guard) = cache.lock() {
+        if guard.0 == key {
+            return guard.1.clone();
+        }
+    }
+    let loaded = decode_artwork(b64);
+    if let Ok(mut guard) = cache.lock() {
+        *guard = (key, loaded.clone());
+    }
+    loaded
+}
+
+fn decode_artwork(b64: &str) -> Option<Vec<u8>> {
+    use base64::Engine;
+    use std::io::Cursor;
+
     let bytes = base64::engine::general_purpose::STANDARD.decode(b64).ok()?;
     if bytes.is_empty() || bytes.len() > MAX_ARTWORK_BYTES {
         return None;
@@ -160,7 +173,39 @@ fn artwork_bytes(b64: &str) -> Option<Vec<u8>> {
     {
         return None;
     }
-    Some(bytes)
+    // MediaRemote often labels Safari/YouTube frames `image/jpeg` while the
+    // bytes are TIFF (`MM\0*` / `II*\0`). GPUI then feeds them to the JPEG
+    // decoder and errors (or crashes) on 4D4D.
+    if is_png(&bytes) || is_jpeg(&bytes) {
+        return Some(bytes);
+    }
+    let mut png = Cursor::new(Vec::new());
+    image::load_from_memory(&bytes)
+        .ok()?
+        .write_to(&mut png, image::ImageFormat::Png)
+        .ok()?;
+    let png = png.into_inner();
+    if png.is_empty() || png.len() > MAX_ARTWORK_BYTES {
+        None
+    } else {
+        Some(png)
+    }
+}
+
+fn is_png(bytes: &[u8]) -> bool {
+    bytes.starts_with(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A])
+}
+
+fn is_jpeg(bytes: &[u8]) -> bool {
+    bytes.len() >= 3 && bytes[0] == 0xFF && bytes[1] == 0xD8 && bytes[2] == 0xFF
+}
+
+fn gpui_format(bytes: &[u8]) -> gpui::ImageFormat {
+    if is_png(bytes) {
+        gpui::ImageFormat::Png
+    } else {
+        gpui::ImageFormat::Jpeg
+    }
 }
 
 pub(super) fn visualizer(levels: &[f64], playing: bool, color: Option<Rgba>) -> impl IntoElement {
@@ -192,12 +237,8 @@ pub(super) fn visualizer(levels: &[f64], playing: bool, color: Option<Rgba>) -> 
 
 const NOOK_ART: f32 = 84.0;
 const NOOK_ART_RADIUS: f32 = 14.0;
-const MUSIC_BADGE: Rgba = Rgba {
-    r: 0.988,
-    g: 0.235,
-    b: 0.267,
-    a: 1.0,
-};
+const APP_BADGE: f32 = 22.0;
+const APP_BADGE_RADIUS: f32 = 5.0;
 
 /// Horizontal Now Playing strip for the Nook tab (art + metadata + transport).
 pub(crate) fn nook_media_pane(np: &NowPlayingData, cx: &mut Context<Island>) -> impl IntoElement {
@@ -205,6 +246,14 @@ pub(crate) fn nook_media_pane(np: &NowPlayingData, cx: &mut Context<Island>) -> 
     let artist = np.artist.clone().unwrap_or_else(|| "Unknown Artist".into());
     let album = np.album.clone().filter(|s| !s.is_empty());
     let playing = np.is_playing;
+    let elapsed = np.elapsed_time.unwrap_or(0.0);
+    let duration = np.duration.unwrap_or(0.0);
+    let progress = if duration > 0.0 {
+        (elapsed / duration) as f32
+    } else {
+        0.0
+    };
+    let seekable = duration > 0.0;
     let art = np
         .artwork_base64
         .as_deref()
@@ -212,8 +261,9 @@ pub(crate) fn nook_media_pane(np: &NowPlayingData, cx: &mut Context<Island>) -> 
 
     div()
         .id("nook-media")
-        .flex_shrink_0()
+        .w_full()
         .h_full()
+        .overflow_hidden()
         .flex()
         .items_center()
         .gap(px(14.))
@@ -223,35 +273,34 @@ pub(crate) fn nook_media_pane(np: &NowPlayingData, cx: &mut Context<Island>) -> 
                 .relative()
                 .size(px(NOOK_ART))
                 .flex_shrink_0()
-                .rounded(px(NOOK_ART_RADIUS))
-                .overflow_hidden()
-                .shadow_md()
-                .bg(linear_gradient(
-                    135.0,
-                    linear_color_stop(rgb(0x2a2a2a), 0.0),
-                    linear_color_stop(rgb(0x1a1a1a), 1.0),
-                ))
-                .child(art.unwrap_or_else(|| {
+                .child(
                     div()
                         .size(px(NOOK_ART))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .child(lucide_color("music", 28.0, rgba(0xffffff66)))
-                        .into_any_element()
-                }))
+                        .rounded(px(NOOK_ART_RADIUS))
+                        .overflow_hidden()
+                        .shadow_md()
+                        .bg(linear_gradient(
+                            135.0,
+                            linear_color_stop(rgb(0x2a2a2a), 0.0),
+                            linear_color_stop(rgb(0x1a1a1a), 1.0),
+                        ))
+                        .child(art.unwrap_or_else(|| {
+                            div()
+                                .size(px(NOOK_ART))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .child(lucide_color("music", 28.0, rgba(0xffffff66)))
+                                .into_any_element()
+                        })),
+                )
                 .child(
                     div()
                         .absolute()
-                        .right(px(6.))
-                        .bottom(px(6.))
-                        .size(px(22.))
-                        .rounded(px(6.))
-                        .bg(MUSIC_BADGE)
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .child(lucide_color("music", 11.0, rgb(0xffffff))),
+                        .right(px(4.))
+                        .bottom(px(4.))
+                        .shadow_sm()
+                        .child(app_badge(np.bundle_id.as_deref(), np.app_name.as_deref())),
                 ),
         )
         .child(
@@ -260,7 +309,7 @@ pub(crate) fn nook_media_pane(np: &NowPlayingData, cx: &mut Context<Island>) -> 
                 .flex_col()
                 .justify_center()
                 .min_w(px(0.))
-                .w(px(148.))
+                .w(px(160.))
                 .overflow_hidden()
                 .child(slide_label(title, theme::TITLE_3, true).w_full())
                 .when_some(album, |d, album| {
@@ -272,30 +321,158 @@ pub(crate) fn nook_media_pane(np: &NowPlayingData, cx: &mut Context<Island>) -> 
                         .flex()
                         .items_center()
                         .gap(px(18.))
-                        .mt(px(8.))
-                        .child(nook_skip(
-                            "skip-back",
-                            "nook-skip-back",
-                            cx,
-                            |_, _, _| {
-                                nook_core::runtime().spawn(async {
-                                    let _ = nook_core::audio::media_previous_track().await;
-                                });
-                            },
-                        ))
+                        .mt(px(6.))
+                        .child(nook_skip("skip-back", "nook-skip-back", cx, |_, _, _| {
+                            nook_core::runtime().spawn(async {
+                                let _ = nook_core::audio::media_previous_track().await;
+                            });
+                        }))
                         .child(nook_play(playing, cx))
-                        .child(nook_skip(
-                            "skip-forward",
-                            "nook-skip-fwd",
-                            cx,
-                            |_, _, _| {
-                                nook_core::runtime().spawn(async {
-                                    let _ = nook_core::audio::media_next_track().await;
-                                });
-                            },
-                        )),
-                ),
+                        .child(nook_skip("skip-forward", "nook-skip-fwd", cx, |_, _, _| {
+                            nook_core::runtime().spawn(async {
+                                let _ = nook_core::audio::media_next_track().await;
+                            });
+                        })),
+                )
+                .child(nook_progress(progress, elapsed, duration, seekable, cx)),
         )
+}
+
+fn app_badge(bundle_id: Option<&str>, app_name: Option<&str>) -> AnyElement {
+    if let Some(image) = app_icon_image(bundle_id, app_name) {
+        return img(image)
+            .size(px(APP_BADGE))
+            .rounded(px(APP_BADGE_RADIUS))
+            .object_fit(gpui::ObjectFit::Fill)
+            .into_any_element();
+    }
+    div()
+        .size(px(APP_BADGE))
+        .rounded(px(APP_BADGE_RADIUS))
+        .bg(rgba(0x00000099))
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(lucide_color("music", 11.0, rgb(0xffffff)))
+        .into_any_element()
+}
+
+fn app_icon_image(
+    bundle_id: Option<&str>,
+    app_name: Option<&str>,
+) -> Option<std::sync::Arc<Image>> {
+    let key = bundle_id
+        .filter(|s| !s.is_empty())
+        .or(app_name)
+        .filter(|s| !s.is_empty())?
+        .to_string();
+    static CACHE: OnceLock<
+        Mutex<std::collections::HashMap<String, Option<std::sync::Arc<Image>>>>,
+    > = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
+    if let Ok(guard) = cache.lock() {
+        if let Some(hit) = guard.get(&key) {
+            return hit.clone();
+        }
+    }
+    let loaded = crate::platform::app_icon_png(bundle_id, app_name).and_then(|png| {
+        if png.is_empty() {
+            None
+        } else {
+            Some(std::sync::Arc::new(Image::from_bytes(
+                gpui::ImageFormat::Png,
+                png,
+            )))
+        }
+    });
+    if let Ok(mut guard) = cache.lock() {
+        guard.insert(key, loaded.clone());
+    }
+    loaded
+}
+
+fn nook_progress(
+    progress: f32,
+    elapsed: f64,
+    duration: f64,
+    seekable: bool,
+    cx: &mut Context<Island>,
+) -> impl IntoElement {
+    let progress = progress.clamp(0.0, 1.0);
+    div()
+        .w_full()
+        .mt(px(6.))
+        .opacity(if seekable { 1.0 } else { 0.45 })
+        .cursor(if seekable {
+            CursorStyle::PointingHand
+        } else {
+            CursorStyle::Arrow
+        })
+        .child(
+            div()
+                .relative()
+                .w_full()
+                .h(px(10.))
+                .flex()
+                .items_center()
+                .child(
+                    div()
+                        .w_full()
+                        .h(px(3.))
+                        .rounded(px(2.))
+                        .bg(rgba(0xffffff26))
+                        .child(
+                            div()
+                                .h_full()
+                                .w(relative(progress))
+                                .rounded(px(2.))
+                                .bg(rgb(0xffffff)),
+                        ),
+                )
+                .when(seekable, |d| d.child(nook_seek_hits(cx))),
+        )
+        .child(
+            div()
+                .flex()
+                .justify_between()
+                .pt(px(2.))
+                .child(time_label(format_time(elapsed)))
+                .child(time_label(format_time(duration))),
+        )
+}
+
+fn nook_seek_hits(cx: &mut Context<Island>) -> impl IntoElement {
+    const SEGMENTS: u32 = 24;
+    let mut row = div()
+        .absolute()
+        .inset_0()
+        .flex()
+        .cursor(CursorStyle::PointingHand);
+    for i in 0..SEGMENTS {
+        let ratio = (i as f32 + 0.5) / SEGMENTS as f32;
+        row = row.child(
+            div()
+                .id(SharedString::from(format!("nook-seek-{i}")))
+                .flex_1()
+                .h_full()
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                        cx.stop_propagation();
+                        let Some(duration) = this.now_playing.duration.filter(|d| *d > 0.0) else {
+                            return;
+                        };
+                        let position = duration * ratio as f64;
+                        this.now_playing.elapsed_time = Some(position);
+                        cx.notify();
+                        nook_core::runtime().spawn(async move {
+                            let _ = nook_core::audio::media_seek(position).await;
+                        });
+                    }),
+                ),
+        );
+    }
+    row
 }
 
 fn nook_skip(
@@ -688,12 +865,54 @@ mod tests {
     }
 
     #[test]
-    fn compact_play_overlay_hides_when_island_hover_ends() {
-        // Cover hover stays true: the overlay window goes click-through
-        // on leave, so GPUI never delivers MouseLeave.
-        assert!(!album_overlay_visible(false, true));
-        assert!(!album_overlay_visible(true, false));
-        assert!(!album_overlay_visible(false, false));
-        assert!(album_overlay_visible(true, true));
+    fn compact_play_overlay_tracks_polled_island_hover() {
+        // GPUI `.hover()` stays true after click-through; this must not.
+        assert_eq!(album_overlay_target(false), 0.0);
+        assert_eq!(album_overlay_target(true), 1.0);
+    }
+
+    fn encode_rgba(w: u32, h: u32, format: image::ImageFormat) -> String {
+        use base64::Engine;
+        use std::io::Cursor;
+        let mut encoded = Cursor::new(Vec::new());
+        if format == image::ImageFormat::Jpeg {
+            image::RgbImage::from_pixel(w, h, image::Rgb([0x20, 0x40, 0x80]))
+                .write_to(&mut encoded, format)
+                .unwrap();
+        } else {
+            image::RgbaImage::from_pixel(w, h, image::Rgba([0x20, 0x40, 0x80, 0xff]))
+                .write_to(&mut encoded, format)
+                .unwrap();
+        }
+        base64::engine::general_purpose::STANDARD.encode(encoded.into_inner())
+    }
+
+    #[test]
+    fn tiff_artwork_is_not_handed_to_gpui_as_jpeg() {
+        use base64::Engine;
+        let b64 = encode_rgba(8, 8, image::ImageFormat::Tiff);
+        let raw = base64::engine::general_purpose::STANDARD
+            .decode(&b64)
+            .unwrap();
+        assert!(
+            raw.starts_with(&[0x4D, 0x4D]) || raw.starts_with(&[0x49, 0x49]),
+            "fixture must be TIFF, got {:02x?}",
+            &raw[..4.min(raw.len())]
+        );
+        let bytes = artwork_bytes(&b64).expect("TIFF artwork should load");
+        assert!(
+            bytes.starts_with(&[0x89, b'P', b'N', b'G']),
+            "MediaRemote YouTube/Safari art is TIFF (MM\\0*) mislabeled as jpeg; GPUI's JPEG decoder then dies on 4D4D. Expected PNG, got {:02x?}",
+            &bytes[..4.min(bytes.len())]
+        );
+        assert_eq!(gpui_format(&bytes), gpui::ImageFormat::Png);
+    }
+
+    #[test]
+    fn jpeg_and_png_artwork_keep_their_format() {
+        let jpeg = artwork_bytes(&encode_rgba(8, 8, image::ImageFormat::Jpeg)).unwrap();
+        assert_eq!(gpui_format(&jpeg), gpui::ImageFormat::Jpeg);
+        let png = artwork_bytes(&encode_rgba(8, 8, image::ImageFormat::Png)).unwrap();
+        assert_eq!(gpui_format(&png), gpui::ImageFormat::Png);
     }
 }

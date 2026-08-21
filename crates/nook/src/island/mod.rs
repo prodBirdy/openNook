@@ -12,11 +12,13 @@ pub(crate) mod ui;
 
 pub use render::open_island;
 
+use crate::motion::{self, SpringValue};
 use crate::platform;
 use crate::theme;
 use gpui::{
-    prelude::*, px, size, Context, Entity, ExternalPaths, Focusable, Subscription, TouchPhase,
-    Window, WindowBackgroundAppearance, WindowBounds, WindowHandle, WindowKind, WindowOptions,
+    prelude::*, px, size, Context, Entity, ExternalPaths, Focusable, MouseDownEvent, Subscription,
+    TouchPhase, Window, WindowBackgroundAppearance, WindowBounds, WindowHandle, WindowKind,
+    WindowOptions,
 };
 use nook_core::agents::AgentSession;
 use nook_core::calendar::{CalendarEvent, Reminder};
@@ -59,10 +61,8 @@ pub struct Island {
     pub notch_width: f32,
     pub notch_height: f32,
     pub screen_width: f32,
+    pub screen_height: f32,
     pub hovered: bool,
-    /// Compact album chip is hovered. Cleared when the island hover pad is left
-    /// because click-through swallows GPUI's MouseLeave.
-    pub(crate) album_hovered: bool,
     pub expanded: bool,
     pub preferred: Option<CompactMode>,
     pub tab: Tab,
@@ -100,11 +100,17 @@ pub struct Island {
     settings_window: Option<WindowHandle<SettingsView>>,
     _settings_closed: Option<Subscription>,
     screen_gen: u64,
-    anim_w: f32,
-    anim_h: f32,
-    anim_vw: f32,
-    anim_vh: f32,
-    content_opacity: f32,
+    /// Island size on `motion::MORPH`.
+    anim_w: SpringValue,
+    anim_h: SpringValue,
+    /// Content crossfade after an expanded/mode swap, 0..1 on
+    /// `motion::CROSSFADE`.
+    content_fade: SpringValue,
+    /// Play/pause scrim over the compact album art, 0..1 on `motion::REVEAL`.
+    overlay_fade: SpringValue,
+    /// Mirrors Accessibility › Display › "Reduce motion"; refreshed by the
+    /// poll loop so springs collapse to a dissolve while it is on.
+    reduce_motion: bool,
     /// How hard the size spring is moving right now, 0..1. Drives the motion
     /// blur in `content_stack`; exactly 0 once the spring has settled.
     blur: f32,
@@ -112,6 +118,13 @@ pub struct Island {
     last_mode: CompactMode,
     file_drag: bool,
     pending_file_drag: Option<PendingFileDrag>,
+    /// True while a full-screen / zoomed app is covering the display and
+    /// Settings asked us to hide.
+    suppressed: bool,
+    /// Option-drag is moving the island; mouse-up persists the new origin.
+    repositioning: bool,
+    reposition_grab_x: f32,
+    reposition_grab_y: f32,
     /// Mirrors NSWindow.ignoresMouseEvents so we only cross into ObjC on change.
     click_through: bool,
     /// Ticks since the flag above was last pushed to AppKit. The overlay covers
@@ -128,6 +141,9 @@ pub struct Island {
     /// Origin for the working-agent Dot Matrix loader (seconds * speed).
     pixel_origin: Instant,
     pixel_t: f32,
+    pub(crate) mirror_on: bool,
+    mirror_gen: u64,
+    pub(crate) mirror_frame: Option<std::sync::Arc<gpui::RenderImage>>,
 }
 
 struct PendingFileDrag {
@@ -161,8 +177,8 @@ impl Island {
                 32.0
             },
             screen_width: info.screen_width as f32,
+            screen_height: info.screen_height as f32,
             hovered: false,
-            album_hovered: false,
             expanded: false,
             preferred: None,
             tab: Tab::Widgets,
@@ -195,16 +211,20 @@ impl Island {
             settings_window: None,
             _settings_closed: None,
             screen_gen: notch::screen_generation(),
-            anim_w: 0.0,
-            anim_h: 0.0,
-            anim_vw: 0.0,
-            anim_vh: 0.0,
-            content_opacity: 1.0,
+            anim_w: SpringValue::at(0.0),
+            anim_h: SpringValue::at(0.0),
+            content_fade: SpringValue::at(1.0),
+            overlay_fade: SpringValue::at(0.0),
+            reduce_motion: platform::reduce_motion(),
             blur: 0.0,
             last_expanded: false,
             last_mode: CompactMode::Idle,
             file_drag: false,
             pending_file_drag: None,
+            suppressed: false,
+            repositioning: false,
+            reposition_grab_x: 0.0,
+            reposition_grab_y: 0.0,
             // NSWindow starts out grabbing events; the first poll tick corrects it.
             click_through: false,
             click_through_age: u32::MAX,
@@ -214,11 +234,14 @@ impl Island {
             wheel_acc_y: 0.0,
             pixel_origin: Instant::now(),
             pixel_t: 0.0,
+            mirror_on: false,
+            mirror_gen: 0,
+            mirror_frame: None,
         };
         // Start at the compact idle size so the first paint isn't a jump.
         let (w, h) = this.target_size();
-        this.anim_w = w;
-        this.anim_h = h;
+        this.anim_w.set(w);
+        this.anim_h.set(h);
 
         nook_core::runtime().spawn(async {
             let _ = nook_core::calendar::request_calendar_access().await;
@@ -263,10 +286,40 @@ impl Island {
                     .update(cx, |this, cx| {
                     let inside = nook_core::mouse::hit_test(mx, my);
                     let on_ui = nook_core::mouse::hit_test_exact(mx, my);
-                    this.settings = nook_core::settings::get_app_settings();
+                    let settings = nook_core::settings::get_app_settings();
                     let mut dirty = false;
+                    if this.repositioning {
+                        let (x, y) = (this.settings.island_x, this.settings.island_y);
+                        this.settings = settings;
+                        this.settings.island_x = x;
+                        this.settings.island_y = y;
+                        this.apply_reposition(mx as f32, my as f32);
+                        dirty = true;
+                    } else if this.settings != settings {
+                        this.settings = settings;
+                        dirty = true;
+                    }
+                    if !platform::island_glass_setting_on() {
+                        platform::sync_island_glass(None);
+                    }
                     if platform::take_open_settings() {
                         this.open_settings(cx);
+                        dirty = true;
+                    }
+                    let want_suppress = this.settings.hide_when_maximized
+                        && !this.repositioning
+                        && !this.settings_open
+                        && nook_core::occupancy::frontmost_fills_display();
+                    if this.suppressed != want_suppress {
+                        this.suppressed = want_suppress;
+                        if want_suppress {
+                            this.hovered = false;
+                            if this.expanded {
+                                this.expanded = false;
+                                this.close_notes_editor(cx);
+                                this.stop_mirror(cx);
+                            }
+                        }
                         dirty = true;
                     }
                     // Our own press / AppKit drag-out also dirties the drag
@@ -319,11 +372,8 @@ impl Island {
                     } else {
                         this.click_through_age += 1;
                     }
-                    if this.hovered != inside {
+                    if !this.suppressed && !this.repositioning && this.hovered != inside {
                         this.hovered = inside;
-                        if !inside {
-                            this.album_hovered = false;
-                        }
                         if inside {
                             nook_core::haptics::trigger(None);
                             if this.file_drag {
@@ -332,6 +382,7 @@ impl Island {
                         } else if this.expanded
                             && !this.settings_open
                             && !this.notes_editing
+                            && !this.mirror_on
                             && !this.file_drag
                             && !nook_core::files::outbound_drag_active()
                         {
@@ -342,8 +393,9 @@ impl Island {
                     }
                     let now = Instant::now();
                     // Do not clamp to 50ms here: that dt is past the Euler
-                    // stability cliff for this spring (see `step_spring`).
+                    // stability cliff for this spring (see `SpringValue::step`).
                     let dt = now.duration_since(this.last_frame).as_secs_f32();
+                    this.reduce_motion = platform::reduce_motion();
                     this.last_frame = now;
                     let elapsed_secs = now.duration_since(this.last_tick).as_secs() as u32;
                     if elapsed_secs >= 1 {
@@ -375,6 +427,17 @@ impl Island {
                         this.pixel_t = now.duration_since(this.pixel_origin).as_secs_f32();
                         dirty = true;
                     }
+                    if this.mirror_on {
+                        if let Some((gen, bgra)) = platform::mirror_frame(this.mirror_gen) {
+                            this.mirror_gen = gen;
+                            if let Some(rendered) = mirror_render_image(bgra) {
+                                if let Some(old) = this.mirror_frame.replace(rendered) {
+                                    cx.drop_image(old, None);
+                                }
+                                dirty = true;
+                            }
+                        }
+                    }
                     if dirty {
                         cx.notify();
                     }
@@ -401,7 +464,9 @@ impl Island {
                     let changed = this.now_playing.title != playing.title
                         || this.now_playing.artist != playing.artist
                         || this.now_playing.is_playing != playing.is_playing
-                        || this.now_playing.elapsed_time != playing.elapsed_time;
+                        || this.now_playing.elapsed_time != playing.elapsed_time
+                        || this.now_playing.app_name != playing.app_name
+                        || this.now_playing.bundle_id != playing.bundle_id;
                     this.now_playing.title = playing.title;
                     this.now_playing.artist = playing.artist;
                     this.now_playing.album = playing.album;
@@ -410,6 +475,7 @@ impl Island {
                     this.now_playing.elapsed_time = playing.elapsed_time;
                     this.now_playing.is_playing = playing.is_playing;
                     this.now_playing.app_name = playing.app_name;
+                    this.now_playing.bundle_id = playing.bundle_id;
                     this.visualizer_color = media::visualizer_color_from_art(
                         this.now_playing.artwork_base64.as_deref(),
                     );
@@ -633,6 +699,28 @@ impl Island {
         cx.notify();
     }
 
+    pub(crate) fn toggle_mirror(&mut self, cx: &mut Context<Self>) {
+        if self.mirror_on {
+            self.stop_mirror(cx);
+        } else if platform::start_mirror() {
+            self.mirror_on = true;
+            self.expanded = true;
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn stop_mirror(&mut self, cx: &mut Context<Self>) {
+        if !self.mirror_on && self.mirror_frame.is_none() {
+            return;
+        }
+        platform::stop_mirror();
+        self.mirror_on = false;
+        self.mirror_gen = 0;
+        if let Some(old) = self.mirror_frame.take() {
+            cx.drop_image(old, None);
+        }
+    }
+
     /// Flush pending edits back into `self.notes` and restore the preview.
     pub(crate) fn close_notes_editor(&mut self, cx: &mut Context<Self>) {
         self.notes_sub.take();
@@ -749,58 +837,39 @@ impl Island {
         (self.screen_width - 40.0).min(theme::EXPANDED_MAX_WIDTH)
     }
 
-    /// Critically-damped-ish spring matching the Tauri Motion values
-    /// (stiffness 400, damping 30, mass 0.8). Returns whether we still need frames.
+    /// Advance every animated value one frame on its `motion` spring.
+    /// Returns whether we still need frames.
     fn step_spring(&mut self, dt: f32) -> bool {
         let (tw, th) = self.target_size();
         let mode = self.mode();
         if self.expanded != self.last_expanded || mode != self.last_mode {
-            self.content_opacity = 0.0;
+            self.content_fade.set(0.0);
             self.last_expanded = self.expanded;
             self.last_mode = mode;
         }
 
-        // Semi-implicit Euler with these constants goes unstable around
-        // dt=42ms. The 20ms poll used to cap a hitch at 50ms — one slow
-        // frame and `anim_h` exploded, so the island strobed open/closed
-        // and the motion-blur taps kept render expensive, which kept dt
-        // large. Substep at 60 Hz; ignore absurd pauses (lid close).
-        const MAX_STEP: f32 = 1.0 / 60.0;
-        let mut left = dt.clamp(0.0, 0.25);
         let mut moving = false;
-        while left > 0.0 {
-            let step_dt = left.min(MAX_STEP);
-            left -= step_dt;
-            moving = self.integrate_spring(step_dt, tw, th);
-            if !moving {
-                break;
-            }
+        if self.reduce_motion {
+            // HIG › Motion: motion must be optional. The size parks instantly
+            // and the blur stays off; the crossfade below still runs — a
+            // dissolve is Apple's own stand-in for movement.
+            self.anim_w.set(tw);
+            self.anim_h.set(th);
+        } else {
+            moving |= self.anim_w.step(motion::MORPH, tw, dt, motion::REST_PX);
+            moving |= self.anim_h.step(motion::MORPH, th, dt, motion::REST_PX);
         }
-        moving
-    }
+        moving |= self
+            .content_fade
+            .step(motion::CROSSFADE, 1.0, dt, motion::REST_ALPHA);
+        let overlay = media::album_overlay_target(self.hovered);
+        moving |= self
+            .overlay_fade
+            .step(motion::REVEAL, overlay, dt, motion::REST_ALPHA);
 
-    fn integrate_spring(&mut self, dt: f32, tw: f32, th: f32) -> bool {
-        self.content_opacity = (self.content_opacity + dt / 0.18).min(1.0);
-
-        const STIFFNESS: f32 = 400.0;
-        const DAMPING: f32 = 30.0;
-        const MASS: f32 = 0.8;
-        let step = |pos: &mut f32, vel: &mut f32, target: f32| {
-            let acc = ((target - *pos) * STIFFNESS - *vel * DAMPING) / MASS;
-            *vel += acc * dt;
-            *pos += *vel * dt;
-        };
-        step(&mut self.anim_w, &mut self.anim_vw, tw);
-        step(&mut self.anim_h, &mut self.anim_vh, th);
-
-        if !self.anim_w.is_finite() || !self.anim_h.is_finite() {
-            self.anim_w = tw;
-            self.anim_h = th;
-            self.anim_vw = 0.0;
-            self.anim_vh = 0.0;
-            self.content_opacity = 1.0;
+        if self.reduce_motion {
             self.blur = 0.0;
-            return false;
+            return moving;
         }
 
         // Width grows from the centre out, so the content on either flank only
@@ -808,24 +877,10 @@ impl Island {
         // pinned top edge, so there it tracks it 1:1. The fade term keeps the
         // blur up through a crossfade that does not resize at all.
         const BLUR_SPEED: f32 = 900.0;
-        let content_speed = (self.anim_vw * 0.5).hypot(self.anim_vh);
+        let content_speed = (self.anim_w.velocity * 0.5).hypot(self.anim_h.velocity);
         self.blur = (content_speed / BLUR_SPEED)
             .min(1.0)
-            .max(1.0 - self.content_opacity);
-
-        let moving = (self.anim_w - tw).abs() > 0.4
-            || (self.anim_h - th).abs() > 0.4
-            || self.anim_vw.abs() > 4.0
-            || self.anim_vh.abs() > 4.0
-            || self.content_opacity < 0.999;
-        if !moving {
-            self.anim_w = tw;
-            self.anim_h = th;
-            self.anim_vw = 0.0;
-            self.anim_vh = 0.0;
-            self.content_opacity = 1.0;
-            self.blur = 0.0;
-        }
+            .max(1.0 - self.content_fade.value);
         moving
     }
 
@@ -841,7 +896,7 @@ impl Island {
         if self.blur < MIN_BLUR {
             return None;
         }
-        let (vx, vy) = (self.anim_vw.abs() * 0.5, self.anim_vh.abs());
+        let (vx, vy) = (self.anim_w.velocity.abs() * 0.5, self.anim_h.velocity.abs());
         let len = vx.hypot(vy);
         // A pure crossfade has no velocity to point at; the island's long axis
         // is the honest guess there.
@@ -868,6 +923,7 @@ impl Island {
             }
         } else {
             self.close_notes_editor(cx);
+            self.stop_mirror(cx);
         }
         nook_core::haptics::trigger(None);
         cx.notify();
@@ -972,10 +1028,59 @@ impl Island {
     /// full-screen overlay live made *us* the drop target, so Finder never
     /// saw the file. Click-through off the painted island; stay live on it.
     fn overlay_ignores_mouse(&self, on_ui: bool, inside: bool) -> bool {
+        if self.suppressed {
+            return true;
+        }
+        if self.repositioning {
+            return false;
+        }
         if nook_core::files::outbound_drag_active() {
             return !on_ui;
         }
         !(on_ui || (self.file_drag && inside) || self.pending_file_drag.is_some())
+    }
+
+    fn on_island_press(&mut self, event: &MouseDownEvent, cx: &mut Context<Self>) {
+        if event.modifiers.alt {
+            self.begin_reposition(event);
+            cx.notify();
+            return;
+        }
+        self.toggle_expanded(cx);
+    }
+
+    fn begin_reposition(&mut self, event: &MouseDownEvent) {
+        let (left, top) = self.island_body_origin();
+        self.reposition_grab_x = f32::from(event.position.x) - left;
+        self.reposition_grab_y = f32::from(event.position.y) - top;
+        self.repositioning = true;
+    }
+
+    fn island_body_origin(&self) -> (f32, f32) {
+        self.settings.island_origin(
+            self.screen_width,
+            self.screen_height,
+            self.anim_w.value.max(1.0),
+            self.anim_h.value.max(1.0),
+        )
+    }
+
+    fn apply_reposition(&mut self, mx: f32, my: f32) {
+        let tw = self.anim_w.value.max(1.0);
+        let th = self.anim_h.value.max(1.0);
+        let left = (mx - self.reposition_grab_x).clamp(0.0, (self.screen_width - tw).max(0.0));
+        let top = (my - self.reposition_grab_y).clamp(0.0, (self.screen_height - th).max(0.0));
+        self.settings
+            .set_island_origin(left, top, self.screen_width, self.screen_height, tw);
+    }
+
+    fn finish_reposition(&mut self) -> bool {
+        if !self.repositioning {
+            return false;
+        }
+        self.repositioning = false;
+        nook_core::settings::update_app_settings(self.settings.clone());
+        true
     }
 
     fn open_settings(&mut self, cx: &mut Context<Self>) {
@@ -1026,6 +1131,16 @@ impl Island {
             }));
         }
         self.settings_window = Some(handle);
+        cx.notify();
+    }
+
+    pub(super) fn airdrop_paths(&mut self, paths: &ExternalPaths, cx: &mut Context<Self>) {
+        let files: Vec<std::path::PathBuf> = paths.paths().iter().cloned().collect();
+        if files.is_empty() {
+            return;
+        }
+        nook_core::haptics::trigger(None);
+        platform::share_via_airdrop(&files);
         cx.notify();
     }
 
@@ -1121,6 +1236,21 @@ impl Island {
     }
 }
 
+/// Paint camera pixels immediately. `img(Image)` goes through GPUI's async
+/// decoder (200ms placeholder), so a new JPEG every tick looks like a reinit.
+fn mirror_render_image(bgra: Vec<u8>) -> Option<std::sync::Arc<gpui::RenderImage>> {
+    use image::{ImageBuffer, Rgba};
+    let size = platform::MIRROR_SIZE;
+    let pixels = (size as usize).checked_mul(size as usize)?.checked_mul(4)?;
+    if bgra.len() != pixels {
+        return None;
+    }
+    let buffer = ImageBuffer::<Rgba<u8>, _>::from_raw(size, size, bgra)?;
+    Some(std::sync::Arc::new(gpui::RenderImage::new([
+        image::Frame::new(buffer),
+    ])))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1143,8 +1273,8 @@ mod tests {
             notch_width: 180.0,
             notch_height: 32.0,
             screen_width: 1512.0,
+            screen_height: 982.0,
             hovered: false,
-            album_hovered: false,
             expanded: false,
             preferred: None,
             tab: Tab::Widgets,
@@ -1177,16 +1307,20 @@ mod tests {
             settings_window: None,
             _settings_closed: None,
             screen_gen: 0,
-            anim_w: 180.0,
-            anim_h: 32.0,
-            anim_vw: 0.0,
-            anim_vh: 0.0,
-            content_opacity: 1.0,
+            anim_w: SpringValue::at(180.0),
+            anim_h: SpringValue::at(32.0),
+            content_fade: SpringValue::at(1.0),
+            overlay_fade: SpringValue::at(0.0),
+            reduce_motion: false,
             blur: 0.0,
             last_expanded: false,
             last_mode: CompactMode::Idle,
             file_drag: false,
             pending_file_drag: None,
+            suppressed: false,
+            repositioning: false,
+            reposition_grab_x: 0.0,
+            reposition_grab_y: 0.0,
             click_through: true,
             click_through_age: 0,
             wheel_locked: false,
@@ -1195,6 +1329,9 @@ mod tests {
             wheel_acc_y: 0.0,
             pixel_origin: Instant::now(),
             pixel_t: 0.0,
+            mirror_on: false,
+            mirror_gen: 0,
+            mirror_frame: None,
         }
     }
 
@@ -1206,6 +1343,76 @@ mod tests {
             mime_type: "image/png".into(),
             last_modified: 0,
         });
+    }
+
+    #[test]
+    fn cocoa_rect_places_island_at_the_top() {
+        let (x, y, w, h) = crate::platform::cocoa_rect_from_gpui(350.0, 0.0, 100.0, 40.0, 600.0);
+        assert_eq!((x, y, w, h), (350.0, 560.0, 100.0, 40.0));
+        let (x, y, w, h) = crate::platform::cocoa_rect_from_gpui(10.0, 20.0, 30.0, 40.0, 100.0);
+        assert_eq!((x, y, w, h), (10.0, 40.0, 30.0, 40.0));
+    }
+
+    #[test]
+    fn glass_underlay_grows_up_so_top_rounding_clips() {
+        let island_h = 160.0;
+        let radius = 36.0;
+        let window_h = 1169.0;
+        let (_, y, _, h) =
+            crate::platform::cocoa_rect_from_gpui(200.0, 0.0, 400.0, island_h, window_h);
+        let under = crate::platform::glass_underlay_height(h, radius, true);
+        assert_eq!(y, window_h - island_h, "bottom of the island stays put");
+        assert!(
+            y + under > window_h,
+            "top rounding sits past the window edge and is clipped"
+        );
+        let detached = crate::platform::glass_underlay_height(h, radius, false);
+        assert_eq!(detached, h, "detached glass matches the island height");
+    }
+
+    #[test]
+    fn sync_island_glass_is_a_noop_without_a_window() {
+        assert!(
+            !crate::platform::sync_island_glass(None),
+            "hiding glass never reports a live material"
+        );
+    }
+
+    #[test]
+    fn native_glass_stays_off_unless_the_setting_is_on() {
+        assert!(
+            !nook_core::settings::get_app_settings().liquid_glass_mode,
+            "tests start with Liquid Glass island off"
+        );
+        assert!(!crate::platform::island_glass_setting_on());
+        assert!(
+            !crate::platform::sync_island_glass(Some(crate::platform::IslandGlass {
+                x: 0.0,
+                y: 0.0,
+                w: 180.0,
+                h: 32.0,
+                radius: 18.0,
+                wing: 6.0,
+                tint: None,
+            })),
+            "native glass must not attach when the setting is off"
+        );
+    }
+
+    #[test]
+    fn mirror_render_image_accepts_square_bgra() {
+        let size = crate::platform::MIRROR_SIZE;
+        let mut bgra = vec![0u8; (size * size * 4) as usize];
+        bgra[0] = 40;
+        bgra[1] = 80;
+        bgra[2] = 160;
+        bgra[3] = 255;
+        let image = super::mirror_render_image(bgra).expect("valid BGRA frame");
+        assert_eq!(image.frame_count(), 1);
+        assert_eq!(image.size(0).width.0, size as i32);
+        assert_eq!(image.size(0).height.0, size as i32);
+        assert_eq!(&image.as_bytes(0).unwrap()[..4], &[40, 80, 160, 255]);
+        assert!(super::mirror_render_image(vec![0u8; 16]).is_none());
     }
 
     #[test]
@@ -1413,6 +1620,23 @@ mod tests {
     }
 
     #[test]
+    fn suppressed_island_is_always_click_through() {
+        let _guard = lock_overlay();
+        let mut island = test_island();
+        island.suppressed = true;
+        assert!(island.overlay_ignores_mouse(true, true));
+        assert!(island.overlay_ignores_mouse(false, false));
+    }
+
+    #[test]
+    fn repositioning_captures_the_overlay() {
+        let _guard = lock_overlay();
+        let mut island = test_island();
+        island.repositioning = true;
+        assert!(!island.overlay_ignores_mouse(false, false));
+    }
+
+    #[test]
     fn file_press_stays_pending_until_moved() {
         let mut island = test_island();
         island.arm_file_drag("/tmp/shot.png".into());
@@ -1521,9 +1745,9 @@ mod tests {
     #[test]
     fn spring_settles_on_target() {
         let mut island = test_island();
-        island.anim_w = 0.0;
-        island.anim_h = 0.0;
-        island.content_opacity = 0.0;
+        island.anim_w.set(0.0);
+        island.anim_h.set(0.0);
+        island.content_fade.set(0.0);
         let mut moving = true;
         for _ in 0..200 {
             moving = island.step_spring(0.016);
@@ -1533,29 +1757,29 @@ mod tests {
         }
         assert!(!moving);
         let (tw, th) = island.target_size();
-        assert!((island.anim_w - tw).abs() < 0.5);
-        assert!((island.anim_h - th).abs() < 0.5);
+        assert!((island.anim_w.value - tw).abs() < 0.5);
+        assert!((island.anim_h.value - th).abs() < 0.5);
     }
 
-    /// The poll loop used to cap `dt` at 50ms. Semi-implicit Euler with
-    /// stiffness 400 / mass 0.8 is already unstable around 42ms, so one hitch
-    /// sent `anim_h` to ±1e6 and the island strobed open/closed forever.
+    /// The poll loop used to cap `dt` at 50ms. Semi-implicit Euler at MORPH
+    /// stiffness is already unstable around 42ms, so one hitch sent `anim_h`
+    /// to ±1e6 and the island strobed open/closed forever.
     fn assert_spring_sane(island: &Island) {
         assert!(
-            island.anim_w.is_finite() && island.anim_h.is_finite(),
+            island.anim_w.value.is_finite() && island.anim_h.value.is_finite(),
             "spring went non-finite: {}×{}",
-            island.anim_w,
-            island.anim_h
+            island.anim_w.value,
+            island.anim_h.value
         );
         assert!(
-            island.anim_w > 0.0 && island.anim_w < 4000.0,
+            island.anim_w.value > 0.0 && island.anim_w.value < 4000.0,
             "width exploded: {}",
-            island.anim_w
+            island.anim_w.value
         );
         assert!(
-            island.anim_h > -1.0 && island.anim_h < 4000.0,
+            island.anim_h.value > -1.0 && island.anim_h.value < 4000.0,
             "height exploded: {}",
-            island.anim_h
+            island.anim_h.value
         );
     }
 
@@ -1576,8 +1800,8 @@ mod tests {
         }
         assert!(!moving, "spring never settled after a 50ms hitch");
         let (tw, th) = island.target_size();
-        assert!((island.anim_w - tw).abs() < 0.5);
-        assert!((island.anim_h - th).abs() < 0.5);
+        assert!((island.anim_w.value - tw).abs() < 0.5);
+        assert!((island.anim_h.value - th).abs() < 0.5);
     }
 
     #[test]
@@ -1595,8 +1819,8 @@ mod tests {
         }
         assert!(!moving, "spring exploded instead of settling at 50ms/frame");
         let (tw, th) = island.target_size();
-        assert!((island.anim_w - tw).abs() < 0.5);
-        assert!((island.anim_h - th).abs() < 0.5);
+        assert!((island.anim_w.value - tw).abs() < 0.5);
+        assert!((island.anim_h.value - th).abs() < 0.5);
     }
 
     #[test]
@@ -1633,7 +1857,7 @@ mod tests {
         let mut island = test_island();
         // Settle first, so the only thing in flight is the content swap.
         while island.step_spring(0.016) {}
-        island.content_opacity = 0.0;
+        island.content_fade.set(0.0);
 
         island.step_spring(0.016);
         assert!(island.blur > 0.5, "crossfade left the content sharp");

@@ -817,7 +817,7 @@ fn is_counter_query(query: &str) -> bool {
     let query = query.trim();
     matches!(
         query,
-        "total_requests" | "requests" | "5xx" | "4xx" | "2xx" | "3xx"
+        "total_requests" | "requests" | "5xx" | "4xx" | "3xx" | "2xx" | "1xx"
     ) || query.ends_with("_total")
         || query.ends_with("_count")
 }
@@ -1126,6 +1126,9 @@ fn format_http_error(err: reqwest::Error, source: &str) -> String {
 fn warmup_metric_names() -> Vec<String> {
     vec![
         "total_requests".into(),
+        "1xx".into(),
+        "2xx".into(),
+        "3xx".into(),
         "5xx".into(),
         "4xx".into(),
         "slow".into(),
@@ -1136,22 +1139,26 @@ fn warmup_metric_names() -> Vec<String> {
 fn is_warmup_query(query: &str) -> bool {
     matches!(
         query.trim(),
-        "total_requests" | "requests" | "5xx" | "4xx" | "2xx" | "3xx" | "slow" | "errors"
+        "total_requests" | "requests" | "5xx" | "4xx" | "3xx" | "2xx" | "1xx" | "slow" | "errors"
     )
 }
 
 fn warmup_metrics_for(config: &ObserveConfig) -> Vec<ObserveMetric> {
-    let pinned: Vec<_> = config
+    let mut pinned: Vec<_> = config
         .metrics
         .iter()
         .filter(|m| is_warmup_query(&m.query))
         .cloned()
         .collect();
     if pinned.is_empty() {
-        default_warmup_metrics()
-    } else {
-        pinned
+        pinned = default_warmup_metrics();
     }
+    for query in ["1xx", "2xx", "3xx", "4xx", "5xx"] {
+        if !pinned.iter().any(|metric| metric.query == query) {
+            pinned.push(ObserveMetric::new(query, query).with_chart(ObserveChartKind::Bars));
+        }
+    }
+    pinned
 }
 
 fn parse_warmup_metrics(body: &str, metrics: &[ObserveMetric]) -> Result<ObserveSnapshot, String> {
@@ -1180,7 +1187,7 @@ fn warmup_reading(parsed: &WarmupMetricsSnapshot, metric: &ObserveMetric) -> Met
     let query = metric.query.trim();
     let value = match query {
         "total_requests" | "requests" => Some(parsed.total_requests as f64),
-        "5xx" | "4xx" | "3xx" | "2xx" => Some(bucket_count(&parsed.counters, query)),
+        "5xx" | "4xx" | "3xx" | "2xx" | "1xx" => Some(bucket_count(&parsed.counters, query)),
         "slow" => Some(parsed.recent_slow_requests.len() as f64),
         "errors" => Some(parsed.recent_error_requests.len() as f64),
         _ => None,
@@ -1700,6 +1707,10 @@ mod tests {
             snap.alerts.is_empty(),
             "recent 5xx must not fire compact Observe until the user sets a threshold"
         );
+        let metrics = warmup_metrics_for(&ObserveConfig::default());
+        for query in ["1xx", "2xx", "3xx", "4xx", "5xx"] {
+            assert!(metrics.iter().any(|metric| metric.query == query));
+        }
     }
 
     #[tokio::test]
