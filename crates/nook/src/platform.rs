@@ -819,6 +819,17 @@ pub fn open_mirror() {
     }
 }
 
+/// Open the system Calendar app. No-op off macOS.
+pub fn open_calendar() {
+    #[cfg(target_os = "macos")]
+    {
+        let _ = std::process::Command::new("open")
+            .arg("-a")
+            .arg("Calendar")
+            .spawn();
+    }
+}
+
 /// System Settings → Appearance → *Accent color* (`NSColor.controlAccentColor`),
 /// as sRGB components in 0..=1. `None` when there is no AppKit to ask or the
 /// color cannot be converted to an RGB space — callers fall back to systemBlue.

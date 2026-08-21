@@ -1258,7 +1258,7 @@ mod tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 mod focus_probe {
     #[test]
     fn probe() {
