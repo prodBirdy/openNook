@@ -163,6 +163,16 @@ impl MetricReading {
     }
 }
 
+/// Map a 0–1 x-ratio across a sparkline to the nearest sample.
+pub fn point_at_ratio(points: &[SamplePoint], ratio: f32) -> Option<&SamplePoint> {
+    if points.is_empty() {
+        return None;
+    }
+    let last = points.len() - 1;
+    let idx = ((ratio.clamp(0.0, 1.0) * last as f32).round() as usize).min(last);
+    Some(&points[idx])
+}
+
 #[derive(Debug, Clone)]
 pub struct SeriesValue {
     pub name: String,
@@ -814,6 +824,28 @@ mod tests {
         assert_eq!(ObserveRange::FiveMinutes.label(), "5m");
         assert_eq!(ObserveRange::FifteenMinutes.seconds(), 900);
         assert_eq!(ObserveRange::SixHours.step_seconds(), 300);
+    }
+
+    #[test]
+    fn point_at_ratio_picks_nearest() {
+        let points = vec![
+            SamplePoint {
+                ts: 10.0,
+                value: 1.0,
+            },
+            SamplePoint {
+                ts: 20.0,
+                value: 2.0,
+            },
+            SamplePoint {
+                ts: 30.0,
+                value: 3.0,
+            },
+        ];
+        assert!(point_at_ratio(&[], 0.5).is_none());
+        assert_eq!(point_at_ratio(&points, 0.0).unwrap().value, 1.0);
+        assert_eq!(point_at_ratio(&points, 1.0).unwrap().value, 3.0);
+        assert_eq!(point_at_ratio(&points, 0.6).unwrap().ts, 20.0);
     }
 
     #[test]

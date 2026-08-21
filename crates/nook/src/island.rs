@@ -4,8 +4,8 @@ use crate::theme;
 use gpui::{
     canvas, div, point, prelude::*, px, relative, rgb, rgba, size, AnyElement, App, Bounds,
     Context, CursorStyle, ExternalPaths, FocusHandle, FontFallbacks, FontWeight, KeyDownEvent,
-    MouseButton, MouseDownEvent, PathBuilder, ScrollWheelEvent, SharedString, Window,
-    WindowBackgroundAppearance, WindowBounds, WindowKind, WindowOptions,
+    MouseButton, MouseDownEvent, MouseMoveEvent, PathBuilder, ScrollWheelEvent, SharedString,
+    Window, WindowBackgroundAppearance, WindowBounds, WindowKind, WindowOptions,
 };
 use nook_core::calendar::{CalendarEvent, Reminder};
 use nook_core::files::FileTrayItem;
@@ -14,6 +14,7 @@ use nook_core::notch;
 use nook_core::observe::{ObserveRange, ObserveSnapshot};
 use nook_core::settings::AppSettings;
 use std::any::Any;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 const WING: f32 = 6.0;
@@ -41,6 +42,20 @@ pub struct Timer {
     pub remaining: u32,
     pub total: u32,
     pub running: bool,
+}
+
+#[derive(Clone)]
+struct ObserveHover {
+    panel: String,
+    series: Option<String>,
+    time: String,
+    value: String,
+    cursor_x: f32,
+    cursor_y: f32,
+    hit_x: f32,
+    hit_y: f32,
+    hit_w: f32,
+    hit_h: f32,
 }
 
 pub struct Island {
@@ -76,6 +91,7 @@ pub struct Island {
     last_expanded: bool,
     last_mode: CompactMode,
     file_drag: bool,
+    observe_hover: Option<ObserveHover>,
 }
 
 impl Island {
@@ -132,6 +148,7 @@ impl Island {
             last_expanded: false,
             last_mode: CompactMode::Idle,
             file_drag: false,
+            observe_hover: None,
         };
         // Start at the compact idle size so the first paint isn't a jump.
         let (w, h) = this.target_size();
@@ -197,8 +214,25 @@ impl Island {
                             }
                         } else if this.expanded && !this.settings_open && !this.file_drag {
                             this.expanded = false;
+                            this.observe_hover = None;
                         }
                         dirty = true;
+                    }
+                    if !this.expanded && this.observe_hover.is_some() {
+                        this.observe_hover = None;
+                        dirty = true;
+                    } else if let Some(hover) = &this.observe_hover {
+                        let pad = 4.0;
+                        let mx = mx as f32;
+                        let my = my as f32;
+                        let over = mx + pad >= hover.hit_x
+                            && mx - pad <= hover.hit_x + hover.hit_w
+                            && my + pad >= hover.hit_y
+                            && my - pad <= hover.hit_y + hover.hit_h;
+                        if !over {
+                            this.observe_hover = None;
+                            dirty = true;
+                        }
                     }
                     if this.step_spring(0.02) {
                         dirty = true;
@@ -620,6 +654,7 @@ impl Render for Island {
 
         div()
             .id("island-root")
+            .relative()
             .size_full()
             .flex()
             .flex_col()
@@ -628,6 +663,22 @@ impl Render for Island {
             .bg(rgba(0x00000000))
             .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _, cx| {
                 this.on_wheel(event, cx);
+            }))
+            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
+                let Some(hover) = &this.observe_hover else {
+                    return;
+                };
+                let px: f32 = event.position.x.into();
+                let py: f32 = event.position.y.into();
+                let pad = 4.0;
+                let over = px + pad >= hover.hit_x
+                    && px - pad <= hover.hit_x + hover.hit_w
+                    && py + pad >= hover.hit_y
+                    && py - pad <= hover.hit_y + hover.hit_h;
+                if !over {
+                    this.observe_hover = None;
+                    cx.notify();
+                }
             }))
             .font(gpui::Font {
                 family: "SF Pro".into(),
@@ -692,6 +743,13 @@ impl Render for Island {
                             .when(!expanded, |d| d.child(self.mode_dots(cx))),
                     ),
             )
+            .when(expanded, |d| {
+                if let Some(hover) = &self.observe_hover {
+                    d.child(observe_tooltip(hover))
+                } else {
+                    d
+                }
+            })
     }
 }
 
@@ -1523,9 +1581,9 @@ fn observe_card(
             panels = panels.child(observe_panel(
                 format!("{} firing", snap.firing_count()),
                 Some(snap.firing_count().to_string()),
-                Vec::new(),
                 None,
                 true,
+                cx,
             ));
             panels = panels.child(alerts);
         } else if snap.connected {
@@ -1547,9 +1605,9 @@ fn observe_card(
             panels = panels.child(observe_panel(
                 reading.label.clone(),
                 Some(value),
-                reading.sparkline_values(),
-                reading.error.as_deref(),
+                Some(reading),
                 false,
+                cx,
             ));
         }
     }
@@ -1594,11 +1652,23 @@ fn observe_card(
 fn observe_panel(
     title: impl Into<SharedString>,
     value: Option<String>,
-    points: Vec<f32>,
-    error: Option<&str>,
+    reading: Option<&nook_core::observe::MetricReading>,
     outage: bool,
+    cx: &mut Context<Island>,
 ) -> impl IntoElement {
+    let title = title.into();
+    let error = reading.and_then(|r| r.error.clone());
+    let points = reading.map(|r| r.sparkline_values()).unwrap_or_default();
+    let series = reading.and_then(|r| r.series.first()).cloned();
+    let multi = reading.map(|r| r.series.len() > 1).unwrap_or(false);
+    let panel_id = reading
+        .map(|r| r.query.clone())
+        .unwrap_or_else(|| title.to_string());
+    let hit = Arc::new(Mutex::new((0.0f32, 0.0, 0.0, 0.0)));
+    let hit_move = hit.clone();
+
     let mut body = div()
+        .id(SharedString::from(format!("op-{panel_id}")))
         .flex()
         .flex_col()
         .gap_1()
@@ -1618,19 +1688,123 @@ fn observe_panel(
                 .child(label(value.unwrap_or_else(|| "—".into()), 13.0, true)),
         );
     if let Some(err) = error {
-        body = body.child(label(err.to_string(), 10.0, false));
+        body = body.child(label(err, 10.0, false));
     } else if points.len() >= 2 {
-        body = body.child(sparkline(
-            points,
-            if outage { rgb(0xff453a) } else { rgb(0x73bf69) },
-        ));
+        if let Some(series) = series {
+            body = body.child(sparkline_hover(
+                panel_id,
+                series,
+                multi,
+                if outage { rgb(0xff453a) } else { rgb(0x73bf69) },
+                hit,
+                hit_move,
+                cx,
+            ));
+        } else {
+            body = body.child(sparkline(points, rgb(0x73bf69), None));
+        }
     }
     body
 }
 
-fn sparkline(points: Vec<f32>, color: gpui::Rgba) -> impl IntoElement {
+fn sparkline_hover(
+    panel_id: String,
+    series: nook_core::observe::RangeSeries,
+    multi: bool,
+    color: gpui::Rgba,
+    hit: Arc<Mutex<(f32, f32, f32, f32)>>,
+    hit_move: Arc<Mutex<(f32, f32, f32, f32)>>,
+    cx: &mut Context<Island>,
+) -> impl IntoElement {
+    let values: Vec<f32> = series.points.iter().map(|p| p.value as f32).collect();
+    div()
+        .id(SharedString::from(format!("spark-{panel_id}")))
+        .relative()
+        .w_full()
+        .cursor(CursorStyle::PointingHand)
+        .on_mouse_move(cx.listener(move |this, event: &MouseMoveEvent, _, cx| {
+            let (x, y, w, h) = hit_move.lock().map(|g| *g).unwrap_or((0.0, 0.0, 0.0, 0.0));
+            if w <= 0.0 {
+                return;
+            }
+            let px: f32 = event.position.x.into();
+            let py: f32 = event.position.y.into();
+            let ratio = ((px - x) / w).clamp(0.0, 1.0);
+            let Some(point) = nook_core::observe::point_at_ratio(&series.points, ratio) else {
+                return;
+            };
+            let next = ObserveHover {
+                panel: panel_id.clone(),
+                series: if multi && !series.name.is_empty() {
+                    Some(series.name.clone())
+                } else {
+                    None
+                },
+                time: format_observe_ts(point.ts),
+                value: nook_core::observe::format_sample(point.value),
+                cursor_x: px,
+                cursor_y: py,
+                hit_x: x,
+                hit_y: y,
+                hit_w: w,
+                hit_h: h,
+            };
+            let skip = this.observe_hover.as_ref().is_some_and(|h| {
+                h.panel == next.panel
+                    && h.time == next.time
+                    && h.value == next.value
+                    && (h.cursor_x - next.cursor_x).abs() < 2.0
+                    && (h.cursor_y - next.cursor_y).abs() < 2.0
+            });
+            if skip {
+                return;
+            }
+            this.observe_hover = Some(next);
+            cx.notify();
+        }))
+        .child(sparkline(values, color, Some(hit)))
+}
+
+fn observe_tooltip(hover: &ObserveHover) -> impl IntoElement {
+    let mut col = div().flex().flex_col().gap(px(1.));
+    if let Some(series) = &hover.series {
+        col = col.child(label(series.clone(), 10.0, false));
+    }
+    col = col
+        .child(label(hover.time.clone(), 10.0, false))
+        .child(label(hover.value.clone(), 12.0, true));
+    div()
+        .absolute()
+        .left(px(hover.cursor_x + 10.0))
+        .top(px(hover.cursor_y + 14.0))
+        .max_w(px(180.))
+        .px_2()
+        .py_1()
+        .rounded(px(8.))
+        .bg(rgb(0x1a1a1c))
+        .border_1()
+        .border_color(rgba(0xffffff33))
+        .child(col)
+}
+
+fn sparkline(
+    points: Vec<f32>,
+    color: gpui::Rgba,
+    hit: Option<Arc<Mutex<(f32, f32, f32, f32)>>>,
+) -> impl IntoElement {
     canvas(
-        |bounds, _, _| bounds,
+        move |bounds, _, _| {
+            if let Some(hit) = &hit {
+                let x: f32 = bounds.origin.x.into();
+                let y: f32 = bounds.origin.y.into();
+                let w: f32 = bounds.size.width.into();
+                let h: f32 = bounds.size.height.into();
+                if let Ok(mut slot) = hit.lock() {
+                    *slot = (x, y, w, h);
+                }
+            }
+            bounds
+        },
         move |bounds, _, window, _| {
             if points.len() < 2 {
                 return;
@@ -1805,6 +1979,15 @@ fn format_ts(ts: f64) -> String {
     use chrono::{Local, TimeZone};
     if let Some(dt) = Local.timestamp_opt(ts as i64, 0).single() {
         dt.format("%a %H:%M").to_string()
+    } else {
+        String::new()
+    }
+}
+
+fn format_observe_ts(ts: f64) -> String {
+    use chrono::{Local, TimeZone};
+    if let Some(dt) = Local.timestamp_opt(ts as i64, 0).single() {
+        dt.format("%H:%M:%S").to_string()
     } else {
         String::new()
     }
