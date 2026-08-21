@@ -11,7 +11,7 @@ use nook_core::calendar::{CalendarEvent, Reminder};
 use nook_core::files::FileTrayItem;
 use nook_core::models::NowPlayingData;
 use nook_core::notch;
-use nook_core::observe::ObserveSnapshot;
+use nook_core::observe::{ObserveRange, ObserveSnapshot};
 use nook_core::settings::AppSettings;
 use std::any::Any;
 use std::time::{Duration, Instant};
@@ -368,7 +368,12 @@ impl Island {
         let base_w = self.notch_width.max(180.0);
         let base_h = self.notch_height.max(32.0);
         if self.expanded {
-            return ((self.screen_width - 40.0).min(600.0), 250.0);
+            let h = if self.settings.show_observe {
+                300.0
+            } else {
+                250.0
+            };
+            return ((self.screen_width - 40.0).min(600.0), h);
         }
         if self.hovered {
             return if self.mode() == CompactMode::Idle {
@@ -537,6 +542,24 @@ impl Island {
             nook_core::haptics::trigger(None);
             cx.notify();
         }
+    }
+
+    fn refresh_observe(&mut self, cx: &mut Context<Self>) {
+        let config = nook_core::settings::get_app_settings().observe;
+        cx.spawn(async move |this, cx| {
+            let snapshot = cx
+                .background_executor()
+                .spawn(
+                    async move { nook_core::runtime().block_on(nook_core::observe::poll(&config)) },
+                )
+                .await;
+            this.update(cx, |this, cx| {
+                this.observe = snapshot;
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     fn add_timer(&mut self, seconds: u32) {
@@ -1437,60 +1460,224 @@ fn speed_card(
 fn observe_card(
     snap: &ObserveSnapshot,
     settings: &AppSettings,
-    _cx: &mut Context<Island>,
+    cx: &mut Context<Island>,
 ) -> impl IntoElement {
-    let mut body = div().flex().flex_col().gap_1();
+    // Restyle chrome (React WidgetWrapper): 300 min, 28 radius, 16 pad, solid dark.
+    let range = settings.observe.range;
+    let mut chips = div().flex().gap_1();
+    for option in ObserveRange::all() {
+        let active = option == range;
+        chips = chips.child(
+            div()
+                .id(SharedString::from(format!("range-{}", option.label())))
+                .px_2()
+                .py(px(2.))
+                .rounded(px(8.))
+                .bg(if active {
+                    rgba(0xffffff33)
+                } else {
+                    theme::SURFACE
+                })
+                .cursor(CursorStyle::PointingHand)
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                        cx.stop_propagation();
+                        let mut s = nook_core::settings::get_app_settings();
+                        if s.observe.range != option {
+                            s.observe.range = option;
+                            nook_core::settings::update_app_settings(s);
+                        }
+                        this.refresh_observe(cx);
+                    }),
+                )
+                .child(label(option.label(), 10.0, active)),
+        );
+    }
+
+    let mut panels = div()
+        .id("observe-panels")
+        .flex()
+        .flex_col()
+        .gap_2()
+        .flex_1()
+        .overflow_y_scroll();
+
     let url = settings.observe.prometheus_url.trim();
     if url.is_empty() {
-        body = body.child(label("Set a Prometheus URL in Settings", 12.0, false));
+        panels = panels.child(label("Set a Prometheus URL in Settings", 12.0, false));
     } else {
         if let Some(err) = &snap.error {
-            body = body.child(label(err.clone(), 11.0, false));
+            panels = panels.child(label(err.clone(), 11.0, false));
         }
         if snap.has_outage() {
-            body = body.child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_1()
-                    .child(div().size(px(8.)).rounded_full().bg(rgb(0xff453a)))
-                    .child(label(format!("{} firing", snap.firing_count()), 11.0, true)),
-            );
+            let mut alerts = div().flex().flex_col().gap_1();
             for alert in snap.alerts.iter().take(3) {
                 let line = if alert.summary.is_empty() {
                     alert.name.clone()
                 } else {
                     format!("{} — {}", alert.name, alert.summary)
                 };
-                body = body.child(label(line, 12.0, true));
+                alerts = alerts.child(label(line, 11.0, true));
             }
+            panels = panels.child(observe_panel(
+                format!("{} firing", snap.firing_count()),
+                Some(snap.firing_count().to_string()),
+                Vec::new(),
+                None,
+                true,
+            ));
+            panels = panels.child(alerts);
         } else if snap.connected {
-            body = body.child(label("No firing alerts", 11.0, false));
+            panels = panels.child(label("No firing alerts", 11.0, false));
         }
         for reading in snap.metrics.iter().take(4) {
             let value = if let Some(err) = &reading.error {
                 err.clone()
-            } else if let Some(first) = reading.values.first() {
-                let extra = if reading.values.len() > 1 {
-                    format!(" (+{})", reading.values.len() - 1)
+            } else if let Some(last) = reading.last_value() {
+                let extra = if reading.series.len() > 1 {
+                    format!(" (+{})", reading.series.len() - 1)
                 } else {
                     String::new()
                 };
-                format!("{}{extra}", nook_core::observe::format_sample(first.value))
+                format!("{}{extra}", nook_core::observe::format_sample(last))
             } else {
                 "—".into()
             };
-            body = body.child(
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .child(label(reading.label.clone(), 11.0, false))
-                    .child(label(value, 12.0, true)),
-            );
+            panels = panels.child(observe_panel(
+                reading.label.clone(),
+                Some(value),
+                reading.sparkline_values(),
+                reading.error.as_deref(),
+                false,
+            ));
         }
     }
-    widget_shell("activity", "Observe", body)
+
+    div()
+        .flex()
+        .flex_col()
+        .flex_1()
+        .min_w(px(300.))
+        .h_full()
+        .p(px(16.))
+        .gap_2()
+        .overflow_hidden()
+        .rounded(px(28.))
+        .bg(rgba(0x1e1e20D9))
+        .border_1()
+        .border_color(rgba(0xffffff1A))
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .child(lucide("activity", 12.0))
+                        .child(
+                            div()
+                                .text_color(theme::TEXT_FAINT)
+                                .text_size(px(10.))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .child("Observe"),
+                        ),
+                )
+                .child(chips),
+        )
+        .child(panels)
+}
+
+fn observe_panel(
+    title: impl Into<SharedString>,
+    value: Option<String>,
+    points: Vec<f32>,
+    error: Option<&str>,
+    outage: bool,
+) -> impl IntoElement {
+    let mut body = div()
+        .flex()
+        .flex_col()
+        .gap_1()
+        .p_2()
+        .rounded(px(12.))
+        .bg(if outage {
+            rgba(0xff453a22)
+        } else {
+            rgba(0xffffff0F)
+        })
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .child(label(title, 11.0, false))
+                .child(label(value.unwrap_or_else(|| "—".into()), 13.0, true)),
+        );
+    if let Some(err) = error {
+        body = body.child(label(err.to_string(), 10.0, false));
+    } else if points.len() >= 2 {
+        body = body.child(sparkline(
+            points,
+            if outage { rgb(0xff453a) } else { rgb(0x73bf69) },
+        ));
+    }
+    body
+}
+
+fn sparkline(points: Vec<f32>, color: gpui::Rgba) -> impl IntoElement {
+    canvas(
+        |bounds, _, _| bounds,
+        move |bounds, _, window, _| {
+            if points.len() < 2 {
+                return;
+            }
+            let ox: f32 = bounds.origin.x.into();
+            let oy: f32 = bounds.origin.y.into();
+            let w: f32 = bounds.size.width.into();
+            let h: f32 = bounds.size.height.into();
+            if w < 2.0 || h < 2.0 {
+                return;
+            }
+            let min = points.iter().copied().fold(f32::INFINITY, f32::min);
+            let max = points.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+            let span = (max - min).max(1e-6);
+            let last = (points.len() - 1) as f32;
+            let x_at = |i: usize| ox + (i as f32 / last) * w;
+            let y_at = |v: f32| oy + h - ((v - min) / span) * (h - 2.0) - 1.0;
+            let p = |x: f32, y: f32| point(px(x), px(y));
+
+            let mut fill = PathBuilder::fill();
+            fill.move_to(p(x_at(0), oy + h));
+            for (i, v) in points.iter().enumerate() {
+                fill.line_to(p(x_at(i), y_at(*v)));
+            }
+            fill.line_to(p(x_at(points.len() - 1), oy + h));
+            fill.close();
+            if let Ok(built) = fill.build() {
+                let mut wash = color;
+                wash.a = 0.22;
+                window.paint_path(built, wash);
+            }
+
+            let mut stroke = PathBuilder::stroke(px(1.5));
+            for (i, v) in points.iter().enumerate() {
+                if i == 0 {
+                    stroke.move_to(p(x_at(i), y_at(*v)));
+                } else {
+                    stroke.line_to(p(x_at(i), y_at(*v)));
+                }
+            }
+            if let Ok(built) = stroke.build() {
+                window.paint_path(built, color);
+            }
+        },
+    )
+    .w_full()
+    .h(px(36.))
 }
 
 fn album_chip(np: &NowPlayingData, cx: &mut Context<Island>) -> impl IntoElement {
@@ -1903,6 +2090,14 @@ impl SettingsView {
             .child(label("Prometheus", 12.0, true))
             .child(label(
                 "Point at Prometheus. Grafana / Alertmanager / fm-observe are later sources.",
+                11.0,
+                false,
+            ))
+            .child(label(
+                format!(
+                    "Time range on the island: {}",
+                    settings.observe.range.label()
+                ),
                 11.0,
                 false,
             ))
