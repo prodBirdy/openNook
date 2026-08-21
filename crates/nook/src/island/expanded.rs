@@ -8,8 +8,8 @@ use crate::widgets::{
     agents_card, calendar_card, notes_card, observe_card, reminders_card, speed_card, timer_card,
 };
 use gpui::{
-    div, prelude::*, px, rgba, AnyElement, Context, CursorStyle, FontWeight, MouseButton,
-    MouseDownEvent, ScrollWheelEvent,
+    div, prelude::*, px, rgba, AnyElement, Context, CursorStyle, Div, FontWeight, MouseButton,
+    MouseDownEvent, ScrollWheelEvent, Stateful,
 };
 
 impl Island {
@@ -18,7 +18,11 @@ impl Island {
         notch_w: f32,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let tab = self.tab;
+        let tab = if self.tab == Tab::Files && !self.settings.show_files {
+            Tab::Widgets
+        } else {
+            self.tab
+        };
         div()
             .flex()
             .flex_col()
@@ -56,7 +60,7 @@ impl Island {
             .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _, cx| {
                 this.on_wheel(event, cx);
             }))
-            .child(tab_switch(widgets_active, cx))
+            .child(tab_switch(widgets_active, self.settings.show_files, cx))
             .child(div().w(px(notch_w)))
             .child(
                 div()
@@ -93,7 +97,7 @@ impl Island {
             }));
 
         let mut first = true;
-        let mut push = |row: gpui::Div, child: AnyElement| {
+        let mut push = |row: Stateful<Div>, child: AnyElement| {
             let row = if first {
                 first = false;
                 row
@@ -132,21 +136,27 @@ impl Island {
         if self.settings.show_reminders {
             row = push(row, reminders_card(&self.reminders, cx).into_any_element());
         }
-        row = push(
-            row,
-            timer_card(&self.timers, self.timer_composer, cx).into_any_element(),
-        );
-        row = push(row, notes_card(self, cx).into_any_element());
-        row = push(
-            row,
-            speed_card(
-                self.speed_mbps,
-                self.speed_progress,
-                self.speed_running,
-                cx,
-            )
-            .into_any_element(),
-        );
+        if self.settings.show_timers {
+            row = push(
+                row,
+                timer_card(&self.timers, self.timer_composer, cx).into_any_element(),
+            );
+        }
+        if self.settings.show_notes {
+            row = push(row, notes_card(self, cx).into_any_element());
+        }
+        if self.settings.show_speed {
+            row = push(
+                row,
+                speed_card(
+                    self.speed_mbps,
+                    self.speed_progress,
+                    self.speed_running,
+                    cx,
+                )
+                .into_any_element(),
+            );
+        }
         row
     }
 }
@@ -160,27 +170,30 @@ fn pane_divider() -> impl IntoElement {
         .flex_shrink_0()
 }
 
-fn tab_switch(widgets_active: bool, cx: &mut Context<Island>) -> impl IntoElement {
-    div()
-        .flex()
-        .items_center()
-        .gap(px(4.))
-        .child(labeled_tab(
-            "tab-nook",
-            "map-pin",
-            "Nook",
-            widgets_active,
-            cx,
-            Tab::Widgets,
-        ))
-        .child(labeled_tab(
+fn tab_switch(
+    widgets_active: bool,
+    show_files: bool,
+    cx: &mut Context<Island>,
+) -> impl IntoElement {
+    let mut row = div().flex().items_center().gap(px(4.)).child(labeled_tab(
+        "tab-nook",
+        "map-pin",
+        "Nook",
+        widgets_active || !show_files,
+        cx,
+        Tab::Widgets,
+    ));
+    if show_files {
+        row = row.child(labeled_tab(
             "tab-tray",
             "files",
             "Tray",
             !widgets_active,
             cx,
             Tab::Files,
-        ))
+        ));
+    }
+    row
 }
 
 fn labeled_tab(

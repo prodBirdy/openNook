@@ -48,6 +48,14 @@ pub struct AppSettings {
     pub show_agents: bool,
     #[serde(default = "default_true")]
     pub show_observe: bool,
+    #[serde(default = "default_true")]
+    pub show_timers: bool,
+    #[serde(default = "default_true")]
+    pub show_notes: bool,
+    #[serde(default = "default_true")]
+    pub show_speed: bool,
+    #[serde(default = "default_true")]
+    pub show_files: bool,
     #[serde(default)]
     pub observe: ObserveConfig,
     #[serde(default)]
@@ -70,6 +78,10 @@ impl Default for AppSettings {
             show_reminders: true,
             show_agents: true,
             show_observe: true,
+            show_timers: true,
+            show_notes: true,
+            show_speed: true,
+            show_files: true,
             observe: ObserveConfig::default(),
             liquid_glass_mode: false,
             non_notch_mode: false,
@@ -258,6 +270,10 @@ mod tests {
         assert!(parsed.show_reminders);
         assert!(parsed.show_agents);
         assert!(parsed.show_observe);
+        assert!(parsed.show_timers);
+        assert!(parsed.show_notes);
+        assert!(parsed.show_speed);
+        assert!(parsed.show_files);
         assert!(parsed.liquid_glass_mode);
         assert!(!parsed.non_notch_mode);
     }

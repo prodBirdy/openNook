@@ -16,7 +16,7 @@ use crate::platform;
 use crate::theme;
 use gpui::{
     prelude::*, px, size, Context, Entity, ExternalPaths, Focusable, Subscription, TouchPhase,
-    Window, WindowBounds, WindowHandle, WindowKind, WindowOptions,
+    Window, WindowBackgroundAppearance, WindowBounds, WindowHandle, WindowKind, WindowOptions,
 };
 use nook_core::agents::AgentSession;
 use nook_core::calendar::{CalendarEvent, Reminder};
@@ -700,10 +700,10 @@ impl Island {
         if self.has_agents() {
             modes.push(CompactMode::Agents);
         }
-        if self.running_timer().is_some() {
+        if self.settings.show_timers && self.running_timer().is_some() {
             modes.push(CompactMode::Timer);
         }
-        if !self.files.is_empty() {
+        if self.settings.show_files && !self.files.is_empty() {
             modes.push(CompactMode::Files);
         }
         if self.first_run {
@@ -928,7 +928,11 @@ impl Island {
             if ax.abs() <= THRESHOLD {
                 false
             } else if self.expanded {
-                self.tab = if ax > 0.0 { Tab::Files } else { Tab::Widgets };
+                self.tab = if ax > 0.0 && self.settings.show_files {
+                    Tab::Files
+                } else {
+                    Tab::Widgets
+                };
                 true
             } else {
                 self.cycle_mode(ax > 0.0)
@@ -987,12 +991,14 @@ impl Island {
         self.settings_open = true;
         platform::set_accessory(false);
         platform::activate_app();
-        let bounds = gpui::Bounds::centered(None, size(px(420.), px(620.)), cx);
+        let (w, h) = settings::SETTINGS_SIZE;
+        let (min_w, min_h) = settings::SETTINGS_MIN;
+        let bounds = gpui::Bounds::centered(None, size(px(w), px(h)), cx);
         let Ok(handle) = cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 titlebar: Some(gpui::TitlebarOptions {
-                    title: Some("openNook".into()),
+                    title: Some("Nook".into()),
                     appears_transparent: true,
                     ..Default::default()
                 }),
@@ -1000,6 +1006,8 @@ impl Island {
                 is_resizable: true,
                 focus: true,
                 show: true,
+                window_background: WindowBackgroundAppearance::Blurred,
+                window_min_size: Some(size(px(min_w), px(min_h))),
                 ..Default::default()
             },
             |_, cx| cx.new(SettingsView::new),
@@ -1278,6 +1286,24 @@ mod tests {
             "leftover={leftover} tile_h={}",
             file_tile_height(tile)
         );
+    }
+
+    #[test]
+    fn hidden_modules_leave_compact_modes() {
+        let mut island = test_island();
+        with_file(&mut island);
+        island.timers.push(Timer {
+            id: 1,
+            name: String::new(),
+            remaining: 30,
+            total: 60,
+            running: true,
+        });
+        assert!(island.available_modes().contains(&CompactMode::Files));
+        assert!(island.available_modes().contains(&CompactMode::Timer));
+        island.settings.show_files = false;
+        island.settings.show_timers = false;
+        assert_eq!(island.available_modes(), vec![CompactMode::Idle]);
     }
 
     #[test]

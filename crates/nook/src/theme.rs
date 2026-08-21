@@ -111,11 +111,26 @@ pub const WINDOW_BG: Rgba = Rgba {
     b: 0.118,
     a: 1.0,
 };
+/// Settings window fill. Slightly transparent so macOS `Blurred` chrome reads
+/// as dark glass; opaque enough that Linux (no vibrancy) stays legible.
+pub const SETTINGS_GLASS: Rgba = Rgba {
+    r: 0.110,
+    g: 0.110,
+    b: 0.118,
+    a: 0.86,
+};
 pub const GROUPED_BG: Rgba = Rgba {
     r: 0.173,
     g: 0.173,
     b: 0.180,
     a: 1.0,
+};
+/// Module list well — a touch darker than grouped rows.
+pub const SETTINGS_WELL: Rgba = Rgba {
+    r: 0.086,
+    g: 0.086,
+    b: 0.094,
+    a: 0.92,
 };
 
 /// Compact island matches the hardware notch; expanded uses a larger bottom

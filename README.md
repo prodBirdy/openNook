@@ -44,7 +44,7 @@ On macOS the process is an accessory (`LSUIElement` / `NSApplicationActivationPo
 - Calendar and Reminders (EventKit)
 - File tray (open / drag out to Finder / remove / clear), notes (external editor), timers, Cloudflare speed test
 - Prometheus observe widget (pinned PromQL, time-range sparklines, hover point detail, firing alerts)
-- Settings window (media/calendar/reminders/agents/observability, liquid glass, non-notch mode)
+- Settings window (Nook chrome: General / Custom Widgets, per-module toggles, Observe metrics, liquid glass, non-notch mode)
 
 No plugin system in this build. Built-in widgets only.
 

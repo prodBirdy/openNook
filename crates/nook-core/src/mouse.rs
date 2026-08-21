@@ -64,10 +64,24 @@ pub fn hit_test(mouse_x: f64, mouse_y: f64) -> bool {
 /// click-through has already lifted by the time the drag cursor arrives, so the
 /// region has to reach out and meet it.
 pub fn hover_padding() -> f64 {
-    if drag_active() || crate::files::file_drag_active() {
+    if drag_active() || file_drag_widens_hover() {
         80.0
     } else {
         0.0
+    }
+}
+
+fn file_drag_widens_hover() -> bool {
+    // Tests drive padding through `DRAG_ACTIVE` only. On macOS the real
+    // drag pasteboard plus a leftover left-button can otherwise pin padding
+    // at 80 for the whole libtest process.
+    #[cfg(test)]
+    {
+        false
+    }
+    #[cfg(not(test))]
+    {
+        crate::files::file_drag_active()
     }
 }
 
@@ -219,12 +233,24 @@ mod tests {
     use std::sync::atomic::Ordering;
     use std::sync::{Mutex, MutexGuard};
 
-    /// `UI_BOUNDS` is process-global, so tests that publish bounds must not run
-    /// concurrently or they read each other's island.
+    /// `UI_BOUNDS` / `DRAG_ACTIVE` are process-global, so tests that publish
+    /// bounds must not run concurrently or they read each other's island.
     static BOUNDS: Mutex<()> = Mutex::new(());
 
-    fn lock() -> MutexGuard<'static, ()> {
-        BOUNDS.lock().unwrap_or_else(|e| e.into_inner())
+    struct BoundsLock {
+        _guard: MutexGuard<'static, ()>,
+    }
+
+    impl Drop for BoundsLock {
+        fn drop(&mut self) {
+            DRAG_ACTIVE.store(false, Ordering::Relaxed);
+        }
+    }
+
+    fn lock() -> BoundsLock {
+        let guard = BOUNDS.lock().unwrap_or_else(|e| e.into_inner());
+        DRAG_ACTIVE.store(false, Ordering::Relaxed);
+        BoundsLock { _guard: guard }
     }
 
     #[test]
@@ -289,7 +315,8 @@ mod tests {
             hit_test(10.0, 10.0),
             "a drag along the menu bar must lift click-through"
         );
-        assert!(hit_test(1790.0, 20.0));
+        let far_x = (get_screen_info().0 - 10.0).max(0.0);
+        assert!(hit_test(far_x, 20.0));
         assert!(!hit_test_exact(10.0, 10.0));
         super::DRAG_ACTIVE.store(false, Ordering::Relaxed);
         assert!(!hit_test(10.0, 10.0));
