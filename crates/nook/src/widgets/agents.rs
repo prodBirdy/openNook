@@ -1,7 +1,7 @@
 //! Coding-agent card + compact island faces.
 
 use crate::dotmatrix;
-use crate::island::ui::{card_row, label, widget_shell};
+use crate::island::ui::{card_row, label, slide_label, widget_shell};
 use crate::island::Island;
 use crate::theme;
 use gpui::{div, prelude::*, AnyElement, Context, MouseButton, MouseDownEvent, SharedString};
@@ -49,7 +49,6 @@ pub(crate) fn agents_card(
             ));
     } else {
         for agent in agents.iter().take(4) {
-            let cwd = agent.cwd.clone();
             let pid = agent.pid;
             let working = agent.status.is_working();
             body = body.child(
@@ -58,12 +57,7 @@ pub(crate) fn agents_card(
                         MouseButton::Left,
                         cx.listener(move |_, _: &MouseDownEvent, _, cx| {
                             cx.stop_propagation();
-                            // Focus the terminal the agent is running in; only
-                            // fall back to its folder if nothing can be focused
-                            // (agent already exited, or no app-owning ancestor).
-                            if !nook_core::agents::focus(pid) {
-                                nook_core::agents::reveal(&cwd);
-                            }
+                            let _ = nook_core::agents::focus(pid);
                         }),
                     )
                     .child(dotmatrix::element(
@@ -80,9 +74,12 @@ pub(crate) fn agents_card(
                             .min_w_0()
                             .flex()
                             .flex_col()
-                            .child(label(agent.title().to_string(), theme::CALLOUT, true).w_full())
                             .child(
-                                label(agent_detail_line(agent, working), theme::SUBHEADLINE, false)
+                                slide_label(agent.title().to_string(), theme::CALLOUT, true)
+                                    .w_full(),
+                            )
+                            .child(
+                                slide_label(agent_detail_line(agent), theme::SUBHEADLINE, false)
                                     .w_full(),
                             ),
                     ),
@@ -96,10 +93,10 @@ pub(crate) fn agents_card(
             ));
         }
     }
-    widget_shell("bot", "Agents", body)
+    widget_shell("agents-scroll", body)
 }
 
-fn agent_detail_line(agent: &AgentSession, working: bool) -> String {
+fn agent_detail_line(agent: &AgentSession) -> String {
     let mut parts = vec![agent.kind.label().to_string()];
     if agent
         .name
@@ -116,10 +113,6 @@ fn agent_detail_line(agent: &AgentSession, working: bool) -> String {
     {
         parts.push(model.to_string());
     }
-    parts.push(if working {
-        format!("{} — working", agent.status.label())
-    } else {
-        agent.status.label().to_string()
-    });
+    parts.push(agent.status.label().to_string());
     parts.join(" · ")
 }

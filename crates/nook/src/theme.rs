@@ -184,6 +184,9 @@ pub const FOOTNOTE: Text = Text {
     emphasized: FontWeight::SEMIBOLD,
 };
 
+/// Compact Live Activity face — album chip, mode icons, timer ring, loader.
+pub const COMPACT_FACE: f32 = 26.0;
+
 /// HIG › Accessibility › Buttons gives macOS a 28×28 pt recommended hit target
 /// (20×20 pt minimum). Interactive rows and controls hold this floor even when
 /// their visible artwork is smaller.

@@ -4,6 +4,7 @@ mod chrome;
 mod compact;
 mod expanded;
 mod files;
+mod marquee;
 mod media;
 mod render;
 mod settings;
@@ -24,8 +25,10 @@ use nook_core::calendar::{CalendarEvent, Reminder};
 use nook_core::files::FileTrayItem;
 use nook_core::models::NowPlayingData;
 use nook_core::notch;
+use nook_core::observe::{MetricHistory, ObserveSnapshot};
 use nook_core::settings::AppSettings;
 use settings::SettingsView;
+use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -35,6 +38,7 @@ pub enum CompactMode {
     Agents,
     Files,
     Timer,
+    Observe,
     Onboard,
 }
 
@@ -71,11 +75,17 @@ pub struct Island {
     pub notes: String,
     pub timers: Vec<Timer>,
     pub next_timer_id: u64,
+    pub observe: ObserveSnapshot,
+    observe_history: MetricHistory,
+    pub(crate) observe_hover: Option<crate::widgets::ObserveHover>,
     pub settings: AppSettings,
     pub first_run: bool,
     pub speed_mbps: Option<f64>,
     pub speed_progress: f64,
     pub speed_running: bool,
+    /// Bumped on start and on Stop so an in-flight test cannot apply after it
+    /// was cancelled (Stop then Run would otherwise take the old result).
+    pub speed_gen: u64,
     pub last_tick: Instant,
     last_frame: Instant,
     pub settings_open: bool,
@@ -93,8 +103,15 @@ pub struct Island {
     last_expanded: bool,
     last_mode: CompactMode,
     file_drag: bool,
+    pending_file_drag: Option<PendingFileDrag>,
     /// Mirrors NSWindow.ignoresMouseEvents so we only cross into ObjC on change.
     click_through: bool,
+    /// Ticks since the flag above was last pushed to AppKit. The overlay covers
+    /// the whole display, so a window left grabbing events would eat every click
+    /// on the machine — too costly to trust a mirrored bool that AppKit or GPUI
+    /// can invalidate behind our back (a restyle drops it). Re-asserted about
+    /// once a second regardless of whether we think it changed.
+    click_through_age: u32,
     /// Ignore extra wheel events from the same two-finger swipe / momentum.
     wheel_locked: bool,
     last_wheel_at: Instant,
@@ -103,6 +120,12 @@ pub struct Island {
     /// Origin for the working-agent Dot Matrix loader (seconds * speed).
     pixel_origin: Instant,
     pixel_t: f32,
+}
+
+struct PendingFileDrag {
+    path: String,
+    screen_x: f64,
+    screen_y: f64,
 }
 
 impl Island {
@@ -143,11 +166,15 @@ impl Island {
             notes,
             timers: Vec::new(),
             next_timer_id: 1,
+            observe: ObserveSnapshot::default(),
+            observe_history: nook_core::observe::load_history(),
+            observe_hover: None,
             settings,
             first_run,
             speed_mbps: None,
             speed_progress: 0.0,
             speed_running: false,
+            speed_gen: 0,
             last_tick: Instant::now(),
             last_frame: Instant::now(),
             settings_open: false,
@@ -163,8 +190,10 @@ impl Island {
             last_expanded: false,
             last_mode: CompactMode::Idle,
             file_drag: false,
+            pending_file_drag: None,
             // NSWindow starts out grabbing events; the first poll tick corrects it.
             click_through: false,
+            click_through_age: u32::MAX,
             wheel_locked: false,
             last_wheel_at: Instant::now(),
             wheel_acc_x: 0.0,
@@ -234,22 +263,40 @@ impl Island {
                         }
                         dirty = true;
                     }
-                    // Own the cursor only where we actually paint. The NSWindow
-                    // spans the whole screen width and is ~280px tall, so
-                    // anything looser swallows clicks meant for the menu bar or
-                    // the app underneath. Exception: while Finder is dragging,
-                    // the window must see the cursor early (padded `inside`) or
-                    // it never gets draggingEntered.
-                    let ignore = !(on_ui || (this.file_drag && inside) || this.settings_open);
-                    if this.click_through != ignore {
+                    if this.poll_pending_file_drag(None) {
+                        dirty = true;
+                    }
+                    if let Some((path, dropped)) = nook_core::files::take_outbound_drag() {
+                        if dropped {
+                            this.remove_file(&path, cx);
+                            dirty = true;
+                        }
+                    }
+                    // Overlay paints the whole display; click-through is what
+                    // keeps the menu bar, Settings, and apps underneath usable.
+                    // Own the cursor only over the painted island. Exception:
+                    // while Finder is dragging, the window must see the cursor
+                    // early (padded `inside`) or it never gets draggingEntered.
+                    // Same while we are the drag source — AppKit needs the
+                    // session's window live. Settings is a separate window and
+                    // must not pin this overlay capturing.
+                    let ignore = this.overlay_ignores_mouse(on_ui, inside);
+                    let changed = this.click_through != ignore;
+                    // 20 ms per tick, so this re-asserts roughly every second.
+                    if changed || this.click_through_age >= 50 {
                         this.click_through = ignore;
+                        this.click_through_age = 0;
                         platform::set_click_through_current(ignore);
-                        log::debug!(
-                            "click-through {} at ({mx:.0},{my:.0}) on_ui={on_ui} drag={} expanded={}",
-                            if ignore { "on" } else { "off" },
-                            this.file_drag,
-                            this.expanded
-                        );
+                        if changed {
+                            log::debug!(
+                                "click-through {} at ({mx:.0},{my:.0}) on_ui={on_ui} drag={} expanded={}",
+                                if ignore { "on" } else { "off" },
+                                this.file_drag,
+                                this.expanded
+                            );
+                        }
+                    } else {
+                        this.click_through_age += 1;
                     }
                     if this.hovered != inside {
                         this.hovered = inside;
@@ -258,7 +305,11 @@ impl Island {
                             if this.file_drag {
                                 this.arm_dropzone(cx);
                             }
-                        } else if this.expanded && !this.settings_open && !this.file_drag {
+                        } else if this.expanded
+                            && !this.settings_open
+                            && !this.file_drag
+                            && !nook_core::files::outbound_drag_active()
+                        {
                             this.expanded = false;
                         }
                         dirty = true;
@@ -427,6 +478,46 @@ impl Island {
                 .await;
         })
         .detach();
+
+        cx.spawn(async move |this, cx| loop {
+            let settings = nook_core::settings::get_app_settings();
+            let window = settings.observe.window;
+            let snapshot = if settings.show_observe {
+                cx.background_executor()
+                    .spawn(async move {
+                        nook_core::runtime().block_on(nook_core::observe::poll(&settings.observe))
+                    })
+                    .await
+            } else {
+                ObserveSnapshot::default()
+            };
+            let connected = snapshot.connected;
+            if this
+                .update(cx, |this, cx| {
+                    let was_quiet = !this.observe.has_outage();
+                    let mut snapshot = snapshot;
+                    nook_core::observe::record_history(
+                        &mut this.observe_history,
+                        &mut snapshot,
+                        window,
+                    );
+                    this.observe = snapshot;
+                    if was_quiet && this.observe.has_outage() {
+                        this.preferred = Some(CompactMode::Observe);
+                        nook_core::haptics::trigger(None);
+                    }
+                    cx.notify();
+                })
+                .is_err()
+            {
+                break;
+            }
+            let wait = if connected { 15 } else { 5 };
+            cx.background_executor()
+                .timer(Duration::from_secs(wait))
+                .await;
+        })
+        .detach();
     }
 
     pub(crate) fn has_media(&self) -> bool {
@@ -456,12 +547,17 @@ impl Island {
         self.settings.show_agents && !self.agents.is_empty()
     }
 
+    fn has_observe_outage(&self) -> bool {
+        self.settings.show_observe && self.observe.has_outage()
+    }
+
     fn mode_available(&self, mode: CompactMode) -> bool {
         match mode {
             CompactMode::Media => self.has_media(),
             CompactMode::Agents => self.has_agents(),
             CompactMode::Files => !self.files.is_empty(),
             CompactMode::Timer => self.running_timer().is_some(),
+            CompactMode::Observe => self.has_observe_outage(),
             CompactMode::Onboard => self.first_run,
             CompactMode::Idle => true,
         }
@@ -469,6 +565,9 @@ impl Island {
 
     fn available_modes(&self) -> Vec<CompactMode> {
         let mut modes = Vec::new();
+        if self.has_observe_outage() {
+            modes.push(CompactMode::Observe);
+        }
         if self.has_media() {
             modes.push(CompactMode::Media);
         }
@@ -687,6 +786,20 @@ impl Island {
         acted
     }
 
+    /// Whether the overlay NSWindow should `ignoresMouseEvents`.
+    ///
+    /// `on_ui` is a hit against the painted island (no hover pad). `inside` is
+    /// the padded hover region, used only so an inbound Finder drag meets the
+    /// window before `draggingEntered`. Settings must not appear here: it used
+    /// to force the overlay live, which ate every click in the window — the
+    /// top of the screen when the overlay was ~280px, the whole display now.
+    fn overlay_ignores_mouse(&self, on_ui: bool, inside: bool) -> bool {
+        !(on_ui
+            || (self.file_drag && inside)
+            || self.pending_file_drag.is_some()
+            || nook_core::files::outbound_drag_active())
+    }
+
     fn open_settings(&mut self, cx: &mut Context<Self>) {
         if let Some(handle) = self.settings_window {
             if handle
@@ -700,7 +813,7 @@ impl Island {
         self.settings_open = true;
         platform::set_accessory(false);
         platform::activate_app();
-        let bounds = gpui::Bounds::centered(None, size(px(420.), px(480.)), cx);
+        let bounds = gpui::Bounds::centered(None, size(px(420.), px(620.)), cx);
         let Ok(handle) = cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
@@ -710,12 +823,12 @@ impl Island {
                     ..Default::default()
                 }),
                 kind: WindowKind::Normal,
-                is_resizable: false,
+                is_resizable: true,
                 focus: true,
                 show: true,
                 ..Default::default()
             },
-            |_, cx| cx.new(|_| SettingsView),
+            |_, cx| cx.new(SettingsView::new),
         ) else {
             self.settings_open = false;
             platform::set_accessory(true);
@@ -768,6 +881,38 @@ impl Island {
         self.next_timer_id += 1;
         self.preferred = Some(CompactMode::Timer);
     }
+
+    pub(crate) fn arm_file_drag(&mut self, path: String) {
+        let (screen_x, screen_y) = nook_core::mouse::current_mouse_logical();
+        self.pending_file_drag = Some(PendingFileDrag {
+            path,
+            screen_x,
+            screen_y,
+        });
+    }
+
+    /// Start an OS drag after the pointer moves a few points (click still opens).
+    pub(crate) fn poll_pending_file_drag(&mut self, window: Option<&Window>) -> bool {
+        let Some(pending) = self.pending_file_drag.as_ref() else {
+            return false;
+        };
+        let (mx, my) = nook_core::mouse::current_mouse_logical();
+        let dx = mx - pending.screen_x;
+        let dy = my - pending.screen_y;
+        if dx * dx + dy * dy < 16.0 {
+            return false;
+        }
+        let path = self.pending_file_drag.take().unwrap().path;
+        nook_core::haptics::trigger(None);
+        platform::start_file_drag(&path, window);
+        true
+    }
+
+    pub(crate) fn finish_file_press(&mut self) {
+        if let Some(pending) = self.pending_file_drag.take() {
+            let _ = nook_core::files::open_file(pending.path);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -793,11 +938,15 @@ mod tests {
             notes: String::new(),
             timers: Vec::new(),
             next_timer_id: 1,
+            observe: ObserveSnapshot::default(),
+            observe_history: HashMap::new(),
+            observe_hover: None,
             settings: AppSettings::default(),
             first_run: false,
             speed_mbps: None,
             speed_progress: 0.0,
             speed_running: false,
+            speed_gen: 0,
             last_tick: Instant::now(),
             last_frame: Instant::now(),
             settings_open: false,
@@ -813,7 +962,9 @@ mod tests {
             last_expanded: false,
             last_mode: CompactMode::Idle,
             file_drag: false,
+            pending_file_drag: None,
             click_through: true,
+            click_through_age: 0,
             wheel_locked: false,
             last_wheel_at: Instant::now() - Duration::from_secs(1),
             wheel_acc_x: 0.0,
@@ -851,6 +1002,23 @@ mod tests {
     }
 
     #[test]
+    fn speed_stop_then_run_ignores_stale_result() {
+        let mut island = test_island();
+        island.speed_running = true;
+        island.speed_gen = 1;
+        let stale_gen = island.speed_gen;
+        island.speed_gen = island.speed_gen.wrapping_add(1);
+        island.speed_running = false;
+        island.speed_gen = island.speed_gen.wrapping_add(1);
+        if island.speed_gen == stale_gen {
+            island.speed_mbps = Some(12.0);
+        }
+        assert!(island.speed_mbps.is_none());
+        assert!(!island.speed_running);
+        assert_eq!(island.speed_gen, 3);
+    }
+
+    #[test]
     fn available_modes_idle_last() {
         let island = test_island();
         assert_eq!(island.available_modes(), vec![CompactMode::Idle]);
@@ -880,6 +1048,68 @@ mod tests {
         assert_eq!(island.mode(), CompactMode::Agents);
         island.settings.show_agents = false;
         assert_eq!(island.available_modes(), vec![CompactMode::Idle]);
+    }
+
+    #[test]
+    fn available_modes_observe_outage_first() {
+        let mut island = test_island();
+        island.observe.alerts = vec![nook_core::observe::FiringAlert {
+            name: "InstanceDown".into(),
+            severity: "critical".into(),
+            summary: "target gone".into(),
+        }];
+        assert_eq!(
+            island.available_modes(),
+            vec![CompactMode::Observe, CompactMode::Idle]
+        );
+        assert_eq!(island.mode(), CompactMode::Observe);
+        island.settings.show_observe = false;
+        assert_eq!(island.available_modes(), vec![CompactMode::Idle]);
+    }
+
+    #[test]
+    fn settings_open_does_not_capture_the_overlay() {
+        let mut island = test_island();
+        island.settings_open = true;
+        island.expanded = true;
+        // Cursor is over the desktop / Settings, not the island.
+        assert!(island.overlay_ignores_mouse(false, false));
+        // Cursor over the painted island still belongs to us.
+        assert!(!island.overlay_ignores_mouse(true, true));
+    }
+
+    #[test]
+    fn overlay_captures_only_painted_island_and_drags() {
+        let mut island = test_island();
+        assert!(island.overlay_ignores_mouse(false, false));
+        assert!(!island.overlay_ignores_mouse(true, false));
+
+        island.file_drag = true;
+        assert!(
+            island.overlay_ignores_mouse(false, false),
+            "outside the hover pad stays click-through"
+        );
+        assert!(
+            !island.overlay_ignores_mouse(false, true),
+            "inside the hover pad must see the inbound drag"
+        );
+
+        island.file_drag = false;
+        island.arm_file_drag("/tmp/shot.png".into());
+        assert!(
+            !island.overlay_ignores_mouse(false, false),
+            "outbound drag source needs the window live"
+        );
+    }
+
+    #[test]
+    fn file_press_stays_pending_until_moved() {
+        let mut island = test_island();
+        island.arm_file_drag("/tmp/shot.png".into());
+        assert!(!island.poll_pending_file_drag(None));
+        assert!(island.pending_file_drag.is_some());
+        island.finish_file_press();
+        assert!(island.pending_file_drag.is_none());
     }
 
     #[test]

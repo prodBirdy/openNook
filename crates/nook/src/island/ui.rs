@@ -4,9 +4,10 @@ use super::Island;
 use crate::icons::lucide;
 use crate::theme;
 use gpui::{
-    div, prelude::*, px, Context, CursorStyle, Div, ElementId, MouseButton, MouseDownEvent,
-    SharedString, Stateful,
+    div, prelude::*, px, Context, CursorStyle, Div, ElementId, Font, FontFeatures, FontStyle,
+    MouseButton, MouseDownEvent, SharedString, Stateful,
 };
+use std::sync::Arc;
 
 pub(crate) fn format_timer(seconds: u32) -> String {
     let m = seconds / 60;
@@ -46,6 +47,54 @@ pub(crate) fn label(text: impl Into<SharedString>, style: theme::Text, strong: b
         .text_ellipsis()
         .child(text.into())
 }
+
+/// Wrapping body copy for cards that should scroll instead of ellipsis.
+pub(crate) fn wrapping_label(
+    text: impl Into<SharedString>,
+    style: theme::Text,
+    strong: bool,
+) -> Div {
+    div()
+        .text_color(if strong {
+            theme::TEXT
+        } else {
+            theme::TEXT_MUTED
+        })
+        .text_size(px(style.size))
+        .line_height(px(style.leading))
+        .font_weight(if strong {
+            style.emphasized
+        } else {
+            style.weight
+        })
+        .w_full()
+        .child(text.into())
+}
+
+fn tabular_features() -> FontFeatures {
+    FontFeatures(Arc::new(vec![("tnum".into(), 1)]))
+}
+
+/// Timer / countdown text. Tabular figures keep the compact pill from
+/// shifting as digits change (HIG › Typography: use tabular numbers for
+/// values that update in place).
+pub(crate) fn timer_text(text: impl Into<SharedString>, style: theme::Text) -> Div {
+    div()
+        .font(Font {
+            family: "SF Pro".into(),
+            features: tabular_features(),
+            fallbacks: None,
+            weight: style.emphasized,
+            style: FontStyle::Normal,
+        })
+        .text_color(theme::TEXT)
+        .text_size(px(style.size))
+        .line_height(px(style.leading))
+        .whitespace_nowrap()
+        .child(text.into())
+}
+
+pub(crate) use super::marquee::slide_label;
 
 /// A selectable row inside a card.
 ///
@@ -127,38 +176,53 @@ pub(crate) fn text_btn(
         )
 }
 
-pub(crate) fn widget_shell(
-    icon: &'static str,
-    title: impl Into<SharedString>,
-    child: impl IntoElement,
-) -> impl IntoElement {
-    use crate::icons::lucide_color;
+/// Width for list-style widgets. Long titles ellipsis inside it; Now Playing
+/// computes its own width from artwork + transport.
+pub(crate) const WIDGET_CARD_WIDTH: f32 = 220.0;
 
+pub(crate) const MEDIA_ART: f32 = 52.0;
+pub(crate) const MEDIA_ART_RADIUS: f32 = 12.0;
+pub(crate) const MEDIA_PLAY: f32 = 40.0;
+pub(crate) const MEDIA_PROGRESS_HIT: f32 = 12.0;
+pub(crate) const MEDIA_TIME_PAD_TOP: f32 = 2.0;
+pub(crate) const MEDIA_TIME_PAD_GAP: f32 = 6.0;
+
+/// Now Playing's intrinsic height. Every expanded card uses this so the row
+/// shares a bottom edge.
+pub(crate) fn widget_card_height() -> f32 {
+    let progress =
+        MEDIA_PROGRESS_HIT + MEDIA_TIME_PAD_TOP + MEDIA_TIME_PAD_GAP + theme::SUBHEADLINE.leading;
+    theme::CONTENT_INSET * 2.0 + MEDIA_ART + progress + MEDIA_PLAY + theme::CONTENT_INSET * 2.0
+}
+
+/// Expanded-card chrome used by Now Playing and every widget: same inset,
+/// radius, fill, and height.
+pub(crate) fn card_chrome(width: f32) -> Div {
     div()
         .flex()
         .flex_col()
-        .w(px(220.))
-        .h_full()
-        .px_3()
-        .pt_3()
-        .pb_3()
+        .flex_shrink_0()
+        .w(px(width))
+        .h(px(widget_card_height()))
+        .p(px(theme::CONTENT_INSET))
+        .gap(px(theme::CONTENT_INSET))
         .bg(theme::FILL)
         .rounded(px(theme::WIDGET_RADIUS))
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .gap_2()
-                .mb_2()
-                .child(lucide_color(icon, 13.0, theme::SECONDARY_LABEL))
-                .child(
-                    div()
-                        .text_color(theme::SECONDARY_LABEL)
-                        .text_size(px(theme::CALLOUT.size))
-                        .line_height(px(theme::CALLOUT.leading))
-                        .font_weight(theme::CALLOUT.emphasized)
-                        .child(title.into()),
-                ),
-        )
-        .child(div().flex_1().min_h(px(0.)).child(child))
+        .overflow_hidden()
+}
+
+pub(crate) fn widget_shell(id: impl Into<ElementId>, child: impl IntoElement) -> impl IntoElement {
+    card_chrome(WIDGET_CARD_WIDTH).child(
+        div()
+            .id(id)
+            .flex_1()
+            .min_h(px(0.))
+            .w_full()
+            .overflow_x_hidden()
+            .overflow_y_scroll()
+            .on_scroll_wheel(|_, _, cx| {
+                cx.stop_propagation();
+            })
+            .child(child),
+    )
 }

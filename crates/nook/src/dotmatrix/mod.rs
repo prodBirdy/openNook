@@ -21,7 +21,7 @@ pub const SPEED: f32 = 1.2;
 /// from its `size` argument so the two call sites can diverge without the gaps
 /// stretching to fill a grid of fixed-width dots.
 const DOT_RATIO: f32 = DOT_SIZE / SIZE;
-pub const COMPACT_SIZE: f32 = SIZE;
+pub const COMPACT_SIZE: f32 = crate::theme::COMPACT_FACE;
 pub const WIDGET_SIZE: f32 = SIZE;
 
 /// Prism Sweep + Gate Shift.
@@ -58,7 +58,7 @@ pub fn layout(size: f32, dot: f32) -> (f32, f32, f32) {
 }
 
 pub fn element(kind: Kind, now: f32, working: bool, size: f32) -> impl IntoElement {
-    let (dot, gap, span) = layout(size, (size * DOT_RATIO).round().max(1.0));
+    let (dot, gap, _) = layout(size, (size * DOT_RATIO).round().max(1.0));
     let now = now * SPEED;
     // Resolved per frame, not cached, so changing the accent in System Settings
     // recolors the loader without a restart.
@@ -69,8 +69,8 @@ pub fn element(kind: Kind, now: f32, working: bool, size: f32) -> impl IntoEleme
             paint_grid(window, bounds, kind, now, working, dot, gap, tint);
         },
     )
-    .w(px(span))
-    .h(px(span))
+    .size(px(size))
+    .flex_shrink_0()
 }
 
 fn paint_grid(

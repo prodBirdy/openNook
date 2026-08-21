@@ -6,16 +6,29 @@ use crate::icons::{lucide, lucide_color};
 use crate::theme;
 use gpui::{
     div, img, prelude::*, px, rgb, rgba, Context, CursorStyle, FontWeight, MouseButton,
-    MouseDownEvent, ObjectFit, ScrollWheelEvent, SharedString,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, ObjectFit, ScrollWheelEvent, SharedString,
 };
 use nook_core::files::FileTrayItem;
 use std::path::PathBuf;
 
 /// React FileTray: `grid-cols-[repeat(auto-fill,minmax(100px,1fr))]` with 12px gaps.
+const FILES_BORDER: f32 = 2.0;
+const FILES_GAP: f32 = 12.0;
+const FILES_MIN_TILE: f32 = 100.0;
+
+/// Content width the grid tracks actually lay out in: expanded island minus
+/// the widgets/files pane inset, the dashed drop-zone border, and the grid pad.
+pub(crate) fn file_grid_inner(island_w: f32) -> f32 {
+    (island_w - theme::CONTENT_INSET * 2.0 - FILES_BORDER * 2.0 - FILES_GAP * 2.0)
+        .max(FILES_MIN_TILE)
+}
+
 pub(crate) fn file_grid_metrics(island_w: f32) -> (u16, f32) {
-    let inner = (island_w - theme::CONTENT_INSET * 2.0 - 4.0 - 24.0).max(100.0);
-    let cols = ((inner + 12.0) / 112.0).floor().max(1.0);
-    let tile = (inner - (cols - 1.0) * 12.0) / cols;
+    let inner = file_grid_inner(island_w);
+    let cols = ((inner + FILES_GAP) / (FILES_MIN_TILE + FILES_GAP))
+        .floor()
+        .max(1.0);
+    let tile = ((inner - (cols - 1.0) * FILES_GAP) / cols).max(1.0);
     (cols as u16, tile)
 }
 
@@ -46,7 +59,6 @@ fn file_card(file: &FileTrayItem, tile_w: f32, cx: &mut Context<Island>) -> impl
         .id(SharedString::from(format!("file-{}", file.path)))
         .relative()
         .w(px(tile_w))
-        .flex_shrink_0()
         .flex()
         .flex_col()
         .items_center()
@@ -58,9 +70,22 @@ fn file_card(file: &FileTrayItem, tile_w: f32, cx: &mut Context<Island>) -> impl
         .cursor(CursorStyle::PointingHand)
         .on_mouse_down(
             MouseButton::Left,
-            cx.listener(move |_, _: &MouseDownEvent, _, cx| {
+            cx.listener(move |this, _: &MouseDownEvent, _, cx| {
                 cx.stop_propagation();
-                let _ = nook_core::files::open_file(path.clone());
+                this.arm_file_drag(path.clone());
+            }),
+        )
+        .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
+            if event.dragging() {
+                cx.stop_propagation();
+                this.poll_pending_file_drag(Some(window));
+            }
+        }))
+        .on_mouse_up(
+            MouseButton::Left,
+            cx.listener(|this, _: &MouseUpEvent, _, cx| {
+                cx.stop_propagation();
+                this.finish_file_press();
             }),
         )
         .child(
@@ -175,20 +200,7 @@ impl Island {
                 .into_any_element()
         } else {
             let (cols, tile_w) = self.file_layout();
-            let pane_w = self.expanded_width() - theme::CONTENT_INSET * 2.0;
-            let mut grid = div()
-                .id("files-list")
-                .grid()
-                .grid_cols(cols)
-                .gap(px(12.))
-                .w(px(pane_w))
-                .h_full()
-                .flex_shrink_0()
-                .p(px(12.))
-                .overflow_y_scroll()
-                .on_scroll_wheel(cx.listener(|_, _: &ScrollWheelEvent, _, cx| {
-                    cx.stop_propagation();
-                }));
+            let mut grid = div().grid().grid_cols(cols).gap(px(FILES_GAP)).w_full();
             for file in &self.files {
                 grid = grid.child(file_card(file, tile_w, cx));
             }
@@ -196,7 +208,19 @@ impl Island {
                 .flex()
                 .flex_col()
                 .size_full()
-                .child(grid)
+                .child(
+                    div()
+                        .id("files-list")
+                        .flex_1()
+                        .min_h(px(0.))
+                        .w_full()
+                        .p(px(FILES_GAP))
+                        .overflow_y_scroll()
+                        .on_scroll_wheel(cx.listener(|_, _: &ScrollWheelEvent, _, cx| {
+                            cx.stop_propagation();
+                        }))
+                        .child(grid),
+                )
                 .child(div().flex().justify_end().px_3().pb_2().child(text_btn(
                     "Clear All",
                     cx,
@@ -243,5 +267,33 @@ impl Island {
         self.preferred = Some(super::CompactMode::Files);
         nook_core::haptics::trigger(None);
         cx.notify();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tiles_fit_dropzone_inner() {
+        for w in [300.0, 400.0, 548.0, 600.0, 1280.0] {
+            let inner = file_grid_inner(w);
+            let (cols, tile) = file_grid_metrics(w);
+            let used = cols as f32 * tile + (cols.saturating_sub(1) as f32) * FILES_GAP;
+            assert!(
+                used <= inner + 0.05,
+                "w={w} cols={cols} tile={tile} used={used} inner={inner}"
+            );
+            assert!(tile + 0.05 >= FILES_MIN_TILE || cols == 1);
+        }
+    }
+
+    #[test]
+    fn narrow_card_does_not_force_five_columns() {
+        let (cols, _) = file_grid_metrics(300.0);
+        assert!(
+            cols < 5,
+            "a 300pt-wide island cannot fit five 100pt tiles, got {cols}"
+        );
     }
 }

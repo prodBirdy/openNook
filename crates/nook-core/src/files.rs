@@ -3,6 +3,8 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct FileTrayItem {
@@ -111,8 +113,41 @@ pub fn resolve_path(path: String) -> Result<String, String> {
 #[cfg(target_os = "macos")]
 static DRAG_PB_IDLE: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(i64::MIN);
 
+static OUTBOUND_DRAG: AtomicBool = AtomicBool::new(false);
+static OUTBOUND_PATH: Mutex<Option<String>> = Mutex::new(None);
+static OUTBOUND_DROPPED: AtomicBool = AtomicBool::new(false);
+
+/// True while this process is the drag source (tray → Finder / other apps).
+pub fn outbound_drag_active() -> bool {
+    OUTBOUND_DRAG.load(Ordering::SeqCst)
+}
+
+pub fn begin_outbound_drag(path: &str) {
+    OUTBOUND_DRAG.store(true, Ordering::SeqCst);
+    OUTBOUND_DROPPED.store(false, Ordering::SeqCst);
+    if let Ok(mut guard) = OUTBOUND_PATH.lock() {
+        *guard = Some(path.to_string());
+    }
+}
+
+pub fn finish_outbound_drag(dropped: bool) {
+    OUTBOUND_DROPPED.store(dropped, Ordering::SeqCst);
+    OUTBOUND_DRAG.store(false, Ordering::SeqCst);
+}
+
+/// Consume a finished outbound drag. `None` while the session is still live.
+pub fn take_outbound_drag() -> Option<(String, bool)> {
+    if OUTBOUND_DRAG.load(Ordering::SeqCst) {
+        return None;
+    }
+    let mut guard = OUTBOUND_PATH.lock().ok()?;
+    let path = guard.take()?;
+    Some((path, OUTBOUND_DROPPED.load(Ordering::SeqCst)))
+}
+
 /// True while the user is dragging files (Finder / another app) on macOS.
 /// Used to punch a hole in click-through so the island can receive the drop.
+/// Our own tray → Finder session is excluded so drop-in UI does not arm.
 ///
 /// The drag pasteboard is *not* emptied when a drag ends — it keeps the last
 /// drag's types indefinitely — so "the board has types" reports a drag forever
@@ -121,6 +156,9 @@ static DRAG_PB_IDLE: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64
 /// actually being held, and on the board having changed since it was last seen
 /// idle, so a leftover board plus an unrelated left-drag doesn't count either.
 pub fn file_drag_active() -> bool {
+    if OUTBOUND_DRAG.load(Ordering::SeqCst) {
+        return false;
+    }
     #[cfg(target_os = "macos")]
     {
         use objc2::runtime::AnyObject;
@@ -236,5 +274,25 @@ mod tests {
         assert_eq!(format_size(12), "12 B");
         assert_eq!(format_size(2048), "2 KB");
         assert_eq!(format_size(1_572_864), "1.5 MB");
+    }
+
+    #[test]
+    fn outbound_drag_state_excludes_inbound_and_reports_drop() {
+        let _ = take_outbound_drag();
+        begin_outbound_drag("/tmp/example.txt");
+        assert!(outbound_drag_active());
+        assert!(!file_drag_active());
+        assert!(take_outbound_drag().is_none());
+        finish_outbound_drag(true);
+        assert!(!outbound_drag_active());
+        assert_eq!(
+            take_outbound_drag(),
+            Some(("/tmp/example.txt".into(), true))
+        );
+        assert!(take_outbound_drag().is_none());
+
+        begin_outbound_drag("/tmp/keep.txt");
+        finish_outbound_drag(false);
+        assert_eq!(take_outbound_drag(), Some(("/tmp/keep.txt".into(), false)));
     }
 }

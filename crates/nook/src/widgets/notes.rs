@@ -1,28 +1,42 @@
 //! Scratchpad notes card.
 
-use crate::island::ui::{label, text_btn, widget_shell};
+use crate::island::ui::{text_btn, widget_shell, wrapping_label};
 use crate::island::Island;
 use crate::theme;
-use gpui::{div, prelude::*, Context};
+use gpui::{div, prelude::*, Context, CursorStyle, MouseButton, MouseDownEvent};
+
+fn open_notes() {
+    if let Err(err) = nook_core::notes::open_notes_editor() {
+        log::warn!("open notes: {err}");
+    }
+}
 
 pub(crate) fn notes_card(notes: &str, cx: &mut Context<Island>) -> impl IntoElement {
-    let preview = if notes.trim().is_empty() {
-        "Nothing here yet. Edit notes to add a scratchpad.".to_string()
+    let empty = notes.trim().is_empty();
+    let preview = if empty {
+        "Click to add notes".to_string()
     } else {
-        notes.chars().take(120).collect()
+        notes.to_string()
     };
     widget_shell(
-        "notebook",
-        "Notes",
+        "notes-scroll",
         div()
+            .id("notes-hit")
             .flex()
             .flex_col()
             .gap_2()
-            .child(label(preview, theme::CALLOUT, false))
+            .size_full()
+            .cursor(CursorStyle::PointingHand)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|_, _: &MouseDownEvent, _, cx| {
+                    cx.stop_propagation();
+                    open_notes();
+                }),
+            )
+            .child(wrapping_label(preview, theme::CALLOUT, !empty))
             .child(text_btn("Edit Notes…", cx, |_, _, _| {
-                if let Err(err) = nook_core::notes::open_notes_editor() {
-                    log::warn!("open notes: {err}");
-                }
+                open_notes();
             })),
     )
 }

@@ -7,8 +7,9 @@ use crate::platform;
 use crate::theme;
 use gpui::{
     div, point, prelude::*, px, rgba, size, AnyElement, App, Bounds, Context, CursorStyle,
-    ExternalPaths, FontFallbacks, FontWeight, MouseButton, MouseDownEvent, ScrollWheelEvent,
-    Window, WindowBackgroundAppearance, WindowBounds, WindowKind, WindowOptions,
+    ExternalPaths, FontFallbacks, FontWeight, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, ScrollWheelEvent, Window, WindowBackgroundAppearance, WindowBounds, WindowKind,
+    WindowOptions,
 };
 use nook_core::notch;
 use std::any::Any;
@@ -49,30 +50,30 @@ impl gpui::Render for Island {
         let wing = if show_wings { WING } else { 0.0 };
         let chrome_w = tw.max(1.0) + wing * 2.0;
         let chrome_h = th.max(1.0);
-        // The hover region reaches past the island, so the outline needs the
-        // whole NSWindow to draw in. Debug builds only — it also widens the
-        // root's drop hitbox to the full window.
         let debug_hitbox = hitbox_debug();
-        let root_h = if debug_hitbox {
-            nook_core::notch::overlay_window_size().1 as f32
-        } else {
-            chrome_h
-        };
 
+        // The root is the whole display. Every layer inside is absolutely
+        // positioned, so the island keeps its exact top-centre placement while
+        // the rest of the screen stays available to paint into — an earlier
+        // flow layout left a lit strip below the island in the leftover gap.
+        // Nothing here decides input: click-through is driven by the mouse poll
+        // loop against `update_ui_bounds` above, which still publishes only the
+        // island's own rect.
         div()
             .id("island-root")
-            // Only as tall as the island. The NSWindow is taller so the expanded
-            // chrome can grow; size_full() laid out in that extra gap and left a
-            // light rounded strip on the wallpaper below the island.
-            .w_full()
-            .h(px(root_h))
+            .size_full()
             .relative()
-            .flex()
-            .flex_col()
-            .items_center()
-            .justify_start()
             .overflow_hidden()
             .bg(rgba(0x00000000))
+            .on_mouse_move(cx.listener(|this, _: &MouseMoveEvent, window, _| {
+                this.poll_pending_file_drag(Some(window));
+            }))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _: &MouseUpEvent, _, _| {
+                    this.finish_file_press();
+                }),
+            )
             .font(gpui::Font {
                 family: "SF Pro".into(),
                 features: gpui::FontFeatures::default(),
@@ -91,50 +92,62 @@ impl gpui::Render for Island {
             }))
             .child(
                 div()
-                    .id("island")
-                    .relative()
-                    .w(px(chrome_w))
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .w_full()
                     .h(px(chrome_h))
-                    .overflow_hidden()
-                    .cursor(CursorStyle::PointingHand)
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|this, _: &MouseDownEvent, _, cx| {
-                            this.toggle_expanded(cx);
-                        }),
-                    )
-                    .when(!expanded, |d| {
-                        d.on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _, cx| {
-                            this.on_wheel(event, cx);
-                        }))
-                    })
-                    .child(div().absolute().inset_0().child(island_chrome(
-                        tw.max(1.0),
-                        th.max(1.0),
-                        wing,
-                        island_bg,
-                    )))
+                    .flex()
+                    .justify_center()
                     .child(
                         div()
-                            .absolute()
-                            .top_0()
-                            .left(px(wing))
-                            .w(px(tw.max(1.0)))
-                            .h(px(th.max(1.0)))
+                            .id("island")
+                            .relative()
+                            .w(px(chrome_w))
+                            .h(px(chrome_h))
                             .overflow_hidden()
-                            .rounded_bl(px(if expanded {
-                                theme::EXPANDED_RADIUS
-                            } else {
-                                theme::COMPACT_RADIUS
-                            }))
-                            .rounded_br(px(if expanded {
-                                theme::EXPANDED_RADIUS
-                            } else {
-                                theme::COMPACT_RADIUS
-                            }))
-                            .child(self.content_stack(expanded, mode, hovered, notch_w, cx))
-                            .when(dropping && !expanded, |d| d.child(drop_veil()))
-                            .when(!expanded, |d| d.child(self.mode_dots(cx))),
+                            .cursor(CursorStyle::PointingHand)
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                                    this.toggle_expanded(cx);
+                                }),
+                            )
+                            .when(!expanded, |d| {
+                                d.on_scroll_wheel(cx.listener(
+                                    |this, event: &ScrollWheelEvent, _, cx| {
+                                        this.on_wheel(event, cx);
+                                    },
+                                ))
+                            })
+                            .child(div().absolute().inset_0().child(island_chrome(
+                                tw.max(1.0),
+                                th.max(1.0),
+                                wing,
+                                island_bg,
+                            )))
+                            .child(
+                                div()
+                                    .absolute()
+                                    .top_0()
+                                    .left(px(wing))
+                                    .w(px(tw.max(1.0)))
+                                    .h(px(th.max(1.0)))
+                                    .overflow_hidden()
+                                    .rounded_bl(px(if expanded {
+                                        theme::EXPANDED_RADIUS
+                                    } else {
+                                        theme::COMPACT_RADIUS
+                                    }))
+                                    .rounded_br(px(if expanded {
+                                        theme::EXPANDED_RADIUS
+                                    } else {
+                                        theme::COMPACT_RADIUS
+                                    }))
+                                    .child(self.content_stack(expanded, mode, hovered, notch_w, cx))
+                                    .when(dropping && !expanded, |d| d.child(drop_veil()))
+                                    .when(!expanded, |d| d.child(self.mode_dots(cx))),
+                            ),
                     ),
             )
             .when(debug_hitbox, |d| d.child(self.hitbox_overlay()))

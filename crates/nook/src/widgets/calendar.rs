@@ -1,6 +1,6 @@
 //! Upcoming calendar events card.
 
-use crate::island::ui::{format_ts, label, text_btn, widget_shell};
+use crate::island::ui::{format_ts, label, slide_label, text_btn, widget_shell};
 use crate::island::Island;
 use crate::theme;
 use gpui::{div, prelude::*, Context};
@@ -25,14 +25,16 @@ pub(crate) fn calendar_card(
                 div()
                     .flex()
                     .flex_col()
-                    .child(label(event.title.clone(), theme::CALLOUT, true).w_full())
-                    .child(label(format_ts(event.start_date), theme::SUBHEADLINE, false).w_full()),
+                    .child(slide_label(event.title.clone(), theme::CALLOUT, true).w_full())
+                    .child(
+                        slide_label(format_ts(event.start_date), theme::SUBHEADLINE, false)
+                            .w_full(),
+                    ),
             );
         }
     }
     widget_shell(
-        "calendar",
-        "Calendar",
+        "calendar-scroll",
         div().flex().flex_col().gap_2().child(body).child(text_btn(
             "Open Calendar",
             cx,

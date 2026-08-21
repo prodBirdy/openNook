@@ -1,4 +1,5 @@
 use crate::database;
+use crate::observe::ObserveConfig;
 use serde::{Deserialize, Serialize};
 use std::sync::RwLock;
 
@@ -7,7 +8,10 @@ pub struct WindowSettings {
     #[serde(default = "default_extra_width")]
     #[allow(dead_code)]
     pub extra_width: f64,
+    /// Kept for config compatibility. The overlay window is the whole display
+    /// now, so neither slack value sizes anything.
     #[serde(default = "default_extra_height")]
+    #[allow(dead_code)]
     pub extra_height: f64,
     /// Legacy copy of [`AppSettings::non_notch_mode`]; read on load, not written.
     #[serde(default, skip_serializing)]
@@ -42,6 +46,10 @@ pub struct AppSettings {
     pub show_reminders: bool,
     #[serde(default = "default_true")]
     pub show_agents: bool,
+    #[serde(default = "default_true")]
+    pub show_observe: bool,
+    #[serde(default)]
+    pub observe: ObserveConfig,
     #[serde(default)]
     pub liquid_glass_mode: bool,
     #[serde(default)]
@@ -61,6 +69,8 @@ impl Default for AppSettings {
             show_calendar: true,
             show_reminders: true,
             show_agents: true,
+            show_observe: true,
+            observe: ObserveConfig::default(),
             liquid_glass_mode: false,
             non_notch_mode: false,
             window: WindowSettings::default(),
@@ -117,11 +127,16 @@ pub fn load_from_db() {
             if settings.window.non_notch_mode {
                 settings.non_notch_mode = true;
             }
+            let filled_url = settings.observe.prometheus_url.trim().is_empty();
+            crate::observe::fill_default_url(&mut settings.observe);
             if let Ok(mut guard) = app_store().write() {
                 *guard = settings.clone();
             }
             if let Ok(mut win) = window_store().write() {
                 *win = settings.window;
+            }
+            if filled_url {
+                persist();
             }
             return;
         }
@@ -177,6 +192,7 @@ mod tests {
         assert!(parsed.show_calendar);
         assert!(parsed.show_reminders);
         assert!(parsed.show_agents);
+        assert!(parsed.show_observe);
         assert!(parsed.liquid_glass_mode);
         assert!(!parsed.non_notch_mode);
     }

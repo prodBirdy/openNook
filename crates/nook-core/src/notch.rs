@@ -1,5 +1,4 @@
 use crate::models::NotchInfo;
-use crate::settings::get_window_settings;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{OnceLock, RwLock};
 
@@ -167,12 +166,18 @@ pub fn get_notch_info() -> NotchInfo {
     }
 }
 
-/// Overlay window size: full display width, tall enough for the expanded island.
+/// Overlay window size: the whole display.
+///
+/// The window is a transparent canvas the island paints into, not a box around
+/// the island — anything the app wants to draw (drop targets, HUDs, anything
+/// that has to reach past the notch) has screen-sized room without resizing the
+/// NSWindow first. Input is unaffected: `crate::mouse` hit-tests the cursor
+/// against the *painted* island rect published by `update_ui_bounds`, and the
+/// window sets `ignoresMouseEvents` everywhere else, so the extra area is
+/// click-through and the menu bar, Dock, and apps underneath keep their clicks.
 pub fn overlay_window_size() -> (f64, f64) {
-    let (screen_width, _h, notch_height, _) = get_screen_info();
-    let settings = get_window_settings();
-    let height = (notch_height + 260.0 + settings.extra_height.min(40.0)).max(280.0);
-    (screen_width, height)
+    let (screen_width, screen_height, _, _) = get_screen_info();
+    (screen_width, screen_height)
 }
 
 pub fn overlay_window_origin() -> (f64, f64) {

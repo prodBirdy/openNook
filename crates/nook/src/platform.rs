@@ -78,17 +78,15 @@ fn install_macos() {
 }
 
 /// Style + pin every GPUI island panel. Does not touch GPUI `Window`.
+#[cfg(target_os = "macos")]
 pub fn apply_island_chrome() {
-    #[cfg(target_os = "macos")]
-    {
-        install_macos();
-        unsafe {
-            set_accessory_policy();
-            for_each_island_window(|ns_win| {
-                style_island_window(ns_win);
-                pin_ns_window(ns_win);
-            });
-        }
+    install_macos();
+    unsafe {
+        set_accessory_policy();
+        for_each_island_window(|ns_win| {
+            style_island_window(ns_win);
+            pin_ns_window(ns_win);
+        });
     }
 }
 
@@ -364,6 +362,39 @@ pub fn set_click_through(window: &Window, ignore: bool) {
     let _ = (window, ignore);
 }
 
+/// Hand activation back to whatever app sits underneath before a drag-out.
+/// The island is a nonactivating panel, but the app can still be the active
+/// one (Settings brings it forward, and it stays forward after that window
+/// closes). While we hold activation the destination app never comes forward
+/// for the drop, so the file lands only when the target happens to accept a
+/// background drag — hence "sometimes". `setHidesOnDeactivate: false` in
+/// `style_island_window` keeps the island painted through this.
+pub fn resign_focus() {
+    #[cfg(target_os = "macos")]
+    unsafe {
+        use objc2::runtime::{AnyClass, AnyObject};
+        use objc2::*;
+        let ns_app: *mut AnyObject = msg_send![class!(NSApplication), sharedApplication];
+        let active: bool = msg_send![ns_app, isActive];
+        if !active {
+            return;
+        }
+        // Never yank focus out of Settings (a Normal window, not a GPUIPanel)
+        // while the user is typing in it.
+        let key_win: *mut AnyObject = msg_send![ns_app, keyWindow];
+        if !key_win.is_null() {
+            if let Some(panel_cls) = AnyClass::get(c"GPUIPanel") {
+                let is_panel: bool = msg_send![key_win, isKindOfClass: panel_cls];
+                if !is_panel {
+                    return;
+                }
+            }
+        }
+        let _: () = msg_send![ns_app, deactivate];
+        log::debug!("resigned focus for drag-out");
+    }
+}
+
 pub fn activate_app() {
     #[cfg(target_os = "macos")]
     unsafe {
@@ -372,6 +403,216 @@ pub fn activate_app() {
         let ns_app: *mut AnyObject = msg_send![class!(NSApplication), sharedApplication];
         let _: () = msg_send![ns_app, activateIgnoringOtherApps: true];
     }
+}
+
+/// Start a real OS drag of `path` so Finder / other apps accept the file.
+/// GPUI 0.2.2 only has in-app `on_drag`; this uses AppKit `NSDraggingSource`
+/// the same way the Tauri `drag` plugin (`beginDraggingSession`) does.
+pub fn start_file_drag(path: &str, window: Option<&Window>) {
+    #[cfg(target_os = "macos")]
+    unsafe {
+        if !std::path::Path::new(path).exists() {
+            log::warn!("drag-out skipped; missing {path}");
+            return;
+        }
+        if let Some(ns_win) = window.and_then(ns_window) {
+            begin_file_drag(ns_win, path);
+            return;
+        }
+        for_each_island_window(|ns_win| {
+            if window_title_is(ns_win, "openNook-island") {
+                begin_file_drag(ns_win, path);
+            }
+        });
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (path, window);
+        log::warn!("file drag-out is macOS-only (AppKit NSDraggingSource)");
+    }
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn window_title_is(ns_win: *mut objc2::runtime::AnyObject, want: &str) -> bool {
+    use objc2::runtime::AnyObject;
+    use objc2::*;
+    let title: *mut AnyObject = msg_send![ns_win, title];
+    if title.is_null() {
+        return false;
+    }
+    let cstr: *const i8 = msg_send![title, UTF8String];
+    if cstr.is_null() {
+        return false;
+    }
+    std::ffi::CStr::from_ptr(cstr).to_string_lossy() == want
+}
+
+#[cfg(target_os = "macos")]
+fn drag_source_class() -> &'static objc2::runtime::AnyClass {
+    use objc2::runtime::{AnyClass, AnyObject, AnyProtocol, ClassBuilder, NSObject, Sel};
+    use objc2::{sel, ClassType};
+    use std::sync::OnceLock;
+
+    static CLASS: OnceLock<&'static AnyClass> = OnceLock::new();
+    CLASS.get_or_init(|| {
+        if let Some(existing) = AnyClass::get(c"NookFileDragSource") {
+            return existing;
+        }
+        let mut builder = ClassBuilder::new(c"NookFileDragSource", NSObject::class())
+            .expect("NookFileDragSource");
+        if let Some(proto) = AnyProtocol::get(c"NSDraggingSource") {
+            builder.add_protocol(proto);
+        }
+
+        // NSDragOperationCopy for both in-app and Finder. Returning None
+        // within the app would make a drop back on the island a no-op.
+        extern "C-unwind" fn source_mask(
+            _this: &NSObject,
+            _cmd: Sel,
+            _session: *mut AnyObject,
+            _context: usize,
+        ) -> usize {
+            1 // NSDragOperationCopy
+        }
+        unsafe {
+            builder.add_method(
+                sel!(draggingSession:sourceOperationMaskForDraggingContext:),
+                source_mask as extern "C-unwind" fn(_, _, _, _) -> _,
+            );
+        }
+
+        extern "C-unwind" fn session_ended(
+            _this: &NSObject,
+            _cmd: Sel,
+            _session: *mut AnyObject,
+            _point: nook_core::notch::CGPoint,
+            operation: usize,
+        ) {
+            let dropped = operation != 0;
+            log::info!("drag-out ended dropped={dropped} op={operation}");
+            nook_core::files::finish_outbound_drag(dropped);
+        }
+        unsafe {
+            builder.add_method(
+                sel!(draggingSession:endedAtPoint:operation:),
+                session_ended as extern "C-unwind" fn(_, _, _, _, _),
+            );
+        }
+
+        builder.register()
+    })
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn begin_file_drag(ns_win: *mut objc2::runtime::AnyObject, path: &str) {
+    use nook_core::notch::{CGPoint, CGRect, CGSize};
+    use objc2::runtime::AnyObject;
+    use objc2::*;
+    use std::ffi::CString;
+
+    let Ok(c_path) = CString::new(path) else {
+        return;
+    };
+    let path_ns: *mut AnyObject =
+        msg_send![class!(NSString), stringWithUTF8String: c_path.as_ptr()];
+    if path_ns.is_null() {
+        return;
+    }
+
+    let is_dir = std::path::Path::new(path).is_dir();
+    let url: *mut AnyObject =
+        msg_send![class!(NSURL), fileURLWithPath: path_ns, isDirectory: is_dir];
+    if url.is_null() {
+        log::error!("drag-out: NSURL failed for {path}");
+        return;
+    }
+
+    let item: *mut AnyObject = msg_send![class!(NSDraggingItem), alloc];
+    let item: *mut AnyObject = msg_send![item, initWithPasteboardWriter: url];
+    if item.is_null() {
+        log::error!("drag-out: NSDraggingItem alloc failed");
+        return;
+    }
+
+    let loc: CGPoint = msg_send![ns_win, mouseLocationOutsideOfEventStream];
+    let icon_size = 32.0;
+    let workspace: *mut AnyObject = msg_send![class!(NSWorkspace), sharedWorkspace];
+    let icon: *mut AnyObject = if workspace.is_null() {
+        std::ptr::null_mut()
+    } else {
+        msg_send![workspace, iconForFile: path_ns]
+    };
+    if !icon.is_null() {
+        let size = CGSize {
+            width: icon_size,
+            height: icon_size,
+        };
+        let _: () = msg_send![icon, setSize: size];
+    }
+    let frame = CGRect {
+        origin: CGPoint {
+            x: loc.x - icon_size / 2.0,
+            y: loc.y - icon_size / 2.0,
+        },
+        size: CGSize {
+            width: icon_size,
+            height: icon_size,
+        },
+    };
+    let _: () = msg_send![item, setDraggingFrame: frame, contents: icon];
+
+    let items: *mut AnyObject = msg_send![class!(NSArray), arrayWithObject: item];
+    let content: *mut AnyObject = msg_send![ns_win, contentView];
+    if content.is_null() {
+        log::error!("drag-out: contentView missing");
+        return;
+    }
+
+    // AppKit wants a mouse-dragged event. Synthesize one, matching drag-rs /
+    // tauri-plugin-drag — the same call the React tray uses.
+    const LEFT_MOUSE_DRAGGED: u64 = 6;
+    let window_number: i64 = msg_send![ns_win, windowNumber];
+    let event: *mut AnyObject = msg_send![
+        class!(NSEvent),
+        mouseEventWithType: LEFT_MOUSE_DRAGGED,
+        location: loc,
+        modifierFlags: 0_u64,
+        timestamp: 0.0_f64,
+        windowNumber: window_number,
+        context: std::ptr::null_mut::<AnyObject>(),
+        eventNumber: 0_i64,
+        clickCount: 1_i64,
+        pressure: 1.0_f32
+    ];
+    if event.is_null() {
+        log::error!("drag-out: failed to synthesize NSEvent");
+        return;
+    }
+
+    let cls = drag_source_class();
+    let source: *mut AnyObject = msg_send![cls, alloc];
+    let source: *mut AnyObject = msg_send![source, init];
+    if source.is_null() {
+        log::error!("drag-out: drag source alloc failed");
+        return;
+    }
+
+    nook_core::files::begin_outbound_drag(path);
+    let session: *mut AnyObject = msg_send![
+        content,
+        beginDraggingSessionWithItems: items,
+        event: event,
+        source: source
+    ];
+    if session.is_null() {
+        nook_core::files::finish_outbound_drag(false);
+        log::error!("drag-out: beginDraggingSession returned nil for {path}");
+        return;
+    }
+    log::info!("drag-out started {path}");
+    // Only after the session exists — deactivating first would pull the
+    // synthesized event's window out from under beginDraggingSession.
+    resign_focus();
 }
 
 pub fn set_accessory(accessory: bool) {
@@ -386,7 +627,6 @@ pub fn set_accessory(accessory: bool) {
 }
 
 #[cfg(target_os = "macos")]
-#[allow(dead_code)]
 fn ns_window(window: &Window) -> Option<*mut objc2::runtime::AnyObject> {
     use objc2::runtime::AnyObject;
     use objc2::*;

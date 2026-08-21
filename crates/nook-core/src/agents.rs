@@ -666,24 +666,33 @@ pub fn reveal(cwd: &str) {
 /// Bring the window hosting an agent to the front.
 ///
 /// A CLI agent owns no window — it runs inside a terminal emulator — so the pid
-/// itself is never something AppKit can activate. Walk up the process tree to
-/// the nearest ancestor that is a regular application and activate that.
-/// Returns false when no ancestor qualifies, which lets the caller fall back.
+/// itself is never something AppKit can activate. Prefer the macOS responsible
+/// process (the terminal .app), then walk parents. `login` is root, so sysinfo
+/// often omits its parent; `ps` still sees Ghostty/Terminal above it.
 pub fn focus(pid: u32) -> bool {
-    ancestry(pid).into_iter().any(activate)
+    host_pids(pid).into_iter().any(activate)
+}
+
+fn host_pids(pid: u32) -> Vec<u32> {
+    let mut out = Vec::new();
+    if let Some(resp) = responsible_pid(pid) {
+        out.push(resp);
+    }
+    for p in ancestry(pid) {
+        if !out.contains(&p) {
+            out.push(p);
+        }
+    }
+    out
 }
 
 /// `pid` first, then each parent up to (but not including) the init process.
 /// Bounded so a cycle in a stale process table cannot spin forever.
 fn ancestry(pid: u32) -> Vec<u32> {
-    let mut sys = System::new();
-    sys.refresh_processes_specifics(ProcessesToUpdate::All, true, ProcessRefreshKind::nothing());
-    let parents: HashMap<u32, u32> = sys
-        .processes()
-        .iter()
-        .filter_map(|(pid, proc_)| Some((pid.as_u32(), proc_.parent()?.as_u32())))
-        .collect();
+    walk_ancestry(pid, &process_parents())
+}
 
+fn walk_ancestry(pid: u32, parents: &HashMap<u32, u32>) -> Vec<u32> {
     let mut chain = vec![pid];
     let mut seen: HashSet<u32> = HashSet::from([pid]);
     let mut current = pid;
@@ -698,6 +707,72 @@ fn ancestry(pid: u32) -> Vec<u32> {
         current = parent;
     }
     chain
+}
+
+fn process_parents() -> HashMap<u32, u32> {
+    #[cfg(unix)]
+    {
+        let ps = ps_parents();
+        if !ps.is_empty() {
+            return ps;
+        }
+    }
+    sysinfo_parents()
+}
+
+fn sysinfo_parents() -> HashMap<u32, u32> {
+    let mut sys = System::new();
+    sys.refresh_processes_specifics(ProcessesToUpdate::All, true, ProcessRefreshKind::nothing());
+    sys.processes()
+        .iter()
+        .filter_map(|(pid, proc_)| Some((pid.as_u32(), proc_.parent()?.as_u32())))
+        .collect()
+}
+
+#[cfg(unix)]
+fn ps_parents() -> HashMap<u32, u32> {
+    let Ok(out) = std::process::Command::new("ps")
+        .args(["-ax", "-o", "pid=,ppid="])
+        .output()
+    else {
+        return HashMap::new();
+    };
+    let mut parents = HashMap::new();
+    for line in String::from_utf8_lossy(&out.stdout).lines() {
+        let mut cols = line.split_whitespace();
+        let Some(pid) = cols.next().and_then(|s| s.parse().ok()) else {
+            continue;
+        };
+        let Some(ppid) = cols.next().and_then(|s| s.parse().ok()) else {
+            continue;
+        };
+        parents.insert(pid, ppid);
+    }
+    parents
+}
+
+/// App that owns this CLI pid on macOS (`responsibility_get_pid_responsible_for_pid`).
+/// Ghostty/Terminal/iTerm show up here even when `login` (root) hides them from
+/// a parent walk that can't see privileged processes.
+fn responsible_pid(pid: u32) -> Option<u32> {
+    #[cfg(target_os = "macos")]
+    {
+        let r = unsafe { responsibility_get_pid_responsible_for_pid(pid as i32) };
+        if r > 1 {
+            return Some(r as u32);
+        }
+        None
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = pid;
+        None
+    }
+}
+
+#[cfg(target_os = "macos")]
+unsafe extern "C" {
+    fn responsibility_get_pid_responsible_for_pid(pid: i32) -> i32;
 }
 
 /// True when `pid` is a regular (Dock-visible) app that AppKit brought forward.
@@ -716,8 +791,18 @@ pub(crate) fn activate_probe(pid: u32) -> String {
         }
         let policy: i64 = msg_send![app, activationPolicy];
         let name: *mut AnyObject = msg_send![app, localizedName];
-        let utf8: *const i8 = if name.is_null() { std::ptr::null() } else { msg_send![name, UTF8String] };
-        let label = if utf8.is_null() { "?".to_string() } else { std::ffi::CStr::from_ptr(utf8).to_string_lossy().into_owned() };
+        let utf8: *const i8 = if name.is_null() {
+            std::ptr::null()
+        } else {
+            msg_send![name, UTF8String]
+        };
+        let label = if utf8.is_null() {
+            "?".to_string()
+        } else {
+            std::ffi::CStr::from_ptr(utf8)
+                .to_string_lossy()
+                .into_owned()
+        };
         format!("{label} policy={policy}")
     }
 }
@@ -727,9 +812,13 @@ fn activate(pid: u32) -> bool {
     use objc2::runtime::AnyObject;
     use objc2::*;
 
-    // NSApplicationActivationPolicyRegular / NSApplicationActivateAllWindows.
+    // NSApplicationActivationPolicyRegular.
     const POLICY_REGULAR: i64 = 0;
     const ACTIVATE_ALL_WINDOWS: u64 = 1;
+    // AllWindows | IgnoringOtherApps. The island is an accessory
+    // (LSUIElement); without IgnoringOtherApps, AppKit reports success and
+    // leaves the host app in the background.
+    const ACTIVATE_OPTIONS: u64 = ACTIVATE_ALL_WINDOWS | 2;
 
     unsafe {
         let app: *mut AnyObject = msg_send![
@@ -745,7 +834,25 @@ fn activate(pid: u32) -> bool {
         if policy != POLICY_REGULAR {
             return false;
         }
-        msg_send![app, activateWithOptions: ACTIVATE_ALL_WINDOWS]
+        // macOS 14+: activate from this click's app instead of the deprecated
+        // `activateWithOptions:` steal. Falls back if the selector is missing
+        // or AppKit refuses the hand-off.
+        let current: *mut AnyObject = msg_send![class!(NSRunningApplication), currentApplication];
+        let can_from: bool = msg_send![
+            app,
+            respondsToSelector: sel!(activateFromApplication:options:)
+        ];
+        if can_from && !current.is_null() {
+            let ok: bool = msg_send![
+                app,
+                activateFromApplication: current,
+                options: ACTIVATE_ALL_WINDOWS
+            ];
+            if ok {
+                return true;
+            }
+        }
+        msg_send![app, activateWithOptions: ACTIVATE_OPTIONS]
     }
 }
 
@@ -1003,6 +1110,31 @@ mod tests {
     }
 
     #[test]
+    fn ancestry_starts_with_self() {
+        let pid = std::process::id();
+        let chain = ancestry(pid);
+        assert_eq!(chain.first().copied(), Some(pid));
+        assert!(!chain.is_empty() && chain.len() <= 32);
+        let mut seen = HashSet::new();
+        assert!(chain.iter().all(|p| seen.insert(*p)));
+    }
+
+    #[test]
+    fn walk_crosses_root_login_to_terminal() {
+        // Real tree: claude → zsh → login (root) → Ghostty → launchd.
+        // sysinfo used to stop at login because it couldn't read the root ppid.
+        let mut parents = HashMap::new();
+        parents.insert(98546, 98344);
+        parents.insert(98344, 98343);
+        parents.insert(98343, 81976);
+        parents.insert(81976, 1);
+        assert_eq!(
+            walk_ancestry(98546, &parents),
+            vec![98546, 98344, 98343, 81976]
+        );
+    }
+
+    #[test]
     fn snapshot_does_not_panic() {
         let sessions = snapshot();
         for session in &sessions {
@@ -1132,11 +1264,26 @@ mod focus_probe {
     #[test]
     fn probe() {
         for s in super::snapshot() {
-            let chain = super::ancestry(s.pid);
-            println!("agent {} pid={} chain={:?}", s.kind.label(), s.pid, chain);
-            for p in chain {
-                println!("   pid {p} -> activatable={}", super::activate_probe(p));
+            let hosts = super::host_pids(s.pid);
+            println!(
+                "agent {} pid={} hosts={:?} responsible={:?}",
+                s.kind.label(),
+                s.pid,
+                hosts,
+                super::responsible_pid(s.pid)
+            );
+            for p in &hosts {
+                println!("   pid {p} -> activatable={}", super::activate_probe(*p));
             }
+            assert!(
+                hosts.iter().any(|p| {
+                    let probe = super::activate_probe(*p);
+                    probe.contains("policy=0")
+                }),
+                "no Dock-visible host for {} pid {} hosts={hosts:?}",
+                s.kind.label(),
+                s.pid
+            );
         }
     }
 }

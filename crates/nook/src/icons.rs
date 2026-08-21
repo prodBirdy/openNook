@@ -18,6 +18,7 @@ pub fn lucide_color(name: &'static str, size: f32, color: impl Into<Hsla>) -> im
     svg()
         .path(SharedString::from(format!("icons/{name}.svg")))
         .size(px(size))
+        .flex_shrink_0()
         .text_color(color)
 }
 

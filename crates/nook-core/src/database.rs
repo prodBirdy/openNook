@@ -64,6 +64,16 @@ fn migrate(conn: &Connection) -> Result<()> {
         [],
     )?;
 
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS observe_samples (
+            query TEXT NOT NULL,
+            at INTEGER NOT NULL,
+            value REAL NOT NULL,
+            PRIMARY KEY (query, at)
+        )",
+        [],
+    )?;
+
     Ok(())
 }
 

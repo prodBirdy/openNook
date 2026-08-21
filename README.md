@@ -38,12 +38,13 @@ On macOS the process is an accessory (`LSUIElement` / `NSApplicationActivationPo
 
 ## Features (v1)
 
-- Compact pill matching the hardware notch (idle / media / files / timer / first-run)
+- Compact pill matching the hardware notch (idle / media / files / timer / observe / first-run)
 - Hover expand, click or scroll to open the island
 - Now Playing with play/pause/skip and a simulated GPU visualizer (MediaRemote on macOS, AppleScript fallback)
 - Calendar and Reminders (EventKit)
-- File tray (open / remove / clear), notes (external editor), timers, Cloudflare speed test
-- Settings window (media/calendar/reminders, liquid glass, non-notch mode)
+- File tray (open / drag out to Finder / remove / clear), notes (external editor), timers, Cloudflare speed test
+- Prometheus observe widget (pinned PromQL + firing alerts on the island)
+- Settings window (media/calendar/reminders/agents/observability, liquid glass, non-notch mode)
 
 No plugin system in this build. Built-in widgets only.
 

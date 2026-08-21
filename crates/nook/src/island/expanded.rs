@@ -6,7 +6,7 @@ use crate::icons::lucide;
 use crate::icons::lucide_color;
 use crate::theme;
 use crate::widgets::{
-    agents_card, calendar_card, notes_card, reminders_card, speed_card, timer_card,
+    agents_card, calendar_card, notes_card, observe_card, reminders_card, speed_card, timer_card,
 };
 use gpui::{
     div, prelude::*, px, Context, CursorStyle, MouseButton, MouseDownEvent, ScrollWheelEvent,
@@ -86,6 +86,7 @@ impl Island {
             .id("widgets-row")
             .flex()
             .flex_row()
+            .items_start()
             .gap_3()
             .h_full()
             .overflow_x_scroll()
@@ -98,6 +99,14 @@ impl Island {
         }
         if self.settings.show_agents {
             row = row.child(agents_card(&self.agents, self.pixel_t, cx));
+        }
+        if self.settings.show_observe {
+            row = row.child(observe_card(
+                &self.observe,
+                &self.settings,
+                self.observe_hover.as_ref(),
+                cx,
+            ));
         }
         if self.settings.show_calendar {
             row = row.child(calendar_card(&self.events, cx));

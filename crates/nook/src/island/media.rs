@@ -1,6 +1,10 @@
 //! Compact album chip, visualizer, and expanded Now Playing card.
 //! Layout matches the React island (`CompactMedia` / `ExpandedMedia`).
 
+use super::ui::{
+    card_chrome, slide_label, MEDIA_ART, MEDIA_ART_RADIUS, MEDIA_PLAY, MEDIA_PROGRESS_HIT,
+    MEDIA_TIME_PAD_GAP, MEDIA_TIME_PAD_TOP,
+};
 use super::Island;
 use crate::icons::lucide_color;
 use crate::theme;
@@ -11,8 +15,14 @@ use gpui::{
 use nook_core::models::NowPlayingData;
 use std::sync::{Mutex, OnceLock};
 
-const COMPACT_ART: f32 = 26.0;
+const COMPACT_ART: f32 = theme::COMPACT_FACE;
 const COMPACT_ART_RADIUS: f32 = 5.0;
+const ART: f32 = MEDIA_ART;
+const ART_RADIUS: f32 = MEDIA_ART_RADIUS;
+const PLAY: f32 = MEDIA_PLAY;
+const SKIP_GAP: f32 = 36.0;
+/// Room for ~15 title glyphs at Title 2, beside the artwork.
+const TITLE_COL: f32 = 120.0;
 const VIS_BAR_W: f32 = 3.5;
 const VIS_BAR_GAP: f32 = 2.5;
 const VIS_H: f32 = 20.0;
@@ -28,13 +38,14 @@ pub(super) fn album_chip(np: &NowPlayingData, cx: &mut Context<Island>) -> impl 
     let art = np
         .artwork_base64
         .as_deref()
-        .and_then(|b64| artwork_element(b64, COMPACT_ART));
+        .and_then(|b64| artwork_element(b64, COMPACT_ART, COMPACT_ART_RADIUS));
     let overlay_icon = if playing { "pause-fill" } else { "play-fill" };
 
     div()
         .id("album")
         .relative()
         .size(px(COMPACT_ART))
+        .flex_shrink_0()
         .rounded(px(COMPACT_ART_RADIUS))
         .overflow_hidden()
         .shadow_sm()
@@ -86,7 +97,7 @@ fn placeholder_art() -> AnyElement {
         .into_any_element()
 }
 
-fn artwork_element(b64: &str, size: f32) -> Option<AnyElement> {
+fn artwork_element(b64: &str, size: f32, radius: f32) -> Option<AnyElement> {
     use base64::Engine;
     let bytes = base64::engine::general_purpose::STANDARD.decode(b64).ok()?;
     if bytes.is_empty() {
@@ -98,10 +109,14 @@ fn artwork_element(b64: &str, size: f32) -> Option<AnyElement> {
         gpui::ImageFormat::Jpeg
     };
     let image = std::sync::Arc::new(Image::from_bytes(format, bytes));
+    // Overflow clip is a rect; the sprite only rounds via its own corner_radii.
+    // Fill keeps the painted quad equal to `size` so those radii land on the
+    // visible box (Cover can paint a larger quad and leave square corners).
     Some(
         img(image)
             .size(px(size))
-            .object_fit(gpui::ObjectFit::Cover)
+            .rounded(px(radius))
+            .object_fit(gpui::ObjectFit::Fill)
             .into_any_element(),
     )
 }
@@ -148,27 +163,22 @@ pub(crate) fn media_card(np: &NowPlayingData, cx: &mut Context<Island>) -> impl 
     let art = np
         .artwork_base64
         .as_deref()
-        .and_then(|b64| artwork_element(b64, 52.0));
+        .and_then(|b64| artwork_element(b64, ART, ART_RADIUS));
 
-    div()
-        .flex()
-        .flex_col()
-        .w(px(300.))
-        .h_full()
-        .p(px(16.))
-        .gap_3()
-        .bg(theme::FILL)
-        .rounded(px(20.))
-        .overflow_hidden()
+    let header = ART + theme::CONTENT_INSET + TITLE_COL;
+    let transport = theme::HIT_MIN + SKIP_GAP + PLAY + SKIP_GAP + theme::HIT_MIN;
+    let card_w = theme::CONTENT_INSET * 2.0 + header.max(transport);
+
+    card_chrome(card_w)
         .child(
             div()
                 .flex()
                 .items_center()
-                .gap_3()
+                .gap(px(theme::CONTENT_INSET))
                 .child(
                     div()
-                        .size(px(52.))
-                        .rounded(px(12.))
+                        .size(px(ART))
+                        .rounded(px(ART_RADIUS))
                         .overflow_hidden()
                         .shadow_md()
                         .flex_shrink_0()
@@ -177,7 +187,7 @@ pub(crate) fn media_card(np: &NowPlayingData, cx: &mut Context<Island>) -> impl 
                             linear_color_stop(rgb(0x2a2a2a), 0.0),
                             linear_color_stop(rgb(0x1a1a1a), 1.0),
                         ))
-                        .child(art.unwrap_or_else(|| div().size(px(52.)).into_any_element())),
+                        .child(art.unwrap_or_else(|| div().size(px(ART)).into_any_element())),
                 )
                 .child(
                     div()
@@ -187,28 +197,10 @@ pub(crate) fn media_card(np: &NowPlayingData, cx: &mut Context<Island>) -> impl 
                         .flex_col()
                         .justify_center()
                         .overflow_hidden()
-                        .child(
-                            div()
-                                .text_color(theme::LABEL)
-                                .text_size(px(theme::TITLE_2.size))
-                                .line_height(px(theme::TITLE_2.leading))
-                                .font_weight(theme::TITLE_2.emphasized)
-                                .whitespace_nowrap()
-                                .overflow_hidden()
-                                .text_ellipsis()
-                                .child(title),
-                        )
-                        .child(
-                            div()
-                                .text_color(theme::SECONDARY_LABEL)
-                                .text_size(px(theme::BODY.size))
-                                .line_height(px(theme::BODY.leading))
-                                .font_weight(theme::BODY.weight)
-                                .whitespace_nowrap()
-                                .overflow_hidden()
-                                .text_ellipsis()
-                                .child(artist),
-                        ),
+                        // Track and artist are the two strings most likely to
+                        // outrun the card, so they slide rather than ellipsis.
+                        .child(slide_label(title, theme::TITLE_2, true).w_full())
+                        .child(slide_label(artist, theme::BODY, false).w_full()),
                 ),
         )
         .child(progress_block(progress, elapsed, duration, seekable, cx))
@@ -237,7 +229,7 @@ fn progress_block(
             div()
                 .relative()
                 .w_full()
-                .h(px(12.))
+                .h(px(MEDIA_PROGRESS_HIT))
                 .flex()
                 .items_center()
                 .child(
@@ -260,8 +252,8 @@ fn progress_block(
             div()
                 .flex()
                 .justify_between()
-                .pt(px(2.))
-                .mt(px(6.))
+                .pt(px(MEDIA_TIME_PAD_TOP))
+                .mt(px(MEDIA_TIME_PAD_GAP))
                 .px(px(1.))
                 .child(time_label(format_time(elapsed)))
                 .child(time_label(format_time(duration))),
@@ -307,7 +299,7 @@ fn transport_row(playing: bool, cx: &mut Context<Island>) -> impl IntoElement {
         .flex()
         .items_center()
         .justify_center()
-        .gap(px(36.))
+        .gap(px(SKIP_GAP))
         .child(skip_btn(
             "skip-back-fill",
             "ibtn-skip-back",
@@ -360,7 +352,7 @@ fn skip_btn(
 fn play_btn(playing: bool, cx: &mut Context<Island>) -> impl IntoElement {
     div()
         .id("ibtn-playpause")
-        .size(px(40.))
+        .size(px(PLAY))
         .rounded_full()
         .bg(rgb(0xffffff))
         .flex()

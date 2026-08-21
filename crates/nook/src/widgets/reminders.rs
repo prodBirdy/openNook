@@ -1,6 +1,6 @@
 //! Reminders card — tap a row to complete it.
 
-use crate::island::ui::{card_row, label, widget_shell};
+use crate::island::ui::{card_row, label, slide_label, widget_shell};
 use crate::island::Island;
 use crate::theme;
 use gpui::{div, prelude::*, px, Context, MouseButton, MouseDownEvent, SharedString};
@@ -49,9 +49,9 @@ pub(crate) fn reminders_card(reminders: &[Reminder], cx: &mut Context<Island>) -
                             .border_1()
                             .border_color(theme::SECONDARY_LABEL),
                     )
-                    .child(label(reminder.title.clone(), theme::CALLOUT, true).w_full()),
+                    .child(slide_label(reminder.title.clone(), theme::CALLOUT, true).w_full()),
             );
         }
     }
-    widget_shell("list-checks", "Reminders", body)
+    widget_shell("reminders-scroll", body)
 }

@@ -1,7 +1,7 @@
 //! Compact Live Activity: left | notch gap | right, plus mode dots.
 
 use super::media::{album_chip, visualizer};
-use super::ui::label;
+use super::ui::{label, timer_text};
 use super::{CompactMode, Island};
 use crate::icons::lucide;
 use crate::theme;
@@ -19,7 +19,8 @@ impl Island {
         notch_w: f32,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let side = ((self.anim_w - notch_w) / 2.0).max(8.0);
+        // Equal flex flanks keep the notch spacer on the camera; a fixed
+        // side width plus px_3 used to overflow and shift the hole.
         div()
             .flex()
             .items_center()
@@ -28,21 +29,25 @@ impl Island {
             .px_3()
             .child(
                 div()
-                    .w(px(side))
+                    .flex_1()
+                    .min_w(px(0.))
                     .h_full()
                     .flex()
                     .items_center()
                     .justify_start()
+                    .overflow_hidden()
                     .child(self.compact_left(mode, hovered, cx)),
             )
-            .child(div().w(px(notch_w)).h_full())
+            .child(div().w(px(notch_w)).flex_shrink_0().h_full())
             .child(
                 div()
-                    .w(px(side))
+                    .flex_1()
+                    .min_w(px(0.))
                     .h_full()
                     .flex()
                     .items_center()
                     .justify_end()
+                    .overflow_hidden()
                     .child(self.compact_right(mode, hovered, cx)),
             )
     }
@@ -56,8 +61,11 @@ impl Island {
         match mode {
             CompactMode::Media => album_chip(&self.now_playing, cx).into_any_element(),
             CompactMode::Agents => widgets::agents_compact_left(&self.agents, self.pixel_t),
-            CompactMode::Files => lucide("image", 16.0).into_any_element(),
+            CompactMode::Files => lucide("image", theme::COMPACT_FACE).into_any_element(),
             CompactMode::Timer => widgets::timer_compact_left(self, cx),
+            CompactMode::Observe => {
+                lucide("triangle-alert", theme::COMPACT_FACE).into_any_element()
+            }
             CompactMode::Onboard => label("openNook", theme::BODY, true).into_any_element(),
             CompactMode::Idle => div().into_any_element(),
         }
@@ -89,7 +97,13 @@ impl Island {
                     .or_else(|| self.timers.first())
                     .map(|t| super::ui::format_timer(t.remaining))
                     .unwrap_or_else(|| "0:00".into());
-                label(text, theme::BODY, true).into_any_element()
+                timer_text(text, theme::BODY)
+                    .min_w(px(40.))
+                    .text_right()
+                    .into_any_element()
+            }
+            CompactMode::Observe => {
+                label(self.observe.firing_count().to_string(), theme::BODY, true).into_any_element()
             }
             CompactMode::Onboard if hovered => div()
                 .id("github")
@@ -103,7 +117,7 @@ impl Island {
                             .spawn();
                     }),
                 )
-                .child(lucide("github", 16.0))
+                .child(lucide("github", theme::COMPACT_FACE))
                 .into_any_element(),
             _ => div().into_any_element(),
         }
@@ -132,6 +146,7 @@ impl Island {
                 CompactMode::Agents => "agents",
                 CompactMode::Files => "files",
                 CompactMode::Timer => "timer",
+                CompactMode::Observe => "observe",
                 CompactMode::Onboard => "onboard",
             };
             row = row.child(

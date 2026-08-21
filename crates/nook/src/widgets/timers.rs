@@ -1,7 +1,7 @@
 //! Compact timer ring + expanded timers card.
 
 use crate::icons::lucide;
-use crate::island::ui::{format_timer, icon_btn, label, text_btn, widget_shell};
+use crate::island::ui::{format_timer, icon_btn, label, text_btn, timer_text, widget_shell};
 use crate::island::{Island, Timer};
 use crate::theme;
 use gpui::{
@@ -12,14 +12,15 @@ use gpui::{
 pub(crate) fn compact_left(island: &Island, cx: &mut Context<Island>) -> AnyElement {
     let timer = island.running_timer().or_else(|| island.timers.first());
     let Some(timer) = timer else {
-        return lucide("clock", 18.0).into_any_element();
+        return lucide("clock", theme::COMPACT_FACE).into_any_element();
     };
     let total = timer.total.max(1);
     let progress = 1.0 - timer.remaining as f32 / total as f32;
     let id = timer.id;
     div()
         .id("timer-ring")
-        .size(px(22.))
+        .size(px(theme::COMPACT_FACE))
+        .flex_shrink_0()
         .flex()
         .items_center()
         .justify_center()
@@ -33,7 +34,7 @@ pub(crate) fn compact_left(island: &Island, cx: &mut Context<Island>) -> AnyElem
                 cx.notify();
             }),
         )
-        .child(timer_ring(progress.clamp(0.0, 1.0), 22.0))
+        .child(timer_ring(progress.clamp(0.0, 1.0), theme::COMPACT_FACE))
         .into_any_element()
 }
 
@@ -93,14 +94,14 @@ pub(crate) fn timer_card(timers: &[Timer], cx: &mut Context<Island>) -> impl Int
             false,
         ));
     } else {
-        for t in timers.iter().take(3) {
+        for t in timers {
             let id = t.id;
             body = body.child(
                 div()
                     .flex()
                     .items_center()
                     .justify_between()
-                    .child(label(format_timer(t.remaining), theme::TITLE_2, true))
+                    .child(timer_text(format_timer(t.remaining), theme::TITLE_2))
                     .child(icon_btn(
                         if t.running { "pause" } else { "play" },
                         SharedString::from(format!("ibtn-timer-{id}")),
@@ -132,5 +133,5 @@ pub(crate) fn timer_card(timers: &[Timer], cx: &mut Context<Island>) -> impl Int
                 cx.notify();
             })),
     );
-    widget_shell("clock", "Timers", body)
+    widget_shell("timers-scroll", body)
 }
