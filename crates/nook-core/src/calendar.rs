@@ -709,7 +709,7 @@ pub async fn create_reminder(title: String, due_date: Option<f64>) -> Result<boo
 pub async fn open_calendar_app() -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
-        std::process::Command::new("open")
+        std::process::Command::new("/usr/bin/open")
             .arg("-a")
             .arg("Calendar")
             .spawn()
@@ -733,7 +733,7 @@ pub async fn open_calendar_app() -> Result<(), String> {
 pub async fn open_reminders_app() -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
-        std::process::Command::new("open")
+        std::process::Command::new("/usr/bin/open")
             .arg("-a")
             .arg("Reminders")
             .spawn()
@@ -840,7 +840,7 @@ pub async fn open_calendar_event(_id: String, date: f64) -> Result<(), String> {
             minute
         );
 
-        std::process::Command::new("osascript")
+        std::process::Command::new("/usr/bin/osascript")
             .arg("-e")
             .arg(&script)
             .output()

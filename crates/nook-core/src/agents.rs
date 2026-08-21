@@ -320,7 +320,7 @@ fn classify_process(name: &str, argv: &[String], exe: Option<&Path>) -> Option<A
         return Some(AgentKind::Grok);
     }
 
-    for kind in [
+    [
         AgentKind::Cursor,
         AgentKind::OpenCode,
         AgentKind::Claude,
@@ -328,16 +328,15 @@ fn classify_process(name: &str, argv: &[String], exe: Option<&Path>) -> Option<A
         AgentKind::Grok,
         AgentKind::Aider,
         AgentKind::Gemini,
-    ] {
-        if kind.binaries().iter().any(|bin| {
+    ]
+    .into_iter()
+    .find(|kind| {
+        kind.binaries().iter().any(|bin| {
             argv_has_binary(argv, bin)
                 || token_has_binary(name, bin)
                 || exe.is_some_and(|p| token_has_binary(&p.to_string_lossy(), bin))
-        }) {
-            return Some(kind);
-        }
-    }
-    None
+        })
+    })
 }
 
 fn is_grok_process(name: &str, argv: &[String], exe: Option<&Path>) -> bool {
@@ -731,7 +730,7 @@ fn sysinfo_parents() -> HashMap<u32, u32> {
 
 #[cfg(unix)]
 fn ps_parents() -> HashMap<u32, u32> {
-    let Ok(out) = std::process::Command::new("ps")
+    let Ok(out) = std::process::Command::new("/bin/ps")
         .args(["-ax", "-o", "pid=,ppid="])
         .output()
     else {
@@ -1146,7 +1145,7 @@ mod tests {
     }
 
     fn pid_is_alive(pid: u32) -> bool {
-        std::process::Command::new("kill")
+        std::process::Command::new("/bin/kill")
             .args(["-0", &pid.to_string()])
             .status()
             .map(|s| s.success())

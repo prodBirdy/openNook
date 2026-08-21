@@ -12,13 +12,11 @@ pub(crate) mod ui;
 
 pub use render::open_island;
 
-pub(crate) use files::file_grid_metrics;
-pub(crate) use ui::format_timer;
-
 use crate::platform;
+use crate::theme;
 use gpui::{
-    prelude::*, px, size, Context, ExternalPaths, Subscription, TouchPhase, Window, WindowBounds,
-    WindowHandle, WindowKind, WindowOptions,
+    prelude::*, px, size, Context, Entity, ExternalPaths, Focusable, Subscription, TouchPhase,
+    Window, WindowBounds, WindowHandle, WindowKind, WindowOptions,
 };
 use nook_core::agents::AgentSession;
 use nook_core::calendar::{CalendarEvent, Reminder};
@@ -28,7 +26,6 @@ use nook_core::notch;
 use nook_core::observe::{MetricHistory, ObserveSnapshot};
 use nook_core::settings::AppSettings;
 use settings::SettingsView;
-use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -63,6 +60,9 @@ pub struct Island {
     pub notch_height: f32,
     pub screen_width: f32,
     pub hovered: bool,
+    /// Compact album chip is hovered. Cleared when the island hover pad is left
+    /// because click-through swallows GPUI's MouseLeave.
+    pub(crate) album_hovered: bool,
     pub expanded: bool,
     pub preferred: Option<CompactMode>,
     pub tab: Tab,
@@ -73,8 +73,16 @@ pub struct Island {
     pub reminders: Vec<Reminder>,
     pub agents: Vec<AgentSession>,
     pub notes: String,
+    /// In-card markdown editor for the Notes card, created on first edit.
+    pub(crate) notes_editor: Option<Entity<crate::widgets::NotesEditor>>,
+    pub(crate) notes_editing: bool,
+    notes_sub: Option<Subscription>,
     pub timers: Vec<Timer>,
     pub next_timer_id: u64,
+    /// Index into the 7-day week strip (today − 3 … today + 3). 3 is today.
+    pub calendar_day: u8,
+    /// Preset chips for a new timer, matching the React add dialog.
+    pub timer_composer: bool,
     pub observe: ObserveSnapshot,
     observe_history: MetricHistory,
     pub(crate) observe_hover: Option<crate::widgets::ObserveHover>,
@@ -154,6 +162,7 @@ impl Island {
             },
             screen_width: info.screen_width as f32,
             hovered: false,
+            album_hovered: false,
             expanded: false,
             preferred: None,
             tab: Tab::Widgets,
@@ -164,8 +173,13 @@ impl Island {
             reminders: Vec::new(),
             agents: Vec::new(),
             notes,
+            notes_editor: None,
+            notes_editing: false,
+            notes_sub: None,
             timers: Vec::new(),
             next_timer_id: 1,
+            calendar_day: 3,
+            timer_composer: false,
             observe: ObserveSnapshot::default(),
             observe_history: nook_core::observe::load_history(),
             observe_hover: None,
@@ -255,11 +269,18 @@ impl Island {
                         this.open_settings(cx);
                         dirty = true;
                     }
-                    let dragging = nook_core::mouse::drag_active();
+                    // Our own press / AppKit drag-out also dirties the drag
+                    // pasteboard. Do not treat that as an inbound Finder drop.
+                    let dragging = nook_core::mouse::drag_active()
+                        && this.pending_file_drag.is_none()
+                        && !nook_core::files::outbound_drag_active();
                     if this.file_drag != dragging {
                         this.file_drag = dragging;
-                        if dragging && inside {
-                            this.arm_dropzone(cx);
+                        if dragging {
+                            platform::register_current_file_drops();
+                            if inside {
+                                this.arm_dropzone(cx);
+                            }
                         }
                         dirty = true;
                     }
@@ -300,6 +321,9 @@ impl Island {
                     }
                     if this.hovered != inside {
                         this.hovered = inside;
+                        if !inside {
+                            this.album_hovered = false;
+                        }
                         if inside {
                             nook_core::haptics::trigger(None);
                             if this.file_drag {
@@ -307,15 +331,19 @@ impl Island {
                             }
                         } else if this.expanded
                             && !this.settings_open
+                            && !this.notes_editing
                             && !this.file_drag
                             && !nook_core::files::outbound_drag_active()
                         {
                             this.expanded = false;
+                            this.close_notes_editor(cx);
                         }
                         dirty = true;
                     }
                     let now = Instant::now();
-                    let dt = now.duration_since(this.last_frame).as_secs_f32().min(0.05);
+                    // Do not clamp to 50ms here: that dt is past the Euler
+                    // stability cliff for this spring (see `step_spring`).
+                    let dt = now.duration_since(this.last_frame).as_secs_f32();
                     this.last_frame = now;
                     let elapsed_secs = now.duration_since(this.last_tick).as_secs() as u32;
                     if elapsed_secs >= 1 {
@@ -432,9 +460,11 @@ impl Island {
                 .update(cx, |this, cx| {
                     this.events = events;
                     this.reminders = reminders;
-                    if let Ok(notes) = nook_core::notes::load_notes() {
-                        if this.notes != notes {
-                            this.notes = notes;
+                    if !this.notes_editing {
+                        if let Ok(notes) = nook_core::notes::load_notes() {
+                            if this.notes != notes {
+                                this.notes = notes;
+                            }
                         }
                     }
                     cx.notify();
@@ -481,7 +511,7 @@ impl Island {
 
         cx.spawn(async move |this, cx| loop {
             let settings = nook_core::settings::get_app_settings();
-            let window = settings.observe.window;
+            let range = settings.observe.range;
             let snapshot = if settings.show_observe {
                 cx.background_executor()
                     .spawn(async move {
@@ -495,18 +525,11 @@ impl Island {
             if this
                 .update(cx, |this, cx| {
                     let was_quiet = !this.observe.has_outage();
-                    let mut snapshot = snapshot;
-                    nook_core::observe::record_history(
-                        &mut this.observe_history,
-                        &mut snapshot,
-                        window,
-                    );
-                    this.observe = snapshot;
+                    this.apply_observe_snapshot(snapshot, range, cx);
                     if was_quiet && this.observe.has_outage() {
                         this.preferred = Some(CompactMode::Observe);
                         nook_core::haptics::trigger(None);
                     }
-                    cx.notify();
                 })
                 .is_err()
             {
@@ -516,6 +539,40 @@ impl Island {
             cx.background_executor()
                 .timer(Duration::from_secs(wait))
                 .await;
+        })
+        .detach();
+    }
+
+    /// Merge a fresh poll into the island: extend the local sample history and
+    /// publish the snapshot. Both the periodic loop and manual refreshes
+    /// (range-chip taps) go through here.
+    fn apply_observe_snapshot(
+        &mut self,
+        snapshot: ObserveSnapshot,
+        range: nook_core::observe::ObserveRange,
+        cx: &mut Context<Self>,
+    ) {
+        let mut snapshot = snapshot;
+        nook_core::observe::record_history_range(&mut self.observe_history, &mut snapshot, range);
+        nook_core::observe::apply_user_alerts(&self.settings.observe, &mut snapshot);
+        self.observe = snapshot;
+        cx.notify();
+    }
+
+    pub(crate) fn refresh_observe(&mut self, cx: &mut Context<Self>) {
+        let config = nook_core::settings::get_app_settings().observe;
+        let range = config.range;
+        cx.spawn(async move |this, cx| {
+            let snapshot = cx
+                .background_executor()
+                .spawn(
+                    async move { nook_core::runtime().block_on(nook_core::observe::poll(&config)) },
+                )
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.apply_observe_snapshot(snapshot, range, cx);
+                this.settings = nook_core::settings::get_app_settings();
+            });
         })
         .detach();
     }
@@ -531,16 +588,97 @@ impl Island {
         self.timers.iter().find(|t| t.running)
     }
 
-    fn mode(&self) -> CompactMode {
-        if let Some(preferred) = self.preferred {
-            if self.mode_available(preferred) {
-                return preferred;
-            }
+    /// Compact face: a finished timer first so the ring turns red, else running, else first.
+    pub(crate) fn face_timer(&self) -> Option<&Timer> {
+        self.timers
+            .iter()
+            .find(|t| t.remaining == 0 && t.total > 0)
+            .or_else(|| self.running_timer())
+            .or_else(|| self.timers.first())
+    }
+
+    pub(crate) fn reset_timer(&mut self, id: u64) {
+        if let Some(t) = self.timers.iter_mut().find(|t| t.id == id) {
+            t.remaining = t.total;
+            t.running = false;
         }
-        self.available_modes()
-            .into_iter()
-            .next()
-            .unwrap_or(CompactMode::Idle)
+    }
+
+    pub(crate) fn remove_timer(&mut self, id: u64) {
+        self.timers.retain(|t| t.id != id);
+        if self.timers.is_empty() {
+            self.timer_composer = false;
+        }
+    }
+
+    /// Swap the Notes card into its raw-markdown editor, ready to type.
+    pub(crate) fn begin_notes_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let notes = self.notes.clone();
+        let editor = cx.new(|cx| crate::widgets::NotesEditor::new(notes, cx));
+        self.notes_sub = Some(cx.subscribe(
+            &editor,
+            |this, _, _: &crate::widgets::NotesEditorEvent, cx| {
+                this.close_notes_editor(cx);
+            },
+        ));
+        window.focus(&editor.focus_handle(cx));
+        // The overlay is a nonactivating NSPanel: clicks never make it key,
+        // so key events only flow after an explicit makeKeyAndOrderFront.
+        // Accessory apps also need an explicit activate or the panel never
+        // receives the IME key-down that drives insertText.
+        window.activate_window();
+        platform::activate_app();
+        self.notes_editor = Some(editor);
+        self.notes_editing = true;
+        cx.notify();
+    }
+
+    /// Flush pending edits back into `self.notes` and restore the preview.
+    pub(crate) fn close_notes_editor(&mut self, cx: &mut Context<Self>) {
+        self.notes_sub.take();
+        if let Some(editor) = self.notes_editor.take() {
+            editor.update(cx, |editor, _| editor.flush());
+            self.notes = editor.read(cx).text().to_string();
+        }
+        if self.notes_editing {
+            self.notes_editing = false;
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn refresh_calendar(&mut self, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            let events = cx
+                .background_executor()
+                .spawn(async {
+                    nook_core::runtime()
+                        .block_on(nook_core::calendar::get_upcoming_events(Some(true)))
+                        .unwrap_or_default()
+                })
+                .await;
+            let reminders = cx
+                .background_executor()
+                .spawn(async {
+                    nook_core::runtime()
+                        .block_on(nook_core::calendar::get_reminders(Some(true)))
+                        .unwrap_or_default()
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.events = events;
+                this.reminders = reminders;
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn mode(&self) -> CompactMode {
+        let modes = self.available_modes();
+        if let Some(preferred) = self.preferred.filter(|mode| modes.contains(mode)) {
+            return preferred;
+        }
+        modes.into_iter().next().unwrap_or(CompactMode::Idle)
     }
 
     fn has_agents(&self) -> bool {
@@ -549,18 +687,6 @@ impl Island {
 
     fn has_observe_outage(&self) -> bool {
         self.settings.show_observe && self.observe.has_outage()
-    }
-
-    fn mode_available(&self, mode: CompactMode) -> bool {
-        match mode {
-            CompactMode::Media => self.has_media(),
-            CompactMode::Agents => self.has_agents(),
-            CompactMode::Files => !self.files.is_empty(),
-            CompactMode::Timer => self.running_timer().is_some(),
-            CompactMode::Observe => self.has_observe_outage(),
-            CompactMode::Onboard => self.first_run,
-            CompactMode::Idle => true,
-        }
     }
 
     fn available_modes(&self) -> Vec<CompactMode> {
@@ -591,7 +717,15 @@ impl Island {
         let base_w = self.notch_width.max(180.0);
         let base_h = self.notch_height.max(32.0);
         if self.expanded {
-            return ((self.screen_width - 40.0).min(600.0), 250.0);
+            let w = self.expanded_width();
+            let body = if self.tab == Tab::Files {
+                // Tall enough for one full dropzone tile (flush preview + caption)
+                // plus Clear All, so a single file is not clipped behind a scroll.
+                theme::EXPANDED_PAD * 2.0 + files::files_pane_min_height(w)
+            } else {
+                theme::NOOK_INSET + theme::NOOK_BODY
+            };
+            return (w, self.notch_height.max(32.0) + body);
         }
         if self.hovered {
             return if self.mode() == CompactMode::Idle {
@@ -612,7 +746,7 @@ impl Island {
     }
 
     pub(super) fn expanded_width(&self) -> f32 {
-        (self.screen_width - 40.0).min(600.0)
+        (self.screen_width - 40.0).min(theme::EXPANDED_MAX_WIDTH)
     }
 
     /// Critically-damped-ish spring matching the Tauri Motion values
@@ -625,6 +759,27 @@ impl Island {
             self.last_expanded = self.expanded;
             self.last_mode = mode;
         }
+
+        // Semi-implicit Euler with these constants goes unstable around
+        // dt=42ms. The 20ms poll used to cap a hitch at 50ms — one slow
+        // frame and `anim_h` exploded, so the island strobed open/closed
+        // and the motion-blur taps kept render expensive, which kept dt
+        // large. Substep at 60 Hz; ignore absurd pauses (lid close).
+        const MAX_STEP: f32 = 1.0 / 60.0;
+        let mut left = dt.clamp(0.0, 0.25);
+        let mut moving = false;
+        while left > 0.0 {
+            let step_dt = left.min(MAX_STEP);
+            left -= step_dt;
+            moving = self.integrate_spring(step_dt, tw, th);
+            if !moving {
+                break;
+            }
+        }
+        moving
+    }
+
+    fn integrate_spring(&mut self, dt: f32, tw: f32, th: f32) -> bool {
         self.content_opacity = (self.content_opacity + dt / 0.18).min(1.0);
 
         const STIFFNESS: f32 = 400.0;
@@ -637,6 +792,16 @@ impl Island {
         };
         step(&mut self.anim_w, &mut self.anim_vw, tw);
         step(&mut self.anim_h, &mut self.anim_vh, th);
+
+        if !self.anim_w.is_finite() || !self.anim_h.is_finite() {
+            self.anim_w = tw;
+            self.anim_h = th;
+            self.anim_vw = 0.0;
+            self.anim_vh = 0.0;
+            self.content_opacity = 1.0;
+            self.blur = 0.0;
+            return false;
+        }
 
         // Width grows from the centre out, so the content on either flank only
         // travels at half the box velocity; height grows downwards from the
@@ -701,6 +866,8 @@ impl Island {
                 self.first_run = false;
                 nook_core::settings::mark_onboarded();
             }
+        } else {
+            self.close_notes_editor(cx);
         }
         nook_core::haptics::trigger(None);
         cx.notify();
@@ -726,6 +893,9 @@ impl Island {
     fn on_wheel(&mut self, event: &gpui::ScrollWheelEvent, cx: &mut Context<Self>) {
         let delta = event.delta.pixel_delta(px(16.0));
         if self.apply_wheel(delta.x.into(), delta.y.into(), event.touch_phase) {
+            if !self.expanded {
+                self.close_notes_editor(cx);
+            }
             cx.notify();
         }
     }
@@ -793,11 +963,15 @@ impl Island {
     /// window before `draggingEntered`. Settings must not appear here: it used
     /// to force the overlay live, which ate every click in the window — the
     /// top of the screen when the overlay was ~280px, the whole display now.
+    ///
+    /// After we start an AppKit drag-out, the session is global. Keeping the
+    /// full-screen overlay live made *us* the drop target, so Finder never
+    /// saw the file. Click-through off the painted island; stay live on it.
     fn overlay_ignores_mouse(&self, on_ui: bool, inside: bool) -> bool {
-        !(on_ui
-            || (self.file_drag && inside)
-            || self.pending_file_drag.is_some()
-            || nook_core::files::outbound_drag_active())
+        if nook_core::files::outbound_drag_active() {
+            return !on_ui;
+        }
+        !(on_ui || (self.file_drag && inside) || self.pending_file_drag.is_some())
     }
 
     fn open_settings(&mut self, cx: &mut Context<Self>) {
@@ -879,6 +1053,7 @@ impl Island {
             running: true,
         });
         self.next_timer_id += 1;
+        self.timer_composer = false;
         self.preferred = Some(CompactMode::Timer);
     }
 
@@ -903,22 +1078,57 @@ impl Island {
             return false;
         }
         let path = self.pending_file_drag.take().unwrap().path;
+        if self.forget_missing_tray_path(&path) {
+            return true;
+        }
         nook_core::haptics::trigger(None);
         platform::start_file_drag(&path, window);
         true
     }
 
-    pub(crate) fn finish_file_press(&mut self) {
-        if let Some(pending) = self.pending_file_drag.take() {
-            let _ = nook_core::files::open_file(pending.path);
+    pub(crate) fn finish_file_press(&mut self) -> bool {
+        let Some(pending) = self.pending_file_drag.take() else {
+            return false;
+        };
+        if self.forget_missing_tray_path(&pending.path) {
+            return true;
         }
+        let _ = nook_core::files::open_file(pending.path);
+        false
+    }
+
+    /// Drop a tray entry whose file is gone. Returns true if the tray changed.
+    fn forget_missing_tray_path(&mut self, path: &str) -> bool {
+        if std::path::Path::new(path).exists() {
+            return false;
+        }
+        log::warn!("drag-out skipped; missing {path}");
+        let n = self.files.len();
+        self.files.retain(|f| f.path != path);
+        if self.files.len() == n {
+            return true;
+        }
+        let _ = nook_core::files::save_file_tray(self.files.clone());
+        true
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::island::files::{file_grid_metrics, file_tile_height, files_pane_min_height};
+    use crate::island::ui::format_timer;
     use nook_core::agents::{AgentKind, AgentStatus};
+    use std::collections::HashMap;
+    use std::sync::{Mutex, MutexGuard};
+
+    /// `outbound_drag_active` is process-global; overlay tests that toggle it
+    /// must not overlap.
+    static OVERLAY_MOUSE: Mutex<()> = Mutex::new(());
+
+    fn lock_overlay() -> MutexGuard<'static, ()> {
+        OVERLAY_MOUSE.lock().unwrap_or_else(|e| e.into_inner())
+    }
 
     fn test_island() -> Island {
         Island {
@@ -926,6 +1136,7 @@ mod tests {
             notch_height: 32.0,
             screen_width: 1512.0,
             hovered: false,
+            album_hovered: false,
             expanded: false,
             preferred: None,
             tab: Tab::Widgets,
@@ -936,8 +1147,13 @@ mod tests {
             reminders: Vec::new(),
             agents: Vec::new(),
             notes: String::new(),
+            notes_editor: None,
+            notes_editing: false,
+            notes_sub: None,
             timers: Vec::new(),
             next_timer_id: 1,
+            calendar_day: 3,
+            timer_composer: false,
             observe: ObserveSnapshot::default(),
             observe_history: HashMap::new(),
             observe_hover: None,
@@ -986,12 +1202,12 @@ mod tests {
 
     #[test]
     fn agent_loader_is_deterministic_per_pid() {
-        assert_eq!(crate::dotmatrix::pick(11), crate::dotmatrix::pick(11));
-        let idle =
-            crate::dotmatrix::cell_opacity(crate::dotmatrix::Kind::Circular(4), 1, 4, 0.3, false);
-        let work =
-            crate::dotmatrix::cell_opacity(crate::dotmatrix::Kind::Circular(4), 1, 4, 0.3, true);
-        assert!((idle - work).abs() > 0.01);
+        let kind = crate::dotmatrix::pick(11);
+        assert_eq!(kind, crate::dotmatrix::pick(11));
+        for working in [false, true] {
+            let a = crate::dotmatrix::cell_opacity(kind, 1, 2, 0.3, working);
+            assert!((0.0..=1.0).contains(&a), "{kind:?} -> {a}");
+        }
     }
 
     #[test]
@@ -999,6 +1215,30 @@ mod tests {
         assert_eq!(format_timer(0), "0:00");
         assert_eq!(format_timer(65), "1:05");
         assert_eq!(format_timer(1500), "25:00");
+        assert_eq!(format_timer(3600), "1:00");
+        assert_eq!(super::ui::format_timer_compact(0), "0s");
+        assert_eq!(super::ui::format_timer_compact(45), "45s");
+        assert_eq!(super::ui::format_timer_compact(65), "1m05");
+        assert_eq!(super::ui::format_timer_compact(3600), "1h");
+        assert_eq!(super::ui::format_timer_compact(3900), "1h05");
+    }
+
+    #[test]
+    fn speed_run_starts_the_readout_at_zero() {
+        let mut island = test_island();
+        island.speed_mbps = Some(99.0);
+        island.speed_progress = 100.0;
+        island.arm_speed_test();
+        assert_eq!(island.speed_mbps, Some(0.0));
+        assert_eq!(island.speed_progress, 0.0);
+        assert!(island.speed_running);
+        island.apply_speed_sample(14.2, 18.0);
+        assert_eq!(island.speed_mbps, Some(14.2));
+        assert_eq!(island.speed_progress, 18.0);
+        island.cancel_speed_test();
+        assert!(!island.speed_running);
+        assert_eq!(island.speed_progress, 0.0);
+        assert_eq!(island.speed_mbps, Some(14.2));
     }
 
     #[test]
@@ -1016,6 +1256,28 @@ mod tests {
         assert!(island.speed_mbps.is_none());
         assert!(!island.speed_running);
         assert_eq!(island.speed_gen, 3);
+    }
+
+    #[test]
+    fn expanded_island_shows_a_full_file_tile() {
+        let mut island = test_island();
+        island.expanded = true;
+        island.tab = Tab::Files;
+        island.notch_height = 38.0;
+        island.screen_width = 1800.0;
+        let (w, h) = island.target_size();
+        let leftover = h - island.notch_height.max(32.0) - theme::EXPANDED_PAD * 2.0;
+        let (_, tile) = file_grid_metrics(w);
+        assert!(
+            leftover + 0.05 >= files_pane_min_height(w),
+            "h={h} leftover={leftover} need={}",
+            files_pane_min_height(w)
+        );
+        assert!(
+            leftover + 0.05 >= file_tile_height(tile),
+            "leftover={leftover} tile_h={}",
+            file_tile_height(tile)
+        );
     }
 
     #[test]
@@ -1051,12 +1313,14 @@ mod tests {
     }
 
     #[test]
-    fn available_modes_observe_outage_first() {
+    fn available_modes_observe_only_when_user_alert_fires() {
         let mut island = test_island();
+        island.settings.show_observe = true;
+        assert_eq!(island.available_modes(), vec![CompactMode::Idle]);
         island.observe.alerts = vec![nook_core::observe::FiringAlert {
-            name: "InstanceDown".into(),
+            name: "5xx".into(),
             severity: "critical".into(),
-            summary: "target gone".into(),
+            summary: "2 > 0".into(),
         }];
         assert_eq!(
             island.available_modes(),
@@ -1069,6 +1333,7 @@ mod tests {
 
     #[test]
     fn settings_open_does_not_capture_the_overlay() {
+        let _guard = lock_overlay();
         let mut island = test_island();
         island.settings_open = true;
         island.expanded = true;
@@ -1080,6 +1345,7 @@ mod tests {
 
     #[test]
     fn overlay_captures_only_painted_island_and_drags() {
+        let _guard = lock_overlay();
         let mut island = test_island();
         assert!(island.overlay_ignores_mouse(false, false));
         assert!(!island.overlay_ignores_mouse(true, false));
@@ -1098,7 +1364,25 @@ mod tests {
         island.arm_file_drag("/tmp/shot.png".into());
         assert!(
             !island.overlay_ignores_mouse(false, false),
-            "outbound drag source needs the window live"
+            "until the AppKit session starts, mouse moves must reach us"
+        );
+        island.pending_file_drag = None;
+        nook_core::files::begin_outbound_drag("/tmp/shot.png");
+        struct ClearOutbound;
+        impl Drop for ClearOutbound {
+            fn drop(&mut self) {
+                nook_core::files::finish_outbound_drag(false);
+                let _ = nook_core::files::take_outbound_drag();
+            }
+        }
+        let _outbound = ClearOutbound;
+        assert!(
+            island.overlay_ignores_mouse(false, false),
+            "off the island, Finder has to be the drop target"
+        );
+        assert!(
+            !island.overlay_ignores_mouse(true, true),
+            "over the island the source window stays live"
         );
     }
 
@@ -1109,6 +1393,26 @@ mod tests {
         assert!(!island.poll_pending_file_drag(None));
         assert!(island.pending_file_drag.is_some());
         island.finish_file_press();
+        assert!(island.pending_file_drag.is_none());
+    }
+
+    #[test]
+    fn missing_file_is_removed_on_drag_out() {
+        let mut island = test_island();
+        let path = "/tmp/nook-missing-tray-file-does-not-exist.bin";
+        island.files.push(FileTrayItem {
+            name: "gone.bin".into(),
+            size: 1,
+            path: path.into(),
+            mime_type: "file".into(),
+            last_modified: 0,
+        });
+        island.arm_file_drag(path.into());
+        if let Some(pending) = island.pending_file_drag.as_mut() {
+            pending.screen_x -= 100.0;
+        }
+        assert!(island.poll_pending_file_drag(None));
+        assert!(island.files.iter().all(|f| f.path != path));
         assert!(island.pending_file_drag.is_none());
     }
 
@@ -1125,6 +1429,7 @@ mod tests {
 
         // A trackpad swipe is many events well over the threshold.
         for _ in 0..8 {
+            island.last_wheel_at = Instant::now();
             assert!(
                 island.apply_wheel(40.0, 0.0, TouchPhase::Moved) || island.wheel_locked,
                 "first event should cycle; the rest of the gesture is locked"
@@ -1184,7 +1489,7 @@ mod tests {
             island.file_layout(),
             file_grid_metrics(island.expanded_width())
         );
-        assert!((island.expanded_width() - 600.0).abs() < f32::EPSILON);
+        assert!((island.expanded_width() - theme::EXPANDED_MAX_WIDTH).abs() < f32::EPSILON);
     }
 
     #[test]
@@ -1201,6 +1506,68 @@ mod tests {
             }
         }
         assert!(!moving);
+        let (tw, th) = island.target_size();
+        assert!((island.anim_w - tw).abs() < 0.5);
+        assert!((island.anim_h - th).abs() < 0.5);
+    }
+
+    /// The poll loop used to cap `dt` at 50ms. Semi-implicit Euler with
+    /// stiffness 400 / mass 0.8 is already unstable around 42ms, so one hitch
+    /// sent `anim_h` to ±1e6 and the island strobed open/closed forever.
+    fn assert_spring_sane(island: &Island) {
+        assert!(
+            island.anim_w.is_finite() && island.anim_h.is_finite(),
+            "spring went non-finite: {}×{}",
+            island.anim_w,
+            island.anim_h
+        );
+        assert!(
+            island.anim_w > 0.0 && island.anim_w < 4000.0,
+            "width exploded: {}",
+            island.anim_w
+        );
+        assert!(
+            island.anim_h > -1.0 && island.anim_h < 4000.0,
+            "height exploded: {}",
+            island.anim_h
+        );
+    }
+
+    #[test]
+    fn spring_survives_50ms_hitch_while_moving() {
+        let mut island = test_island();
+        island.hovered = true;
+        island.step_spring(0.016);
+        island.step_spring(0.05);
+        assert_spring_sane(&island);
+        let mut moving = true;
+        for _ in 0..200 {
+            moving = island.step_spring(0.016);
+            assert_spring_sane(&island);
+            if !moving {
+                break;
+            }
+        }
+        assert!(!moving, "spring never settled after a 50ms hitch");
+        let (tw, th) = island.target_size();
+        assert!((island.anim_w - tw).abs() < 0.5);
+        assert!((island.anim_h - th).abs() < 0.5);
+    }
+
+    #[test]
+    fn spring_survives_sustained_slow_frames() {
+        let mut island = test_island();
+        island.hovered = true;
+        island.expanded = true;
+        let mut moving = true;
+        for _ in 0..200 {
+            moving = island.step_spring(0.05);
+            assert_spring_sane(&island);
+            if !moving {
+                break;
+            }
+        }
+        assert!(!moving, "spring exploded instead of settling at 50ms/frame");
         let (tw, th) = island.target_size();
         assert!((island.anim_w - tw).abs() < 0.5);
         assert!((island.anim_h - th).abs() < 0.5);

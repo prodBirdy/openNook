@@ -31,17 +31,20 @@ where
                 let start = Instant::now();
                 let mut total_bytes = 0u64;
                 let mut last_sample_time = start;
+                let mut sent_first = false;
                 let max_duration = 8.0;
 
                 while let Some(chunk_result) = stream.next().await {
                     match chunk_result {
                         Ok(chunk) => {
                             total_bytes += chunk.len() as u64;
-                            if last_sample_time.elapsed().as_millis() >= 100 {
-                                let elapsed = start.elapsed().as_secs_f64();
+                            let due = !sent_first || last_sample_time.elapsed().as_millis() >= 100;
+                            if total_bytes > 0 && due {
+                                let elapsed = start.elapsed().as_secs_f64().max(1e-6);
                                 let bps = (total_bytes as f64 * 8.0) / elapsed;
                                 let mbps = bps / 1_000_000.0;
                                 last_sample_time = Instant::now();
+                                sent_first = true;
                                 let progress = ((elapsed / max_duration) * 100.0).min(100.0);
                                 on_progress(SpeedSample {
                                     speed: mbps,

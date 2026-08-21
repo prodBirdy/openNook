@@ -14,9 +14,8 @@ static WAS_PLAYING: AtomicBool = AtomicBool::new(false);
 
 /// Cache for current track info to avoid refetching artwork
 /// Format: (title, artist, artwork_base64)
-static TRACK_CACHE: std::sync::OnceLock<
-    std::sync::Mutex<(Option<String>, Option<String>, Option<String>)>,
-> = std::sync::OnceLock::new();
+type TrackCache = (Option<String>, Option<String>, Option<String>);
+static TRACK_CACHE: std::sync::OnceLock<std::sync::Mutex<TrackCache>> = std::sync::OnceLock::new();
 
 /// Cache for the last played track to display when paused/idle
 static LAST_PLAYED: std::sync::OnceLock<std::sync::Mutex<Option<NowPlayingData>>> =
@@ -95,7 +94,7 @@ fn get_last_played_or_default(levels: Vec<f64>) -> NowPlayingData {
 }
 
 #[cfg(target_os = "macos")]
-fn now_playing_from_adapter(track: crate::mediaremote::AdapterTrack) -> NowPlayingData {
+async fn now_playing_from_adapter(track: crate::mediaremote::AdapterTrack) -> NowPlayingData {
     IS_PLAYING.store(track.is_playing, Ordering::Relaxed);
     let just_started = track.is_playing && !WAS_PLAYING.swap(track.is_playing, Ordering::Relaxed);
     if !track.is_playing {
@@ -103,14 +102,28 @@ fn now_playing_from_adapter(track: crate::mediaremote::AdapterTrack) -> NowPlayi
     }
 
     let track_changed = is_track_changed(&track.title, &track.artist);
-    let artwork = if track.artwork_base64.is_some() {
-        track.artwork_base64.clone()
-    } else if !track_changed {
+    let mut artwork = if !track_changed {
         get_cached_track().2
     } else {
         None
     };
-    if track_changed || just_started || track.artwork_base64.is_some() {
+    if artwork.is_none() {
+        artwork = track.artwork_base64.clone();
+    }
+    if crate::browser_media::is_browser(track.app_name.as_deref(), track.bundle_id.as_deref())
+        && (track_changed || just_started || artwork.is_none())
+    {
+        if let Some(resolved) = crate::browser_media::resolve_artwork(
+            track.app_name.as_deref(),
+            track.bundle_id.as_deref(),
+            track.title.as_deref(),
+        )
+        .await
+        {
+            artwork = Some(resolved);
+        }
+    }
+    if track_changed || just_started || artwork.is_some() {
         set_cached_track(track.title.clone(), track.artist.clone(), artwork.clone());
     }
 
@@ -255,6 +268,37 @@ fn build_now_playing_script(
     script
 }
 
+fn safari_artwork_url<'a>(page_url: &str, artwork_url: &'a str) -> Option<&'a str> {
+    let page = reqwest::Url::parse(page_url).ok()?;
+    let artwork = reqwest::Url::parse(artwork_url).ok()?;
+    if page.scheme() != "https" || artwork.scheme() != "https" {
+        return None;
+    }
+    let page_host = page.host_str()?;
+    let artwork_host = artwork.host_str()?;
+    let allowed_art_hosts: &[&str] = match page_host {
+        "youtube.com" | "www.youtube.com" | "music.youtube.com" => &[
+            "youtube.com",
+            "www.youtube.com",
+            "music.youtube.com",
+            "i.ytimg.com",
+            "yt3.ggpht.com",
+            "lh3.googleusercontent.com",
+        ],
+        "open.spotify.com" => &["open.spotify.com", "i.scdn.co", "mosaic.scdn.co"],
+        "soundcloud.com" | "www.soundcloud.com" => &[
+            "soundcloud.com",
+            "www.soundcloud.com",
+            "i1.sndcdn.com",
+            "a1.sndcdn.com",
+        ],
+        _ => return None,
+    };
+    allowed_art_hosts
+        .contains(&artwork_host)
+        .then_some(artwork_url)
+}
+
 /// Get currently playing music information.
 ///
 /// On macOS this prefers MediaRemote via [mediaremote-adapter]
@@ -267,7 +311,7 @@ pub async fn get_now_playing() -> NowPlayingData {
     {
         if crate::mediaremote::is_available() {
             match crate::mediaremote::get_now_playing() {
-                Ok(Some(track)) => return now_playing_from_adapter(track),
+                Ok(Some(track)) => return now_playing_from_adapter(track).await,
                 Ok(None) => {
                     IS_PLAYING.store(false, Ordering::Relaxed);
                     WAS_PLAYING.store(false, Ordering::Relaxed);
@@ -348,9 +392,12 @@ pub async fn get_now_playing() -> NowPlayingData {
                 let artwork = if track_changed || just_started {
                     if *app_id == "music" {
                         get_music_app_artwork()
-                    } else if !parts[6].is_empty() {
-                        let art = fetch_artwork_from_url(parts[6]).await;
-                        art
+                    } else if let Some(url) = if *app_id == "safari" {
+                        safari_artwork_url(parts[3], parts[6])
+                    } else {
+                        (!parts[6].is_empty()).then_some(parts[6])
+                    } {
+                        fetch_artwork_from_url(url).await
                     } else {
                         None
                     }
@@ -609,7 +656,7 @@ pub async fn get_now_playing() -> NowPlayingData {
 #[cfg(target_os = "macos")]
 fn run_osascript(script: &str) -> Result<String, String> {
     use std::process::Command;
-    let output = Command::new("osascript")
+    let output = Command::new("/usr/bin/osascript")
         .arg("-e")
         .arg(script)
         .output()
@@ -1309,4 +1356,31 @@ pub fn setup_audio_monitoring() {
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn safari_artwork_rejects_deceptive_pages_and_private_urls() {
+        assert_eq!(
+            safari_artwork_url(
+                "https://youtube.com.evil.example/watch",
+                "http://127.0.0.1/favicon.ico"
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn safari_artwork_accepts_supported_https_origins() {
+        assert_eq!(
+            safari_artwork_url(
+                "https://music.youtube.com/watch?v=1",
+                "https://music.youtube.com/favicon.ico"
+            ),
+            Some("https://music.youtube.com/favicon.ico")
+        );
+    }
 }

@@ -121,14 +121,27 @@ pub const GROUPED_BG: Rgba = Rgba {
 /// Compact island matches the hardware notch; expanded uses a larger bottom
 /// radius so inner cards can sit concentrically (outer − inset).
 pub const COMPACT_RADIUS: f32 = 18.0;
-pub const EXPANDED_RADIUS: f32 = 24.0;
-pub const WIDGET_RADIUS: f32 = 14.0;
+pub const EXPANDED_RADIUS: f32 = 36.0;
+/// React `WidgetWrapper`: `rounded-[28px]`.
+pub const WIDGET_RADIUS: f32 = 28.0;
 pub const INNER_RADIUS: f32 = 10.0;
 pub const CONTROL_RADIUS: f32 = 8.0;
 pub const CONTENT_INSET: f32 = 12.0;
+/// React expanded pane `p-5` (files tab still uses this).
+pub const EXPANDED_PAD: f32 = 20.0;
+/// Nook tab body: one row under the notch, matching the capsule layout.
+pub const NOOK_BODY: f32 = 112.0;
+pub const NOOK_INSET: f32 = 16.0;
+pub const EXPANDED_MAX_WIDTH: f32 = 780.0;
+/// React widgets row `gap-4`.
+pub const WIDGET_GAP: f32 = 16.0;
+/// React `WidgetWrapper` padding (`1rem`).
+pub const WIDGET_PAD: f32 = 16.0;
 /// How far a row highlight bleeds back out of the card's content margin. Also
 /// the concentric gap that sets the row's own corner radius.
 pub const ROW_INSET: f32 = 6.0;
+/// React widget row chips: `rounded-[20px]`.
+pub const ROW_RADIUS: f32 = 20.0;
 
 /// A macOS built-in text style: point size, line height, and the two weights
 /// the platform pairs with it.
@@ -151,7 +164,6 @@ pub const TITLE_2: Text = Text {
     weight: FontWeight::NORMAL,
     emphasized: FontWeight::BOLD,
 };
-#[allow(dead_code)]
 pub const TITLE_3: Text = Text {
     size: 15.0,
     leading: 20.0,
@@ -192,7 +204,6 @@ pub const COMPACT_FACE: f32 = 26.0;
 /// their visible artwork is smaller.
 pub const HIT_MIN: f32 = 28.0;
 
-#[allow(dead_code)]
 pub fn parse_hex(hex: &str) -> Hsla {
     let hex = hex.trim_start_matches('#');
     if hex.len() >= 6 {

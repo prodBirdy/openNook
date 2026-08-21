@@ -111,11 +111,21 @@ const MIN_GRAB_HEIGHT: f64 = 8.0;
 fn hit_region(padding: f64) -> (f64, f64, f64, f64) {
     if let Ok(guard) = bounds_store().try_read() {
         if let Some(bounds) = *guard {
+            let y0 = bounds.y - padding;
+            let y1 = (bounds.y + bounds.height).max(MIN_GRAB_HEIGHT) + padding;
+            // Compact island is a short centred pill. A pad around that box
+            // misses Finder drags that come in along the menu bar from the
+            // sides. During a drag, take the whole top strip so click-through
+            // lifts before the cursor reaches the painted island.
+            if padding > 0.0 {
+                let (screen_width, _, _, _) = get_screen_info();
+                return (0.0, screen_width, y0.max(0.0), y1);
+            }
             return (
                 bounds.x - padding,
                 bounds.x + bounds.width + padding,
-                bounds.y - padding,
-                (bounds.y + bounds.height).max(MIN_GRAB_HEIGHT) + padding,
+                y0,
+                y1,
             );
         }
     }
@@ -206,6 +216,7 @@ fn read_mouse_logical() -> (f64, f64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::Ordering;
     use std::sync::{Mutex, MutexGuard};
 
     /// `UI_BOUNDS` is process-global, so tests that publish bounds must not run
@@ -263,5 +274,24 @@ mod tests {
         update_ui_bounds(10.0, 0.0, 100.0, 34.0);
         assert!(hit_test(20.0, 10.0));
         assert!(!hit_test(200.0, 10.0));
+    }
+
+    #[test]
+    fn finder_drag_opens_a_full_width_top_strip() {
+        let _guard = lock();
+        update_ui_bounds(790.0, 0.0, 220.0, 38.0);
+        assert!(
+            !hit_test(10.0, 10.0),
+            "idle hover stays on the painted pill"
+        );
+        super::DRAG_ACTIVE.store(true, Ordering::Relaxed);
+        assert!(
+            hit_test(10.0, 10.0),
+            "a drag along the menu bar must lift click-through"
+        );
+        assert!(hit_test(1790.0, 20.0));
+        assert!(!hit_test_exact(10.0, 10.0));
+        super::DRAG_ACTIVE.store(false, Ordering::Relaxed);
+        assert!(!hit_test(10.0, 10.0));
     }
 }

@@ -76,7 +76,7 @@ pub fn open_file(path: String) -> Result<(), String> {
 pub fn reveal_file(path: String) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
-        Command::new("open")
+        Command::new("/usr/bin/open")
             .args(["-R", &path])
             .spawn()
             .map_err(|e| e.to_string())?;

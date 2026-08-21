@@ -27,6 +27,6 @@
 	<key>NSRemindersUsageDescription</key>
 	<string>openNook shows reminders in the island and lets you mark them complete from there.</string>
 	<key>NSAppleEventsUsageDescription</key>
-	<string>openNook can skip or pause Music, Spotify, and Safari from the island if system media controls are unavailable.</string>
+	<string>openNook uses Automation to pause or skip Music, Spotify, and Safari if system media controls are unavailable, and to read the current Safari or Chrome tab URL so the island can show a YouTube thumbnail or site icon when the browser does not provide artwork.</string>
 </dict>
 </plist>

@@ -329,6 +329,16 @@ unsafe fn for_each_island_window(mut f: impl FnMut(*mut objc2::runtime::AnyObjec
     }
 }
 
+/// Re-register Finder drop types on the overlay. `setStyleMask` and
+/// `ignoresMouseEvents` both drop the list, so a drag that starts while we
+/// were click-through would otherwise never get `draggingEntered`.
+pub fn register_current_file_drops() {
+    #[cfg(target_os = "macos")]
+    unsafe {
+        for_each_island_window(|w| register_file_drops(w));
+    }
+}
+
 pub fn set_click_through_current(ignore: bool) {
     #[cfg(target_os = "macos")]
     unsafe {
@@ -464,15 +474,16 @@ fn drag_source_class() -> &'static objc2::runtime::AnyClass {
             builder.add_protocol(proto);
         }
 
-        // NSDragOperationCopy for both in-app and Finder. Returning None
-        // within the app would make a drop back on the island a no-op.
+        // NSDraggingContextOutsideApplication = 0, WithinApplication = 1.
+        // Finder is outside. Offer Copy|Move|Generic so the destination can
+        // pick; returning None for 0 was rejecting every Finder drop.
         extern "C-unwind" fn source_mask(
             _this: &NSObject,
             _cmd: Sel,
             _session: *mut AnyObject,
             _context: usize,
         ) -> usize {
-            1 // NSDragOperationCopy
+            1 | 4 | 16 // NSDragOperationCopy | Generic | Move
         }
         unsafe {
             builder.add_method(
@@ -649,7 +660,7 @@ fn ns_window(window: &Window) -> Option<*mut objc2::runtime::AnyObject> {
 pub fn take_open_settings() -> bool {
     #[cfg(target_os = "macos")]
     {
-        return OPEN_SETTINGS.swap(false, Ordering::SeqCst);
+        OPEN_SETTINGS.swap(false, Ordering::SeqCst)
     }
     #[cfg(not(target_os = "macos"))]
     false
@@ -795,6 +806,17 @@ unsafe fn observe_screen_changes() {
         name: name,
         object: std::ptr::null_mut::<AnyObject>()
     ];
+}
+
+/// Open the system camera preview (Photo Booth) for the Mirror control.
+pub fn open_mirror() {
+    #[cfg(target_os = "macos")]
+    {
+        let _ = std::process::Command::new("open")
+            .arg("-a")
+            .arg("Photo Booth")
+            .spawn();
+    }
 }
 
 /// System Settings → Appearance → *Accent color* (`NSColor.controlAccentColor`),

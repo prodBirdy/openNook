@@ -55,13 +55,18 @@ impl Island {
     fn compact_left(
         &self,
         mode: CompactMode,
-        _hovered: bool,
+        hovered: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         match mode {
-            CompactMode::Media => album_chip(&self.now_playing, cx).into_any_element(),
+            CompactMode::Media => album_chip(
+                &self.now_playing,
+                super::media::album_overlay_visible(hovered, self.album_hovered),
+                cx,
+            )
+            .into_any_element(),
             CompactMode::Agents => widgets::agents_compact_left(&self.agents, self.pixel_t),
-            CompactMode::Files => lucide("image", theme::COMPACT_FACE).into_any_element(),
+            CompactMode::Files => super::files::compact_left(&self.files),
             CompactMode::Timer => widgets::timer_compact_left(self, cx),
             CompactMode::Observe => {
                 lucide("triangle-alert", theme::COMPACT_FACE).into_any_element()
@@ -93,17 +98,20 @@ impl Island {
             }
             CompactMode::Timer => {
                 let text = self
-                    .running_timer()
-                    .or_else(|| self.timers.first())
-                    .map(|t| super::ui::format_timer(t.remaining))
-                    .unwrap_or_else(|| "0:00".into());
+                    .face_timer()
+                    .map(|t| super::ui::format_timer_compact(t.remaining))
+                    .unwrap_or_else(|| "0s".into());
                 timer_text(text, theme::BODY)
                     .min_w(px(40.))
                     .text_right()
                     .into_any_element()
             }
             CompactMode::Observe => {
-                label(self.observe.firing_count().to_string(), theme::BODY, true).into_any_element()
+                let text = match self.observe.alerts.as_slice() {
+                    [one] => one.name.clone(),
+                    _ => self.observe.firing_count().to_string(),
+                };
+                label(text, theme::BODY, true).into_any_element()
             }
             CompactMode::Onboard if hovered => div()
                 .id("github")
@@ -112,7 +120,7 @@ impl Island {
                     MouseButton::Left,
                     cx.listener(|_, _: &MouseDownEvent, _, cx| {
                         cx.stop_propagation();
-                        let _ = std::process::Command::new("open")
+                        let _ = std::process::Command::new("/usr/bin/open")
                             .arg("https://github.com/prodBirdy/openNook-gpui")
                             .spawn();
                     }),

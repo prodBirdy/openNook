@@ -1,72 +1,94 @@
-//! GPUI port of the 5×5 [Dot Matrix](https://dotmatrix.zzzzshawn.cloud/) loaders.
-//! The island uses Prism Sweep (`dotm-circular-4`) and Gate Shift (`dotm-circular-7`)
-//! at size 16, dotSize 2, speed 1.2, with bloom.
+//! GPUI port of the 3×3 [Dot Matrix](https://dotmatrix.zzzzshawn.cloud/)
+//! loaders the coding agents spin with: Drift TL (`dotm-3x3-3`), Core Echo
+//! (`dotm-3x3-6`) and Smiley Spin (`dotm-3x3-16`), each at half the upstream
+//! `speed 1.2` with bloom, one per agent by pid. Only a working agent
+//! animates: an idle one holds a flat grey cluster.
 //!
 //! Animation math follows the upstream CSS keyframes and the Swift
 //! [matrix-swift](https://github.com/mana-am/matrix-swift) TimelineView port.
 //! Embedded use in an application is permitted by the upstream license;
 //! this is not a republished component library.
 
-mod circular;
 mod engine;
+mod grid3;
 
-use engine::{bloom_level, circular_mask, Ctx, N};
+use engine::{bloom_level, Ctx, N};
 use gpui::{canvas, fill, point, prelude::*, px, Bounds, IntoElement, Pixels, Rgba, Window};
 
-/// Matches `<DotmCircular4 size={16} dotSize={2} speed={1.2} bloom />`.
-pub const SIZE: f32 = 16.0;
-pub const DOT_SIZE: f32 = 2.0;
-pub const SPEED: f32 = 1.2;
-/// Upstream keeps `dotSize` at an eighth of `size`; `element` re-derives the dot
-/// from its `size` argument so the two call sites can diverge without the gaps
-/// stretching to fill a grid of fixed-width dots.
-const DOT_RATIO: f32 = DOT_SIZE / SIZE;
-pub const COMPACT_SIZE: f32 = crate::theme::COMPACT_FACE;
-pub const WIDGET_SIZE: f32 = SIZE;
+pub use grid3::Kind;
 
-/// Prism Sweep + Gate Shift.
-const POOL: [Kind; 2] = [Kind::Circular(4), Kind::Circular(7)];
+/// Half of the `speed={1.2}` in
+/// `<Dotm3x3_N size={32} dotSize={4} speed={1.2} bloom />` — the upstream
+/// cadence reads as frantic in the notch, so the port runs it at half rate.
+pub const SPEED: f32 = 0.6;
+/// Upstream pins `dotSize` 4 in a 16px box (1px gap). Compact and the widget
+/// row both use that cluster; scaling it to the 26px notch face made 7px dots
+/// that filled the compact island.
+const DOT_RATIO: f32 = 4.0 / 16.0;
+const GAP_RATIO: f32 = 1.0 / 4.0;
+/// Idle dots sit below the 0.6 bloom threshold, so the flat cluster never glows.
+const IDLE_ALPHA: f32 = 0.45;
+/// The idle cluster drops the accent for the secondary-label grey. Only the
+/// RGB is used — `IDLE_ALPHA` sets the alpha — and only a working agent is
+/// tinted with the accent.
+const IDLE_TINT: Rgba = crate::theme::SECONDARY_LABEL;
+/// Upstream `size={16}` / `dotSize={4}` cluster (14px span), not the 26px face.
+pub const COMPACT_SIZE: f32 = 16.0;
+pub const WIDGET_SIZE: f32 = 16.0;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Kind {
-    Circular(u8),
-}
+const POOL: [Kind; 3] = [Kind::DriftTl, Kind::CoreEcho, Kind::SmileySpin];
 
 /// Deterministic pick: the same seed always lands on the same loader.
 pub fn pick(seed: u32) -> Kind {
     POOL[(seed as usize) % POOL.len()]
 }
 
+/// `pattern="full"`, so every in-bounds cell of the grid is lit. An idle agent
+/// holds every cell at `IDLE_ALPHA` — no animation, no bright cell, no bloom —
+/// so a working agent is the only loader that moves or glows.
 pub fn cell_opacity(kind: Kind, row: i32, col: i32, now: f32, working: bool) -> f32 {
-    if !circular_mask(row, col) {
+    if !(0..N).contains(&row) || !(0..N).contains(&col) {
         return 0.0;
     }
-    let ctx = Ctx { row, col };
-    match kind {
-        Kind::Circular(n) => circular::opacity(n, &ctx, now, working),
+    if !working {
+        return IDLE_ALPHA;
     }
-    .clamp(0.0, 1.0)
+    grid3::opacity(kind, &Ctx { row, col }, now).clamp(0.0, 1.0)
 }
 
-/// `gap = max(1, floor((size - dotSize * 5) / 4))`, span follows the dots.
-pub fn layout(size: f32, dot: f32) -> (f32, f32, f32) {
-    let gap = ((size - dot * N as f32) / (N as f32 - 1.0))
-        .floor()
-        .max(1.0);
-    let span = dot * N as f32 + gap * (N as f32 - 1.0);
-    (dot, gap, span)
+/// Geometry of a loader on one face: dot diameter, gap, and total span.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DotLayout {
+    pub dot: f32,
+    pub gap: f32,
+    pub span: f32,
+}
+
+/// [`DotLayout`] for a face of `size`.
+pub fn layout(size: f32) -> DotLayout {
+    let dot = (size * DOT_RATIO).round().max(1.0);
+    let gap = (dot * GAP_RATIO).round().max(1.0);
+    DotLayout {
+        dot,
+        gap,
+        span: dot * N as f32 + gap * (N as f32 - 1.0),
+    }
 }
 
 pub fn element(kind: Kind, now: f32, working: bool, size: f32) -> impl IntoElement {
-    let (dot, gap, _) = layout(size, (size * DOT_RATIO).round().max(1.0));
+    let lay = layout(size);
     let now = now * SPEED;
     // Resolved per frame, not cached, so changing the accent in System Settings
     // recolors the loader without a restart.
-    let tint = crate::theme::accent();
+    let tint = if working {
+        crate::theme::accent()
+    } else {
+        IDLE_TINT
+    };
     canvas(
         |bounds, _, _| bounds,
         move |bounds, _, window, _| {
-            paint_grid(window, bounds, kind, now, working, dot, gap, tint);
+            paint_grid(window, bounds, kind, now, working, lay, tint);
         },
     )
     .size(px(size))
@@ -79,29 +101,24 @@ fn paint_grid(
     kind: Kind,
     now: f32,
     working: bool,
-    dot: f32,
-    gap: f32,
+    lay: DotLayout,
     tint: Rgba,
 ) {
     let ox: f32 = bounds.origin.x.into();
     let oy: f32 = bounds.origin.y.into();
     let bw: f32 = bounds.size.width.into();
     let bh: f32 = bounds.size.height.into();
-    let span = dot * N as f32 + gap * (N as f32 - 1.0);
-    let ox = ox + (bw - span).max(0.0) * 0.5;
-    let oy = oy + (bh - span).max(0.0) * 0.5;
-    let mut cells = Vec::with_capacity(21);
+    let ox = ox + (bw - lay.span).max(0.0) * 0.5;
+    let oy = oy + (bh - lay.span).max(0.0) * 0.5;
+    let mut cells = Vec::with_capacity((N * N) as usize);
     for row in 0..N {
         for col in 0..N {
-            if !circular_mask(row, col) {
-                continue;
-            }
             let a = cell_opacity(kind, row, col, now, working);
             if a < 0.01 {
                 continue;
             }
-            let x = ox + col as f32 * (dot + gap);
-            let y = oy + row as f32 * (dot + gap);
+            let x = ox + col as f32 * (lay.dot + lay.gap);
+            let y = oy + row as f32 * (lay.dot + lay.gap);
             cells.push((x, y, a, bloom_level(a)));
         }
     }
@@ -109,13 +126,13 @@ fn paint_grid(
         if level <= 0.0 {
             continue;
         }
-        paint_glow(window, x, y, dot, level, tint);
+        paint_glow(window, x, y, lay.dot, level, tint);
     }
-    let radius = px(dot * 0.5);
+    let radius = px(lay.dot * 0.5);
     for &(x, y, a, _) in &cells {
         window.paint_quad(
             fill(
-                Bounds::from_corners(point(px(x), px(y)), point(px(x + dot), px(y + dot))),
+                Bounds::from_corners(point(px(x), px(y)), point(px(x + lay.dot), px(y + lay.dot))),
                 alpha(tint, a),
             )
             .corner_radii(radius),
@@ -159,66 +176,96 @@ mod tests {
     use super::*;
 
     #[test]
-    fn pick_is_circular_4_and_7() {
-        assert_eq!(pick(0), Kind::Circular(4));
-        assert_eq!(pick(1), Kind::Circular(7));
-        assert_eq!(pick(2), Kind::Circular(4));
+    fn pick_cycles_the_trio() {
+        assert_eq!(pick(0), Kind::DriftTl);
+        assert_eq!(pick(1), Kind::CoreEcho);
+        assert_eq!(pick(2), Kind::SmileySpin);
         assert_eq!(pick(0), pick(POOL.len() as u32));
     }
 
-    #[test]
-    fn working_differs_from_idle() {
-        let idle = cell_opacity(Kind::Circular(4), 1, 4, 0.4, false);
-        let work = cell_opacity(Kind::Circular(4), 1, 4, 0.4, true);
-        assert!((idle - work).abs() > 0.01);
+    fn frame(kind: Kind, now: f32, working: bool) -> Vec<f32> {
+        (0..N)
+            .flat_map(|row| (0..N).map(move |col| (row, col)))
+            .map(|(row, col)| cell_opacity(kind, row, col, now, working))
+            .collect()
     }
 
     #[test]
-    fn corners_are_off_for_every_loader() {
-        for seed in 0..POOL.len() as u32 {
-            let kind = pick(seed);
-            for (row, col) in [(0, 0), (0, 4), (4, 0), (4, 4)] {
-                assert_eq!(
-                    cell_opacity(kind, row, col, 0.5, true),
-                    0.0,
-                    "{kind:?} corner ({row},{col})"
-                );
+    fn idle_is_flat_and_never_blooms() {
+        for kind in POOL {
+            for t in [0.0, 0.4, 2.7] {
+                let idle = frame(kind, t, false);
+                assert!(idle.iter().all(|&a| a == IDLE_ALPHA), "{kind:?} {idle:?}");
+                assert_eq!(engine::bloom_level(IDLE_ALPHA), 0.0);
             }
-            assert!(cell_opacity(kind, 2, 2, 0.5, true) >= 0.0);
+            let work = frame(kind, 0.4, true);
+            assert!(
+                work.iter().any(|&a| (a - IDLE_ALPHA).abs() > 0.01),
+                "{kind:?} working {work:?}"
+            );
         }
     }
 
     #[test]
-    fn layout_matches_size_32_dot_4() {
-        let (dot, gap, span) = layout(32.0, 4.0);
-        assert_eq!(dot, 4.0);
-        assert_eq!(gap, 3.0);
-        assert_eq!(span, 32.0);
+    fn working_animates_over_time() {
+        for kind in POOL {
+            let a = frame(kind, 0.1, true);
+            let b = frame(kind, 0.35, true);
+            assert!(
+                a.iter().zip(&b).any(|(x, y)| (x - y).abs() > 0.01),
+                "{kind:?} {a:?} {b:?}"
+            );
+        }
     }
 
     #[test]
-    fn dot_scales_with_size() {
-        assert_eq!((SIZE * DOT_RATIO).round(), DOT_SIZE);
-        assert_eq!((32.0 * DOT_RATIO).round(), 4.0);
-        // size 16 floors the gap to 1, so the grid paints a 14px span.
-        let (dot, gap, span) = layout(SIZE, (SIZE * DOT_RATIO).round().max(1.0));
-        assert_eq!((dot, gap, span), (2.0, 1.0, 14.0));
+    fn out_of_bounds_cells_are_off() {
+        for kind in POOL {
+            assert_eq!(cell_opacity(kind, N, 0, 0.5, true), 0.0);
+            assert_eq!(cell_opacity(kind, 0, -1, 0.5, true), 0.0);
+        }
+    }
+
+    #[test]
+    fn layout_keeps_the_upstream_cluster() {
+        // Compact and the widget row share the upstream `dotSize 4` / `gap 1`.
+        assert_eq!(
+            layout(COMPACT_SIZE),
+            DotLayout {
+                dot: 4.0,
+                gap: 1.0,
+                span: 14.0
+            }
+        );
+        assert_eq!(
+            layout(WIDGET_SIZE),
+            DotLayout {
+                dot: 4.0,
+                gap: 1.0,
+                span: 14.0
+            }
+        );
+        // Never collapses to a zero gap on tiny faces.
+        assert_eq!(
+            layout(2.0),
+            DotLayout {
+                dot: 1.0,
+                gap: 1.0,
+                span: 5.0
+            }
+        );
     }
 
     #[test]
     fn every_loader_stays_in_unit_interval() {
-        for seed in 0..POOL.len() as u32 {
-            let kind = pick(seed);
+        for kind in POOL {
             for working in [false, true] {
                 for t in [0.0, 0.37, 1.1, 3.3] {
-                    for row in 0..5 {
-                        for col in 0..5 {
-                            let a = cell_opacity(kind, row, col, t, working);
-                            assert!(
-                                a.is_finite() && (0.0..=1.0).contains(&a),
-                                "{kind:?} ({row},{col}) t={t} working={working} -> {a}"
-                            );
-                        }
+                    for (i, a) in frame(kind, t, working).iter().enumerate() {
+                        assert!(
+                            a.is_finite() && (0.0..=1.0).contains(a),
+                            "{kind:?} cell {i} t={t} working={working} -> {a}"
+                        );
                     }
                 }
             }

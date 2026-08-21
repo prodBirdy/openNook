@@ -81,6 +81,49 @@ impl Default for AppSettings {
 static WINDOW_SETTINGS: std::sync::OnceLock<RwLock<WindowSettings>> = std::sync::OnceLock::new();
 static APP_SETTINGS: std::sync::OnceLock<RwLock<AppSettings>> = std::sync::OnceLock::new();
 
+#[cfg(target_os = "macos")]
+const METRICS_TOKEN_SERVICE: &str = "com.prodBirdy.openNook.metrics";
+#[cfg(target_os = "macos")]
+const METRICS_TOKEN_ACCOUNT: &str = "warmup-bearer";
+
+#[cfg(target_os = "macos")]
+fn load_metrics_token() -> Option<String> {
+    security_framework::passwords::get_generic_password(
+        METRICS_TOKEN_SERVICE,
+        METRICS_TOKEN_ACCOUNT,
+    )
+    .ok()
+    .and_then(|bytes| String::from_utf8(bytes).ok())
+}
+
+#[cfg(target_os = "macos")]
+fn store_metrics_token(token: &str) -> Result<(), String> {
+    if token.is_empty() {
+        let _ = security_framework::passwords::delete_generic_password(
+            METRICS_TOKEN_SERVICE,
+            METRICS_TOKEN_ACCOUNT,
+        );
+        Ok(())
+    } else {
+        security_framework::passwords::set_generic_password(
+            METRICS_TOKEN_SERVICE,
+            METRICS_TOKEN_ACCOUNT,
+            token.as_bytes(),
+        )
+        .map_err(|err| err.to_string())
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn load_metrics_token() -> Option<String> {
+    None
+}
+
+#[cfg(not(target_os = "macos"))]
+fn store_metrics_token(_token: &str) -> Result<(), String> {
+    Ok(())
+}
+
 fn window_store() -> &'static RwLock<WindowSettings> {
     WINDOW_SETTINGS.get_or_init(|| RwLock::new(WindowSettings::default()))
 }
@@ -120,10 +163,25 @@ pub fn update_app_settings(settings: AppSettings) {
     persist();
 }
 
+/// Read-modify-write the app settings in one step.
+pub fn tweak_app_settings(tweak: impl FnOnce(&mut AppSettings)) {
+    let mut settings = get_app_settings();
+    tweak(&mut settings);
+    update_app_settings(settings);
+}
+
 pub fn load_from_db() {
     if let Some(json) = database::get_setting("app_settings") {
         if let Ok(settings) = serde_json::from_str::<AppSettings>(&json) {
             let mut settings = settings;
+            let legacy_token = !settings.observe.metrics_token.is_empty();
+            if legacy_token {
+                if let Err(err) = store_metrics_token(&settings.observe.metrics_token) {
+                    log::warn!("failed to migrate metrics token to Keychain: {err}");
+                }
+            } else if let Some(token) = load_metrics_token() {
+                settings.observe.metrics_token = token;
+            }
             if settings.window.non_notch_mode {
                 settings.non_notch_mode = true;
             }
@@ -135,7 +193,7 @@ pub fn load_from_db() {
             if let Ok(mut win) = window_store().write() {
                 *win = settings.window;
             }
-            if filled_url {
+            if filled_url || legacy_token {
                 persist();
             }
             return;
@@ -170,8 +228,15 @@ pub fn mark_onboarded() {
 
 fn persist() {
     let settings = get_app_settings();
+    #[cfg(target_os = "macos")]
+    if let Err(err) = store_metrics_token(&settings.observe.metrics_token) {
+        log::warn!("failed to persist metrics token to Keychain: {err}");
+        return;
+    }
     if let Ok(json) = serde_json::to_string(&settings) {
-        let _ = database::set_setting("app_settings", &json);
+        if let Err(err) = database::set_setting("app_settings", &json) {
+            log::warn!("failed to persist app settings: {err}");
+        }
     }
 }
 
@@ -195,5 +260,19 @@ mod tests {
         assert!(parsed.show_observe);
         assert!(parsed.liquid_glass_mode);
         assert!(!parsed.non_notch_mode);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn serialized_settings_omit_the_metrics_token() {
+        let mut settings = AppSettings::default();
+        settings.observe.metrics_token = "secret-value".into();
+        let json = serde_json::to_string(&settings).unwrap();
+        assert!(!json.contains("secret-value"));
+        assert!(!json.contains("metrics_token"));
+
+        let legacy: AppSettings =
+            serde_json::from_str(r#"{"observe":{"metrics_token":"legacy-secret"}}"#).unwrap();
+        assert_eq!(legacy.observe.metrics_token, "legacy-secret");
     }
 }

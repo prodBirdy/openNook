@@ -15,6 +15,9 @@ use gpui::{
 use nook_core::models::NowPlayingData;
 use std::sync::{Mutex, OnceLock};
 
+const MAX_ARTWORK_BYTES: usize = 5 * 1024 * 1024;
+const MAX_ARTWORK_DIMENSION: u32 = 4096;
+
 const COMPACT_ART: f32 = theme::COMPACT_FACE;
 const COMPACT_ART_RADIUS: f32 = 5.0;
 const ART: f32 = MEDIA_ART;
@@ -33,7 +36,18 @@ const VIS_DEFAULT: Rgba = Rgba {
     a: 1.0,
 };
 
-pub(super) fn album_chip(np: &NowPlayingData, cx: &mut Context<Island>) -> impl IntoElement {
+/// Compact play/pause overlay. GPUI `.hover()` sticks after the full-screen
+/// overlay goes click-through (MouseLeave never arrives), so this is the
+/// intersection of the polled island hover pad and the chip's `on_hover`.
+pub(super) fn album_overlay_visible(island_hovered: bool, cover_hovered: bool) -> bool {
+    island_hovered && cover_hovered
+}
+
+pub(super) fn album_chip(
+    np: &NowPlayingData,
+    show_overlay: bool,
+    cx: &mut Context<Island>,
+) -> impl IntoElement {
     let playing = np.is_playing;
     let art = np
         .artwork_base64
@@ -67,6 +81,7 @@ pub(super) fn album_chip(np: &NowPlayingData, cx: &mut Context<Island>) -> impl 
         .child(art.unwrap_or_else(placeholder_art))
         .child(
             div()
+                .id("album-overlay")
                 .absolute()
                 .inset_0()
                 .rounded(px(COMPACT_ART_RADIUS))
@@ -74,8 +89,13 @@ pub(super) fn album_chip(np: &NowPlayingData, cx: &mut Context<Island>) -> impl 
                 .flex()
                 .items_center()
                 .justify_center()
-                .opacity(0.)
-                .hover(|s| s.opacity(1.))
+                .opacity(if show_overlay { 1. } else { 0. })
+                .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                    if this.album_hovered != *hovered {
+                        this.album_hovered = *hovered;
+                        cx.notify();
+                    }
+                }))
                 .when(!playing, |d| d.pl(px(1.)))
                 .child(lucide_color(overlay_icon, 14.0, rgb(0xffffff))),
         )
@@ -98,11 +118,7 @@ fn placeholder_art() -> AnyElement {
 }
 
 fn artwork_element(b64: &str, size: f32, radius: f32) -> Option<AnyElement> {
-    use base64::Engine;
-    let bytes = base64::engine::general_purpose::STANDARD.decode(b64).ok()?;
-    if bytes.is_empty() {
-        return None;
-    }
+    let bytes = artwork_bytes(b64)?;
     let format = if bytes.len() >= 8 && bytes.starts_with(&[0x89, b'P', b'N', b'G']) {
         gpui::ImageFormat::Png
     } else {
@@ -119,6 +135,32 @@ fn artwork_element(b64: &str, size: f32, radius: f32) -> Option<AnyElement> {
             .object_fit(gpui::ObjectFit::Fill)
             .into_any_element(),
     )
+}
+
+fn artwork_bytes(b64: &str) -> Option<Vec<u8>> {
+    use base64::Engine;
+    use std::io::Cursor;
+
+    if b64.len() > MAX_ARTWORK_BYTES.div_ceil(3) * 4 {
+        return None;
+    }
+    let bytes = base64::engine::general_purpose::STANDARD.decode(b64).ok()?;
+    if bytes.is_empty() || bytes.len() > MAX_ARTWORK_BYTES {
+        return None;
+    }
+    let (width, height) = image::ImageReader::new(Cursor::new(bytes.as_slice()))
+        .with_guessed_format()
+        .ok()?
+        .into_dimensions()
+        .ok()?;
+    if width > MAX_ARTWORK_DIMENSION
+        || height > MAX_ARTWORK_DIMENSION
+        || u64::from(width) * u64::from(height)
+            > u64::from(MAX_ARTWORK_DIMENSION) * u64::from(MAX_ARTWORK_DIMENSION)
+    {
+        return None;
+    }
+    Some(bytes)
 }
 
 pub(super) fn visualizer(levels: &[f64], playing: bool, color: Option<Rgba>) -> impl IntoElement {
@@ -148,6 +190,169 @@ pub(super) fn visualizer(levels: &[f64], playing: bool, color: Option<Rgba>) -> 
     row
 }
 
+const NOOK_ART: f32 = 84.0;
+const NOOK_ART_RADIUS: f32 = 14.0;
+const MUSIC_BADGE: Rgba = Rgba {
+    r: 0.988,
+    g: 0.235,
+    b: 0.267,
+    a: 1.0,
+};
+
+/// Horizontal Now Playing strip for the Nook tab (art + metadata + transport).
+pub(crate) fn nook_media_pane(np: &NowPlayingData, cx: &mut Context<Island>) -> impl IntoElement {
+    let title = np.title.clone().unwrap_or_else(|| "Unknown Title".into());
+    let artist = np.artist.clone().unwrap_or_else(|| "Unknown Artist".into());
+    let album = np.album.clone().filter(|s| !s.is_empty());
+    let playing = np.is_playing;
+    let art = np
+        .artwork_base64
+        .as_deref()
+        .and_then(|b64| artwork_element(b64, NOOK_ART, NOOK_ART_RADIUS));
+
+    div()
+        .id("nook-media")
+        .flex_shrink_0()
+        .h_full()
+        .flex()
+        .items_center()
+        .gap(px(14.))
+        .pr(px(4.))
+        .child(
+            div()
+                .relative()
+                .size(px(NOOK_ART))
+                .flex_shrink_0()
+                .rounded(px(NOOK_ART_RADIUS))
+                .overflow_hidden()
+                .shadow_md()
+                .bg(linear_gradient(
+                    135.0,
+                    linear_color_stop(rgb(0x2a2a2a), 0.0),
+                    linear_color_stop(rgb(0x1a1a1a), 1.0),
+                ))
+                .child(art.unwrap_or_else(|| {
+                    div()
+                        .size(px(NOOK_ART))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(lucide_color("music", 28.0, rgba(0xffffff66)))
+                        .into_any_element()
+                }))
+                .child(
+                    div()
+                        .absolute()
+                        .right(px(6.))
+                        .bottom(px(6.))
+                        .size(px(22.))
+                        .rounded(px(6.))
+                        .bg(MUSIC_BADGE)
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(lucide_color("music", 11.0, rgb(0xffffff))),
+                ),
+        )
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .justify_center()
+                .min_w(px(0.))
+                .w(px(148.))
+                .overflow_hidden()
+                .child(slide_label(title, theme::TITLE_3, true).w_full())
+                .when_some(album, |d, album| {
+                    d.child(slide_label(album, theme::CALLOUT, false).w_full())
+                })
+                .child(slide_label(artist, theme::CALLOUT, false).w_full())
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(18.))
+                        .mt(px(8.))
+                        .child(nook_skip(
+                            "skip-back",
+                            "nook-skip-back",
+                            cx,
+                            |_, _, _| {
+                                nook_core::runtime().spawn(async {
+                                    let _ = nook_core::audio::media_previous_track().await;
+                                });
+                            },
+                        ))
+                        .child(nook_play(playing, cx))
+                        .child(nook_skip(
+                            "skip-forward",
+                            "nook-skip-fwd",
+                            cx,
+                            |_, _, _| {
+                                nook_core::runtime().spawn(async {
+                                    let _ = nook_core::audio::media_next_track().await;
+                                });
+                            },
+                        )),
+                ),
+        )
+}
+
+fn nook_skip(
+    icon: &'static str,
+    elem_id: &'static str,
+    cx: &mut Context<Island>,
+    on_click: impl Fn(&mut Island, &MouseDownEvent, &mut Context<Island>) + 'static,
+) -> impl IntoElement {
+    div()
+        .id(elem_id)
+        .size(px(22.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .opacity(0.9)
+        .hover(|s| s.opacity(1.0))
+        .active(|s| s.opacity(0.75))
+        .cursor(CursorStyle::PointingHand)
+        .child(lucide_color(icon, 16.0, rgb(0xffffff)))
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                cx.stop_propagation();
+                on_click(this, event, cx);
+            }),
+        )
+}
+
+fn nook_play(playing: bool, cx: &mut Context<Island>) -> impl IntoElement {
+    div()
+        .id("nook-playpause")
+        .size(px(22.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .hover(|s| s.opacity(0.85))
+        .active(|s| s.opacity(0.7))
+        .cursor(CursorStyle::PointingHand)
+        .child(lucide_color(
+            if playing { "pause" } else { "play" },
+            16.0,
+            rgb(0xffffff),
+        ))
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                cx.stop_propagation();
+                this.now_playing.is_playing = !this.now_playing.is_playing;
+                cx.notify();
+                nook_core::runtime().spawn(async {
+                    let _ = nook_core::audio::media_play_pause().await;
+                });
+            }),
+        )
+}
+
+#[allow(dead_code)]
 pub(crate) fn media_card(np: &NowPlayingData, cx: &mut Context<Island>) -> impl IntoElement {
     let title = np.title.clone().unwrap_or_else(|| "Unknown Title".into());
     let artist = np.artist.clone().unwrap_or_else(|| "Unknown Artist".into());
@@ -167,9 +372,11 @@ pub(crate) fn media_card(np: &NowPlayingData, cx: &mut Context<Island>) -> impl 
 
     let header = ART + theme::CONTENT_INSET + TITLE_COL;
     let transport = theme::HIT_MIN + SKIP_GAP + PLAY + SKIP_GAP + theme::HIT_MIN;
-    let card_w = theme::CONTENT_INSET * 2.0 + header.max(transport);
+    let card_w =
+        (theme::WIDGET_PAD * 2.0 + header.max(transport)).max(super::ui::WIDGET_CARD_WIDTH);
 
     card_chrome(card_w)
+        .gap(px(12.))
         .child(
             div()
                 .flex()
@@ -398,24 +605,27 @@ fn format_time(seconds: f64) -> String {
 
 pub(crate) fn visualizer_color_from_art(artwork_base64: Option<&str>) -> Option<Rgba> {
     let b64 = artwork_base64?;
-    static CACHE: OnceLock<Mutex<(String, Option<Rgba>)>> = OnceLock::new();
-    let cache = CACHE.get_or_init(|| Mutex::new((String::new(), None)));
+    use std::hash::{DefaultHasher, Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    b64.hash(&mut hasher);
+    let key = hasher.finish();
+    static CACHE: OnceLock<Mutex<(u64, Option<Rgba>)>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new((0, None)));
     if let Ok(guard) = cache.lock() {
-        if guard.0 == b64 {
+        if guard.0 == key {
             return guard.1;
         }
     }
     let color = sample_dominant_color(b64);
     if let Ok(mut guard) = cache.lock() {
-        *guard = (b64.to_string(), color);
+        *guard = (key, color);
     }
     color
 }
 
 fn sample_dominant_color(b64: &str) -> Option<Rgba> {
-    use base64::Engine;
     use image::GenericImageView;
-    let bytes = base64::engine::general_purpose::STANDARD.decode(b64).ok()?;
+    let bytes = artwork_bytes(b64)?;
     let img = image::load_from_memory(&bytes).ok()?.thumbnail(32, 32);
     let mut r_acc = 0u64;
     let mut g_acc = 0u64;
@@ -435,7 +645,7 @@ fn sample_dominant_color(b64: &str) -> Option<Rgba> {
         b_all += b as u64;
         n_all += 1;
         let brightness = (r as u16 + g as u16 + b as u16) / 3;
-        if brightness < 20 || brightness > 230 {
+        if !(20..=230).contains(&brightness) {
             continue;
         }
         r_acc += r as u64;
@@ -457,4 +667,33 @@ fn sample_dominant_color(b64: &str) -> Option<Rgba> {
         b: (b / count) as f32 / 255.0,
         a: 1.0,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn oversized_artwork_dimensions_are_rejected_before_decode() {
+        use base64::Engine;
+        use std::io::Cursor;
+
+        let image = image::RgbaImage::new(MAX_ARTWORK_DIMENSION + 1, 1);
+        let mut encoded = Cursor::new(Vec::new());
+        image
+            .write_to(&mut encoded, image::ImageFormat::Png)
+            .unwrap();
+        let b64 = base64::engine::general_purpose::STANDARD.encode(encoded.into_inner());
+        assert!(artwork_bytes(&b64).is_none());
+    }
+
+    #[test]
+    fn compact_play_overlay_hides_when_island_hover_ends() {
+        // Cover hover stays true: the overlay window goes click-through
+        // on leave, so GPUI never delivers MouseLeave.
+        assert!(!album_overlay_visible(false, true));
+        assert!(!album_overlay_visible(true, false));
+        assert!(!album_overlay_visible(false, false));
+        assert!(album_overlay_visible(true, true));
+    }
 }

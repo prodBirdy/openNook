@@ -47,6 +47,7 @@ pub struct AdapterTrack {
     pub elapsed_time: Option<f64>,
     pub is_playing: bool,
     pub app_name: Option<String>,
+    pub bundle_id: Option<String>,
 }
 
 enum Backend {
@@ -56,7 +57,8 @@ enum Backend {
         script: PathBuf,
         framework: PathBuf,
     },
-    /// Homebrew / PATH `media-control`, which wraps the same adapter.
+    /// Fixed Homebrew `media-control` path for debug builds.
+    #[cfg(debug_assertions)]
     MediaControl { bin: PathBuf },
 }
 
@@ -71,26 +73,38 @@ pub fn is_available() -> bool {
 }
 
 fn discover() -> Option<Backend> {
-    if let Some(backend) = from_env() {
-        log::info!("MediaRemote adapter from environment");
-        return Some(backend);
-    }
     if let Some(backend) = from_bundle_resources() {
         log::info!("MediaRemote adapter from app bundle");
         return Some(backend);
     }
+    development_backend()
+}
+
+#[cfg(debug_assertions)]
+fn development_backend() -> Option<Backend> {
+    if let Some(backend) = from_env() {
+        log::info!("MediaRemote adapter from environment (debug build)");
+        return Some(backend);
+    }
     if let Some(backend) = from_third_party() {
-        log::info!("MediaRemote adapter from third_party build");
+        log::info!("MediaRemote adapter from workspace (debug build)");
         return Some(backend);
     }
     if let Some(bin) = find_media_control() {
-        log::info!("MediaRemote via media-control at {}", bin.display());
+        log::info!("MediaRemote debug fallback at {}", bin.display());
         return Some(Backend::MediaControl { bin });
     }
     log::info!("MediaRemote adapter not found; AppleScript fallback will be used");
     None
 }
 
+#[cfg(not(debug_assertions))]
+fn development_backend() -> Option<Backend> {
+    log::info!("Bundled MediaRemote adapter not found; AppleScript fallback will be used");
+    None
+}
+
+#[cfg(debug_assertions)]
 fn from_env() -> Option<Backend> {
     let script = std::env::var_os("MEDIAREMOTE_ADAPTER_SCRIPT").map(PathBuf::from)?;
     let framework = std::env::var_os("MEDIAREMOTE_ADAPTER_FRAMEWORK").map(PathBuf::from)?;
@@ -108,47 +122,15 @@ fn from_bundle_resources() -> Option<Backend> {
     )
 }
 
+#[cfg(debug_assertions)]
 fn from_third_party() -> Option<Backend> {
-    for root in adapter_search_roots() {
-        let candidate = root.join("third_party/mediaremote-adapter");
-        if let Some(backend) = adapter_backend(
-            candidate.join("bin/mediaremote-adapter.pl"),
-            candidate.join("build/MediaRemoteAdapter.framework"),
-        ) {
-            return Some(backend);
-        }
-    }
-    None
-}
-
-fn adapter_search_roots() -> Vec<PathBuf> {
-    let mut roots = Vec::new();
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    if let Some(workspace) = manifest.parent().and_then(|p| p.parent()) {
-        roots.push(workspace.to_path_buf());
-    }
-    if let Ok(cwd) = std::env::current_dir() {
-        roots.push(cwd.clone());
-        let mut cur = cwd;
-        for _ in 0..6 {
-            if let Some(parent) = cur.parent() {
-                cur = parent.to_path_buf();
-                roots.push(cur.clone());
-            }
-        }
-    }
-    if let Ok(exe) = std::env::current_exe() {
-        let mut cur = exe;
-        for _ in 0..8 {
-            if let Some(parent) = cur.parent() {
-                cur = parent.to_path_buf();
-                roots.push(cur.clone());
-            }
-        }
-    }
-    roots.sort();
-    roots.dedup();
-    roots
+    let workspace = manifest.parent()?.parent()?;
+    let candidate = workspace.join("third_party/mediaremote-adapter");
+    adapter_backend(
+        candidate.join("bin/mediaremote-adapter.pl"),
+        candidate.join("build/MediaRemoteAdapter.framework"),
+    )
 }
 
 fn adapter_backend(script: PathBuf, framework: PathBuf) -> Option<Backend> {
@@ -183,6 +165,7 @@ fn abs_if_exists(path: &Path) -> Option<PathBuf> {
     }
 }
 
+#[cfg(debug_assertions)]
 fn find_media_control() -> Option<PathBuf> {
     const CANDIDATES: &[&str] = &[
         "/opt/homebrew/bin/media-control",
@@ -192,14 +175,6 @@ fn find_media_control() -> Option<PathBuf> {
         let p = PathBuf::from(path);
         if p.is_file() {
             return Some(p);
-        }
-    }
-    if let Some(paths) = std::env::var_os("PATH") {
-        for dir in std::env::split_paths(&paths) {
-            let p = dir.join("media-control");
-            if p.is_file() {
-                return Some(p);
-            }
         }
     }
     None
@@ -217,6 +192,7 @@ fn run(args: &[&str]) -> Result<String, String> {
             cmd.arg(script).arg(framework);
             cmd
         }
+        #[cfg(debug_assertions)]
         Backend::MediaControl { bin } => Command::new(bin),
     };
     cmd.args(args);
@@ -246,6 +222,7 @@ pub fn seek_seconds(position: f64) -> Result<(), String> {
         return Err("seek position must be a positive number".into());
     }
     match backend() {
+        #[cfg(debug_assertions)]
         Some(Backend::MediaControl { .. }) => {
             let _ = run(&["seek", &format!("{position:.3}")])?;
         }
@@ -261,6 +238,7 @@ pub fn seek_seconds(position: f64) -> Result<(), String> {
 /// `adapter_send` with an `MRACommand` id.
 pub fn send(command: MraCommand) -> Result<(), String> {
     match backend() {
+        #[cfg(debug_assertions)]
         Some(Backend::MediaControl { .. }) => {
             let _ = run(&[media_control_name(command)])?;
         }
@@ -272,6 +250,7 @@ pub fn send(command: MraCommand) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(debug_assertions)]
 fn media_control_name(command: MraCommand) -> &'static str {
     match command {
         MraCommand::Play => "play",
@@ -305,11 +284,15 @@ fn parse_get_output(stdout: &str) -> Result<Option<AdapterTrack>, String> {
         .as_object()
         .ok_or_else(|| "MediaRemote get did not return an object".to_string())?;
     let title = json_string(obj.get("title"));
-    if title.as_ref().map_or(true, |t| t.is_empty()) {
+    if title.as_ref().is_none_or(|t| t.is_empty()) {
         return Ok(None);
     }
     let bundle = json_string(obj.get("bundleIdentifier"));
     let parent = json_string(obj.get("parentApplicationBundleIdentifier"));
+    let bundle_id = parent
+        .clone()
+        .filter(|p| !p.is_empty())
+        .or_else(|| bundle.clone());
     Ok(Some(AdapterTrack {
         title,
         artist: json_string(obj.get("artist")),
@@ -320,6 +303,7 @@ fn parse_get_output(stdout: &str) -> Result<Option<AdapterTrack>, String> {
             .or_else(|| json_f64(obj.get("elapsedTime"))),
         is_playing: json_bool(obj.get("playing")).unwrap_or(false),
         app_name: app_name_from_bundle(bundle.as_deref(), parent.as_deref()),
+        bundle_id,
     }))
 }
 
@@ -429,6 +413,7 @@ mod tests {
         assert_eq!(track.elapsed_time, Some(13.5));
         assert!(track.is_playing);
         assert_eq!(track.app_name.as_deref(), Some("Spotify"));
+        assert_eq!(track.bundle_id.as_deref(), Some("com.spotify.client"));
         assert_eq!(track.artwork_base64.as_deref(), Some("abc"));
     }
 
@@ -451,6 +436,12 @@ mod tests {
         assert_eq!(MraCommand::TogglePlayPause as i32, 2);
         assert_eq!(MraCommand::NextTrack as i32, 4);
         assert_eq!(MraCommand::PreviousTrack as i32, 5);
+    }
+
+    #[cfg(not(debug_assertions))]
+    #[test]
+    fn release_build_has_no_ambient_backend_fallback() {
+        assert!(development_backend().is_none());
     }
 
     #[test]

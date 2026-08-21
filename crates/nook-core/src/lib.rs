@@ -5,6 +5,7 @@
 
 pub mod agents;
 pub mod audio;
+pub mod browser_media;
 pub mod calendar;
 pub mod database;
 pub mod files;

@@ -36,7 +36,7 @@ pub(super) fn island_chrome(
                 theme::COMPACT_RADIUS
             }
             .min(h * 0.5);
-            let k = 0.552_284_75;
+            let k = 0.552_284_8;
             let p = |x: f32, y: f32| point(px(ox + x), px(oy + y));
             let cubic = |path: &mut PathBuilder, to: (f32, f32), c1: (f32, f32), c2: (f32, f32)| {
                 path.cubic_bezier_to(p(to.0, to.1), p(c1.0, c1.1), p(c2.0, c2.1));

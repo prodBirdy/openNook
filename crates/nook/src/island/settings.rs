@@ -13,6 +13,14 @@ use std::sync::atomic::{AtomicU8, Ordering};
 /// not dump them back on Appearance.
 static LAST_PANE: AtomicU8 = AtomicU8::new(0);
 
+fn token_text(token: &str, revealed: bool) -> String {
+    if revealed {
+        token.to_string()
+    } else {
+        "••••••••".into()
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 enum SettingsPane {
@@ -38,6 +46,7 @@ pub(super) struct SettingsView {
     query_focus: FocusHandle,
     url_draft: String,
     token_draft: String,
+    token_revealed: bool,
     query_draft: String,
     catalog: Vec<String>,
     catalog_error: Option<String>,
@@ -54,6 +63,7 @@ impl SettingsView {
             query_focus: cx.focus_handle(),
             url_draft: settings.observe.prometheus_url,
             token_draft: settings.observe.metrics_token,
+            token_revealed: false,
             query_draft: String::new(),
             catalog: Vec::new(),
             catalog_error: None,
@@ -70,7 +80,7 @@ impl SettingsView {
         if s.observe.prometheus_url == draft {
             return;
         }
-        s.observe.prometheus_url = draft;
+        nook_core::observe::set_metrics_url(&mut s.observe, draft);
         nook_core::settings::update_app_settings(s);
     }
 
@@ -85,9 +95,7 @@ impl SettingsView {
     }
 
     fn persist_observe(tweak: impl FnOnce(&mut AppSettings)) {
-        let mut s = nook_core::settings::get_app_settings();
-        tweak(&mut s);
-        nook_core::settings::update_app_settings(s);
+        nook_core::settings::tweak_app_settings(tweak);
     }
 
     fn apply_key(draft: &mut String, event: &KeyDownEvent, cx: &Context<Self>) -> bool {
@@ -305,7 +313,9 @@ impl SettingsView {
             for metric in &settings.observe.metrics {
                 let query = metric.query.clone();
                 let chart_query = metric.query.clone();
+                let alert_query = metric.query.clone();
                 let chart_caption = metric.chart.caption();
+                let alert_caption = metric.alert_caption();
                 pinned = pinned.child(
                     div()
                         .id(SharedString::from(format!("pin-{}", metric.query)))
@@ -349,6 +359,30 @@ impl SettingsView {
                                     }),
                                 )
                                 .child(label(chart_caption, theme::SUBHEADLINE, true)),
+                        )
+                        .child(
+                            div()
+                                .id(SharedString::from(format!("alert-{}", metric.query)))
+                                .h(px(theme::HIT_MIN))
+                                .px_2()
+                                .flex()
+                                .items_center()
+                                .cursor(CursorStyle::PointingHand)
+                                .hover(|s| s.opacity(0.8))
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(move |_, _, _, cx| {
+                                        cx.stop_propagation();
+                                        SettingsView::persist_observe(|s| {
+                                            nook_core::observe::cycle_metric_alert(
+                                                &mut s.observe,
+                                                &alert_query,
+                                            );
+                                        });
+                                        cx.notify();
+                                    }),
+                                )
+                                .child(label(alert_caption, theme::SUBHEADLINE, true)),
                         )
                         .child(
                             div()
@@ -427,9 +461,9 @@ impl SettingsView {
         };
         let token_placeholder = self.token_draft.is_empty();
         let token_text = if token_placeholder {
-            "Bearer token for /admin/metrics"
+            "Bearer token for /admin/metrics".to_string()
         } else {
-            self.token_draft.as_str()
+            token_text(&self.token_draft, self.token_revealed)
         };
         let query_placeholder = self.query_draft.is_empty();
         let query_text = if query_placeholder {
@@ -452,57 +486,28 @@ impl SettingsView {
                 false,
             ))
             .child(label(
-                "Pins default to a line chart. Samples are kept for 24 h. Pick a range to view.",
+                "Pins default to a line chart. Prometheus uses query_range; warmUP keeps 24 h of samples. Pick a lookback.",
                 theme::SUBHEADLINE,
                 false,
             ))
-            .child(
-                div()
-                    .flex()
-                    .gap_2()
-                    .child(window_chip(
-                        "30 min",
-                        settings.observe.window == nook_core::observe::ObserveWindow::ThirtyMinutes,
+            .child({
+                let mut chips = div().flex().gap_2();
+                for option in nook_core::observe::ObserveRange::all() {
+                    let selected = settings.observe.range == option;
+                    chips = chips.child(chip(
+                        option.label(),
+                        selected,
                         cx,
-                        |_, _, cx| {
+                        move |_, _, cx| {
                             SettingsView::persist_observe(|s| {
-                                nook_core::observe::set_window(
-                                    &mut s.observe,
-                                    nook_core::observe::ObserveWindow::ThirtyMinutes,
-                                );
+                                nook_core::observe::set_range(&mut s.observe, option);
                             });
                             cx.notify();
                         },
-                    ))
-                    .child(window_chip(
-                        "5 h",
-                        settings.observe.window == nook_core::observe::ObserveWindow::FiveHours,
-                        cx,
-                        |_, _, cx| {
-                            SettingsView::persist_observe(|s| {
-                                nook_core::observe::set_window(
-                                    &mut s.observe,
-                                    nook_core::observe::ObserveWindow::FiveHours,
-                                );
-                            });
-                            cx.notify();
-                        },
-                    ))
-                    .child(window_chip(
-                        "24 h",
-                        settings.observe.window == nook_core::observe::ObserveWindow::OneDay,
-                        cx,
-                        |_, _, cx| {
-                            SettingsView::persist_observe(|s| {
-                                nook_core::observe::set_window(
-                                    &mut s.observe,
-                                    nook_core::observe::ObserveWindow::OneDay,
-                                );
-                            });
-                            cx.notify();
-                        },
-                    )),
-            )
+                    ));
+                }
+                chips
+            })
             .child(
                 div()
                     .id("prom-url")
@@ -578,7 +583,7 @@ impl SettingsView {
                                 theme::LABEL
                             })
                             .text_size(px(theme::BODY.size))
-                            .child(SharedString::from(token_text.to_string())),
+                            .child(SharedString::from(token_text)),
                     ),
             )
             .child(
@@ -594,9 +599,26 @@ impl SettingsView {
                     }))
                     .child(settings_chip("Browse names", cx, |this, _, cx| {
                         this.browse_metrics(cx);
-                    })),
+                    }))
+                    .child(settings_chip(
+                        if self.token_revealed {
+                            "Hide token"
+                        } else {
+                            "Show token"
+                        },
+                        cx,
+                        |this, _, cx| {
+                            this.token_revealed = !this.token_revealed;
+                            cx.notify();
+                        },
+                    )),
             )
             .child(label("Pinned metrics", theme::CALLOUT, true))
+            .child(label(
+                "The compact island shows Observe only while a threshold you set is firing.",
+                theme::SUBHEADLINE,
+                false,
+            ))
             .child(pinned)
             .child(
                 div()
@@ -669,7 +691,7 @@ fn pane_chip(
     pane: SettingsPane,
     cx: &mut Context<SettingsView>,
 ) -> impl IntoElement {
-    window_chip(caption, selected, cx, move |this, _, cx| {
+    chip(caption, selected, cx, move |this, _, cx| {
         this.pane = pane;
         LAST_PANE.store(pane as u8, Ordering::Relaxed);
         cx.notify();
@@ -681,10 +703,11 @@ fn settings_chip(
     cx: &mut Context<SettingsView>,
     on_click: impl Fn(&mut SettingsView, &mut Window, &mut Context<SettingsView>) + 'static,
 ) -> impl IntoElement {
-    window_chip(caption, false, cx, on_click)
+    chip(caption, false, cx, on_click)
 }
 
-fn window_chip(
+/// One selectable pill used for panes, actions, and option chips.
+fn chip(
     caption: impl Into<SharedString>,
     selected: bool,
     cx: &mut Context<SettingsView>,
@@ -770,4 +793,15 @@ fn toggle_row(
                 .px(px(2.))
                 .child(div().size(px(20.)).rounded_full().bg(rgb(0xffffff))),
         )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn metrics_token_is_masked_by_default() {
+        assert_eq!(token_text("secret-value", false), "••••••••");
+        assert_eq!(token_text("secret-value", true), "secret-value");
+    }
 }

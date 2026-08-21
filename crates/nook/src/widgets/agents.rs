@@ -1,7 +1,8 @@
 //! Coding-agent card + compact island faces.
 
 use crate::dotmatrix;
-use crate::island::ui::{card_row, label, slide_label, widget_shell};
+use crate::icons::lucide_color;
+use crate::island::ui::{card_row, label, slide_label, widget_shell_actions};
 use crate::island::Island;
 use crate::theme;
 use gpui::{div, prelude::*, AnyElement, Context, MouseButton, MouseDownEvent, SharedString};
@@ -24,13 +25,18 @@ pub(crate) fn compact_left(agents: &[AgentSession], pixel_t: f32) -> AnyElement 
     .into_any_element()
 }
 
+/// Running count, or a pause glyph when every session is waiting.
 pub(crate) fn compact_right(agents: &[AgentSession]) -> AnyElement {
-    let text = if agents.len() == 1 {
-        agents[0].title().to_string()
+    let running = running_count(agents);
+    if running == 0 {
+        lucide_color("pause-fill", 14.0, theme::TEXT_MUTED).into_any_element()
     } else {
-        agents.len().to_string()
-    };
-    label(text, theme::BODY, true).into_any_element()
+        label(running.to_string(), theme::BODY, true).into_any_element()
+    }
+}
+
+fn running_count(agents: &[AgentSession]) -> usize {
+    agents.iter().filter(|a| a.status.is_working()).count()
 }
 
 pub(crate) fn agents_card(
@@ -93,7 +99,7 @@ pub(crate) fn agents_card(
             ));
         }
     }
-    widget_shell("agents-scroll", body)
+    widget_shell_actions("agents-scroll", "Agents", div(), body)
 }
 
 fn agent_detail_line(agent: &AgentSession) -> String {
@@ -115,4 +121,37 @@ fn agent_detail_line(agent: &AgentSession) -> String {
     }
     parts.push(agent.status.label().to_string());
     parts.join(" · ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nook_core::agents::{AgentKind, AgentStatus};
+
+    fn agent(pid: u32, working: bool) -> AgentSession {
+        AgentSession {
+            kind: AgentKind::Grok,
+            pid,
+            project: "p".into(),
+            cwd: "/tmp".into(),
+            status: if working {
+                AgentStatus::Working
+            } else {
+                AgentStatus::Waiting
+            },
+            session_id: None,
+            name: Some("session".into()),
+            model: None,
+        }
+    }
+
+    #[test]
+    fn compact_face_counts_only_working_agents() {
+        let mixed = [agent(1, true), agent(2, false), agent(3, true)];
+        assert_eq!(running_count(&mixed), 2);
+        let idle = [agent(1, false), agent(2, false)];
+        assert_eq!(running_count(&idle), 0);
+        let busy = [agent(1, true)];
+        assert_eq!(running_count(&busy), 1);
+    }
 }

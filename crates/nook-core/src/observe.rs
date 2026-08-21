@@ -9,10 +9,12 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::time::Duration;
 
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(8);
+const MAX_METRICS_BODY_BYTES: usize = 1024 * 1024;
 const MAX_PINNED: usize = 6;
 const MAX_ALERTS: usize = 8;
 const MAX_SERIES: usize = 3;
+const MAX_POINTS: usize = 48;
 const WARMUP_METRICS_PATH: &str = "/admin/metrics";
 const CHART_POINTS: usize = 60;
 const STORE_SLACK_MS: u64 = 120_000;
@@ -109,12 +111,63 @@ impl ObserveWindow {
     }
 }
 
+/// Grafana-style lookback window for `/api/v1/query_range` and island chips.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ObserveRange {
+    FiveMinutes,
+    #[default]
+    FifteenMinutes,
+    OneHour,
+    SixHours,
+}
+
+impl ObserveRange {
+    pub fn all() -> [Self; 4] {
+        [
+            Self::FiveMinutes,
+            Self::FifteenMinutes,
+            Self::OneHour,
+            Self::SixHours,
+        ]
+    }
+
+    pub fn label(self) -> &'static str {
+        self.spec().0
+    }
+
+    pub fn seconds(self) -> i64 {
+        self.spec().1
+    }
+
+    pub fn step_seconds(self) -> i64 {
+        self.spec().2
+    }
+
+    fn spec(self) -> (&'static str, i64, i64) {
+        match self {
+            Self::FiveMinutes => ("5m", 5 * 60, 15),
+            Self::FifteenMinutes => ("15m", 15 * 60, 30),
+            Self::OneHour => ("1h", 60 * 60, 60),
+            Self::SixHours => ("6h", 6 * 60 * 60, 300),
+        }
+    }
+
+    pub fn duration_ms(self) -> u64 {
+        self.seconds() as u64 * 1000
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ObserveMetric {
     pub label: String,
     pub query: String,
     #[serde(default)]
     pub chart: ObserveChartKind,
+    /// Compact island shows Observe only while this pin's value is above the
+    /// threshold. `None` means the pin never takes over compact mode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alert_above: Option<i64>,
 }
 
 impl ObserveMetric {
@@ -123,12 +176,20 @@ impl ObserveMetric {
             label: label.into(),
             query: query.into(),
             chart: ObserveChartKind::Sparkline,
+            alert_above: None,
         }
     }
 
     pub fn with_chart(mut self, chart: ObserveChartKind) -> Self {
         self.chart = chart;
         self
+    }
+
+    pub fn alert_caption(&self) -> String {
+        match self.alert_above {
+            None => "No alert".into(),
+            Some(n) => format!("> {n}"),
+        }
     }
 }
 
@@ -140,10 +201,17 @@ pub struct ObserveConfig {
     pub prometheus_url: String,
     /// Bearer token for warmUP `/admin/metrics`. Also read from
     /// `WARMUP_METRICS_TOKEN` / `ADMIN_METRICS_TOKEN` when empty.
-    #[serde(default, skip_serializing_if = "String::is_empty")]
+    #[serde(default)]
+    #[cfg_attr(target_os = "macos", serde(skip_serializing))]
+    #[cfg_attr(
+        not(target_os = "macos"),
+        serde(skip_serializing_if = "String::is_empty")
+    )]
     pub metrics_token: String,
     #[serde(default)]
     pub window: ObserveWindow,
+    #[serde(default)]
+    pub range: ObserveRange,
     #[serde(default = "default_metrics")]
     pub metrics: Vec<ObserveMetric>,
 }
@@ -155,6 +223,7 @@ impl Default for ObserveConfig {
             prometheus_url: default_observe_url(),
             metrics_token: String::new(),
             window: ObserveWindow::ThirtyMinutes,
+            range: ObserveRange::default(),
             metrics: default_metrics(),
         }
     }
@@ -189,6 +258,7 @@ impl ObserveSnapshot {
         self.alerts.len()
     }
 
+    /// Compact Observe is only for thresholds the user set on a pin.
     pub fn has_outage(&self) -> bool {
         !self.alerts.is_empty()
     }
@@ -200,6 +270,7 @@ pub struct MetricReading {
     pub query: String,
     pub chart: ObserveChartKind,
     pub values: Vec<SeriesValue>,
+    pub series: Vec<RangeSeries>,
     pub error: Option<String>,
     pub history: Vec<ChartPoint>,
     /// For counters: increase over the selected window. Gauges leave this empty.
@@ -224,10 +295,25 @@ impl MetricReading {
             query: metric.query.clone(),
             chart: metric.chart,
             values,
+            series: Vec::new(),
             error,
             history: Vec::new(),
             window_total: None,
         }
+    }
+
+    pub fn last_value(&self) -> Option<f64> {
+        self.series
+            .first()
+            .and_then(|s| s.points.last().map(|p| p.value))
+            .or_else(|| self.values.first().map(|v| v.value))
+    }
+
+    pub fn sparkline_values(&self) -> Vec<f32> {
+        self.series
+            .first()
+            .map(|s| s.points.iter().map(|p| p.value as f32).collect())
+            .unwrap_or_default()
     }
 
     pub fn headline(&self) -> String {
@@ -237,16 +323,51 @@ impl MetricReading {
         if let Some(total) = self.window_total {
             return format_sample(total);
         }
-        if let Some(first) = self.values.first() {
-            let extra = if self.values.len() > 1 {
-                format!(" (+{})", self.values.len() - 1)
-            } else {
-                String::new()
-            };
-            return format!("{}{extra}", format_sample(first.value));
+        let extra = if self.values.len() > 1 {
+            format!(" (+{})", self.values.len() - 1)
+        } else if self.series.len() > 1 {
+            format!(" (+{})", self.series.len() - 1)
+        } else {
+            String::new()
+        };
+        if let Some(value) = self.last_value() {
+            return format!("{}{extra}", format_sample(value));
         }
         "—".into()
     }
+}
+
+/// One PromQL series from `/api/v1/query_range` (or local history mapped to it).
+#[derive(Debug, Clone)]
+pub struct RangeSeries {
+    pub name: String,
+    pub points: Vec<SamplePoint>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SamplePoint {
+    pub ts: f64,
+    pub value: f64,
+}
+
+/// Map a 0–1 x-ratio across a sparkline to the nearest sample.
+pub fn point_at_ratio(points: &[SamplePoint], ratio: f32) -> Option<&SamplePoint> {
+    if points.is_empty() {
+        return None;
+    }
+    let last = points.len() - 1;
+    let idx = ((ratio.clamp(0.0, 1.0) * last as f32).round() as usize).min(last);
+    Some(&points[idx])
+}
+
+/// Map a sample timestamp to the nearest sample.
+pub fn point_at_ts(points: &[SamplePoint], ts: f64) -> Option<&SamplePoint> {
+    points.iter().min_by(|a, b| {
+        (a.ts - ts)
+            .abs()
+            .partial_cmp(&(b.ts - ts).abs())
+            .unwrap_or(std::cmp::Ordering::Equal)
+    })
 }
 
 #[derive(Debug, Clone)]
@@ -284,12 +405,27 @@ pub fn fill_default_url(config: &mut ObserveConfig) {
     }
 }
 
-fn is_warmup_host(raw: &str) -> bool {
-    raw.to_ascii_lowercase().contains("warmup-gamelauncher.com")
+pub fn set_metrics_url(config: &mut ObserveConfig, url: String) {
+    config.source = if is_warmup_url(&url) {
+        ObserveSourceKind::Warmup
+    } else {
+        ObserveSourceKind::Prometheus
+    };
+    config.prometheus_url = url;
+}
+
+fn is_warmup_url(raw: &str) -> bool {
+    let (Ok(url), Ok(approved)) = (
+        reqwest::Url::parse(raw),
+        reqwest::Url::parse(DEFAULT_OBSERVE_URL),
+    ) else {
+        return false;
+    };
+    url.origin() == approved.origin()
 }
 
 fn uses_warmup(config: &ObserveConfig) -> bool {
-    config.source == ObserveSourceKind::Warmup || is_warmup_host(&config.prometheus_url)
+    config.source == ObserveSourceKind::Warmup || is_warmup_url(&config.prometheus_url)
 }
 
 fn metrics_token(config: &ObserveConfig) -> String {
@@ -302,6 +438,17 @@ fn metrics_token(config: &ObserveConfig) -> String {
         .unwrap_or_default()
         .trim()
         .to_string()
+}
+
+fn warmup_bearer(config: &ObserveConfig) -> Option<String> {
+    is_warmup_url(&config.prometheus_url)
+        .then(|| metrics_token(config))
+        .filter(|token| !token.is_empty())
+}
+
+async fn response_text(response: reqwest::Response) -> Result<String, String> {
+    let bytes = crate::utils::read_response_limited(response, MAX_METRICS_BODY_BYTES).await?;
+    String::from_utf8(bytes).map_err(|err| err.to_string())
 }
 
 pub fn pin_metric(config: &mut ObserveConfig, label: &str, query: &str) -> Result<(), String> {
@@ -338,8 +485,57 @@ pub fn cycle_metric_chart(config: &mut ObserveConfig, query: &str) {
     }
 }
 
-pub fn set_window(config: &mut ObserveConfig, window: ObserveWindow) {
-    config.window = window;
+const ALERT_STEPS: [i64; 3] = [0, 10, 100];
+
+pub fn cycle_metric_alert(config: &mut ObserveConfig, query: &str) {
+    if let Some(metric) = config.metrics.iter_mut().find(|m| m.query == query) {
+        metric.alert_above = next_alert_above(metric.alert_above);
+    }
+}
+
+fn next_alert_above(current: Option<i64>) -> Option<i64> {
+    match current {
+        None => Some(ALERT_STEPS[0]),
+        Some(n) => ALERT_STEPS.iter().copied().find(|step| *step > n),
+    }
+}
+
+/// Replace snapshot alerts with pins whose user-set threshold is currently
+/// breached. Counters use the selected window's increase so a lifetime 5xx
+/// count cannot pin compact mode open.
+pub fn apply_user_alerts(config: &ObserveConfig, snap: &mut ObserveSnapshot) {
+    let mut alerts = Vec::new();
+    for metric in config.metrics.iter().take(MAX_PINNED) {
+        let Some(threshold) = metric.alert_above else {
+            continue;
+        };
+        let Some(reading) = snap.metrics.iter().find(|m| m.query == metric.query) else {
+            continue;
+        };
+        let value = if is_counter_query(&metric.query) {
+            reading.window_total
+        } else {
+            reading.last_value()
+        };
+        let Some(value) = value else {
+            continue;
+        };
+        if value > threshold as f64 {
+            alerts.push(FiringAlert {
+                name: metric.label.clone(),
+                severity: "critical".into(),
+                summary: format!("{} > {threshold}", format_sample(value)),
+            });
+            if alerts.len() >= MAX_ALERTS {
+                break;
+            }
+        }
+    }
+    snap.alerts = alerts;
+}
+
+pub fn set_range(config: &mut ObserveConfig, range: ObserveRange) {
+    config.range = range;
 }
 
 pub type MetricHistory = HashMap<String, Vec<(u64, f64)>>;
@@ -352,13 +548,21 @@ pub fn record_history(
     snap: &mut ObserveSnapshot,
     window: ObserveWindow,
 ) {
-    record_history_at(store, snap, window, now_ms(), true);
+    record_history_at(store, snap, window.duration_ms(), now_ms(), true);
+}
+
+pub fn record_history_range(
+    store: &mut MetricHistory,
+    snap: &mut ObserveSnapshot,
+    range: ObserveRange,
+) {
+    record_history_at(store, snap, range.duration_ms(), now_ms(), true);
 }
 
 pub fn record_history_at(
     store: &mut MetricHistory,
     snap: &mut ObserveSnapshot,
-    window: ObserveWindow,
+    duration_ms: u64,
     now: u64,
     persist: bool,
 ) {
@@ -374,12 +578,34 @@ pub fn record_history_at(
             }
         }
         let hist = store.get(&reading.query).map(Vec::as_slice).unwrap_or(&[]);
-        reading.history = chart_values(&reading.query, hist, window, now);
-        reading.window_total = window_count(&reading.query, hist, window, now);
+        reading.history = chart_values_for(&reading.query, hist, duration_ms, now);
+        reading.window_total = window_count_for(&reading.query, hist, duration_ms, now);
+        if reading.series.is_empty() {
+            reading.series = series_from_chart(&reading.history, duration_ms, now);
+        }
     }
     if persist {
         persist_samples(&fresh, retain_after);
     }
+}
+
+fn series_from_chart(history: &[ChartPoint], duration_ms: u64, now: u64) -> Vec<RangeSeries> {
+    if history.is_empty() {
+        return Vec::new();
+    }
+    let now_s = now as f64 / 1000.0;
+    let dur_s = duration_ms.max(1) as f64 / 1000.0;
+    let points = history
+        .iter()
+        .map(|p| SamplePoint {
+            ts: now_s - (1.0 - p.t.clamp(0.0, 1.0) as f64) * dur_s,
+            value: p.value,
+        })
+        .collect();
+    vec![RangeSeries {
+        name: String::new(),
+        points,
+    }]
 }
 
 /// Last 24 hours of collected samples, for charts after a relaunch.
@@ -452,13 +678,13 @@ fn write_samples(
     Ok(())
 }
 
-pub fn chart_values(
+fn chart_values_for(
     query: &str,
     history: &[(u64, f64)],
-    window: ObserveWindow,
+    duration_ms: u64,
     now: u64,
 ) -> Vec<ChartPoint> {
-    let (start, span) = plot_range(history, window, now);
+    let (start, span) = plot_range(history, duration_ms, now);
     let t_of = |ms: u64| ((ms.saturating_sub(start) as f32) / span as f32).clamp(0.0, 1.0);
 
     let points = if is_counter_query(query) {
@@ -508,10 +734,19 @@ pub fn window_count(
     window: ObserveWindow,
     now: u64,
 ) -> Option<f64> {
+    window_count_for(query, history, window.duration_ms(), now)
+}
+
+fn window_count_for(
+    query: &str,
+    history: &[(u64, f64)],
+    duration_ms: u64,
+    now: u64,
+) -> Option<f64> {
     if !is_counter_query(query) {
         return None;
     }
-    let start = now.saturating_sub(window.duration_ms());
+    let start = now.saturating_sub(duration_ms);
     let mut baseline: Option<f64> = None;
     let mut last: Option<f64> = None;
     for &(t, v) in history {
@@ -536,8 +771,8 @@ pub fn window_count(
     })
 }
 
-fn plot_range(history: &[(u64, f64)], window: ObserveWindow, now: u64) -> (u64, u64) {
-    let window_span = window.duration_ms().max(1);
+fn plot_range(history: &[(u64, f64)], duration_ms: u64, now: u64) -> (u64, u64) {
+    let window_span = duration_ms.max(1);
     let window_start = now.saturating_sub(window_span);
     let first = history
         .iter()
@@ -672,7 +907,7 @@ fn client() -> Result<Client, String> {
 pub async fn poll(config: &ObserveConfig) -> ObserveSnapshot {
     match config.source {
         ObserveSourceKind::Warmup => poll_warmup(config).await,
-        ObserveSourceKind::Prometheus if is_warmup_host(&config.prometheus_url) => {
+        ObserveSourceKind::Prometheus if is_warmup_url(&config.prometheus_url) => {
             poll_warmup(config).await
         }
         ObserveSourceKind::Prometheus => poll_prometheus(config).await,
@@ -707,14 +942,13 @@ async fn poll_warmup(config: &ObserveConfig) -> ObserveSnapshot {
 
     let url = format!("{base}{WARMUP_METRICS_PATH}");
     let mut request = client.get(&url);
-    let token = metrics_token(config);
-    if !token.is_empty() {
+    if let Some(token) = warmup_bearer(config) {
         request = request.bearer_auth(token);
     }
     match request.send().await {
         Ok(response) => {
             let status = response.status();
-            match response.text().await {
+            match response_text(response).await {
                 Ok(body) => {
                     if status.as_u16() == 401 {
                         return ObserveSnapshot {
@@ -774,39 +1008,66 @@ async fn poll_prometheus(config: &ObserveConfig) -> ObserveSnapshot {
         }
     };
 
-    let alerts = fetch_alerts(&client, &base).await;
-    let (alerts, alert_error) = match alerts {
-        Ok(list) => (list, None),
-        Err(err) => (Vec::new(), Some(err)),
-    };
-
     let mut metrics = Vec::new();
     for metric in config.metrics.iter().take(MAX_PINNED) {
-        metrics.push(fetch_metric(&client, &base, metric).await);
+        metrics.push(fetch_metric(&client, &base, metric, config.range).await);
     }
 
-    let connected = alert_error.is_none() || metrics.iter().any(|m| m.error.is_none());
+    let connected = metrics.iter().any(|m| m.error.is_none());
+    let error = if connected {
+        None
+    } else {
+        metrics.iter().find_map(|m| m.error.clone())
+    };
     ObserveSnapshot {
         connected,
-        error: alert_error,
+        error,
         metrics,
-        alerts,
+        alerts: Vec::new(),
     }
 }
 
-async fn fetch_metric(client: &Client, base: &str, metric: &ObserveMetric) -> MetricReading {
-    let url = format!("{base}/api/v1/query");
+async fn fetch_metric(
+    client: &Client,
+    base: &str,
+    metric: &ObserveMetric,
+    range: ObserveRange,
+) -> MetricReading {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let start = now.saturating_sub(range.seconds());
+    let url = format!("{base}/api/v1/query_range");
     match client
         .get(&url)
-        .query(&[("query", metric.query.as_str())])
+        .query(&[
+            ("query", metric.query.as_str()),
+            ("start", &start.to_string()),
+            ("end", &now.to_string()),
+            ("step", &range.step_seconds().to_string()),
+        ])
         .send()
         .await
     {
         Ok(response) => {
             let status = response.status();
-            match response.text().await {
-                Ok(body) => match parse_query(&body) {
-                    Ok(values) => MetricReading::from_metric(metric, values, None),
+            match response_text(response).await {
+                Ok(body) => match parse_query_range(&body) {
+                    Ok(series) => {
+                        let values = series
+                            .iter()
+                            .filter_map(|s| {
+                                s.points.last().map(|p| SeriesValue {
+                                    name: s.name.clone(),
+                                    value: p.value,
+                                })
+                            })
+                            .collect();
+                        let mut reading = MetricReading::from_metric(metric, values, None);
+                        reading.series = series;
+                        reading
+                    }
                     Err(err) => MetricReading::from_metric(
                         metric,
                         Vec::new(),
@@ -828,21 +1089,6 @@ async fn fetch_metric(client: &Client, base: &str, metric: &ObserveMetric) -> Me
     }
 }
 
-async fn fetch_alerts(client: &Client, base: &str) -> Result<Vec<FiringAlert>, String> {
-    let url = format!("{base}/api/v1/alerts");
-    let response = client
-        .get(&url)
-        .send()
-        .await
-        .map_err(|e| format_http_error(e, "Prometheus"))?;
-    let status = response.status();
-    let body = response.text().await.map_err(|e| e.to_string())?;
-    if !status.is_success() {
-        return Err(format!("Prometheus /api/v1/alerts returned HTTP {status}"));
-    }
-    parse_alerts(&body)
-}
-
 /// Metric names from the active source, used by Settings to pick pins.
 pub async fn list_metric_names(config: &ObserveConfig) -> Result<Vec<String>, String> {
     if uses_warmup(config) {
@@ -860,7 +1106,7 @@ pub async fn list_metric_names(config: &ObserveConfig) -> Result<Vec<String>, St
         .await
         .map_err(|e| format_http_error(e, "Prometheus"))?;
     let status = response.status();
-    let body = response.text().await.map_err(|e| e.to_string())?;
+    let body = response_text(response).await?;
     if !status.is_success() {
         return Err(format!("Prometheus label values returned HTTP {status}"));
     }
@@ -922,22 +1168,11 @@ fn snapshot_from_warmup(
         .iter()
         .map(|metric| warmup_reading(&parsed, metric))
         .collect();
-    let alerts = parsed
-        .recent_error_requests
-        .iter()
-        .filter(|s| s.status >= 500)
-        .take(MAX_ALERTS)
-        .map(|s| FiringAlert {
-            name: format!("{} {}", s.method, s.path).trim().to_string(),
-            severity: "critical".into(),
-            summary: format!("HTTP {}", s.status),
-        })
-        .collect();
     ObserveSnapshot {
         connected: true,
         error: None,
         metrics: readings,
-        alerts,
+        alerts: Vec::new(),
     }
 }
 
@@ -973,73 +1208,24 @@ fn bucket_count(counters: &[WarmupCounter], bucket: &str) -> f64 {
         .sum()
 }
 
-fn parse_query(body: &str) -> Result<Vec<SeriesValue>, String> {
+fn parse_query_range(body: &str) -> Result<Vec<RangeSeries>, String> {
     let parsed: PromEnvelope<PromQueryData> =
-        serde_json::from_str(body).map_err(|e| format!("Unexpected query response: {e}"))?;
+        serde_json::from_str(body).map_err(|e| format!("Unexpected range response: {e}"))?;
     if parsed.status != "success" {
         return Err(parsed
             .error
-            .unwrap_or_else(|| "Prometheus query failed".into()));
+            .unwrap_or_else(|| "Prometheus query_range failed".into()));
     }
     let data = parsed
         .data
-        .ok_or_else(|| "Query response missing data".to_string())?;
-    match data.result_type.as_str() {
-        "scalar" => {
-            if let Some(value) = data.result.into_scalar() {
-                Ok(vec![SeriesValue {
-                    name: String::new(),
-                    value,
-                }])
-            } else {
-                Err("Scalar result was empty".into())
-            }
-        }
-        "vector" => Ok(data
-            .result
-            .into_vector()
-            .into_iter()
-            .take(MAX_SERIES)
-            .collect()),
-        other => Err(format!("Unsupported result type '{other}'")),
+        .ok_or_else(|| "Range response missing data".to_string())?;
+    if data.result_type != "matrix" && !data.result_type.is_empty() {
+        return Err(format!(
+            "Unsupported range result type '{}'",
+            data.result_type
+        ));
     }
-}
-
-fn parse_alerts(body: &str) -> Result<Vec<FiringAlert>, String> {
-    let parsed: PromEnvelope<PromAlertsData> =
-        serde_json::from_str(body).map_err(|e| format!("Unexpected alerts response: {e}"))?;
-    if parsed.status != "success" {
-        return Err(parsed
-            .error
-            .unwrap_or_else(|| "Prometheus alerts failed".into()));
-    }
-    let data = parsed
-        .data
-        .ok_or_else(|| "Alerts response missing data".to_string())?;
-    Ok(data
-        .alerts
-        .into_iter()
-        .filter(|a| a.state.eq_ignore_ascii_case("firing"))
-        .map(|a| FiringAlert {
-            name: a
-                .labels
-                .get("alertname")
-                .cloned()
-                .unwrap_or_else(|| "alert".into()),
-            severity: a
-                .labels
-                .get("severity")
-                .cloned()
-                .unwrap_or_else(|| "none".into()),
-            summary: a
-                .annotations
-                .get("summary")
-                .or_else(|| a.annotations.get("description"))
-                .cloned()
-                .unwrap_or_default(),
-        })
-        .take(MAX_ALERTS)
-        .collect())
+    Ok(data.result.into_matrix())
 }
 
 fn parse_label_values(body: &str) -> Result<Vec<String>, String> {
@@ -1064,9 +1250,9 @@ struct WarmupMetricsSnapshot {
     #[serde(default)]
     counters: Vec<WarmupCounter>,
     #[serde(default, rename = "recentSlowRequests")]
-    recent_slow_requests: Vec<WarmupSample>,
+    recent_slow_requests: Vec<serde_json::Value>,
     #[serde(default, rename = "recentErrorRequests")]
-    recent_error_requests: Vec<WarmupSample>,
+    recent_error_requests: Vec<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1075,16 +1261,6 @@ struct WarmupCounter {
     status_bucket: String,
     #[serde(default)]
     count: f64,
-}
-
-#[derive(Debug, Deserialize)]
-struct WarmupSample {
-    #[serde(default)]
-    method: String,
-    #[serde(default)]
-    path: String,
-    #[serde(default)]
-    status: u16,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1108,32 +1284,23 @@ struct PromQueryData {
 #[serde(untagged)]
 enum PromResult {
     Vector(Vec<PromVectorSample>),
-    Scalar(PromValue),
     #[default]
     Empty,
 }
 
 impl PromResult {
-    fn into_vector(self) -> Vec<SeriesValue> {
+    fn into_matrix(self) -> Vec<RangeSeries> {
         match self {
             Self::Vector(rows) => rows
                 .into_iter()
-                .filter_map(|row| {
-                    let value = row.value.value()?;
-                    Some(SeriesValue {
-                        name: series_name(&row.metric),
-                        value,
-                    })
+                .take(MAX_SERIES)
+                .map(|row| RangeSeries {
+                    name: series_name(&row.metric),
+                    points: downsample_points(row.values()),
                 })
+                .filter(|s| !s.points.is_empty())
                 .collect(),
             _ => Vec::new(),
-        }
-    }
-
-    fn into_scalar(self) -> Option<f64> {
-        match self {
-            Self::Scalar(v) => v.value(),
-            _ => None,
         }
     }
 }
@@ -1142,13 +1309,58 @@ impl PromResult {
 struct PromVectorSample {
     #[serde(default)]
     metric: serde_json::Map<String, serde_json::Value>,
-    value: PromValue,
+    #[serde(default)]
+    value: Option<PromValue>,
+    #[serde(default)]
+    values: Vec<PromValue>,
+}
+
+impl PromVectorSample {
+    fn values(self) -> Vec<PromValue> {
+        if !self.values.is_empty() {
+            self.values
+        } else if let Some(value) = self.value {
+            vec![value]
+        } else {
+            Vec::new()
+        }
+    }
+}
+
+fn downsample_points(values: Vec<PromValue>) -> Vec<SamplePoint> {
+    let parsed: Vec<SamplePoint> = values
+        .into_iter()
+        .filter_map(|v| {
+            Some(SamplePoint {
+                ts: v.ts()?,
+                value: v.value()?,
+            })
+        })
+        .collect();
+    if parsed.len() <= MAX_POINTS {
+        return parsed;
+    }
+    let last = parsed.len() - 1;
+    let mut out = Vec::with_capacity(MAX_POINTS);
+    for i in 0..MAX_POINTS {
+        let idx = i * last / (MAX_POINTS - 1);
+        out.push(parsed[idx].clone());
+    }
+    out
 }
 
 #[derive(Debug, Deserialize)]
-struct PromValue(#[allow(dead_code)] serde_json::Value, serde_json::Value);
+struct PromValue(serde_json::Value, serde_json::Value);
 
 impl PromValue {
+    fn ts(&self) -> Option<f64> {
+        match &self.0 {
+            serde_json::Value::Number(n) => n.as_f64(),
+            serde_json::Value::String(s) => s.parse().ok(),
+            _ => None,
+        }
+    }
+
     fn value(&self) -> Option<f64> {
         match &self.1 {
             serde_json::Value::String(s) => s.parse().ok(),
@@ -1156,22 +1368,6 @@ impl PromValue {
             _ => None,
         }
     }
-}
-
-#[derive(Debug, Default, Deserialize)]
-struct PromAlertsData {
-    #[serde(default)]
-    alerts: Vec<PromAlert>,
-}
-
-#[derive(Debug, Deserialize)]
-struct PromAlert {
-    #[serde(default)]
-    labels: std::collections::HashMap<String, String>,
-    #[serde(default)]
-    annotations: std::collections::HashMap<String, String>,
-    #[serde(default)]
-    state: String,
 }
 
 fn series_name(metric: &serde_json::Map<String, serde_json::Value>) -> String {
@@ -1197,58 +1393,6 @@ mod tests {
             normalize_base_url(" http://127.0.0.1:9090/ ").unwrap(),
             "http://127.0.0.1:9090"
         );
-    }
-
-    #[test]
-    fn parses_vector_query() {
-        let body = r#"{
-            "status":"success",
-            "data":{
-                "resultType":"vector",
-                "result":[{
-                    "metric":{"__name__":"up","job":"prometheus","instance":"localhost:9090"},
-                    "value":[1710000000,"1"]
-                }]
-            }
-        }"#;
-        let values = parse_query(body).unwrap();
-        assert_eq!(values.len(), 1);
-        assert_eq!(values[0].value, 1.0);
-        assert!(values[0].name.contains("job=prometheus"));
-    }
-
-    #[test]
-    fn parses_scalar_query() {
-        let body = r#"{
-            "status":"success",
-            "data":{"resultType":"scalar","result":[1710000000,"3.5"]}
-        }"#;
-        let values = parse_query(body).unwrap();
-        assert_eq!(values[0].value, 3.5);
-    }
-
-    #[test]
-    fn keeps_only_firing_alerts() {
-        let body = r#"{
-            "status":"success",
-            "data":{"alerts":[
-                {
-                    "labels":{"alertname":"InstanceDown","severity":"critical"},
-                    "annotations":{"summary":"target gone"},
-                    "state":"firing"
-                },
-                {
-                    "labels":{"alertname":"Soon"},
-                    "annotations":{},
-                    "state":"pending"
-                }
-            ]}
-        }"#;
-        let alerts = parse_alerts(body).unwrap();
-        assert_eq!(alerts.len(), 1);
-        assert_eq!(alerts[0].name, "InstanceDown");
-        assert_eq!(alerts[0].severity, "critical");
-        assert_eq!(alerts[0].summary, "target gone");
     }
 
     #[test]
@@ -1344,7 +1488,7 @@ mod tests {
         record_history_at(
             &mut store,
             &mut snap,
-            ObserveWindow::ThirtyMinutes,
+            ObserveWindow::ThirtyMinutes.duration_ms(),
             now - 15_000,
             false,
         );
@@ -1353,7 +1497,7 @@ mod tests {
         record_history_at(
             &mut store,
             &mut snap,
-            ObserveWindow::ThirtyMinutes,
+            ObserveWindow::ThirtyMinutes.duration_ms(),
             now,
             false,
         );
@@ -1375,13 +1519,36 @@ mod tests {
         record_history_at(
             &mut store,
             &mut snap,
-            ObserveWindow::ThirtyMinutes,
+            ObserveWindow::ThirtyMinutes.duration_ms(),
             later,
             false,
         );
         assert!(store["total_requests"]
             .iter()
             .all(|(t, _)| *t >= later - DAY_MS - STORE_SLACK_MS));
+    }
+
+    #[test]
+    fn local_history_becomes_a_range_series() {
+        let mut store = HashMap::new();
+        let mut snap = ObserveSnapshot {
+            metrics: vec![MetricReading::from_metric(
+                &ObserveMetric::new("Slow", "slow"),
+                vec![SeriesValue {
+                    name: String::new(),
+                    value: 1.0,
+                }],
+                None,
+            )],
+            ..ObserveSnapshot::default()
+        };
+        let now = 60_000;
+        record_history_at(&mut store, &mut snap, 60_000, now - 15_000, false);
+        snap.metrics[0].values[0].value = 4.0;
+        snap.metrics[0].series.clear();
+        record_history_at(&mut store, &mut snap, 60_000, now, false);
+        assert!(snap.metrics[0].series[0].points.len() >= 2);
+        assert_eq!(snap.metrics[0].last_value(), Some(4.0));
     }
 
     #[test]
@@ -1408,7 +1575,12 @@ mod tests {
     fn window_filters_old_gauge_samples() {
         let now = 40 * 60 * 1000;
         let history = vec![(0, 3.0), (now - 10 * 60 * 1000, 4.0), (now, 9.0)];
-        let pts = chart_values("slow", &history, ObserveWindow::ThirtyMinutes, now);
+        let pts = chart_values_for(
+            "slow",
+            &history,
+            ObserveWindow::ThirtyMinutes.duration_ms(),
+            now,
+        );
         assert_eq!(pts.len(), 2);
         assert!((pts.last().unwrap().value - 9.0).abs() < 1e-9);
         assert!(pts.last().unwrap().t > 0.9);
@@ -1450,7 +1622,12 @@ mod tests {
     fn short_history_fills_the_plot_instead_of_a_right_sliver() {
         let now = 30 * 60 * 1000;
         let history = vec![(now - 90_000, 10.0), (now - 45_000, 20.0), (now, 30.0)];
-        let pts = chart_values("slow", &history, ObserveWindow::ThirtyMinutes, now);
+        let pts = chart_values_for(
+            "slow",
+            &history,
+            ObserveWindow::ThirtyMinutes.duration_ms(),
+            now,
+        );
         assert_eq!(pts.len(), 3);
         assert!(
             pts[0].t < 0.4,
@@ -1476,6 +1653,29 @@ mod tests {
     }
 
     #[test]
+    fn custom_metrics_url_selects_prometheus() {
+        let mut config = ObserveConfig::default();
+        set_metrics_url(&mut config, "https://metrics.example.com".into());
+        assert_eq!(config.source, ObserveSourceKind::Prometheus);
+        assert_eq!(config.prometheus_url, "https://metrics.example.com");
+    }
+
+    #[test]
+    fn warmup_bearer_is_bound_to_the_approved_origin() {
+        let approved = ObserveConfig {
+            metrics_token: "secret".into(),
+            ..ObserveConfig::default()
+        };
+        assert_eq!(warmup_bearer(&approved).as_deref(), Some("secret"));
+
+        let unapproved = ObserveConfig {
+            prometheus_url: "https://api.warmup-gamelauncher.com.evil.example".into(),
+            ..approved
+        };
+        assert_eq!(warmup_bearer(&unapproved), None);
+    }
+
+    #[test]
     fn parses_warmup_admin_metrics() {
         let body = r#"{
             "totalRequests": 12,
@@ -1496,9 +1696,10 @@ mod tests {
         assert_eq!(snap.metrics[0].values[0].value, 12.0);
         assert_eq!(snap.metrics[1].values[0].value, 2.0);
         assert_eq!(snap.metrics[2].values[0].value, 1.0);
-        assert_eq!(snap.alerts.len(), 1);
-        assert_eq!(snap.alerts[0].name, "GET /v1/x");
-        assert_eq!(snap.alerts[0].summary, "HTTP 500");
+        assert!(
+            snap.alerts.is_empty(),
+            "recent 5xx must not fire compact Observe until the user sets a threshold"
+        );
     }
 
     #[tokio::test]
@@ -1513,8 +1714,8 @@ mod tests {
                 let mut buf = [0u8; 2048];
                 let _ = stream.read(&mut buf);
                 let req = String::from_utf8_lossy(&buf);
-                let body = if req.contains("/api/v1/alerts") {
-                    r#"{"status":"success","data":{"alerts":[{"labels":{"alertname":"Down","severity":"critical"},"annotations":{"summary":"gone"},"state":"firing"}]}}"#
+                let body = if req.contains("/api/v1/query_range") {
+                    r#"{"status":"success","data":{"resultType":"matrix","result":[{"metric":{"__name__":"up"},"values":[[1,"1"],[2,"1"]]}]}}"#
                 } else {
                     r#"{"status":"success","data":{"resultType":"vector","result":[{"metric":{"__name__":"up"},"value":[1,"1"]}]}}"#
                 };
@@ -1534,12 +1735,62 @@ mod tests {
         };
         let snap = poll(&config).await;
         assert!(
-            snap.has_outage(),
-            "expected firing alert, got {:?}",
+            snap.connected,
+            "expected prometheus snapshot, got {:?}",
             snap.error
         );
-        assert_eq!(snap.alerts[0].name, "Down");
-        assert_eq!(snap.metrics[0].values[0].value, 1.0);
+        assert!(snap.alerts.is_empty());
+        assert_eq!(snap.metrics[0].last_value(), Some(1.0));
+        assert_eq!(snap.metrics[0].sparkline_values().len(), 2);
+    }
+
+    #[test]
+    fn parses_matrix_range() {
+        let body = r#"{
+            "status":"success",
+            "data":{
+                "resultType":"matrix",
+                "result":[{
+                    "metric":{"__name__":"up","job":"prometheus"},
+                    "values":[[1710000000,"1"],[1710000015,"1"],[1710000030,"0"]]
+                }]
+            }
+        }"#;
+        let series = parse_query_range(body).unwrap();
+        assert_eq!(series.len(), 1);
+        assert_eq!(series[0].points.len(), 3);
+        assert_eq!(series[0].points[2].value, 0.0);
+        assert!(series[0].name.contains("job=prometheus"));
+    }
+
+    #[test]
+    fn range_labels_and_steps() {
+        assert_eq!(ObserveRange::FiveMinutes.label(), "5m");
+        assert_eq!(ObserveRange::FifteenMinutes.seconds(), 900);
+        assert_eq!(ObserveRange::SixHours.step_seconds(), 300);
+        assert_eq!(ObserveRange::OneHour.duration_ms(), 3_600_000);
+    }
+
+    #[test]
+    fn point_at_ratio_picks_nearest() {
+        let points = vec![
+            SamplePoint {
+                ts: 10.0,
+                value: 1.0,
+            },
+            SamplePoint {
+                ts: 20.0,
+                value: 2.0,
+            },
+            SamplePoint {
+                ts: 30.0,
+                value: 3.0,
+            },
+        ];
+        assert!(point_at_ratio(&[], 0.5).is_none());
+        assert_eq!(point_at_ratio(&points, 0.0).unwrap().value, 1.0);
+        assert_eq!(point_at_ratio(&points, 1.0).unwrap().value, 3.0);
+        assert_eq!(point_at_ratio(&points, 0.6).unwrap().ts, 20.0);
     }
 
     #[tokio::test]
@@ -1585,6 +1836,112 @@ mod tests {
             snap.error
         );
         assert_eq!(snap.metrics[0].values[0].value, 7.0);
-        assert_eq!(snap.alerts[0].name, "GET /v1/x");
+        assert!(snap.alerts.is_empty());
+    }
+
+    #[test]
+    fn saved_pin_without_alert_stays_quiet() {
+        let parsed: ObserveMetric =
+            serde_json::from_str(r#"{"label":"5xx","query":"5xx"}"#).unwrap();
+        assert_eq!(parsed.alert_above, None);
+        assert_eq!(parsed.alert_caption(), "No alert");
+    }
+
+    #[test]
+    fn cycles_alert_threshold() {
+        assert_eq!(next_alert_above(None), Some(0));
+        assert_eq!(next_alert_above(Some(0)), Some(10));
+        assert_eq!(next_alert_above(Some(10)), Some(100));
+        assert_eq!(next_alert_above(Some(100)), None);
+        let mut config = ObserveConfig {
+            metrics: vec![ObserveMetric::new("5xx", "5xx")],
+            ..ObserveConfig::default()
+        };
+        cycle_metric_alert(&mut config, "5xx");
+        assert_eq!(config.metrics[0].alert_above, Some(0));
+        assert_eq!(config.metrics[0].alert_caption(), "> 0");
+        cycle_metric_alert(&mut config, "5xx");
+        assert_eq!(config.metrics[0].alert_above, Some(10));
+    }
+
+    #[test]
+    fn user_threshold_fires_from_window_increase() {
+        let mut five = ObserveMetric::new("5xx", "5xx");
+        five.alert_above = Some(0);
+        let mut reading = MetricReading::from_metric(
+            &five,
+            vec![SeriesValue {
+                name: String::new(),
+                value: 12.0,
+            }],
+            None,
+        );
+        reading.window_total = Some(2.0);
+        let mut snap = ObserveSnapshot {
+            connected: true,
+            metrics: vec![reading],
+            ..ObserveSnapshot::default()
+        };
+        let config = ObserveConfig {
+            metrics: vec![five],
+            ..ObserveConfig::default()
+        };
+        apply_user_alerts(&config, &mut snap);
+        assert_eq!(snap.alerts.len(), 1);
+        assert_eq!(snap.alerts[0].name, "5xx");
+        assert!(snap.has_outage());
+    }
+
+    #[test]
+    fn lifetime_counter_without_window_increase_does_not_fire() {
+        let mut five = ObserveMetric::new("5xx", "5xx");
+        five.alert_above = Some(0);
+        let mut reading = MetricReading::from_metric(
+            &five,
+            vec![SeriesValue {
+                name: String::new(),
+                value: 12.0,
+            }],
+            None,
+        );
+        reading.window_total = Some(0.0);
+        let mut snap = ObserveSnapshot {
+            connected: true,
+            metrics: vec![reading],
+            ..ObserveSnapshot::default()
+        };
+        let config = ObserveConfig {
+            metrics: vec![five],
+            ..ObserveConfig::default()
+        };
+        apply_user_alerts(&config, &mut snap);
+        assert!(snap.alerts.is_empty());
+        assert!(!snap.has_outage());
+    }
+
+    #[test]
+    fn gauge_threshold_uses_last_value() {
+        let mut errors = ObserveMetric::new("Errors", "errors");
+        errors.alert_above = Some(0);
+        let reading = MetricReading::from_metric(
+            &errors,
+            vec![SeriesValue {
+                name: String::new(),
+                value: 3.0,
+            }],
+            None,
+        );
+        let mut snap = ObserveSnapshot {
+            connected: true,
+            metrics: vec![reading],
+            ..ObserveSnapshot::default()
+        };
+        let config = ObserveConfig {
+            metrics: vec![errors],
+            ..ObserveConfig::default()
+        };
+        apply_user_alerts(&config, &mut snap);
+        assert_eq!(snap.alerts.len(), 1);
+        assert_eq!(snap.alerts[0].name, "Errors");
     }
 }
