@@ -140,14 +140,13 @@ export function DynamicIsland() {
         });
     }, [mode, setExpanded, setIsAnimating, setActiveTab, setIsHovered]);
 
-    // Hover: DOM pointer plus existing Tauri mouse-entered/exited listeners
+    // Hover: DOM enter only. Do not clear isHovered on onHoverEnd — the
+    // motion.div resize on expand briefly reports the pointer as outside
+    // the old compact box and auto-collapse would fold immediately.
+    // Exit is owned by the Tauri mouse-exited-notch listener (X11 poll).
     const handleHoverStart = useCallback(() => {
         setIsHovered(true);
         invoke('trigger_haptics').catch(console.error);
-    }, [setIsHovered]);
-
-    const handleHoverEnd = useCallback(() => {
-        setIsHovered(false);
     }, [setIsHovered]);
 
     // Initialization and listeners
@@ -442,7 +441,6 @@ export function DynamicIsland() {
                 }}
                 transition={springTransition}
                 onHoverStart={handleHoverStart}
-                onHoverEnd={handleHoverEnd}
                 onClick={handleIslandClick}
                 onWheel={handleWheel}
                 style={{ cursor: 'pointer' }}
