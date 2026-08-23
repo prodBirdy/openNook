@@ -69,3 +69,5 @@ winreg = "0.55"
 [target.'cfg(target_os = "linux")'.dependencies]
 zbus = "4.0"
 futures = "0.3"
+# Pure-Rust X11 client for global pointer polling (no libX11/libxcb link).
+x11rb = "0.13"
