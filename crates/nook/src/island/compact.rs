@@ -63,16 +63,18 @@ impl Island {
             CompactMode::Observe => {
                 lucide("triangle-alert", theme::COMPACT_FACE).into_any_element()
             }
-            CompactMode::Onboard => label("openNook", theme::BODY, true).into_any_element(),
-            CompactMode::Idle => div().into_any_element(),
+            // Onboard is not a titled compact face (Mac 0.3.0 has no app-name
+            // pill). Keep the arm empty so a leftover preferred mode cannot
+            // paint "openNook" / clip to "openNc".
+            CompactMode::Onboard | CompactMode::Idle => div().into_any_element(),
         }
     }
 
     fn compact_right(
         &self,
         mode: CompactMode,
-        hovered: bool,
-        cx: &mut Context<Self>,
+        _hovered: bool,
+        _cx: &mut Context<Self>,
     ) -> AnyElement {
         match mode {
             CompactMode::Media => visualizer(
@@ -105,20 +107,6 @@ impl Island {
                 };
                 label(text, theme::BODY, true).into_any_element()
             }
-            CompactMode::Onboard if hovered => div()
-                .id("github")
-                .cursor(CursorStyle::PointingHand)
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(|_, _: &MouseDownEvent, _, cx| {
-                        cx.stop_propagation();
-                        let _ = std::process::Command::new("/usr/bin/open")
-                            .arg("https://github.com/prodBirdy/openNook-gpui")
-                            .spawn();
-                    }),
-                )
-                .child(lucide("github", theme::COMPACT_FACE))
-                .into_any_element(),
             _ => div().into_any_element(),
         }
     }
