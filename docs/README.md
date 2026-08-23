@@ -1,18 +1,17 @@
 # Launch page
 
-Static GitHub Pages site for openNook. Intended URL after Pages is on:
+Three designs. Same facts. No winner.
 
-https://prodbirdy.github.io/openNook/
+| Design | File | Intended Pages path |
+| --- | --- | --- |
+| A | [a.html](a.html) | https://prodbirdy.github.io/openNook/a.html |
+| B | [b.html](b.html) | https://prodbirdy.github.io/openNook/b.html |
+| C | [c.html](c.html) | https://prodbirdy.github.io/openNook/c.html |
 
-## Enable Pages (needed once)
+Index ([index.html](index.html)) is only a list of the three.
 
-Pages is not on for this repo yet. After this folder is on `main`:
+Windows download on every design:
 
-1. Repo **Settings → Pages**
-2. **Source:** Deploy from a branch
-3. **Branch:** `main` · **Folder:** `/docs`
-4. Save
+https://github.com/prodBirdy/openNook/releases/download/0.0.2a/openNook_0.1.0_x64-setup.exe
 
-No custom domain. Do not add a CNAME.
-
-Optional: **Source: GitHub Actions** if you merge `.github/workflows/pages.yml` and prefer that deploy path.
+Pages is not enabled from this work. Do not add a CNAME.
