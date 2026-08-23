@@ -635,7 +635,11 @@ mod tests {
         let (x, y) = settings.island_origin(screen_w, screen_h, wrap_w, wrap_h);
         assert_eq!(y, 0.0);
         assert!((x - (screen_w - wrap_w) / 2.0).abs() < 0.01);
-        assert!(x < 400.0, "must not sit on the right of a 1280 display, got {x}");
+        let parked_on_1920 = (1920.0 - wrap_w) / 2.0;
+        assert!(
+            (x - parked_on_1920).abs() > 100.0,
+            "a 1920-wide canvas parks the pill at {parked_on_1920}, which is the right of 1280; got {x}"
+        );
         assert!(settings.island_attached(screen_h));
     }
 
