@@ -4,7 +4,9 @@ Shipped page is design A: light, centered, pill CTA. `index.html` is that page.
 
 https://prodbirdy.github.io/openNook/
 
-Windows: https://github.com/prodBirdy/openNook/releases/download/0.0.2a/openNook_0.1.0_x64-setup.exe
+Primary CTA is macOS 0.3.0: https://github.com/prodBirdy/openNook/releases/download/v0.3.0/openNook-0.3.0.dmg
+
+Windows / Linux remain the old 0.0.2a Tauri line, not 0.3.0.
 
 `a.html` / `b.html` / `c.html` are leftover files, not linked from the index.
 
