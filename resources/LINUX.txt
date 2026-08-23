@@ -7,7 +7,8 @@ Run: ./nook
 Needs a Vulkan-capable GPU driver, plus libxkbcommon and
 libwayland or X11 libraries at runtime.
 
-Compact island: Idle housing wrap, no app title, top-center.
+Compact island: Idle housing wrap, no app title, top-center,
+no window-manager decorations (no title bar / min / max / close).
 Screen size comes from X11 DisplayWidth / DisplayHeight (not a
 hardcoded 1920×1080 canvas). Settings, expanded island, and the
 file tray have been proven on Linux.
