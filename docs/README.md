@@ -1,17 +1,11 @@
 # Launch page
 
-Three designs. Same facts. No winner.
+Shipped page is design A: light, centered, pill CTA. `index.html` is that page.
 
-| Design | File | Intended Pages path |
-| --- | --- | --- |
-| A | [a.html](a.html) | https://prodbirdy.github.io/openNook/a.html |
-| B | [b.html](b.html) | https://prodbirdy.github.io/openNook/b.html |
-| C | [c.html](c.html) | https://prodbirdy.github.io/openNook/c.html |
+https://prodbirdy.github.io/openNook/
 
-Index ([index.html](index.html)) is only a list of the three.
+Windows: https://github.com/prodBirdy/openNook/releases/download/0.0.2a/openNook_0.1.0_x64-setup.exe
 
-Windows download on every design:
+`a.html` / `b.html` / `c.html` are leftover files, not linked from the index.
 
-https://github.com/prodBirdy/openNook/releases/download/0.0.2a/openNook_0.1.0_x64-setup.exe
-
-Pages is not enabled from this work. Do not add a CNAME.
+Pages is not enabled from this work. After merge: Settings → Pages → Deploy from a branch → `main` · `/docs`. No CNAME.
