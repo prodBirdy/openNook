@@ -48,30 +48,29 @@ pub fn drag_active() -> bool {
     DRAG_ACTIVE.load(Ordering::Relaxed)
 }
 
-/// Hit-test the cursor against the island — the painted box and nothing else.
+/// Hit-test the cursor against the island activation area.
+///
+/// Drag capture may extend beyond this area, but hovering and expansion must not.
 pub fn hit_test(mouse_x: f64, mouse_y: f64) -> bool {
-    contains(hit_region(hover_padding()), mouse_x, mouse_y)
+    contains(hit_region(0.0), mouse_x, mouse_y)
 }
 
-/// Margin around the painted island that still counts as a hover.
-///
-/// Zero in normal use: the compact island is only ~32px tall and sits under the
-/// menu bar, so any margin at all arms it from outside its own box. Hysteresis
-/// is not needed either, since hovering *grows* the island — the cursor is well
-/// inside the new bounds before the old ones stop applying.
-///
-/// A Finder drag is the exception. NSWindow only receives `draggingEntered` if
-/// click-through has already lifted by the time the drag cursor arrives, so the
-/// region has to reach out and meet it.
-pub fn hover_padding() -> f64 {
-    if drag_active() || file_drag_widens_hover() {
+/// Hit-test the wider region used only to let the overlay receive Finder drags.
+pub fn hit_test_drag_capture(mouse_x: f64, mouse_y: f64) -> bool {
+    contains(hit_region(drag_capture_padding()), mouse_x, mouse_y)
+}
+
+/// Margin used only to let the overlay receive an inbound Finder drag before
+/// the cursor reaches the painted island.
+pub fn drag_capture_padding() -> f64 {
+    if drag_active() || file_drag_needs_capture() {
         80.0
     } else {
         0.0
     }
 }
 
-fn file_drag_widens_hover() -> bool {
+fn file_drag_needs_capture() -> bool {
     // Tests drive padding through `DRAG_ACTIVE` only. On macOS the real
     // drag pasteboard plus a leftover left-button can otherwise pin padding
     // at 80 for the whole libtest process.
@@ -90,13 +89,13 @@ fn file_drag_widens_hover() -> bool {
 /// than the island, so this is what decides whether a click belongs to us or
 /// falls through to whatever is underneath.
 pub fn hit_test_exact(mouse_x: f64, mouse_y: f64) -> bool {
-    contains(hit_region(0.0), mouse_x, mouse_y)
+    hit_test(mouse_x, mouse_y)
 }
 
-/// What [`hit_test`] accepts, as a rect. For the debug overlay, so what gets
-/// drawn cannot drift from what gets tested.
-pub fn hover_bounds() -> UiBounds {
-    rect(hit_region(hover_padding()))
+/// What [`hit_test_drag_capture`] accepts, as a rect. For the debug overlay, so
+/// what gets drawn cannot drift from what gets tested.
+pub fn drag_capture_bounds() -> UiBounds {
+    rect(hit_region(drag_capture_padding()))
 }
 
 /// What [`hit_test_exact`] accepts, as a rect.
@@ -260,14 +259,14 @@ mod tests {
     fn hover_region_is_the_painted_box() {
         let _guard = lock();
         update_ui_bounds(100.0, 0.0, 200.0, 34.0);
-        assert_eq!(hover_padding(), 0.0);
+        assert_eq!(drag_capture_padding(), 0.0);
         assert!(hit_test(150.0, 10.0));
         // A pixel out on any side is out — no entry pad, no hysteresis.
         assert!(!hit_test(99.0, 10.0));
         assert!(!hit_test(301.0, 10.0));
         assert!(!hit_test(150.0, 35.0));
 
-        let bounds = hover_bounds();
+        let bounds = drag_capture_bounds();
         assert_eq!((bounds.x, bounds.width), (100.0, 200.0));
         assert_eq!((bounds.y, bounds.height), (0.0, 34.0));
     }
@@ -306,23 +305,26 @@ mod tests {
     }
 
     #[test]
-    fn finder_drag_opens_a_full_width_top_strip() {
+    fn finder_drag_only_hovers_the_painted_island() {
         let _guard = lock();
         update_ui_bounds(790.0, 0.0, 220.0, 38.0);
+        super::DRAG_ACTIVE.store(true, Ordering::Relaxed);
+
+        assert!(hit_test(800.0, 20.0), "the painted island activates");
         assert!(
             !hit_test(10.0, 10.0),
-            "idle hover stays on the painted pill"
+            "a file elsewhere on screen must not open the island"
         );
-        super::DRAG_ACTIVE.store(true, Ordering::Relaxed);
         assert!(
-            hit_test(10.0, 10.0),
-            "a drag along the menu bar must lift click-through"
+            hit_test_drag_capture(10.0, 10.0),
+            "the overlay still captures the drag before it reaches the island"
         );
         let far_x = (get_screen_info().0 - 10.0).max(0.0);
-        assert!(hit_test(far_x, 20.0));
-        assert!(!hit_test_exact(10.0, 10.0));
-        super::DRAG_ACTIVE.store(false, Ordering::Relaxed);
-        assert!(!hit_test(10.0, 10.0));
+        assert!(
+            !hit_test(far_x, 20.0),
+            "the drag capture strip must not count as hover"
+        );
+        assert!(hit_test_drag_capture(far_x, 20.0));
     }
 
     #[test]
@@ -331,10 +333,13 @@ mod tests {
         update_ui_bounds(790.0, 200.0, 220.0, 38.0);
         super::DRAG_ACTIVE.store(true, Ordering::Relaxed);
         assert!(
-            !hit_test(10.0, 10.0),
+            !hit_test_drag_capture(10.0, 10.0),
             "a moved island does not steal the menu bar"
         );
-        assert!(hit_test(800.0, 210.0), "padded box around the island still works");
+        assert!(
+            hit_test_drag_capture(800.0, 210.0),
+            "padded capture box around the island still works"
+        );
         super::DRAG_ACTIVE.store(false, Ordering::Relaxed);
     }
 }

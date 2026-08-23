@@ -891,7 +891,8 @@ pub fn stop_mirror() {
 }
 
 /// Pixel edge of the square BGRA frame `mirror_frame` returns.
-pub const MIRROR_SIZE: u32 = 176;
+/// 2× `theme::MIRROR_FACE` so the circle stays sharp on retina.
+pub const MIRROR_SIZE: u32 = 224;
 
 /// Latest square BGRA8 frame from the Mirror camera, if `gen` is newer than `seen`.
 pub fn mirror_frame(seen: u64) -> Option<(u64, Vec<u8>)> {
@@ -913,6 +914,190 @@ pub fn mirror_frame(seen: u64) -> Option<(u64, Vec<u8>)> {
         let _ = seen;
         None
     }
+}
+
+/// PNG of the main display's current desktop wallpaper.
+///
+/// AppKit performs the source decode, so this also works for macOS wallpaper
+/// formats (such as HEIC) that GPUI's cross-platform image decoder may not
+/// understand directly.
+pub fn desktop_wallpaper_png() -> Option<Vec<u8>> {
+    #[cfg(target_os = "macos")]
+    unsafe {
+        desktop_wallpaper_png_macos()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        None
+    }
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn desktop_wallpaper_png_macos() -> Option<Vec<u8>> {
+    desktop_wallpaper_window_png_macos().or_else(|| desktop_wallpaper_url_png_macos())
+}
+
+/// Modern macOS wallpapers can be rendered by an extension (dynamic, video, or
+/// shader based). In that case `desktopImageURLForScreen:` returns the generic
+/// `DefaultDesktop.heic`, not what the user sees. The Dock owns one wallpaper
+/// window per display, so capture its already-rendered frame instead.
+#[cfg(target_os = "macos")]
+unsafe fn desktop_wallpaper_window_png_macos() -> Option<Vec<u8>> {
+    use objc2::rc::autoreleasepool;
+    use objc2::runtime::AnyObject;
+    use objc2::*;
+
+    #[link(name = "CoreGraphics", kind = "framework")]
+    unsafe extern "C" {
+        fn CGWindowListCopyWindowInfo(option: u32, relative_to_window: u32) -> *mut AnyObject;
+        fn CGWindowListCreateImage(
+            screen_bounds: CGRect,
+            list_option: u32,
+            window_id: u32,
+            image_option: u32,
+        ) -> CGImageRef;
+        fn CGImageRelease(image: CGImageRef);
+    }
+
+    const OPTION_ALL: u32 = 0;
+    const OPTION_INCLUDING_WINDOW: u32 = 1 << 3;
+    const IMAGE_BOUNDS_IGNORE_FRAMING: u32 = 1 << 0;
+    const IMAGE_BEST_RESOLUTION: u32 = 1 << 3;
+
+    autoreleasepool(|_| {
+        let windows = CGWindowListCopyWindowInfo(OPTION_ALL, 0);
+        if windows.is_null() {
+            return None;
+        }
+        let owner_key: *mut AnyObject = msg_send![
+            class!(NSString),
+            stringWithUTF8String: c"kCGWindowOwnerName".as_ptr()
+        ];
+        let name_key: *mut AnyObject = msg_send![
+            class!(NSString),
+            stringWithUTF8String: c"kCGWindowName".as_ptr()
+        ];
+        let number_key: *mut AnyObject = msg_send![
+            class!(NSString),
+            stringWithUTF8String: c"kCGWindowNumber".as_ptr()
+        ];
+        let dock: *mut AnyObject =
+            msg_send![class!(NSString), stringWithUTF8String: c"Dock".as_ptr()];
+        let wallpaper: *mut AnyObject = msg_send![
+            class!(NSString),
+            stringWithUTF8String: c"Wallpaper".as_ptr()
+        ];
+
+        let count: usize = msg_send![windows, count];
+        let mut wallpaper_window = None;
+        for index in 0..count {
+            let info: *mut AnyObject = msg_send![windows, objectAtIndex: index];
+            let owner: *mut AnyObject = msg_send![info, objectForKey: owner_key];
+            let name: *mut AnyObject = msg_send![info, objectForKey: name_key];
+            if owner.is_null() || name.is_null() {
+                continue;
+            }
+            let is_dock: bool = msg_send![owner, isEqualToString: dock];
+            let is_wallpaper: bool = msg_send![name, hasPrefix: wallpaper];
+            if is_dock && is_wallpaper {
+                let number: *mut AnyObject = msg_send![info, objectForKey: number_key];
+                if !number.is_null() {
+                    wallpaper_window = Some(msg_send![number, unsignedIntValue]);
+                    break;
+                }
+            }
+        }
+        let _: () = msg_send![windows, release];
+
+        let window_id = wallpaper_window?;
+        let image = CGWindowListCreateImage(
+            CGRect {
+                origin: CGPoint {
+                    x: f64::INFINITY,
+                    y: f64::INFINITY,
+                },
+                size: CGSize {
+                    width: 0.0,
+                    height: 0.0,
+                },
+            },
+            OPTION_INCLUDING_WINDOW,
+            window_id,
+            IMAGE_BOUNDS_IGNORE_FRAMING | IMAGE_BEST_RESOLUTION,
+        );
+        if image.0.is_null() {
+            return None;
+        }
+        let rep: *mut AnyObject = msg_send![class!(NSBitmapImageRep), alloc];
+        let rep: *mut AnyObject = msg_send![rep, initWithCGImage: image];
+        CGImageRelease(image);
+        if rep.is_null() {
+            return None;
+        }
+        let png = bitmap_rep_png(rep);
+        let _: () = msg_send![rep, release];
+        png
+    })
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn desktop_wallpaper_url_png_macos() -> Option<Vec<u8>> {
+    use objc2::rc::autoreleasepool;
+    use objc2::runtime::AnyObject;
+    use objc2::*;
+
+    autoreleasepool(|_| {
+        let screen: *mut AnyObject = msg_send![class!(NSScreen), mainScreen];
+        let workspace: *mut AnyObject = msg_send![class!(NSWorkspace), sharedWorkspace];
+        if screen.is_null() || workspace.is_null() {
+            return None;
+        }
+
+        let url: *mut AnyObject = msg_send![workspace, desktopImageURLForScreen: screen];
+        if url.is_null() {
+            return None;
+        }
+        let image: *mut AnyObject = msg_send![class!(NSImage), alloc];
+        let image: *mut AnyObject = msg_send![image, initWithContentsOfURL: url];
+        if image.is_null() {
+            return None;
+        }
+        let tiff: *mut AnyObject = msg_send![image, TIFFRepresentation];
+        let _: () = msg_send![image, release];
+        if tiff.is_null() {
+            return None;
+        }
+        let rep: *mut AnyObject = msg_send![class!(NSBitmapImageRep), imageRepWithData: tiff];
+        bitmap_rep_png(rep)
+    })
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn bitmap_rep_png(rep: *mut objc2::runtime::AnyObject) -> Option<Vec<u8>> {
+    use objc2::runtime::AnyObject;
+    use objc2::*;
+    use std::ffi::c_void;
+
+    const PNG_TYPE: usize = 4; // NSBitmapImageFileTypePNG
+    const MAX_PNG: usize = 64 * 1024 * 1024;
+
+    if rep.is_null() {
+        return None;
+    }
+    let props: *mut AnyObject = msg_send![class!(NSDictionary), dictionary];
+    let png: *mut AnyObject = msg_send![rep, representationUsingType: PNG_TYPE, properties: props];
+    if png.is_null() {
+        return None;
+    }
+    let len: usize = msg_send![png, length];
+    if len == 0 || len > MAX_PNG {
+        log::warn!("desktop wallpaper: PNG length {len}");
+        return None;
+    }
+    let mut bytes = vec![0u8; len];
+    let dst: *mut c_void = bytes.as_mut_ptr().cast();
+    let _: () = msg_send![png, getBytes: dst, length: len];
+    Some(bytes)
 }
 
 /// PNG of the running media app's icon, from its bundle via NSWorkspace.
@@ -951,6 +1136,7 @@ fn known_bundle_id(app_name: &str) -> Option<&'static str> {
 /// `CGImageRef` encodes as `^{CGImage=}`; a raw `*const c_void` is `^v`
 /// and panics objc2's encoding check.
 #[cfg(target_os = "macos")]
+#[derive(Clone, Copy)]
 #[repr(transparent)]
 struct CGImageRef(*const std::ffi::c_void);
 
@@ -959,8 +1145,6 @@ unsafe impl objc2::Encode for CGImageRef {
     const ENCODING: objc2::Encoding =
         objc2::Encoding::Pointer(&objc2::Encoding::Struct("CGImage", &[]));
 }
-
-
 
 #[cfg(target_os = "macos")]
 #[repr(transparent)]
@@ -1355,6 +1539,7 @@ unsafe fn apply_island_glass(spec: IslandGlass) -> bool {
         let hosted: *mut AnyObject = msg_send![cap.view, window];
         if hosted != ns_win {
             attach_glass_behind_content(ns_win, content, cap.view);
+            pin_dark_appearance(cap.view);
         }
         let current: CGRect = msg_send![cap.view, frame];
         let moved = (current.origin.x - rect.origin.x).abs() > 0.4
@@ -1427,13 +1612,6 @@ unsafe fn create_glass_view(
         let _: () = msg_send![v, setMaterial: 13_i64];
         let _: () = msg_send![v, setBlendingMode: 0_i64];
         let _: () = msg_send![v, setState: 1_i64];
-        let dark_name = ns_string("NSAppearanceNameDarkAqua");
-        if !dark_name.is_null() {
-            let dark: *mut AnyObject = msg_send![class!(NSAppearance), appearanceNamed: dark_name];
-            if !dark.is_null() {
-                let _: () = msg_send![v, setAppearance: dark];
-            }
-        }
         v
     };
 
@@ -1445,9 +1623,32 @@ unsafe fn create_glass_view(
             let _: () = msg_send![glass, setIdentifier: id];
         }
     }
+    // Island chrome is always the dark Live Activity fill (white labels).
+    // Without this, NSGlassEffectView inherits Light appearance and paints
+    // the light glass recipe under those labels.
+    pin_dark_appearance(glass);
     configure_glass_shape(glass, spec);
     apply_glass_tint(glass, spec.tint);
     Some(glass)
+}
+
+/// Pin the underlay to Dark Aqua so Regular glass keeps the dark luminosity
+/// recipe in Light Mode. Choosing a Specific Appearance for Your macOS App:
+/// set the view's `appearance` when a surface must not follow the system.
+#[cfg(target_os = "macos")]
+unsafe fn pin_dark_appearance(view: *mut objc2::runtime::AnyObject) {
+    use objc2::runtime::AnyObject;
+    use objc2::*;
+
+    let name = ns_string("NSAppearanceNameDarkAqua");
+    if name.is_null() {
+        return;
+    }
+    let dark: *mut AnyObject = msg_send![class!(NSAppearance), appearanceNamed: name];
+    if dark.is_null() {
+        return;
+    }
+    let _: () = msg_send![view, setAppearance: dark];
 }
 
 #[cfg(target_os = "macos")]
@@ -1602,8 +1803,6 @@ unsafe extern "C" {
 unsafe extern "C" {
     fn dispatch_get_global_queue(identifier: isize, flags: usize) -> *mut std::ffi::c_void;
 }
-
-
 
 #[cfg(target_os = "macos")]
 fn ns_string(s: &str) -> *mut objc2::runtime::AnyObject {

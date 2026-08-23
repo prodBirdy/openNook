@@ -12,6 +12,7 @@ path = "src/main.rs"
 [dependencies]
 nook-core.workspace = true
 gpui.workspace = true
+gpui-component.workspace = true
 serde.workspace = true
 log.workspace = true
 env_logger.workspace = true

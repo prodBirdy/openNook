@@ -43,11 +43,12 @@ impl gpui::Render for Island {
         let mode = self.mode();
         let expanded = self.expanded;
         let hovered = self.hovered;
-        let notch_w = self.notch_width.max(180.0);
+        let notch_w = self.notch_width.max(1.0);
         let dropping = self.file_drag && (self.hovered || self.expanded);
-        let show_wings = attached
-            && th > 4.0
-            && (!self.settings.non_notch_mode || mode != CompactMode::Idle || hovered || expanded);
+        // Idle collapsed is a 1px wrap around the camera; the 6px ears would
+        // stick out into the menu bar. They come back on hover, Live Activity,
+        // and expand — those silhouettes are already wider than the housing.
+        let show_wings = attached && th > 4.0 && (hovered || expanded || mode != CompactMode::Idle);
 
         let wing = if show_wings { WING } else { 0.0 };
         let chrome_w = tw.max(1.0) + wing * 2.0;
@@ -89,6 +90,11 @@ impl gpui::Render for Island {
         } else {
             theme::island_fill(self.settings.island_color)
         };
+        let agent_border = self
+            .agents
+            .iter()
+            .any(|agent| agent.status.is_working())
+            .then(theme::accent);
         let debug_hitbox = hitbox_debug();
         let content_radius = if expanded {
             theme::EXPANDED_RADIUS
@@ -176,15 +182,18 @@ impl gpui::Render for Island {
                                 },
                             ))
                         })
-                        .when(!native_glass, |d| {
-                            d.child(div().absolute().inset_0().child(island_chrome(
-                                tw.max(1.0),
-                                th.max(1.0),
-                                wing,
-                                island_bg,
-                                attached,
-                            )))
-                        })
+                        .child(div().absolute().inset_0().child(island_chrome(
+                            // Native glass draws no wings — NSGlassEffectView is a
+                            // plain rounded rect spanning the full chrome width — so
+                            // trace the accent border along that glass edge instead
+                            // of the winged silhouette the painted fills use.
+                            if native_glass { chrome_w } else { tw.max(1.0) },
+                            th.max(1.0),
+                            if native_glass { 0.0 } else { wing },
+                            island_bg,
+                            agent_border,
+                            attached,
+                        )))
                         .child(
                             div()
                                 .absolute()
@@ -233,7 +242,7 @@ impl Island {
     /// inserts no hitbox of its own and can't change what it is measuring.
     fn hitbox_overlay(&self) -> AnyElement {
         const EXACT: u32 = 0xff3b30ff;
-        const HOVER: u32 = 0xff3b3066;
+        const DRAG_CAPTURE: u32 = 0xff3b3066;
 
         let outline = |bounds: nook_core::mouse::UiBounds, color: u32| {
             div()
@@ -250,7 +259,10 @@ impl Island {
             .top_0()
             .left_0()
             .size_full()
-            .child(outline(nook_core::mouse::hover_bounds(), HOVER))
+            .child(outline(
+                nook_core::mouse::drag_capture_bounds(),
+                DRAG_CAPTURE,
+            ))
             .child(outline(nook_core::mouse::exact_bounds(), EXACT))
             .into_any_element()
     }

@@ -102,18 +102,17 @@ impl Island {
                         nook_media_pane(&self.now_playing, cx),
                     ),
                 ),
-                WidgetModule::Calendar => {
-                    if self.settings.show_calendar {
-                        add(
-                            &mut kids,
-                            cell_pane(
-                                self.settings.cells_for(module),
-                                calendar_card(&self.events, self.calendar_day, cx),
-                            ),
-                        );
-                    }
-                    add(&mut kids, mirror_pane(self, cx).into_any_element());
-                }
+                WidgetModule::Calendar if self.settings.show_calendar => add(
+                    &mut kids,
+                    cell_pane(
+                        self.settings.cells_for(module),
+                        calendar_card(&self.events, self.calendar_day, cx),
+                    ),
+                ),
+                WidgetModule::Mirror if self.settings.show_mirror => add(
+                    &mut kids,
+                    cell_pane(self.settings.cells_for(module), mirror_pane(self, cx)),
+                ),
                 WidgetModule::Agents if self.settings.show_agents => add(
                     &mut kids,
                     cell_pane(
@@ -290,7 +289,7 @@ fn mirror_pane(island: &Island, cx: &mut Context<Island>) -> impl IntoElement {
         .child(
             div()
                 .id("mirror-btn")
-                .size(px(88.))
+                .size(px(theme::MIRROR_FACE))
                 .rounded_full()
                 .bg(rgba(0xffffff14))
                 .cursor(CursorStyle::PointingHand)
@@ -309,12 +308,12 @@ fn mirror_pane(island: &Island, cx: &mut Context<Island>) -> impl IntoElement {
                         .flex_col()
                         .items_center()
                         .justify_center()
-                        .gap(px(6.))
-                        .child(lucide_color("webcam", 22.0, theme::SECONDARY_LABEL))
+                        .gap(px(8.))
+                        .child(lucide_color("webcam", 28.0, theme::SECONDARY_LABEL))
                         .child(
                             div()
-                                .text_size(px(11.))
-                                .line_height(px(13.))
+                                .text_size(px(12.))
+                                .line_height(px(15.))
                                 .font_weight(FontWeight::MEDIUM)
                                 .text_color(theme::SECONDARY_LABEL)
                                 .child("Mirror"),
@@ -332,18 +331,18 @@ fn mirror_frame_el(frame: Option<std::sync::Arc<RenderImage>>) -> AnyElement {
             // placeholder on every camera tick, which looks like a reinit.
             img(image)
                 .id("mirror-video")
-                .size(px(88.))
+                .size(px(theme::MIRROR_FACE))
                 .rounded_full()
                 .object_fit(ObjectFit::Fill)
                 .into_any_element()
         }
         None => div()
-            .size(px(88.))
+            .size(px(theme::MIRROR_FACE))
             .rounded_full()
             .flex()
             .items_center()
             .justify_center()
-            .child(lucide_color("webcam", 22.0, theme::LABEL))
+            .child(lucide_color("webcam", 28.0, theme::LABEL))
             .into_any_element(),
     }
 }

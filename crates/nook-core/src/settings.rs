@@ -16,10 +16,11 @@ pub enum WidgetModule {
     Reminders = 6,
     Speed = 7,
     Agents = 8,
+    Mirror = 9,
 }
 
 impl WidgetModule {
-    pub const ALL: [Self; 9] = [
+    pub const ALL: [Self; 10] = [
         Self::Calendar,
         Self::Music,
         Self::Files,
@@ -29,6 +30,7 @@ impl WidgetModule {
         Self::Reminders,
         Self::Speed,
         Self::Agents,
+        Self::Mirror,
     ];
 
     pub fn from_u8(value: u8) -> Self {
@@ -43,21 +45,21 @@ impl WidgetModule {
         match self {
             Self::Calendar | Self::Music => 5,
             Self::Files | Self::Notes | Self::Observe | Self::Reminders | Self::Agents => 4,
-            Self::Timers | Self::Speed => 3,
+            Self::Timers | Self::Speed | Self::Mirror => 3,
         }
     }
 
     pub fn min_cells(self) -> u8 {
         match self {
             Self::Calendar => 4,
-            Self::Music | Self::Files | Self::Observe | Self::Reminders => 3,
+            Self::Music | Self::Files | Self::Observe | Self::Reminders | Self::Mirror => 3,
             Self::Notes | Self::Timers | Self::Speed | Self::Agents => 2,
         }
     }
 
     pub fn max_cells(self) -> u8 {
         match self {
-            Self::Timers | Self::Speed | Self::Agents => 6,
+            Self::Timers | Self::Speed | Self::Agents | Self::Mirror => 6,
             _ => 8,
         }
     }
@@ -72,6 +74,7 @@ fn default_widget_order() -> Vec<WidgetModule> {
     vec![
         WidgetModule::Music,
         WidgetModule::Calendar,
+        WidgetModule::Mirror,
         WidgetModule::Files,
         WidgetModule::Agents,
         WidgetModule::Observe,
@@ -137,6 +140,8 @@ pub struct AppSettings {
     pub show_speed: bool,
     #[serde(default = "default_true")]
     pub show_files: bool,
+    #[serde(default = "default_true")]
+    pub show_mirror: bool,
     #[serde(default)]
     pub observe: ObserveConfig,
     #[serde(default)]
@@ -225,6 +230,7 @@ impl Default for AppSettings {
             show_notes: true,
             show_speed: true,
             show_files: true,
+            show_mirror: true,
             observe: ObserveConfig::default(),
             liquid_glass_mode: false,
             non_notch_mode: false,
@@ -269,6 +275,7 @@ impl AppSettings {
             WidgetModule::Reminders => self.show_reminders,
             WidgetModule::Speed => self.show_speed,
             WidgetModule::Agents => self.show_agents,
+            WidgetModule::Mirror => self.show_mirror,
         }
     }
 
@@ -283,6 +290,7 @@ impl AppSettings {
             WidgetModule::Reminders => self.show_reminders = !self.show_reminders,
             WidgetModule::Speed => self.show_speed = !self.show_speed,
             WidgetModule::Agents => self.show_agents = !self.show_agents,
+            WidgetModule::Mirror => self.show_mirror = !self.show_mirror,
         }
     }
 
@@ -309,16 +317,9 @@ impl AppSettings {
         }
     }
 
-    /// Max width the slider may grow to without stealing cells from others.
+    /// Max width available to this widget in the horizontally scrollable Nook row.
     pub fn max_cells_for(&self, module: WidgetModule) -> u8 {
-        let current = self.cells_for(module);
-        if self.is_enabled(module) && module.occupies_nook_cells() {
-            module
-                .max_cells()
-                .min(current.saturating_add(self.remaining_cells()))
-        } else {
-            module.max_cells()
-        }
+        module.max_cells()
     }
 
     pub fn used_cells(&self) -> u8 {
@@ -599,6 +600,7 @@ mod tests {
         assert!(parsed.show_notes);
         assert!(parsed.show_speed);
         assert!(parsed.show_files);
+        assert!(parsed.show_mirror);
         assert!(parsed.liquid_glass_mode);
         assert!(!parsed.non_notch_mode);
         assert!((parsed.island_x - 0.5).abs() < f32::EPSILON);
@@ -683,10 +685,22 @@ mod tests {
         settings.show_reminders = false;
         settings.show_speed = false;
         settings.show_agents = false;
+        settings.show_mirror = false;
         settings.set_cells(WidgetModule::Music, 5);
         assert_eq!(settings.used_cells(), 5);
         assert_eq!(settings.remaining_cells(), AppSettings::TOTAL_CELLS - 5);
         assert_eq!(settings.max_cells_for(WidgetModule::Music), 8);
+    }
+
+    #[test]
+    fn enabled_widget_can_grow_when_the_scrollable_row_exceeds_the_cell_budget() {
+        let settings = AppSettings::default();
+        assert_eq!(settings.remaining_cells(), 0);
+        assert_eq!(settings.cells_for(WidgetModule::Music), 5);
+        assert_eq!(
+            settings.max_cells_for(WidgetModule::Music),
+            WidgetModule::Music.max_cells()
+        );
     }
 
     #[cfg(target_os = "macos")]

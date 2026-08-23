@@ -158,9 +158,15 @@ pub const SETTINGS_WELL: Rgba = Rgba {
     a: 0.92,
 };
 
-/// Compact island matches the hardware notch; expanded uses a larger bottom
-/// radius so inner cards can sit concentrically (outer − inset).
-pub const COMPACT_RADIUS: f32 = 18.0;
+/// Idle compact wraps the camera housing by this much so the hardware sits
+/// inside the island instead of sitting on the painted edge.
+pub const IDLE_NOTCH_OVERFLOW: f32 = 1.0;
+/// Extra height on every compact rest state so the bottom rim clears the
+/// housing after anti-aliasing.
+pub const COMPACT_HEIGHT_OVERFLOW: f32 = 1.0;
+/// Bottom-corner radius of the compact island. The camera housing is a
+/// rounded rect, not a capsule — half-height rounding ate the 1px wrap.
+pub const COMPACT_RADIUS: f32 = 12.0;
 pub const EXPANDED_RADIUS: f32 = 36.0;
 /// React `WidgetWrapper`: `rounded-[28px]`.
 pub const WIDGET_RADIUS: f32 = 28.0;
@@ -231,7 +237,6 @@ pub const SUBHEADLINE: Text = Text {
     weight: FontWeight::NORMAL,
     emphasized: FontWeight::SEMIBOLD,
 };
-#[allow(dead_code)]
 pub const FOOTNOTE: Text = Text {
     size: 10.0,
     leading: 13.0,
@@ -241,6 +246,8 @@ pub const FOOTNOTE: Text = Text {
 
 /// Compact Live Activity face — album chip, mode icons, timer ring, loader.
 pub const COMPACT_FACE: f32 = 26.0;
+/// Expanded Nook Mirror circle. Fills `NOOK_BODY` minus the pane inset.
+pub const MIRROR_FACE: f32 = 112.0;
 
 /// HIG › Accessibility › Buttons gives macOS a 28×28 pt recommended hit target
 /// (20×20 pt minimum). Interactive rows and controls hold this floor even when

@@ -1,26 +1,32 @@
-//! Settings window — Nook chrome: titlebar, icon toolbar, pills, module list.
+//! Settings window — macOS split view: sidebar + grouped inset lists.
 
 use super::ui::label;
 use crate::icons::lucide_color;
 use crate::theme;
 use gpui::{
-    canvas, div, prelude::*, px, relative, rgb, rgba, AnyElement, Bounds, Context, CursorStyle,
-    FocusHandle, FontWeight, KeyDownEvent, MouseButton, MouseMoveEvent, MouseUpEvent, Pixels, Rgba,
-    SharedString, Window,
+    canvas, div, img, prelude::*, px, rgb, rgba, AnyElement, Bounds, Context, CursorStyle, Entity,
+    FocusHandle, FontWeight, Image, KeyDownEvent, MouseButton, MouseMoveEvent, MouseUpEvent,
+    ObjectFit, Pixels, Rgba, SharedString, Subscription, Window,
 };
+use gpui_component::slider::{Slider, SliderEvent, SliderState};
 use nook_core::settings::{AppSettings, IslandSwatch, WidgetModule, ISLAND_SWATCHES};
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU8, Ordering};
 
-/// Default settings window. 3:2 so the two-column Custom Widgets page
-/// is neither a tall stretch (860×640) nor a cramped portrait (420×620).
-pub(super) const SETTINGS_SIZE: (f32, f32) = (900.0, 600.0);
-pub(super) const SETTINGS_MIN: (f32, f32) = (780.0, 520.0);
+/// Default settings window. Sidebar + grouped pane, landscape so the widget
+/// list and island preview sit side by side with the navigation.
+pub(super) const SETTINGS_SIZE: (f32, f32) = (780.0, 560.0);
+pub(super) const SETTINGS_MIN: (f32, f32) = (680.0, 480.0);
+
+const SIDEBAR_W: f32 = 180.0;
+/// Room for traffic lights on a transparent titlebar.
+const TITLEBAR_INSET: f32 = 52.0;
+const GROUP_PAD: f32 = 12.0;
+const ROW_H: f32 = 36.0;
 
 /// Last surface the user had open. Survives closing the window.
-static LAST_CATEGORY: AtomicU8 = AtomicU8::new(SettingsCategory::Nook as u8);
-static LAST_NOOK_TAB: AtomicU8 = AtomicU8::new(NookTab::CustomWidgets as u8);
+static LAST_CATEGORY: AtomicU8 = AtomicU8::new(SettingsCategory::Widgets as u8);
 static LAST_MODULE: AtomicU8 = AtomicU8::new(WidgetModule::Calendar as u8);
 
 fn token_text(token: &str, revealed: bool) -> String {
@@ -31,34 +37,47 @@ fn token_text(token: &str, revealed: bool) -> String {
     }
 }
 
+fn hairline() -> Rgba {
+    rgba(0xffffff14)
+}
+
+fn desktop_wallpaper_image() -> Option<std::sync::Arc<Image>> {
+    static WALLPAPER: std::sync::OnceLock<Option<std::sync::Arc<Image>>> =
+        std::sync::OnceLock::new();
+    WALLPAPER
+        .get_or_init(|| {
+            crate::platform::desktop_wallpaper_png()
+                .map(|png| std::sync::Arc::new(Image::from_bytes(gpui::ImageFormat::Png, png)))
+        })
+        .clone()
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
 enum SettingsCategory {
     General = 0,
-    Nook = 1,
+    Widgets = 1,
 }
 
 impl SettingsCategory {
     fn from_u8(v: u8) -> Self {
         match v {
-            1 => Self::Nook,
+            1 => Self::Widgets,
             _ => Self::General,
         }
     }
-}
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[repr(u8)]
-enum NookTab {
-    General = 0,
-    CustomWidgets = 1,
-}
+    fn title(self) -> &'static str {
+        match self {
+            Self::General => "General",
+            Self::Widgets => "Widgets",
+        }
+    }
 
-impl NookTab {
-    fn from_u8(v: u8) -> Self {
-        match v {
-            1 => Self::CustomWidgets,
-            _ => Self::General,
+    fn icon(self) -> &'static str {
+        match self {
+            Self::General => "settings",
+            Self::Widgets => "layout-grid",
         }
     }
 }
@@ -78,20 +97,21 @@ struct WidgetDrag(WidgetModule);
 impl gpui::Render for WidgetDrag {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         div()
-            .w(px(180.))
-            .h(px(44.))
+            .w(px(220.))
+            .h(px(ROW_H))
             .px(px(10.))
-            .rounded(px(10.))
-            .bg(theme::accent())
+            .rounded(px(8.))
+            .bg(theme::GROUPED_BG)
             .shadow_md()
             .flex()
             .items_center()
             .gap(px(8.))
-            .child(lucide_color(self.0.icon(), 16.0, theme::LABEL))
+            .child(lucide_color("grip-vertical", 14.0, theme::TERTIARY_LABEL))
+            .child(lucide_color(self.0.icon(), 14.0, theme::LABEL))
             .child(
                 div()
-                    .text_size(px(13.))
-                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_size(px(theme::BODY.size))
+                    .font_weight(FontWeight::MEDIUM)
                     .text_color(theme::LABEL)
                     .child(self.0.name()),
             )
@@ -110,6 +130,7 @@ impl WidgetModuleExt for WidgetModule {
             Self::Reminders => "Reminders",
             Self::Speed => "Speed Test",
             Self::Agents => "Agents",
+            Self::Mirror => "Mirror",
         }
     }
 
@@ -124,6 +145,7 @@ impl WidgetModuleExt for WidgetModule {
             Self::Reminders => "list-checks",
             Self::Speed => "gauge",
             Self::Agents => "bot",
+            Self::Mirror => "webcam",
         }
     }
 
@@ -138,6 +160,7 @@ impl WidgetModuleExt for WidgetModule {
             Self::Reminders => "EventKit".into(),
             Self::Speed => "Cloudflare".into(),
             Self::Agents => "Sessions".into(),
+            Self::Mirror => "Camera".into(),
         }
     }
 
@@ -160,6 +183,7 @@ impl WidgetModuleExt for WidgetModule {
             Self::Reminders => "Reminders",
             Self::Speed => "Speed",
             Self::Agents => "Agents",
+            Self::Mirror => "Mirror",
         }
     }
 }
@@ -172,9 +196,33 @@ fn observe_subtitle(pinned: usize) -> SharedString {
     }
 }
 
+fn create_width_slider(
+    module: WidgetModule,
+    settings: &AppSettings,
+    cx: &mut Context<SettingsView>,
+) -> (Entity<SliderState>, Subscription) {
+    let min = module.min_cells();
+    let max = settings.max_cells_for(module).max(min);
+    let value = settings.cells_for(module).clamp(min, max);
+    let slider = cx.new(|_| {
+        SliderState::new()
+            .min(min as f32)
+            .max(max as f32)
+            .step(1.0)
+            .default_value(value as f32)
+    });
+    let subscription = cx.subscribe(&slider, move |_, _, event: &SliderEvent, cx| {
+        let SliderEvent::Change(value) = event;
+        nook_core::settings::tweak_app_settings(|settings| {
+            settings.set_cells(module, value.start().round() as u8)
+        });
+        cx.notify();
+    });
+    (slider, subscription)
+}
+
 pub(super) struct SettingsView {
     category: SettingsCategory,
-    nook_tab: NookTab,
     module: WidgetModule,
     url_focus: FocusHandle,
     token_focus: FocusHandle,
@@ -186,8 +234,9 @@ pub(super) struct SettingsView {
     catalog: Vec<String>,
     catalog_error: Option<String>,
     catalog_loading: bool,
-    slider_dragging: bool,
-    slider_bounds: Rc<RefCell<Option<Bounds<Pixels>>>>,
+    width_slider: Entity<SliderState>,
+    width_slider_config: (WidgetModule, u8, u8),
+    _width_slider_subscription: Subscription,
     placement_drag: bool,
     placement_bounds: Rc<RefCell<Option<Bounds<Pixels>>>>,
 }
@@ -195,10 +244,13 @@ pub(super) struct SettingsView {
 impl SettingsView {
     pub(super) fn new(cx: &mut Context<Self>) -> Self {
         let settings = nook_core::settings::get_app_settings();
+        let module = WidgetModule::from_u8(LAST_MODULE.load(Ordering::Relaxed));
+        let min = module.min_cells();
+        let max = settings.max_cells_for(module).max(min);
+        let (width_slider, width_slider_subscription) = create_width_slider(module, &settings, cx);
         Self {
             category: SettingsCategory::from_u8(LAST_CATEGORY.load(Ordering::Relaxed)),
-            nook_tab: NookTab::from_u8(LAST_NOOK_TAB.load(Ordering::Relaxed)),
-            module: WidgetModule::from_u8(LAST_MODULE.load(Ordering::Relaxed)),
+            module,
             url_focus: cx.focus_handle(),
             token_focus: cx.focus_handle(),
             query_focus: cx.focus_handle(),
@@ -209,34 +261,12 @@ impl SettingsView {
             catalog: Vec::new(),
             catalog_error: None,
             catalog_loading: false,
-            slider_dragging: false,
-            slider_bounds: Rc::new(RefCell::new(None)),
+            width_slider,
+            width_slider_config: (module, min, max),
+            _width_slider_subscription: width_slider_subscription,
             placement_drag: false,
             placement_bounds: Rc::new(RefCell::new(None)),
         }
-    }
-
-    fn apply_slider_x(&mut self, x: f32, cx: &mut Context<Self>) {
-        let Some(bounds) = *self.slider_bounds.borrow() else {
-            return;
-        };
-        let width: f32 = bounds.size.width.into();
-        let origin: f32 = bounds.origin.x.into();
-        if width < 1.0 {
-            return;
-        }
-        let t = ((x - origin) / width).clamp(0.0, 1.0);
-        let settings = nook_core::settings::get_app_settings();
-        let module = self.module;
-        let min = module.min_cells();
-        let max = settings.max_cells_for(module).max(min);
-        let span = (max - min).max(1);
-        let cells = (min + (t * span as f32).round() as u8).clamp(min, max);
-        if cells == settings.cells_for(module) {
-            return;
-        }
-        nook_core::settings::tweak_app_settings(|s| s.set_cells(module, cells));
-        cx.notify();
     }
 
     fn apply_placement(&mut self, x: f32, y: f32, cx: &mut Context<Self>) {
@@ -262,7 +292,6 @@ impl SettingsView {
 
     fn persist_nav(&self) {
         LAST_CATEGORY.store(self.category as u8, Ordering::Relaxed);
-        LAST_NOOK_TAB.store(self.nook_tab as u8, Ordering::Relaxed);
         LAST_MODULE.store(self.module as u8, Ordering::Relaxed);
     }
 
@@ -361,44 +390,29 @@ impl gpui::Render for SettingsView {
         let url_focused = self.url_focus.is_focused(window);
         let token_focused = self.token_focus.is_focused(window);
         let query_focused = self.query_focus.is_focused(window);
-        let show_widgets =
-            self.category == SettingsCategory::Nook && self.nook_tab == NookTab::CustomWidgets;
 
         div()
             .id("settings-root")
             .size_full()
             .flex()
-            .flex_col()
             .bg(theme::SETTINGS_GLASS)
             .text_color(theme::LABEL)
-            .pt(px(36.))
-            .px(px(24.))
-            .pb(px(20.))
-            .gap(px(12.))
-            .when(self.slider_dragging || self.placement_drag, |d| {
+            .when(self.placement_drag, |d| {
                 d.on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
-                    let x: f32 = event.position.x.into();
-                    let y: f32 = event.position.y.into();
-                    if this.slider_dragging {
-                        this.apply_slider_x(x, cx);
-                    }
-                    if this.placement_drag {
-                        this.apply_placement(x, y, cx);
-                    }
+                    this.apply_placement(event.position.x.into(), event.position.y.into(), cx);
                 }))
                 .on_mouse_up(
                     MouseButton::Left,
                     cx.listener(|this, _: &MouseUpEvent, _, cx| {
-                        this.slider_dragging = false;
                         this.placement_drag = false;
                         cx.notify();
                     }),
                 )
             })
-            .child(self.category_toolbar(cx))
-            .child(self.pill_row(cx))
-            .child(if show_widgets {
-                self.render_custom_widgets(&settings, url_focused, token_focused, query_focused, cx)
+            .child(self.sidebar(cx))
+            .child(div().w(px(1.)).h_full().bg(hairline()))
+            .child(if self.category == SettingsCategory::Widgets {
+                self.render_widgets(&settings, url_focused, token_focused, query_focused, cx)
                     .into_any_element()
             } else {
                 self.render_general(&settings, cx).into_any_element()
@@ -407,230 +421,184 @@ impl gpui::Render for SettingsView {
 }
 
 impl SettingsView {
-    fn category_toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         div()
-            .w_full()
+            .id("settings-sidebar")
+            .w(px(SIDEBAR_W))
+            .h_full()
+            .flex_shrink_0()
             .flex()
-            .justify_center()
-            .gap(px(32.))
-            .child(self.toolbar_item(
-                "settings",
-                "General",
-                self.category == SettingsCategory::General,
-                SettingsCategory::General,
-                cx,
-            ))
-            .child(self.toolbar_item(
-                "map-pin",
-                "Nook",
-                self.category == SettingsCategory::Nook,
-                SettingsCategory::Nook,
-                cx,
-            ))
+            .flex_col()
+            .bg(theme::SETTINGS_WELL)
+            .pt(px(TITLEBAR_INSET))
+            .px(px(10.))
+            .pb(px(16.))
+            .gap(px(2.))
+            .child(self.sidebar_item(SettingsCategory::General, cx))
+            .child(self.sidebar_item(SettingsCategory::Widgets, cx))
     }
 
-    fn toolbar_item(
-        &self,
-        icon: &'static str,
-        caption: &'static str,
-        selected: bool,
-        category: SettingsCategory,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let color = if selected {
+    fn sidebar_item(&self, category: SettingsCategory, cx: &mut Context<Self>) -> impl IntoElement {
+        let selected = self.category == category;
+        let icon_color = if selected {
             theme::accent()
         } else {
             theme::SECONDARY_LABEL
         };
         div()
-            .id(SharedString::from(format!("toolbar-{caption}")))
+            .id(SharedString::from(format!("sidebar-{}", category.title())))
+            .h(px(28.))
+            .px(px(8.))
+            .rounded(px(6.))
             .flex()
-            .flex_col()
             .items_center()
-            .gap(px(4.))
+            .gap(px(8.))
+            .when(selected, |d| d.bg(theme::FILL_SECONDARY))
+            .hover(|s| if selected { s } else { s.bg(theme::FILL) })
             .cursor(CursorStyle::PointingHand)
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, _, _, cx| {
                     this.category = category;
-                    if category == SettingsCategory::Nook {
-                        this.nook_tab = NookTab::CustomWidgets;
-                    }
                     this.persist_nav();
                     cx.notify();
                 }),
             )
-            .child(lucide_color(icon, 22.0, color))
+            .child(lucide_color(category.icon(), 15.0, icon_color))
             .child(
                 div()
-                    .text_size(px(11.))
+                    .text_size(px(theme::BODY.size))
+                    .line_height(px(theme::BODY.leading))
                     .font_weight(if selected {
                         FontWeight::SEMIBOLD
                     } else {
-                        FontWeight::MEDIUM
+                        FontWeight::NORMAL
                     })
-                    .text_color(color)
-                    .child(caption),
-            )
-    }
-
-    fn pill_row(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let mut row = div().w_full().flex().justify_center().gap(px(8.));
-        match self.category {
-            SettingsCategory::General => {
-                row = row.child(self.pill("General", true, NookTab::General, false, cx));
-            }
-            SettingsCategory::Nook => {
-                row = row
-                    .child(self.pill(
-                        "General",
-                        self.nook_tab == NookTab::General,
-                        NookTab::General,
-                        true,
-                        cx,
-                    ))
-                    .child(self.pill(
-                        "Customize widgets",
-                        self.nook_tab == NookTab::CustomWidgets,
-                        NookTab::CustomWidgets,
-                        true,
-                        cx,
-                    ));
-            }
-        }
-        row
-    }
-
-    fn pill(
-        &self,
-        caption: &'static str,
-        selected: bool,
-        tab: NookTab,
-        switch_tab: bool,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        div()
-            .id(SharedString::from(format!("pill-{caption}")))
-            .h(px(28.))
-            .px(px(14.))
-            .flex()
-            .items_center()
-            .justify_center()
-            .rounded_full()
-            .bg(if selected {
-                rgba(0xffffff22)
-            } else {
-                rgba(0xffffff0D)
-            })
-            .hover(|s| s.bg(rgba(0xffffff2A)))
-            .cursor(CursorStyle::PointingHand)
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, _, _, cx| {
-                    if switch_tab {
-                        this.nook_tab = tab;
-                        this.persist_nav();
-                        cx.notify();
-                    }
-                }),
-            )
-            .child(
-                div()
-                    .text_size(px(12.))
-                    .font_weight(FontWeight::SEMIBOLD)
                     .text_color(if selected {
                         theme::LABEL
                     } else {
                         theme::SECONDARY_LABEL
                     })
-                    .child(caption),
+                    .child(category.title()),
+            )
+    }
+
+    fn pane(title: &'static str, body: impl IntoElement) -> impl IntoElement {
+        div()
+            .id(SharedString::from(format!("pane-{title}")))
+            .flex_1()
+            .min_w(px(0.))
+            .h_full()
+            .flex()
+            .flex_col()
+            .pt(px(TITLEBAR_INSET))
+            .child(
+                div()
+                    .px(px(20.))
+                    .pb(px(12.))
+                    .flex_shrink_0()
+                    .text_size(px(theme::TITLE_2.size))
+                    .line_height(px(theme::TITLE_2.leading))
+                    .font_weight(theme::TITLE_2.emphasized)
+                    .text_color(theme::LABEL)
+                    .child(title),
+            )
+            .child(
+                div()
+                    .id(SharedString::from(format!("pane-body-{title}")))
+                    .flex_1()
+                    .min_h(px(0.))
+                    .px(px(20.))
+                    .pb(px(24.))
+                    .overflow_y_scroll()
+                    .flex()
+                    .flex_col()
+                    .gap(px(16.))
+                    .child(body),
             )
     }
 
     fn render_general(&self, settings: &AppSettings, cx: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .id("general-pane")
-            .flex_1()
-            .min_h(px(0.))
-            .w_full()
-            .overflow_y_scroll()
-            .flex()
-            .flex_col()
-            .gap_3()
-            .child(group_caption("Appearance"))
-            .child(settings_group(vec![
-                toggle_row("Liquid Glass island", settings.liquid_glass_mode, cx, |s| {
-                    s.liquid_glass_mode = !s.liquid_glass_mode
-                })
-                .into_any_element(),
-                self.color_row(settings, cx).into_any_element(),
-            ]))
-            .child(group_caption("Position"))
-            .child(self.placement_canvas(settings, cx))
-            .child(self.placement_chips(settings, cx))
-            .child(group_caption("Behavior"))
-            .child(settings_group(vec![
-                toggle_row(
-                    "Show island without a notch",
-                    settings.non_notch_mode,
-                    cx,
-                    |s| {
-                        s.non_notch_mode = !s.non_notch_mode;
-                    },
-                )
-                .into_any_element(),
-                toggle_row(
-                    "Hide when an app fills the display",
-                    settings.hide_when_maximized,
-                    cx,
-                    |s| {
-                        s.hide_when_maximized = !s.hide_when_maximized;
-                    },
-                )
-                .into_any_element(),
-            ]))
-            .child(
-                div()
-                    .text_size(px(theme::SUBHEADLINE.size))
-                    .text_color(theme::SECONDARY_LABEL)
-                    .child(
-                        "Hover the island to expand. Option-drag to move it. Settings and Quit live in the menu bar extra.",
-                    ),
-            )
+        Self::pane(
+            "General",
+            div()
+                .id("general-pane")
+                .flex()
+                .flex_col()
+                .gap(px(16.))
+                .child(section(
+                    "Appearance",
+                    settings_group(vec![
+                        toggle_row("Liquid Glass island", settings.liquid_glass_mode, cx, |s| {
+                            s.liquid_glass_mode = !s.liquid_glass_mode
+                        })
+                        .into_any_element(),
+                        self.color_row(settings, cx).into_any_element(),
+                    ]),
+                    Some("A custom color replaces the default black island."),
+                ))
+                .child(section(
+                    "Position",
+                    settings_group(vec![
+                        self.placement_canvas(settings, cx).into_any_element(),
+                        self.alignment_row(settings, cx).into_any_element(),
+                        self.reset_row(cx).into_any_element(),
+                    ]),
+                    Some("Drag the island on the preview. Option-drag it on the display to place it."),
+                ))
+                .child(section(
+                    "Behavior",
+                    settings_group(vec![
+                        toggle_row(
+                            "Show island without a notch",
+                            settings.non_notch_mode,
+                            cx,
+                            |s| {
+                                s.non_notch_mode = !s.non_notch_mode;
+                            },
+                        )
+                        .into_any_element(),
+                        toggle_row(
+                            "Hide when an app fills the display",
+                            settings.hide_when_maximized,
+                            cx,
+                            |s| {
+                                s.hide_when_maximized = !s.hide_when_maximized;
+                            },
+                        )
+                        .into_any_element(),
+                    ]),
+                    Some("Hover the island to expand. Settings and Quit are in the menu bar extra."),
+                )),
+        )
     }
 
     fn color_row(&self, settings: &AppSettings, cx: &mut Context<Self>) -> impl IntoElement {
-        let mut swatches = div().flex().items_center().gap(px(8.));
+        let mut swatches = div().flex().items_center().gap(px(6.));
         for swatch in ISLAND_SWATCHES {
             swatches = swatches.child(color_swatch(swatch, settings.island_color, cx));
         }
-        div()
-            .id("island-color")
-            .flex()
-            .items_center()
-            .justify_between()
-            .min_h(px(36.))
-            .py(px(6.))
+        settings_row("island-color")
             .child(
                 div()
                     .flex()
                     .flex_col()
                     .gap(px(1.))
                     .child(label("Island color", theme::BODY, true))
-                    .child(label(settings.island_swatch_name(), theme::SUBHEADLINE, false)),
+                    .child(label(
+                        settings.island_swatch_name(),
+                        theme::SUBHEADLINE,
+                        false,
+                    )),
             )
             .child(swatches)
     }
 
-    fn placement_canvas(
-        &self,
-        settings: &AppSettings,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    fn placement_canvas(&self, settings: &AppSettings, cx: &mut Context<Self>) -> impl IntoElement {
         const PILL_W: f32 = 52.0;
         const PILL_H: f32 = 14.0;
         const FALLBACK_W: f32 = 640.0;
-        const FALLBACK_H: f32 = 140.0;
+        const FALLBACK_H: f32 = 128.0;
         let (cw, ch) = self
             .placement_bounds
             .borrow()
@@ -648,7 +616,6 @@ impl SettingsView {
             .id("placement-canvas")
             .w_full()
             .h(px(FALLBACK_H))
-            .rounded(px(14.))
             .overflow_hidden()
             .relative()
             .cursor(if self.placement_drag {
@@ -688,100 +655,90 @@ impl SettingsView {
             )
     }
 
-    fn placement_chips(&self, settings: &AppSettings, cx: &mut Context<Self>) -> impl IntoElement {
+    fn alignment_row(&self, settings: &AppSettings, cx: &mut Context<Self>) -> impl IntoElement {
         let x = settings.island_x;
         let left = (x - 0.0).abs() < 0.02;
         let center = (x - 0.5).abs() < 0.02;
         let right = (x - 1.0).abs() < 0.02;
-        div()
-            .flex()
-            .items_center()
-            .gap(px(8.))
-            .child(chip("Left", left, cx, |_, _, cx| {
-                nook_core::settings::tweak_app_settings(|s| s.island_x = 0.0);
-                cx.notify();
-            }))
-            .child(chip("Center", center, cx, |_, _, cx| {
-                nook_core::settings::tweak_app_settings(|s| s.island_x = 0.5);
-                cx.notify();
-            }))
-            .child(chip("Right", right, cx, |_, _, cx| {
-                nook_core::settings::tweak_app_settings(|s| s.island_x = 1.0);
-                cx.notify();
-            }))
-            .child(chip("Reset", false, cx, |_, _, cx| {
+        settings_row("island-align")
+            .child(label("Alignment", theme::BODY, true))
+            .child(
+                segmented_group()
+                    .child(segment("Left", left, cx, |_, _, cx| {
+                        nook_core::settings::tweak_app_settings(|s| s.island_x = 0.0);
+                        cx.notify();
+                    }))
+                    .child(segment("Center", center, cx, |_, _, cx| {
+                        nook_core::settings::tweak_app_settings(|s| s.island_x = 0.5);
+                        cx.notify();
+                    }))
+                    .child(segment("Right", right, cx, |_, _, cx| {
+                        nook_core::settings::tweak_app_settings(|s| s.island_x = 1.0);
+                        cx.notify();
+                    })),
+            )
+    }
+
+    fn reset_row(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        settings_row("island-reset")
+            .child(label("Restore default position", theme::BODY, true))
+            .child(push_button("island-reset-btn", "Reset", cx, |_, _, cx| {
                 nook_core::settings::tweak_app_settings(|s| s.reset_island_position());
                 cx.notify();
             }))
     }
 
-    fn render_custom_widgets(
-        &self,
+    fn render_widgets(
+        &mut self,
         settings: &AppSettings,
         url_focused: bool,
         token_focused: bool,
         query_focused: bool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let mut chips = div()
-            .id("widget-chips")
-            .w_full()
-            .flex()
-            .flex_wrap()
-            .gap(px(8.));
+        let remaining = settings.remaining_cells();
+        let total = AppSettings::TOTAL_CELLS;
+        let preview_footer = if remaining == 0 {
+            format!("All {total} cells are in use.")
+        } else if remaining == 1 {
+            "1 cell remaining.".to_string()
+        } else {
+            format!("{remaining} of {total} cells remaining.")
+        };
+
+        let mut list = Vec::new();
         for module in settings.ordered_widgets() {
-            chips = chips.child(self.widget_chip(module, settings, cx));
+            list.push(self.widget_row(module, settings, cx).into_any_element());
         }
 
-        div()
-            .id("custom-widgets")
-            .flex_1()
-            .min_h(px(0.))
-            .w_full()
-            .overflow_y_scroll()
-            .flex()
-            .flex_col()
-            .gap(px(12.))
-            .child(
-                div()
-                    .w_full()
-                    .rounded(px(16.))
-                    .bg(theme::SETTINGS_WELL)
-                    .p(px(16.))
-                    .flex()
-                    .flex_col()
-                    .gap(px(14.))
-                    .child(self.cell_counts(settings))
-                    .child(self.island_preview(settings))
-                    .child(chips)
-                    .child(self.width_slider(settings, cx)),
-            )
-            .child(self.manage_footer(settings, cx))
-            .child(
-                div()
-                    .id("module-controls")
-                    .w_full()
-                    .child(self.module_controls(
-                        settings,
-                        url_focused,
-                        token_focused,
-                        query_focused,
-                        cx,
-                    )),
-            )
+        Self::pane(
+            "Widgets",
+            div()
+                .id("custom-widgets")
+                .flex()
+                .flex_col()
+                .gap(px(16.))
+                .child(section(
+                    "Preview",
+                    settings_group(vec![self.island_preview(settings).into_any_element()]),
+                    Some(preview_footer),
+                ))
+                .child(section(
+                    "Widgets",
+                    settings_group(list),
+                    Some("Drag to change the order on the island."),
+                ))
+                .child(self.module_section(
+                    settings,
+                    url_focused,
+                    token_focused,
+                    query_focused,
+                    cx,
+                )),
+        )
     }
 
-    fn cell_counts(&self, settings: &AppSettings) -> impl IntoElement {
-        div()
-            .w_full()
-            .flex()
-            .items_center()
-            .justify_between()
-            .child(cell_caption("REMAINING CELLS", settings.remaining_cells()))
-            .child(cell_caption("TOTAL CELLS", AppSettings::TOTAL_CELLS))
-    }
-
-    fn widget_chip(
+    fn widget_row(
         &self,
         module: WidgetModule,
         settings: &AppSettings,
@@ -790,13 +747,6 @@ impl SettingsView {
         let selected = self.module == module;
         let on = module.enabled(settings);
         let cells = settings.cells_for(module);
-        let accent = theme::accent();
-        let selected_fill = Rgba {
-            r: accent.r,
-            g: accent.g,
-            b: accent.b,
-            a: 0.28,
-        };
         let caption = if module.occupies_nook_cells() {
             if cells == 1 {
                 "1 cell".to_string()
@@ -808,32 +758,24 @@ impl SettingsView {
         };
         div()
             .id(SharedString::from(format!("mod-{}", module.name())))
-            .h(px(52.))
-            .min_w(px(210.))
-            .flex_1()
-            .px(px(10.))
-            .rounded(px(16.))
+            .px(px(GROUP_PAD))
+            .min_h(px(ROW_H + 4.0))
             .flex()
             .items_center()
             .gap(px(8.))
-            .bg(if selected {
-                selected_fill
-            } else {
-                rgba(0xffffff14)
-            })
-            .when(selected, |d| d.border_1().border_color(rgba(0xffffff55)))
+            .when(selected, |d| d.bg(theme::FILL))
             .hover(|s| {
                 if selected {
                     s
                 } else {
-                    s.bg(rgba(0xffffff1F))
+                    s.bg(theme::FILL_TERTIARY)
                 }
             })
             .drag_over::<WidgetDrag>(move |style, drag, _, _| {
                 if drag.0 == module {
                     style
                 } else {
-                    style.border_2().border_color(rgba(0xffffff80))
+                    style.bg(theme::FILL_SECONDARY)
                 }
             })
             .can_drop(move |value, _, _| {
@@ -857,20 +799,8 @@ impl SettingsView {
                 }),
             )
             .on_drag(WidgetDrag(module), |drag, _, _, cx| cx.new(|_| *drag))
-            .child(
-                div()
-                    .size(px(28.))
-                    .rounded(px(8.))
-                    .bg(if selected {
-                        rgba(0xffffff28)
-                    } else {
-                        theme::FILL
-                    })
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .child(lucide_color(module.icon(), 16.0, theme::LABEL)),
-            )
+            .child(lucide_color("grip-vertical", 14.0, theme::TERTIARY_LABEL))
+            .child(lucide_color(module.icon(), 15.0, theme::LABEL))
             .child(
                 div()
                     .flex_1()
@@ -878,19 +808,8 @@ impl SettingsView {
                     .flex()
                     .flex_col()
                     .gap(px(1.))
-                    .child(
-                        div()
-                            .text_size(px(13.))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(theme::LABEL)
-                            .child(module.name()),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(11.))
-                            .text_color(theme::SECONDARY_LABEL)
-                            .child(caption),
-                    ),
+                    .child(label(module.name(), theme::BODY, true))
+                    .child(label(caption, theme::SUBHEADLINE, false)),
             )
             .child(module_toggle(on, module, cx))
     }
@@ -906,19 +825,20 @@ impl SettingsView {
             .map(|module| settings.cells_for(*module) as f32)
             .sum::<f32>()
             .max(1.0);
-        let inner = 560.0_f32;
+        let inner = 480.0_f32;
+        let wallpaper = desktop_wallpaper_image();
         let mut chips = div().flex().items_center().gap(px(6.)).px(px(8.));
         if enabled.is_empty() {
             chips = chips.child(
                 div()
-                    .text_size(px(11.))
+                    .text_size(px(theme::SUBHEADLINE.size))
                     .text_color(theme::SECONDARY_LABEL)
                     .child("No widgets enabled"),
             );
         } else {
             for module in enabled {
                 let cells = settings.cells_for(module) as f32;
-                let width = ((cells / used) * inner).max(64.0);
+                let width = ((cells / used) * inner).max(56.0);
                 chips = chips.child(self.preview_chip(module, width, module == self.module));
             }
         }
@@ -926,38 +846,19 @@ impl SettingsView {
         div()
             .id("island-preview")
             .w_full()
-            .h(px(148.))
-            .rounded(px(18.))
+            .h(px(132.))
             .overflow_hidden()
             .relative()
-            .child(div().absolute().inset_0().bg(rgb(0x2a3a12)))
-            .child(
-                div()
-                    .absolute()
-                    .left(px(-60.))
-                    .top(px(-70.))
-                    .size(px(280.))
-                    .rounded_full()
-                    .bg(rgba(0xc4e85a66)),
-            )
-            .child(
-                div()
-                    .absolute()
-                    .left(px(180.))
-                    .top(px(-40.))
-                    .size(px(220.))
-                    .rounded_full()
-                    .bg(rgba(0xf0c14d55)),
-            )
-            .child(
-                div()
-                    .absolute()
-                    .right(px(-50.))
-                    .bottom(px(-80.))
-                    .size(px(260.))
-                    .rounded_full()
-                    .bg(rgba(0xe8a83866)),
-            )
+            .bg(theme::SETTINGS_GLASS)
+            .when_some(wallpaper, |preview, wallpaper| {
+                preview.child(
+                    img(wallpaper)
+                        .absolute()
+                        .inset_0()
+                        .size_full()
+                        .object_fit(ObjectFit::Cover),
+                )
+            })
             .child(
                 div()
                     .absolute()
@@ -967,9 +868,9 @@ impl SettingsView {
                     .justify_center()
                     .child(
                         div()
-                            .h(px(72.))
-                            .px(px(10.))
-                            .rounded(px(22.))
+                            .h(px(64.))
+                            .px(px(8.))
+                            .rounded(px(20.))
                             .bg(rgb(0x000000))
                             .flex()
                             .items_center()
@@ -980,174 +881,146 @@ impl SettingsView {
 
     fn preview_chip(&self, module: WidgetModule, width: f32, selected: bool) -> impl IntoElement {
         div()
-            .h(px(56.))
+            .h(px(48.))
             .w(px(width))
-            .rounded(px(14.))
-            .bg(if selected { rgb(0x2a2a2a) } else { rgb(0x1a1a1a) })
+            .rounded(px(12.))
+            .bg(if selected {
+                rgb(0x2a2a2a)
+            } else {
+                rgb(0x1a1a1a)
+            })
             .when(selected, |d| d.border_1().border_color(rgba(0xffffff33)))
             .flex()
             .flex_col()
             .items_center()
             .justify_center()
-            .gap(px(4.))
-            .child(lucide_color(module.icon(), 16.0, theme::LABEL))
+            .gap(px(3.))
+            .child(lucide_color(module.icon(), 14.0, theme::LABEL))
             .child(
                 div()
-                    .text_size(px(10.))
+                    .text_size(px(theme::FOOTNOTE.size))
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(theme::LABEL)
                     .child(module.preview_label()),
             )
     }
 
-    fn width_slider(&self, settings: &AppSettings, cx: &mut Context<Self>) -> impl IntoElement {
+    fn width_slider(&mut self, settings: &AppSettings, cx: &mut Context<Self>) -> impl IntoElement {
         let module = self.module;
         let value = settings.cells_for(module);
         let min = module.min_cells();
         let max = settings.max_cells_for(module).max(min);
-        let span = (max - min).max(1) as f32;
-        let frac = (value.saturating_sub(min) as f32 / span).clamp(0.0, 1.0);
-        let bounds_cell = self.slider_bounds.clone();
+        let config = (module, min, max);
+        if self.width_slider_config != config {
+            let (slider, subscription) = create_width_slider(module, settings, cx);
+            self.width_slider = slider;
+            self._width_slider_subscription = subscription;
+            self.width_slider_config = config;
+        }
         let enabled = module.occupies_nook_cells();
 
-        div()
-            .id("width-row")
-            .w_full()
-            .flex()
-            .items_center()
-            .gap(px(14.))
+        settings_row("width-row")
             .opacity(if enabled { 1.0 } else { 0.45 })
-            .child(
-                div()
-                    .w(px(48.))
-                    .text_size(px(12.))
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_color(theme::SECONDARY_LABEL)
-                    .child("Width"),
-            )
+            .child(label("Width", theme::BODY, true))
             .child(
                 div()
                     .id("width-slider")
                     .flex_1()
                     .h(px(theme::HIT_MIN))
                     .px(px(8.))
-                    .relative()
-                    .cursor(if enabled {
-                        CursorStyle::PointingHand
-                    } else {
-                        CursorStyle::Arrow
-                    })
-                    .when(enabled, |d| {
-                        d.on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(|this, event: &gpui::MouseDownEvent, _, cx| {
-                                this.slider_dragging = true;
-                                let x: f32 = event.position.x.into();
-                                this.apply_slider_x(x, cx);
-                            }),
-                        )
-                    })
-                    .child(canvas(
-                        {
-                            let bounds_cell = bounds_cell.clone();
-                            move |bounds, _, _| {
-                                *bounds_cell.borrow_mut() = Some(bounds);
-                                bounds
-                            }
-                        },
-                        |_, _, _, _| {},
-                    ))
-                    .child(
-                        div()
-                            .absolute()
-                            .left(px(8.))
-                            .right(px(8.))
-                            .top(px(12.))
-                            .h(px(4.))
-                            .rounded_full()
-                            .bg(rgba(0xffffff22)),
-                    )
-                    .child(
-                        div()
-                            .absolute()
-                            .left(relative(frac))
-                            .top(px(6.))
-                            .size(px(16.))
-                            .rounded_full()
-                            .bg(rgb(0xffffff))
-                            .shadow_sm(),
-                    ),
-            )
-            .child(
-                div()
-                    .w(px(36.))
-                    .h(px(24.))
-                    .rounded(px(6.))
-                    .bg(rgba(0xffffff18))
                     .flex()
                     .items_center()
-                    .justify_center()
                     .child(
-                        div()
-                            .text_size(px(12.))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(theme::LABEL)
-                            .child(value.to_string()),
+                        Slider::new(&self.width_slider)
+                            .disabled(!enabled)
+                            .bg(theme::accent())
+                            .text_color(rgb(0xffffff)),
                     ),
             )
-    }
-
-    fn manage_footer(&self, settings: &AppSettings, cx: &mut Context<Self>) -> impl IntoElement {
-        let name = self.module.name();
-        let prompt = format!("Manage other {name} settings:");
-        let action = format!("{name} Settings");
-        let has_action = matches!(
-            self.module,
-            WidgetModule::Calendar | WidgetModule::Notes | WidgetModule::Observe
-        );
-        div()
-            .w_full()
-            .flex()
-            .items_center()
-            .gap(px(10.))
             .child(
-                div()
-                    .text_size(px(12.))
-                    .text_color(theme::SECONDARY_LABEL)
-                    .child(prompt),
+                div().w(px(28.)).flex().justify_end().child(
+                    div()
+                        .text_size(px(theme::BODY.size))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(theme::SECONDARY_LABEL)
+                        .child(value.to_string()),
+                ),
             )
-            .child(settings_chip(action, cx, move |this, _, cx| {
-                match this.module {
-                    WidgetModule::Calendar => crate::platform::open_calendar(),
-                    WidgetModule::Notes => {
-                        if let Err(err) = nook_core::notes::open_notes_editor() {
-                            log::warn!("open notes: {err}");
-                        }
-                    }
-                    WidgetModule::Observe => this.browse_metrics(cx),
-                    _ => {}
-                }
-            }))
-            .when(!has_action, |d| d.opacity(0.55))
-            .when(!self.module.enabled(settings), |d| d.opacity(0.55))
     }
 
-    fn module_controls(
-        &self,
+    fn module_section(
+        &mut self,
         settings: &AppSettings,
         url_focused: bool,
         token_focused: bool,
         query_focused: bool,
         cx: &mut Context<Self>,
-    ) -> AnyElement {
+    ) -> impl IntoElement {
+        let name = self.module.name();
+        let enabled = self.module.enabled(settings);
+        let mut rows = vec![self.width_slider(settings, cx).into_any_element()];
         match self.module {
-            WidgetModule::Observe => self
-                .render_observe_settings(settings, url_focused, token_focused, query_focused, cx)
-                .into_any_element(),
-            WidgetModule::Notes => notes_controls(cx).into_any_element(),
-            WidgetModule::Calendar => calendar_controls(cx).into_any_element(),
-            other => module_blurb(other).into_any_element(),
+            WidgetModule::Calendar => {
+                rows.push(
+                    action_row(
+                        "calendar-app",
+                        "Calendar app",
+                        "Open Calendar",
+                        cx,
+                        |_, _, _| {
+                            crate::platform::open_calendar();
+                        },
+                    )
+                    .into_any_element(),
+                );
+            }
+            WidgetModule::Notes => {
+                rows.push(
+                    action_row("notes-edit", "Notes", "Edit Notes…", cx, |_, _, _| {
+                        if let Err(err) = nook_core::notes::open_notes_editor() {
+                            log::warn!("open notes: {err}");
+                        }
+                    })
+                    .into_any_element(),
+                );
+            }
+            WidgetModule::Observe => {
+                rows.push(
+                    action_row(
+                        "observe-browse",
+                        "Metric names",
+                        "Browse Metrics",
+                        cx,
+                        |this, _, cx| {
+                            this.browse_metrics(cx);
+                        },
+                    )
+                    .into_any_element(),
+                );
+            }
+            _ => {}
         }
+
+        div()
+            .id("module-controls")
+            .flex()
+            .flex_col()
+            .gap(px(16.))
+            .opacity(if enabled { 1.0 } else { 0.55 })
+            .child(section(
+                name,
+                settings_group(rows),
+                Some(module_blurb(self.module)),
+            ))
+            .when(self.module == WidgetModule::Observe, |d| {
+                d.child(self.render_observe_settings(
+                    settings,
+                    url_focused,
+                    token_focused,
+                    query_focused,
+                    cx,
+                ))
+            })
     }
 
     fn render_observe_settings(
@@ -1158,9 +1031,13 @@ impl SettingsView {
         query_focused: bool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let mut pinned = div().flex().flex_col().gap_1();
+        let mut pinned_rows = Vec::new();
         if settings.observe.metrics.is_empty() {
-            pinned = pinned.child(label("No pinned metrics", theme::SUBHEADLINE, false));
+            pinned_rows.push(
+                settings_row("pin-empty")
+                    .child(label("No pinned metrics", theme::BODY, false))
+                    .into_any_element(),
+            );
         } else {
             for metric in &settings.observe.metrics {
                 let query = metric.query.clone();
@@ -1168,122 +1045,98 @@ impl SettingsView {
                 let alert_query = metric.query.clone();
                 let chart_caption = metric.chart.caption();
                 let alert_caption = metric.alert_caption();
-                pinned = pinned.child(
+                pinned_rows.push(
                     div()
                         .id(SharedString::from(format!("pin-{}", metric.query)))
+                        .px(px(GROUP_PAD))
+                        .py(px(6.))
+                        .min_h(px(ROW_H))
                         .flex()
                         .items_center()
                         .justify_between()
-                        .gap_2()
-                        .px_2()
-                        .py_1()
-                        .rounded(px(theme::CONTROL_RADIUS))
-                        .bg(theme::FILL)
-                        .child(
-                            label(
-                                format!("{}  {}", metric.label, metric.query),
-                                theme::SUBHEADLINE,
-                                true,
-                            )
-                            .flex_1()
-                            .min_w_0(),
-                        )
+                        .gap(px(8.))
                         .child(
                             div()
-                                .id(SharedString::from(format!("chart-{}", metric.query)))
-                                .h(px(theme::HIT_MIN))
-                                .px_2()
+                                .flex_1()
+                                .min_w(px(0.))
                                 .flex()
-                                .items_center()
-                                .cursor(CursorStyle::PointingHand)
-                                .hover(|s| s.opacity(0.8))
-                                .on_mouse_down(
-                                    MouseButton::Left,
-                                    cx.listener(move |_, _, _, cx| {
-                                        cx.stop_propagation();
-                                        SettingsView::persist_observe(|s| {
-                                            nook_core::observe::cycle_metric_chart(
-                                                &mut s.observe,
-                                                &chart_query,
-                                            );
-                                        });
-                                        cx.notify();
-                                    }),
-                                )
-                                .child(label(chart_caption, theme::SUBHEADLINE, true)),
+                                .flex_col()
+                                .gap(px(1.))
+                                .child(label(metric.label.clone(), theme::BODY, true))
+                                .child(label(metric.query.clone(), theme::SUBHEADLINE, false)),
                         )
-                        .child(
-                            div()
-                                .id(SharedString::from(format!("alert-{}", metric.query)))
-                                .h(px(theme::HIT_MIN))
-                                .px_2()
-                                .flex()
-                                .items_center()
-                                .cursor(CursorStyle::PointingHand)
-                                .hover(|s| s.opacity(0.8))
-                                .on_mouse_down(
-                                    MouseButton::Left,
-                                    cx.listener(move |_, _, _, cx| {
-                                        cx.stop_propagation();
-                                        SettingsView::persist_observe(|s| {
-                                            nook_core::observe::cycle_metric_alert(
-                                                &mut s.observe,
-                                                &alert_query,
-                                            );
-                                        });
-                                        cx.notify();
-                                    }),
-                                )
-                                .child(label(alert_caption, theme::SUBHEADLINE, true)),
-                        )
-                        .child(
-                            div()
-                                .id(SharedString::from(format!("unpin-{}", metric.query)))
-                                .h(px(theme::HIT_MIN))
-                                .px_2()
-                                .flex()
-                                .items_center()
-                                .cursor(CursorStyle::PointingHand)
-                                .hover(|s| s.opacity(0.8))
-                                .on_mouse_down(
-                                    MouseButton::Left,
-                                    cx.listener(move |_, _, _, cx| {
-                                        cx.stop_propagation();
-                                        SettingsView::persist_observe(|s| {
-                                            nook_core::observe::unpin_metric(
-                                                &mut s.observe,
-                                                &query,
-                                            );
-                                        });
-                                        cx.notify();
-                                    }),
-                                )
-                                .child(label("Remove", theme::SUBHEADLINE, false)),
-                        ),
+                        .child(push_button(
+                            SharedString::from(format!("chart-{}", metric.query)),
+                            chart_caption,
+                            cx,
+                            move |_, _, cx| {
+                                cx.stop_propagation();
+                                SettingsView::persist_observe(|s| {
+                                    nook_core::observe::cycle_metric_chart(
+                                        &mut s.observe,
+                                        &chart_query,
+                                    );
+                                });
+                                cx.notify();
+                            },
+                        ))
+                        .child(push_button(
+                            SharedString::from(format!("alert-{}", metric.query)),
+                            alert_caption,
+                            cx,
+                            move |_, _, cx| {
+                                cx.stop_propagation();
+                                SettingsView::persist_observe(|s| {
+                                    nook_core::observe::cycle_metric_alert(
+                                        &mut s.observe,
+                                        &alert_query,
+                                    );
+                                });
+                                cx.notify();
+                            },
+                        ))
+                        .child(push_button(
+                            SharedString::from(format!("unpin-{}", metric.query)),
+                            "Remove",
+                            cx,
+                            move |_, _, cx| {
+                                cx.stop_propagation();
+                                SettingsView::persist_observe(|s| {
+                                    nook_core::observe::unpin_metric(&mut s.observe, &query);
+                                });
+                                cx.notify();
+                            },
+                        ))
+                        .into_any_element(),
                 );
             }
         }
 
-        let mut catalog = div().flex().flex_col().gap_1();
+        let mut catalog_rows = Vec::new();
         if self.catalog_loading {
-            catalog = catalog.child(label("Loading metric names…", theme::SUBHEADLINE, false));
+            catalog_rows.push(
+                settings_row("cat-loading")
+                    .child(label("Loading metric names…", theme::BODY, false))
+                    .into_any_element(),
+            );
         } else if let Some(err) = &self.catalog_error {
-            catalog = catalog.child(label(err.clone(), theme::SUBHEADLINE, false).w_full());
+            catalog_rows.push(
+                settings_row("cat-error")
+                    .child(caption_text(err.clone()))
+                    .into_any_element(),
+            );
         }
         for name in self.catalog.iter().take(12) {
             let query = name.clone();
             let label_text = name.clone();
-            catalog = catalog.child(
+            catalog_rows.push(
                 div()
                     .id(SharedString::from(format!("cat-{name}")))
-                    .px_2()
-                    .py_1()
-                    .min_h(px(theme::HIT_MIN))
+                    .px(px(GROUP_PAD))
+                    .min_h(px(ROW_H))
                     .flex()
                     .items_center()
-                    .rounded(px(theme::CONTROL_RADIUS))
-                    .bg(theme::FILL)
-                    .hover(|s| s.bg(theme::FILL_SECONDARY))
+                    .hover(|s| s.bg(theme::FILL_TERTIARY))
                     .cursor(CursorStyle::PointingHand)
                     .on_mouse_down(
                         MouseButton::Left,
@@ -1301,7 +1154,8 @@ impl SettingsView {
                             cx.notify();
                         }),
                     )
-                    .child(label(name.clone(), theme::SUBHEADLINE, true)),
+                    .child(label(name.clone(), theme::BODY, true))
+                    .into_any_element(),
             );
         }
 
@@ -1324,334 +1178,308 @@ impl SettingsView {
             self.query_draft.as_str()
         };
 
+        let mut range = segmented_group();
+        for option in nook_core::observe::ObserveRange::all() {
+            let selected = settings.observe.range == option;
+            range = range.child(segment(option.label(), selected, cx, move |_, _, cx| {
+                SettingsView::persist_observe(|s| {
+                    nook_core::observe::set_range(&mut s.observe, option);
+                });
+                cx.notify();
+            }));
+        }
+
         div()
             .flex()
             .flex_col()
-            .gap_2()
-            .rounded(px(theme::INNER_RADIUS))
-            .bg(theme::GROUPED_BG)
-            .p_3()
-            .child(label("Metrics", theme::CALLOUT, true))
-            .child(label(
-                "Defaults to the warmUP API. Prometheus still works if you point at a Prom host.",
-                theme::SUBHEADLINE,
-                false,
-            ))
-            .child(label(
-                "Pins default to a line chart. Prometheus uses query_range; warmUP keeps 24 h of samples. Pick a lookback.",
-                theme::SUBHEADLINE,
-                false,
-            ))
-            .child({
-                let mut chips = div().flex().gap_2();
-                for option in nook_core::observe::ObserveRange::all() {
-                    let selected = settings.observe.range == option;
-                    chips = chips.child(chip(
-                        option.label(),
-                        selected,
+            .gap(px(16.))
+            .child(section(
+                "Source",
+                settings_group(vec![
+                    field_row(
+                        "prom-url",
+                        "URL",
+                        url_text,
+                        url_placeholder,
+                        url_focused,
+                        &self.url_focus,
                         cx,
-                        move |_, _, cx| {
-                            SettingsView::persist_observe(|s| {
-                                nook_core::observe::set_range(&mut s.observe, option);
-                            });
-                            cx.notify();
-                        },
-                    ));
-                }
-                chips
-            })
-            .child(
-                div()
-                    .id("prom-url")
-                    .track_focus(&self.url_focus)
-                    .px_2()
-                    .py_2()
-                    .min_h(px(theme::HIT_MIN))
-                    .rounded(px(theme::CONTROL_RADIUS))
-                    .bg(theme::FILL)
-                    .when(url_focused, |d| d.border_1().border_color(theme::accent()))
-                    .cursor(CursorStyle::IBeam)
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|this, _, window, cx| {
-                            cx.stop_propagation();
-                            window.focus(&this.url_focus);
-                            cx.notify();
-                        }),
-                    )
-                    .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
-                        let persist = SettingsView::apply_key(&mut this.url_draft, event, cx)
-                            || event.keystroke.key == "enter";
-                        if persist {
-                            this.persist_url();
-                            cx.notify();
-                        }
-                    }))
-                    .child(
-                        div()
-                            .text_color(if url_placeholder {
-                                theme::TERTIARY_LABEL
-                            } else {
-                                theme::LABEL
-                            })
-                            .text_size(px(theme::BODY.size))
-                            .child(SharedString::from(url_text.to_string())),
-                    ),
-            )
-            .child(
-                div()
-                    .id("prom-token")
-                    .track_focus(&self.token_focus)
-                    .px_2()
-                    .py_2()
-                    .min_h(px(theme::HIT_MIN))
-                    .rounded(px(theme::CONTROL_RADIUS))
-                    .bg(theme::FILL)
-                    .when(token_focused, |d| {
-                        d.border_1().border_color(theme::accent())
-                    })
-                    .cursor(CursorStyle::IBeam)
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|this, _, window, cx| {
-                            cx.stop_propagation();
-                            window.focus(&this.token_focus);
-                            cx.notify();
-                        }),
-                    )
-                    .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
-                        let persist = SettingsView::apply_key(&mut this.token_draft, event, cx)
-                            || event.keystroke.key == "enter";
-                        if persist {
-                            this.persist_token();
-                            cx.notify();
-                        }
-                    }))
-                    .child(
-                        div()
-                            .text_color(if token_placeholder {
-                                theme::TERTIARY_LABEL
-                            } else {
-                                theme::LABEL
-                            })
-                            .text_size(px(theme::BODY.size))
-                            .child(SharedString::from(token_text)),
-                    ),
-            )
-            .child(
-                div()
-                    .flex()
-                    .gap_2()
-                    .child(settings_chip("Paste URL", cx, |this, _, cx| {
-                        if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
-                            this.url_draft = text.trim().to_string();
-                            this.persist_url();
-                            cx.notify();
-                        }
-                    }))
-                    .child(settings_chip("Browse names", cx, |this, _, cx| {
-                        this.browse_metrics(cx);
-                    }))
-                    .child(settings_chip(
-                        if self.token_revealed {
-                            "Hide token"
-                        } else {
-                            "Show token"
-                        },
-                        cx,
-                        |this, _, cx| {
-                            this.token_revealed = !this.token_revealed;
-                            cx.notify();
-                        },
-                    )),
-            )
-            .child(label("Pinned metrics", theme::CALLOUT, true))
-            .child(label(
-                "The compact island shows Observe only while a threshold you set is firing.",
-                theme::SUBHEADLINE,
-                false,
-            ))
-            .child(pinned)
-            .child(
-                div()
-                    .id("prom-query")
-                    .track_focus(&self.query_focus)
-                    .px_2()
-                    .py_2()
-                    .min_h(px(theme::HIT_MIN))
-                    .rounded(px(theme::CONTROL_RADIUS))
-                    .bg(theme::FILL)
-                    .when(query_focused, |d| {
-                        d.border_1().border_color(theme::accent())
-                    })
-                    .cursor(CursorStyle::IBeam)
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|this, _, window, cx| {
-                            cx.stop_propagation();
-                            window.focus(&this.query_focus);
-                            cx.notify();
-                        }),
-                    )
-                    .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
-                        if event.keystroke.key == "enter" {
-                            let query = this.query_draft.trim().to_string();
-                            if !query.is_empty() {
-                                SettingsView::persist_observe(|s| {
-                                    let _ = nook_core::observe::pin_metric(
-                                        &mut s.observe,
-                                        &query,
-                                        &query,
-                                    );
-                                });
-                                this.query_draft.clear();
+                        |this, event, cx| {
+                            let persist = SettingsView::apply_key(&mut this.url_draft, event, cx)
+                                || event.keystroke.key == "enter";
+                            if persist {
+                                this.persist_url();
                                 cx.notify();
                             }
-                        } else if SettingsView::apply_key(&mut this.query_draft, event, cx) {
+                        },
+                    )
+                    .into_any_element(),
+                    field_row(
+                        "prom-token",
+                        "Token",
+                        &token_text,
+                        token_placeholder,
+                        token_focused,
+                        &self.token_focus,
+                        cx,
+                        |this, event, cx| {
+                            let persist = SettingsView::apply_key(&mut this.token_draft, event, cx)
+                                || event.keystroke.key == "enter";
+                            if persist {
+                                this.persist_token();
+                                cx.notify();
+                            }
+                        },
+                    )
+                    .into_any_element(),
+                    settings_row("observe-actions")
+                        .child(div().flex_1())
+                        .child(
+                            div()
+                                .flex()
+                                .gap(px(6.))
+                                .child(push_button("paste-url", "Paste URL", cx, |this, _, cx| {
+                                    if let Some(text) =
+                                        cx.read_from_clipboard().and_then(|item| item.text())
+                                    {
+                                        this.url_draft = text.trim().to_string();
+                                        this.persist_url();
+                                        cx.notify();
+                                    }
+                                }))
+                                .child(push_button(
+                                    "toggle-token",
+                                    if self.token_revealed {
+                                        "Hide Token"
+                                    } else {
+                                        "Show Token"
+                                    },
+                                    cx,
+                                    |this, _, cx| {
+                                        this.token_revealed = !this.token_revealed;
+                                        cx.notify();
+                                    },
+                                )),
+                        )
+                        .into_any_element(),
+                ]),
+                Some("Defaults to the warmUP API. Prometheus still works if you point at a Prom host."),
+            ))
+            .child(section(
+                "Lookback",
+                settings_group(vec![settings_row("observe-range")
+                    .child(label("Range", theme::BODY, true))
+                    .child(range)
+                    .into_any_element()]),
+                Some("Pins default to a line chart. Prometheus uses query_range; warmUP keeps 24 h of samples."),
+            ))
+            .child(section(
+                "Pinned Metrics",
+                settings_group(pinned_rows),
+                Some("The compact island shows Observe only while a threshold you set is firing."),
+            ))
+            .child(section(
+                "Pin Query",
+                settings_group(vec![
+                    field_row(
+                        "prom-query",
+                        "Query",
+                        query_text,
+                        query_placeholder,
+                        query_focused,
+                        &self.query_focus,
+                        cx,
+                        |this, event, cx| {
+                            if event.keystroke.key == "enter" {
+                                let query = this.query_draft.trim().to_string();
+                                if !query.is_empty() {
+                                    SettingsView::persist_observe(|s| {
+                                        let _ = nook_core::observe::pin_metric(
+                                            &mut s.observe,
+                                            &query,
+                                            &query,
+                                        );
+                                    });
+                                    this.query_draft.clear();
+                                    cx.notify();
+                                }
+                            } else if SettingsView::apply_key(&mut this.query_draft, event, cx) {
+                                cx.notify();
+                            }
+                        },
+                    )
+                    .into_any_element(),
+                    settings_row("pin-query-action")
+                        .child(div().flex_1())
+                        .child(push_button("pin-query", "Pin Query", cx, |this, _, cx| {
+                            let query = this.query_draft.trim().to_string();
+                            if query.is_empty() {
+                                return;
+                            }
+                            SettingsView::persist_observe(|s| {
+                                let _ = nook_core::observe::pin_metric(&mut s.observe, &query, &query);
+                            });
+                            this.query_draft.clear();
                             cx.notify();
-                        }
-                    }))
-                    .child(
-                        div()
-                            .text_color(if query_placeholder {
-                                theme::TERTIARY_LABEL
-                            } else {
-                                theme::LABEL
-                            })
-                            .text_size(px(theme::BODY.size))
-                            .child(SharedString::from(query_text.to_string())),
-                    ),
-            )
-            .child(settings_chip("Pin query", cx, |this, _, cx| {
-                let query = this.query_draft.trim().to_string();
-                if query.is_empty() {
-                    return;
-                }
-                SettingsView::persist_observe(|s| {
-                    let _ = nook_core::observe::pin_metric(&mut s.observe, &query, &query);
-                });
-                this.query_draft.clear();
-                cx.notify();
-            }))
-            .child(catalog)
+                        }))
+                        .into_any_element(),
+                ]),
+                None::<SharedString>,
+            ))
+            .when(!catalog_rows.is_empty(), |d| {
+                d.child(section(
+                    "Catalog",
+                    settings_group(catalog_rows),
+                    Some("Choose a name to pin it."),
+                ))
+            })
     }
 }
 
-fn calendar_controls(cx: &mut Context<SettingsView>) -> impl IntoElement {
-    div()
-        .flex()
-        .flex_col()
-        .gap_2()
-        .rounded(px(theme::INNER_RADIUS))
-        .bg(theme::GROUPED_BG)
-        .p_3()
-        .child(label("Calendar", theme::CALLOUT, true))
-        .child(label(
-            "Week strip is today ± 3 days (7 cells). EventKit includes every calendar the system allows — there is no per-calendar filter yet.",
-            theme::SUBHEADLINE,
-            false,
-        ))
-        .child(settings_chip("Open Calendar", cx, |_, _, _| {
-            crate::platform::open_calendar();
-        }))
-}
-
-fn notes_controls(cx: &mut Context<SettingsView>) -> impl IntoElement {
-    div()
-        .flex()
-        .flex_col()
-        .gap_2()
-        .rounded(px(theme::INNER_RADIUS))
-        .bg(theme::GROUPED_BG)
-        .p_3()
-        .child(label("Notes", theme::CALLOUT, true))
-        .child(label(
-            "Scratchpad on the island. Edit here or in the expanded card.",
-            theme::SUBHEADLINE,
-            false,
-        ))
-        .child(settings_chip("Edit Notes…", cx, |_, _, _| {
-            if let Err(err) = nook_core::notes::open_notes_editor() {
-                log::warn!("open notes: {err}");
-            }
-        }))
-}
-
-fn module_blurb(module: WidgetModule) -> impl IntoElement {
-    let copy = match module {
+fn module_blurb(module: WidgetModule) -> SharedString {
+    match module {
+        WidgetModule::Calendar => {
+            "Week strip is today ± 3 days. EventKit includes every calendar the system allows — there is no per-calendar filter yet.".into()
+        }
+        WidgetModule::Notes => "Scratchpad on the island. Edit here or in the expanded card.".into(),
+        WidgetModule::Observe => {
+            "Pinned metrics on the compact island and the expanded card.".into()
+        }
         WidgetModule::Music => {
-            "Now Playing from MediaRemote on macOS, with an AppleScript fallback."
+            "Now Playing from MediaRemote on macOS, with an AppleScript fallback.".into()
         }
-        WidgetModule::Files => "Drop zone and tray live on the Tray tab of the expanded island.",
-        WidgetModule::Timers => "Countdown presets and a compact ring while a timer is running.",
-        WidgetModule::Reminders => "Incomplete reminders from EventKit, same store as Calendar.",
-        WidgetModule::Speed => "Cloudflare (then OVH) download probe. Runs from the island card.",
+        WidgetModule::Files => "Drop zone and tray live on the Tray tab of the expanded island.".into(),
+        WidgetModule::Timers => "Countdown presets and a compact ring while a timer is running.".into(),
+        WidgetModule::Reminders => "Incomplete reminders from EventKit, same store as Calendar.".into(),
+        WidgetModule::Speed => "Cloudflare (then OVH) download probe. Runs from the island card.".into(),
         WidgetModule::Agents => {
-            "Working coding-agent sessions on the compact face and expanded card."
+            "Working coding-agent sessions on the compact face and expanded card.".into()
         }
-        WidgetModule::Calendar | WidgetModule::Notes | WidgetModule::Observe => "",
-    };
+        WidgetModule::Mirror => "A live camera preview that opens when you click the Mirror card.".into(),
+    }
+}
+
+fn section(
+    header: impl Into<SharedString>,
+    group: impl IntoElement,
+    footer: Option<impl Into<SharedString>>,
+) -> impl IntoElement {
     div()
         .flex()
         .flex_col()
-        .gap_2()
+        .gap(px(6.))
+        .child(section_header(header))
+        .child(group)
+        .when_some(footer, |d, text| {
+            d.child(div().px(px(4.)).child(caption_text(text)))
+        })
+}
+
+fn section_header(text: impl Into<SharedString>) -> impl IntoElement {
+    div()
+        .px(px(4.))
+        .text_size(px(theme::BODY.size))
+        .line_height(px(theme::BODY.leading))
+        .font_weight(FontWeight::NORMAL)
+        .text_color(theme::SECONDARY_LABEL)
+        .child(text.into())
+}
+
+fn caption_text(text: impl Into<SharedString>) -> impl IntoElement {
+    div()
+        .text_size(px(theme::SUBHEADLINE.size))
+        .line_height(px(16.))
+        .text_color(theme::SECONDARY_LABEL)
+        .child(text.into())
+}
+
+fn settings_group(rows: Vec<AnyElement>) -> impl IntoElement {
+    let mut group = div()
+        .flex()
+        .flex_col()
         .rounded(px(theme::INNER_RADIUS))
         .bg(theme::GROUPED_BG)
-        .p_3()
-        .child(label(module.name(), theme::CALLOUT, true))
-        .child(label(copy, theme::SUBHEADLINE, false))
+        .overflow_hidden();
+    for (i, row) in rows.into_iter().enumerate() {
+        if i > 0 {
+            group = group.child(div().h(px(1.)).ml(px(GROUP_PAD)).bg(hairline()));
+        }
+        group = group.child(row);
+    }
+    group
 }
 
-fn settings_chip(
-    caption: impl Into<SharedString>,
-    cx: &mut Context<SettingsView>,
-    on_click: impl Fn(&mut SettingsView, &mut Window, &mut Context<SettingsView>) + 'static,
-) -> impl IntoElement {
-    chip(caption, false, cx, on_click)
-}
-
-/// One selectable pill used for actions and option chips.
-fn chip(
-    caption: impl Into<SharedString>,
-    selected: bool,
-    cx: &mut Context<SettingsView>,
-    on_click: impl Fn(&mut SettingsView, &mut Window, &mut Context<SettingsView>) + 'static,
-) -> impl IntoElement {
-    let caption = caption.into();
+fn settings_row(id: impl Into<SharedString>) -> gpui::Stateful<gpui::Div> {
     div()
-        .id(caption.clone())
-        .h(px(theme::HIT_MIN))
-        .px_3()
+        .id(id.into())
+        .px(px(GROUP_PAD))
         .flex()
         .items_center()
-        .justify_center()
-        .rounded(px(theme::CONTROL_RADIUS))
-        .bg(if selected {
-            theme::accent()
-        } else {
-            theme::FILL
-        })
-        .when(selected, |d| d.border_1().border_color(theme::accent()))
-        .hover(|s| s.bg(theme::FILL_SECONDARY))
-        .active(|s| s.opacity(0.85))
-        .cursor(CursorStyle::PointingHand)
-        .child(label(caption, theme::CALLOUT, true))
-        .on_mouse_down(
-            MouseButton::Left,
-            cx.listener(move |this, _, window, cx| {
-                cx.stop_propagation();
-                on_click(this, window, cx);
-            }),
-        )
+        .justify_between()
+        .gap(px(10.))
+        .min_h(px(ROW_H))
 }
 
-fn group_caption(text: &'static str) -> impl IntoElement {
+fn action_row(
+    id: &'static str,
+    title: &'static str,
+    caption: &'static str,
+    cx: &mut Context<SettingsView>,
+    on_click: impl Fn(&mut SettingsView, &mut Window, &mut Context<SettingsView>) + 'static,
+) -> impl IntoElement {
+    settings_row(id)
+        .child(label(title, theme::BODY, true))
+        .child(push_button(
+            SharedString::from(format!("{id}-btn")),
+            caption,
+            cx,
+            on_click,
+        ))
+}
+
+fn toggle_row(
+    label_text: &'static str,
+    on: bool,
+    cx: &mut Context<SettingsView>,
+    tweak: impl Fn(&mut AppSettings) + 'static,
+) -> impl IntoElement {
+    settings_row(label_text)
+        .cursor(CursorStyle::PointingHand)
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |_, _, _, cx| {
+                let mut s = nook_core::settings::get_app_settings();
+                tweak(&mut s);
+                nook_core::settings::update_app_settings(s);
+                cx.notify();
+            }),
+        )
+        .child(label(label_text, theme::BODY, true))
+        .child(toggle_knob(on))
+}
+
+fn module_toggle(
+    on: bool,
+    module: WidgetModule,
+    cx: &mut Context<SettingsView>,
+) -> impl IntoElement {
     div()
-        .pt(px(4.))
-        .text_size(px(theme::SUBHEADLINE.size))
-        .font_weight(FontWeight::SEMIBOLD)
-        .text_color(theme::SECONDARY_LABEL)
-        .child(text)
+        .id(SharedString::from(format!("tog-{}", module.name())))
+        .min_h(px(theme::HIT_MIN))
+        .flex()
+        .items_center()
+        .cursor(CursorStyle::PointingHand)
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |_, _, _, cx| {
+                cx.stop_propagation();
+                let mut s = nook_core::settings::get_app_settings();
+                module.set_enabled(&mut s);
+                nook_core::settings::update_app_settings(s);
+                cx.notify();
+            }),
+        )
+        .child(toggle_knob(on))
 }
 
 fn color_swatch(
@@ -1679,7 +1507,7 @@ fn color_swatch(
         )
         .child(
             div()
-                .size(px(18.))
+                .size(px(16.))
                 .rounded_full()
                 .bg(fill)
                 .when(on, |d| d.border_2().border_color(theme::LABEL))
@@ -1687,91 +1515,10 @@ fn color_swatch(
         )
 }
 
-fn settings_group(rows: Vec<AnyElement>) -> impl IntoElement {
-    let mut group = div()
-        .flex()
-        .flex_col()
-        .rounded(px(theme::INNER_RADIUS))
-        .bg(theme::GROUPED_BG)
-        .px_3();
-    for row in rows {
-        group = group.child(row);
-    }
-    group
-}
-
-fn toggle_row(
-    label_text: &'static str,
-    on: bool,
-    cx: &mut Context<SettingsView>,
-    tweak: impl Fn(&mut AppSettings) + 'static,
-) -> impl IntoElement {
-    div()
-        .id(label_text)
-        .flex()
-        .items_center()
-        .justify_between()
-        .h(px(36.))
-        .cursor(CursorStyle::PointingHand)
-        .on_mouse_down(
-            MouseButton::Left,
-            cx.listener(move |_, _, _, cx| {
-                let mut s = nook_core::settings::get_app_settings();
-                tweak(&mut s);
-                nook_core::settings::update_app_settings(s);
-                cx.notify();
-            }),
-        )
-        .child(label(label_text, theme::BODY, true))
-        .child(toggle_knob(on))
-}
-
-fn module_toggle(
-    on: bool,
-    module: WidgetModule,
-    cx: &mut Context<SettingsView>,
-) -> impl IntoElement {
-    div()
-        .id(SharedString::from(format!("tog-{}", module.name())))
-        .cursor(CursorStyle::PointingHand)
-        .on_mouse_down(
-            MouseButton::Left,
-            cx.listener(move |_, _, _, cx| {
-                cx.stop_propagation();
-                let mut s = nook_core::settings::get_app_settings();
-                module.set_enabled(&mut s);
-                nook_core::settings::update_app_settings(s);
-                cx.notify();
-            }),
-        )
-        .child(toggle_knob(on))
-}
-
-fn cell_caption(title: &'static str, value: u8) -> impl IntoElement {
-    div()
-        .flex()
-        .items_center()
-        .gap(px(6.))
-        .child(
-            div()
-                .text_size(px(10.))
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(theme::SECONDARY_LABEL)
-                .child(title),
-        )
-        .child(
-            div()
-                .text_size(px(10.))
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(theme::LABEL)
-                .child(format!("{value}")),
-        )
-}
-
 fn toggle_knob(on: bool) -> impl IntoElement {
     div()
-        .w(px(40.))
-        .h(px(24.))
+        .w(px(38.))
+        .h(px(22.))
         .rounded_full()
         .bg(if on {
             theme::accent()
@@ -1782,7 +1529,149 @@ fn toggle_knob(on: bool) -> impl IntoElement {
         .items_center()
         .when(on, |d| d.justify_end())
         .px(px(2.))
-        .child(div().size(px(20.)).rounded_full().bg(rgb(0xffffff)))
+        .child(div().size(px(18.)).rounded_full().bg(rgb(0xffffff)))
+}
+
+fn segmented_group() -> gpui::Div {
+    div()
+        .h(px(theme::HIT_MIN))
+        .p(px(2.))
+        .rounded(px(6.))
+        .bg(theme::FILL)
+        .flex()
+        .items_center()
+}
+
+fn segment(
+    caption: &'static str,
+    selected: bool,
+    cx: &mut Context<SettingsView>,
+    on_click: impl Fn(&mut SettingsView, &mut Window, &mut Context<SettingsView>) + 'static,
+) -> impl IntoElement {
+    div()
+        .id(SharedString::from(format!("seg-{caption}")))
+        .h(px(24.))
+        .px(px(10.))
+        .rounded(px(4.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .when(selected, |d| d.bg(theme::FILL_SECONDARY))
+        .hover(|s| {
+            if selected {
+                s
+            } else {
+                s.bg(theme::FILL_TERTIARY)
+            }
+        })
+        .active(|s| s.opacity(0.85))
+        .cursor(CursorStyle::PointingHand)
+        .child(
+            div()
+                .text_size(px(theme::CALLOUT.size))
+                .font_weight(if selected {
+                    FontWeight::SEMIBOLD
+                } else {
+                    FontWeight::MEDIUM
+                })
+                .text_color(if selected {
+                    theme::LABEL
+                } else {
+                    theme::SECONDARY_LABEL
+                })
+                .child(caption),
+        )
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, _, window, cx| {
+                cx.stop_propagation();
+                on_click(this, window, cx);
+            }),
+        )
+}
+
+fn push_button(
+    id: impl Into<SharedString>,
+    caption: impl Into<SharedString>,
+    cx: &mut Context<SettingsView>,
+    on_click: impl Fn(&mut SettingsView, &mut Window, &mut Context<SettingsView>) + 'static,
+) -> impl IntoElement {
+    let caption = caption.into();
+    div()
+        .id(id.into())
+        .h(px(theme::HIT_MIN))
+        .px(px(10.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(6.))
+        .bg(theme::FILL)
+        .hover(|s| s.bg(theme::FILL_SECONDARY))
+        .active(|s| s.opacity(0.85))
+        .cursor(CursorStyle::PointingHand)
+        .child(label(caption, theme::CALLOUT, true))
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, _, window, cx| {
+                cx.stop_propagation();
+                on_click(this, window, cx);
+            }),
+        )
+}
+
+fn field_row(
+    id: &'static str,
+    title: &'static str,
+    value: &str,
+    placeholder: bool,
+    focused: bool,
+    focus: &FocusHandle,
+    cx: &mut Context<SettingsView>,
+    on_key: impl Fn(&mut SettingsView, &KeyDownEvent, &mut Context<SettingsView>) + 'static,
+) -> impl IntoElement {
+    let focus = focus.clone();
+    settings_row(id)
+        .child(label(title, theme::BODY, true).w(px(56.)))
+        .child(
+            div()
+                .id(SharedString::from(format!("{id}-field")))
+                .track_focus(&focus)
+                .flex_1()
+                .min_w(px(0.))
+                .h(px(24.))
+                .px(px(8.))
+                .rounded(px(5.))
+                .bg(theme::FILL)
+                .when(focused, |d| d.border_1().border_color(theme::accent()))
+                .flex()
+                .items_center()
+                .cursor(CursorStyle::IBeam)
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |_, _, window, cx| {
+                        cx.stop_propagation();
+                        window.focus(&focus);
+                        cx.notify();
+                    }),
+                )
+                .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
+                    on_key(this, event, cx);
+                }))
+                .child(
+                    div()
+                        .w_full()
+                        .overflow_hidden()
+                        .text_ellipsis()
+                        .whitespace_nowrap()
+                        .text_color(if placeholder {
+                            theme::TERTIARY_LABEL
+                        } else {
+                            theme::LABEL
+                        })
+                        .text_size(px(theme::BODY.size))
+                        .child(SharedString::from(value.to_string())),
+                ),
+        )
 }
 
 #[cfg(test)]
@@ -1796,13 +1685,14 @@ mod tests {
     }
 
     #[test]
-    fn settings_window_is_landscape_three_by_two() {
+    fn settings_window_is_landscape() {
         let (w, h) = SETTINGS_SIZE;
-        assert_eq!((w, h), (900.0, 600.0));
-        assert!((w / h - 1.5).abs() < 0.01, "default size should be 3:2");
+        assert_eq!((w, h), (780.0, 560.0));
+        assert!(w > h, "default size stays landscape");
         let (min_w, min_h) = SETTINGS_MIN;
         assert!(min_w > min_h, "min size stays landscape");
-        assert!(min_w >= 780.0 && min_h >= 520.0);
+        assert!(min_w >= 680.0 && min_h >= 480.0);
+        assert!(w > SIDEBAR_W + 400.0, "pane has room beside the sidebar");
     }
 
     #[test]
@@ -1836,18 +1726,19 @@ mod tests {
                 "Reminders",
                 "Speed Test",
                 "Agents",
+                "Mirror",
             ]
         );
-        assert!(!names.iter().any(|n| n.contains("Mirror")
-            || n.contains("Shortcuts")
-            || n.contains("Tencent")
-            || n.contains("License")));
+        assert!(!names
+            .iter()
+            .any(|n| n.contains("Shortcuts") || n.contains("Tencent") || n.contains("License")));
     }
 
     #[test]
     fn nav_enums_round_trip() {
-        assert_eq!(SettingsCategory::from_u8(1), SettingsCategory::Nook);
-        assert_eq!(NookTab::from_u8(1), NookTab::CustomWidgets);
+        assert_eq!(SettingsCategory::from_u8(1), SettingsCategory::Widgets);
+        assert_eq!(SettingsCategory::from_u8(0), SettingsCategory::General);
+        assert_eq!(SettingsCategory::from_u8(99), SettingsCategory::General);
         assert_eq!(WidgetModule::from_u8(0), WidgetModule::Calendar);
         assert_eq!(WidgetModule::from_u8(99), WidgetModule::Calendar);
     }

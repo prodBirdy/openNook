@@ -24,6 +24,7 @@ pub(super) fn island_chrome(
     body_h: f32,
     wing: f32,
     color: gpui::Rgba,
+    border_color: Option<gpui::Rgba>,
     attached: bool,
 ) -> impl IntoElement {
     canvas(
@@ -47,50 +48,88 @@ pub(super) fn island_chrome(
                 path.cubic_bezier_to(p(to.0, to.1), p(c1.0, c1.1), p(c2.0, c2.1));
             };
 
-            let mut path = PathBuilder::fill();
-            if attached {
-                path.move_to(p(0.0, 0.0));
-                path.line_to(p(g + w + g, 0.0));
-                if g > 0.5 {
-                    let kk = k * g;
+            let append_silhouette = |path: &mut PathBuilder| {
+                if attached {
+                    path.move_to(p(0.0, 0.0));
+                    path.line_to(p(g + w + g, 0.0));
+                    if g > 0.5 {
+                        let kk = k * g;
+                        cubic(path, (g + w, g), (g + w + g - kk, 0.0), (g + w, g - kk));
+                    }
+                    path.line_to(p(g + w, h - r));
+                    let rk = k * r;
                     cubic(
-                        &mut path,
-                        (g + w, g),
-                        (g + w + g - kk, 0.0),
-                        (g + w, g - kk),
+                        path,
+                        (g + w - r, h),
+                        (g + w, h - r + rk),
+                        (g + w - r + rk, h),
                     );
+                    path.line_to(p(g + r, h));
+                    cubic(path, (g, h - r), (g + r - rk, h), (g, h - r + rk));
+                    path.line_to(p(g, g.max(0.0)));
+                    if g > 0.5 {
+                        let kk = k * g;
+                        cubic(path, (0.0, 0.0), (g, g - kk), (kk, 0.0));
+                    }
+                } else {
+                    let rk = k * r;
+                    path.move_to(p(r, 0.0));
+                    path.line_to(p(w - r, 0.0));
+                    cubic(path, (w, r), (w - r + rk, 0.0), (w, r - rk));
+                    path.line_to(p(w, h - r));
+                    cubic(path, (w - r, h), (w, h - r + rk), (w - r + rk, h));
+                    path.line_to(p(r, h));
+                    cubic(path, (0.0, h - r), (r - rk, h), (0.0, h - r + rk));
+                    path.line_to(p(0.0, r));
+                    cubic(path, (r, 0.0), (0.0, r - rk), (r - rk, 0.0));
                 }
-                path.line_to(p(g + w, h - r));
-                let rk = k * r;
-                cubic(
-                    &mut path,
-                    (g + w - r, h),
-                    (g + w, h - r + rk),
-                    (g + w - r + rk, h),
-                );
-                path.line_to(p(g + r, h));
-                cubic(&mut path, (g, h - r), (g + r - rk, h), (g, h - r + rk));
-                path.line_to(p(g, g.max(0.0)));
-                if g > 0.5 {
-                    let kk = k * g;
-                    cubic(&mut path, (0.0, 0.0), (g, g - kk), (kk, 0.0));
-                }
-            } else {
-                let rk = k * r;
-                path.move_to(p(r, 0.0));
-                path.line_to(p(w - r, 0.0));
-                cubic(&mut path, (w, r), (w - r + rk, 0.0), (w, r - rk));
-                path.line_to(p(w, h - r));
-                cubic(&mut path, (w - r, h), (w, h - r + rk), (w - r + rk, h));
-                path.line_to(p(r, h));
-                cubic(&mut path, (0.0, h - r), (r - rk, h), (0.0, h - r + rk));
-                path.line_to(p(0.0, r));
-                cubic(&mut path, (r, 0.0), (0.0, r - rk), (r - rk, 0.0));
-            }
-            path.close();
-            match path.build() {
+                path.close();
+            };
+
+            let mut fill = PathBuilder::fill();
+            append_silhouette(&mut fill);
+            match fill.build() {
                 Ok(built) => window.paint_path(built, color),
                 Err(err) => log::warn!("island path: {err}"),
+            }
+
+            if let Some(border_color) = border_color {
+                let mut border = PathBuilder::stroke(px(1.0));
+                if attached {
+                    // The screen edge is the attached island's top edge, so leave
+                    // that edge open instead of drawing an accent line across it.
+                    border.move_to(p(g + w + g, 0.0));
+                    if g > 0.5 {
+                        let kk = k * g;
+                        cubic(
+                            &mut border,
+                            (g + w, g),
+                            (g + w + g - kk, 0.0),
+                            (g + w, g - kk),
+                        );
+                    }
+                    border.line_to(p(g + w, h - r));
+                    let rk = k * r;
+                    cubic(
+                        &mut border,
+                        (g + w - r, h),
+                        (g + w, h - r + rk),
+                        (g + w - r + rk, h),
+                    );
+                    border.line_to(p(g + r, h));
+                    cubic(&mut border, (g, h - r), (g + r - rk, h), (g, h - r + rk));
+                    border.line_to(p(g, g.max(0.0)));
+                    if g > 0.5 {
+                        let kk = k * g;
+                        cubic(&mut border, (0.0, 0.0), (g, g - kk), (kk, 0.0));
+                    }
+                } else {
+                    append_silhouette(&mut border);
+                }
+                match border.build() {
+                    Ok(built) => window.paint_path(built, border_color),
+                    Err(err) => log::warn!("island border path: {err}"),
+                }
             }
         },
     )

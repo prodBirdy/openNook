@@ -12,13 +12,29 @@ use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
 
-const CPU_ACTIVE: f32 = 1.0;
+/// CPU % above which a descendant process counts as doing real work. The
+/// agent process's own CPU is never a work signal — a TUI burns CPU
+/// repainting spinners and streaming text whether or not work is happening
+/// (same rationale as abtop). Idle MCP-server polling in the descendant tree
+/// still ticks past 1%, so the bar sits well above that noise.
+const CPU_ACTIVE: f32 = 5.0;
+
+/// Consecutive polls a CPU reading must persist before the shown status
+/// flips. Smooths one-poll spikes/dips so the list doesn't reorder itself
+/// every scan. Only applies to CPU-derived status; sidecar status is exact.
+const DEBOUNCE_POLLS: u8 = 2;
+
+/// Slack when comparing a sidecar's `startedAt` against the process start
+/// time. A session starts moments after its process; a reused pid starts
+/// long after the dead session it would otherwise impersonate.
+const SIDECAR_START_SLACK_SECS: u64 = 10;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum AgentKind {
     Claude,
     Codex,
     OpenCode,
+    Fx,
     Grok,
     Cursor,
     Aider,
@@ -31,6 +47,7 @@ impl AgentKind {
             AgentKind::Claude => "Claude",
             AgentKind::Codex => "Codex",
             AgentKind::OpenCode => "OpenCode",
+            AgentKind::Fx => "fx",
             AgentKind::Grok => "Grok",
             AgentKind::Cursor => "Cursor",
             AgentKind::Aider => "Aider",
@@ -43,6 +60,7 @@ impl AgentKind {
             AgentKind::Claude => &["claude"],
             AgentKind::Codex => &["codex"],
             AgentKind::OpenCode => &["opencode"],
+            AgentKind::Fx => &["fx"],
             AgentKind::Grok => &["grok"],
             AgentKind::Cursor => &["cursor-agent"],
             AgentKind::Aider => &["aider"],
@@ -104,6 +122,8 @@ struct ProcInfo {
     argv: Vec<String>,
     cwd: Option<PathBuf>,
     exe: Option<PathBuf>,
+    /// Process start, seconds since the epoch (0 when unknown).
+    start_time: u64,
 }
 
 /// Live coding-agent sessions on this machine. Cheap enough for a 2s poll.
@@ -156,6 +176,7 @@ fn scan_processes() -> HashMap<u32, ProcInfo> {
                 argv,
                 cwd: proc_.cwd().map(PathBuf::from),
                 exe: proc_.exe().map(PathBuf::from),
+                start_time: proc_.start_time(),
             },
         );
     }
@@ -163,14 +184,62 @@ fn scan_processes() -> HashMap<u32, ProcInfo> {
 }
 
 fn assemble(procs: &HashMap<u32, ProcInfo>) -> Vec<AgentSession> {
-    assemble_inner(procs, &grok_sessions(), &claude_sessions())
+    static DEBOUNCE: OnceLock<Mutex<HashMap<u32, CpuDebounce>>> = OnceLock::new();
+    let mut debounce = DEBOUNCE
+        .get_or_init(Mutex::default)
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    assemble_inner(procs, &grok_sessions(), &claude_sessions(), &mut debounce)
+}
+
+#[derive(Default)]
+struct CpuDebounce {
+    shown: bool,
+    contrary: u8,
+}
+
+/// Debounce a raw CPU busy/idle reading: the shown status only flips after
+/// `DEBOUNCE_POLLS` consecutive polls disagree with it.
+fn debounced_cpu_busy(state: &mut HashMap<u32, CpuDebounce>, pid: u32, raw: bool) -> bool {
+    let entry = state.entry(pid).or_default();
+    if raw == entry.shown {
+        entry.contrary = 0;
+    } else {
+        entry.contrary += 1;
+        if entry.contrary >= DEBOUNCE_POLLS {
+            entry.shown = raw;
+            entry.contrary = 0;
+        }
+    }
+    entry.shown
+}
+
+/// Reject sidecar rows written by a dead session whose pid was reused: the
+/// claiming process must predate (within slack) the session's `startedAt`.
+fn sidecar_matches_proc(started_at_ms: Option<u64>, proc: &ProcInfo) -> bool {
+    match started_at_ms {
+        Some(ms) if proc.start_time > 0 => proc.start_time <= ms / 1000 + SIDECAR_START_SLACK_SECS,
+        _ => true,
+    }
 }
 
 fn assemble_inner(
     procs: &HashMap<u32, ProcInfo>,
     grok_meta: &HashMap<u32, GrokActive>,
     claude_meta: &HashMap<u32, ClaudeSidecar>,
+    debounce: &mut HashMap<u32, CpuDebounce>,
 ) -> Vec<AgentSession> {
+    let claude_meta: HashMap<u32, ClaudeSidecar> = claude_meta
+        .iter()
+        .filter(|(pid, row)| {
+            procs
+                .get(pid)
+                .is_none_or(|p| sidecar_matches_proc(row.started_at, p))
+        })
+        .map(|(pid, row)| (*pid, row.clone()))
+        .collect();
+    let claude_meta = &claude_meta;
+
     let children = children_map(procs);
     let self_pid = std::process::id();
 
@@ -181,7 +250,12 @@ fn assemble_inner(
         .map(|p| p.pid)
         .collect();
 
-    // Prefer the real agent binary over a wrapper ancestor of the same kind.
+    // Collapse same-kind candidates that sit in one process chain: an agent
+    // spawns short-lived helper children from its own binary (Claude does),
+    // and wrappers (`node .../claude`) sit above the real process. A pid
+    // backed by a session file is the real session and wins over related
+    // pids without one; between two file-less pids the descendant wins
+    // (real binary under a wrapper). Two file-backed pids are two sessions.
     let kinds: HashMap<u32, AgentKind> = candidates
         .iter()
         .filter_map(|&pid| {
@@ -191,13 +265,33 @@ fn assemble_inner(
                 .map(|k| (pid, k))
         })
         .collect();
+    let has_session_file = |pid: u32, kind: AgentKind| match kind {
+        AgentKind::Claude => claude_meta.contains_key(&pid),
+        AgentKind::Grok => grok_meta.contains_key(&pid),
+        _ => false,
+    };
     let all_candidates = candidates.clone();
     candidates.retain(|&pid| {
-        let Some(kind) = kinds.get(&pid) else {
+        let Some(&kind) = kinds.get(&pid) else {
             return false;
         };
+        let file_backed = has_session_file(pid, kind);
         !all_candidates.iter().any(|&other| {
-            other != pid && kinds.get(&other) == Some(kind) && is_descendant_of(other, pid, procs)
+            if other == pid || kinds.get(&other) != Some(&kind) {
+                return false;
+            }
+            match (file_backed, has_session_file(other, kind)) {
+                // A helper/wrapper anywhere in the real session's chain loses.
+                (false, true) => {
+                    is_descendant_of(other, pid, procs) || is_descendant_of(pid, other, procs)
+                }
+                // The real session never loses to a file-less relative.
+                (true, false) => false,
+                // Two real sessions (e.g. claude launched inside claude).
+                (true, true) => false,
+                // Wrapper chain: keep the deepest process.
+                (false, false) => is_descendant_of(other, pid, procs),
+            }
         })
     });
 
@@ -260,9 +354,19 @@ fn assemble_inner(
             _ => None,
         };
 
-        let cpu_busy =
-            proc.cpu_pct > CPU_ACTIVE || has_active_descendant(pid, &children, procs, CPU_ACTIVE);
-        let status = if file_busy.unwrap_or(false) || cpu_busy {
+        // The sidecar status is authoritative when present: an idle Claude
+        // stays Waiting even while an MCP-server child or a TUI repaint burns
+        // CPU. Only sessions without one fall back to the CPU heuristic.
+        let busy = match file_busy {
+            Some(busy) => busy,
+            None => {
+                // Descendants only: a running tool (shell, build, script)
+                // shows up as child CPU; the agent's own CPU is TUI noise.
+                let raw = has_active_descendant(pid, &children, procs, CPU_ACTIVE);
+                debounced_cpu_busy(debounce, pid, raw)
+            }
+        };
+        let status = if busy {
             AgentStatus::Working
         } else {
             AgentStatus::Waiting
@@ -279,6 +383,8 @@ fn assemble_inner(
             model,
         });
     }
+
+    debounce.retain(|pid, _| procs.contains_key(pid));
 
     sessions.sort_by(|a, b| {
         b.status
@@ -325,6 +431,7 @@ fn classify_process(name: &str, argv: &[String], exe: Option<&Path>) -> Option<A
         AgentKind::OpenCode,
         AgentKind::Claude,
         AgentKind::Codex,
+        AgentKind::Fx,
         AgentKind::Grok,
         AgentKind::Aider,
         AgentKind::Gemini,
@@ -591,7 +698,7 @@ fn grok_sessions() -> HashMap<u32, GrokActive> {
     rows.into_iter().map(|row| (row.pid, row)).collect()
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 struct ClaudeSidecar {
     #[serde(default)]
     cwd: Option<String>,
@@ -601,6 +708,9 @@ struct ClaudeSidecar {
     status: Option<String>,
     #[serde(default)]
     name: Option<String>,
+    /// Session start, ms since the epoch; used to reject reused pids.
+    #[serde(rename = "startedAt", default)]
+    started_at: Option<u64>,
 }
 
 fn claude_sessions() -> HashMap<u32, ClaudeSidecar> {
@@ -878,6 +988,7 @@ mod tests {
             argv: argv.iter().map(|s| s.to_string()).collect(),
             cwd: None,
             exe: None,
+            start_time: 0,
         }
     }
 
@@ -921,6 +1032,10 @@ mod tests {
         assert_eq!(
             classify_process("grok", &["grok".into()], None),
             Some(AgentKind::Grok)
+        );
+        assert_eq!(
+            classify_process("fx", &["/Users/me/.local/bin/fx".into()], None),
+            Some(AgentKind::Fx)
         );
         assert_eq!(
             classify_process(
@@ -1015,7 +1130,12 @@ mod tests {
             99,
             proc_exe(99, 1, "agent", &["agent"], "/Users/me/.grok/bin/agent"),
         );
-        let sessions = assemble_inner(&procs, &HashMap::new(), &HashMap::new());
+        let sessions = assemble_inner(
+            &procs,
+            &HashMap::new(),
+            &HashMap::new(),
+            &mut HashMap::new(),
+        );
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].kind, AgentKind::Grok);
         assert_eq!(sessions[0].pid, 99);
@@ -1031,12 +1151,99 @@ mod tests {
                 cwd: "/tmp/proj".into(),
             },
         );
-        let sessions = assemble_inner(&procs, &grok_meta, &HashMap::new());
+        let sessions = assemble_inner(&procs, &grok_meta, &HashMap::new(), &mut HashMap::new());
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].kind, AgentKind::Grok);
         assert_eq!(sessions[0].pid, 77);
         assert_eq!(sessions[0].session_id.as_deref(), Some("abc"));
         assert_eq!(sessions[0].cwd, "/tmp/proj");
+    }
+
+    fn sidecar(status: Option<&str>, started_at: Option<u64>) -> ClaudeSidecar {
+        ClaudeSidecar {
+            cwd: Some("/tmp/proj".into()),
+            session_id: Some("abc".into()),
+            status: status.map(str::to_string),
+            name: None,
+            started_at,
+        }
+    }
+
+    #[test]
+    fn sidecar_idle_beats_cpu() {
+        let mut procs = HashMap::new();
+        let mut claude = proc(50, 1, "claude", &["/usr/local/bin/claude"]);
+        claude.cpu_pct = 80.0;
+        procs.insert(50, claude);
+        let mut meta = HashMap::new();
+        meta.insert(50, sidecar(Some("idle"), None));
+
+        let sessions = assemble_inner(&procs, &HashMap::new(), &meta, &mut HashMap::new());
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].status, AgentStatus::Waiting);
+
+        meta.insert(50, sidecar(Some("busy"), None));
+        let sessions = assemble_inner(&procs, &HashMap::new(), &meta, &mut HashMap::new());
+        assert_eq!(sessions[0].status, AgentStatus::Working);
+    }
+
+    #[test]
+    fn cpu_status_needs_consecutive_polls() {
+        let mut procs = HashMap::new();
+        procs.insert(60, proc(60, 1, "codex", &["/usr/local/bin/codex"]));
+        let mut tool = proc(61, 60, "cargo", &["cargo", "build"]);
+        tool.cpu_pct = 50.0;
+        procs.insert(61, tool);
+        let mut debounce = HashMap::new();
+
+        // One busy poll is a spike, two flip the status.
+        let s = assemble_inner(&procs, &HashMap::new(), &HashMap::new(), &mut debounce);
+        assert_eq!(s[0].status, AgentStatus::Waiting);
+        let s = assemble_inner(&procs, &HashMap::new(), &HashMap::new(), &mut debounce);
+        assert_eq!(s[0].status, AgentStatus::Working);
+
+        // Same on the way down: one quiet poll doesn't drop it back.
+        procs.get_mut(&61).unwrap().cpu_pct = 0.0;
+        let s = assemble_inner(&procs, &HashMap::new(), &HashMap::new(), &mut debounce);
+        assert_eq!(s[0].status, AgentStatus::Working);
+        let s = assemble_inner(&procs, &HashMap::new(), &HashMap::new(), &mut debounce);
+        assert_eq!(s[0].status, AgentStatus::Waiting);
+    }
+
+    #[test]
+    fn own_process_cpu_is_not_work() {
+        // A TUI repainting or streaming text burns CPU on the agent process
+        // itself; only descendant CPU counts as a running tool.
+        let mut procs = HashMap::new();
+        let mut codex = proc(60, 1, "codex", &["/usr/local/bin/codex"]);
+        codex.cpu_pct = 80.0;
+        procs.insert(60, codex);
+        let mut debounce = HashMap::new();
+
+        for _ in 0..3 {
+            let s = assemble_inner(&procs, &HashMap::new(), &HashMap::new(), &mut debounce);
+            assert_eq!(s[0].status, AgentStatus::Waiting);
+        }
+    }
+
+    #[test]
+    fn stale_sidecar_for_reused_pid_is_ignored() {
+        let mut procs = HashMap::new();
+        // Unrelated process that started long after the dead session.
+        let mut python = proc(70, 1, "python3", &["python3", "serve.py"]);
+        python.start_time = 2_000_000_000;
+        procs.insert(70, python);
+        let mut meta = HashMap::new();
+        meta.insert(70, sidecar(Some("busy"), Some(1_000_000_000_000)));
+
+        let sessions = assemble_inner(&procs, &HashMap::new(), &meta, &mut HashMap::new());
+        assert!(sessions.is_empty(), "reused pid must not surface as Claude");
+
+        // A process that predates the session start is accepted.
+        procs.get_mut(&70).unwrap().start_time = 999_999_998;
+        let sessions = assemble_inner(&procs, &HashMap::new(), &meta, &mut HashMap::new());
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].kind, AgentKind::Claude);
     }
 
     #[test]
@@ -1049,26 +1256,40 @@ mod tests {
         );
         procs.insert(12, proc(12, 1, "zsh", &["zsh"]));
 
-        // Directly test retain logic via assemble without file enrichment.
-        let children_ok = {
-            let kinds: HashMap<u32, AgentKind> = procs
-                .values()
-                .filter_map(|p| classify(p).map(|k| (p.pid, k)))
-                .collect();
-            let mut candidates: Vec<u32> = kinds.keys().copied().collect();
-            let all_candidates = candidates.clone();
-            candidates.retain(|&pid| {
-                let kind = kinds.get(&pid).unwrap();
-                !all_candidates.iter().any(|&other| {
-                    other != pid
-                        && kinds.get(&other) == Some(kind)
-                        && is_descendant_of(other, pid, &procs)
-                })
-            });
-            candidates.sort_unstable();
-            candidates
-        };
-        assert_eq!(children_ok, vec![11]);
+        let sessions = assemble_inner(&procs, &HashMap::new(), &HashMap::new(), &mut HashMap::new());
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].pid, 11);
+    }
+
+    #[test]
+    fn session_beats_its_own_spawned_helper() {
+        // Claude spawns short-lived children from its own binary; the
+        // sidecar-backed parent is the session, not the helper.
+        let mut procs = HashMap::new();
+        procs.insert(100, proc(100, 1, "claude", &["claude"]));
+        procs.insert(
+            101,
+            proc_exe(
+                101,
+                100,
+                "claude",
+                &["claude"],
+                "/Users/me/.local/share/claude/versions/2.1.239",
+            ),
+        );
+        let mut meta = HashMap::new();
+        meta.insert(100, sidecar(Some("idle"), None));
+
+        let sessions = assemble_inner(&procs, &HashMap::new(), &meta, &mut HashMap::new());
+        assert_eq!(sessions.len(), 1, "helper must not surface: {sessions:?}");
+        assert_eq!(sessions[0].pid, 100);
+
+        // Two sidecar-backed sessions in one chain are both real
+        // (claude launched from inside claude's shell).
+        meta.insert(101, sidecar(Some("busy"), None));
+        let mut sessions = assemble_inner(&procs, &HashMap::new(), &meta, &mut HashMap::new());
+        sessions.sort_by_key(|s| s.pid);
+        assert_eq!(sessions.len(), 2);
     }
 
     #[test]

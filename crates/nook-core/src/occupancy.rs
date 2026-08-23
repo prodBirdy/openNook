@@ -167,7 +167,8 @@ unsafe fn window_bounds(dict: *mut objc2::runtime::AnyObject) -> Option<ScreenRe
     use objc2::runtime::AnyObject;
     use objc2::*;
 
-    let key: *mut AnyObject = msg_send![class!(NSString), stringWithUTF8String: c"kCGWindowBounds".as_ptr()];
+    let key: *mut AnyObject =
+        msg_send![class!(NSString), stringWithUTF8String: c"kCGWindowBounds".as_ptr()];
     if key.is_null() {
         return None;
     }
@@ -218,9 +219,7 @@ unsafe fn dict_i64(dict: *mut objc2::runtime::AnyObject, key: &std::ffi::CStr) -
 #[cfg(target_os = "windows")]
 fn query_frontmost_fills_windows() -> bool {
     use windows::Win32::Foundation::{HWND, RECT};
-    use windows::Win32::UI::WindowsAndMessaging::{
-        GetForegroundWindow, GetWindowRect, IsZoomed,
-    };
+    use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowRect, IsZoomed};
 
     unsafe {
         let hwnd: HWND = GetForegroundWindow();

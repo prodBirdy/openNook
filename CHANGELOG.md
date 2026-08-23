@@ -5,6 +5,45 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-08-23
+
+Settings rebuilt as a native sidebar window, a compact island that hugs the
+camera housing, and much more reliable agent detection. macOS only.
+
+### Added
+
+- Settings window rebuilt as a sidebar + grouped-pane layout (System Settings
+  style) on `gpui-component`, with native sliders and a transparent titlebar
+- Island preview in Settings sits on the actual desktop wallpaper, captured
+  from the Dock's rendered frame so dynamic and HEIC wallpapers work
+- Island silhouette border color option
+
+### Changed
+
+- Compact island wraps the camera housing by 1px on every side so the
+  hardware sits inside the island instead of on the painted edge; bottom
+  corners follow the housing's rounded-rect (no more capsule rounding)
+- Settings underlay pinned to Dark Aqua so Regular glass keeps its dark
+  luminosity recipe in Light Mode
+
+### Fixed
+
+- Agent detection false alarms: Claude sessions now trust the session file's
+  own busy/idle status instead of CPU noise from MCP servers and TUI repaints
+- Agent status no longer flaps between Working and Waiting: only descendant
+  CPU (a running tool) counts as work, above 5% and debounced over two polls
+- A short-lived helper process spawned from the agent's own binary no longer
+  displaces (or outlives) the real session in the agent list
+- A stale session file whose pid was reused no longer labels an unrelated
+  process as an agent
+- A Finder drag elsewhere on screen no longer opens the island; the widened
+  region is only used to capture a drag before it reaches the painted pill
+
+### Packaging
+
+- `./scripts/with-metal.sh ./scripts/installer.sh` produces `target/openNook-0.3.0.dmg`
+- Ad-hoc signed; a Developer ID identity is used when one is on the keychain
+
 ## [0.2.0] - 2026-08-22
 
 First **native GPUI** release of openNook. The React / Tauri WebView is gone;
@@ -54,4 +93,5 @@ only.
 - `./scripts/with-metal.sh ./scripts/installer.sh` produces `target/openNook-0.2.0.dmg`
 - Ad-hoc signed; a Developer ID identity is used when one is on the keychain
 
+[0.3.0]: https://github.com/prodBirdy/openNook/releases/tag/v0.3.0
 [0.2.0]: https://github.com/prodBirdy/openNook/releases/tag/v0.2.0

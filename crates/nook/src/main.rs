@@ -17,6 +17,7 @@ fn main() {
     Application::new()
         .with_assets(icons::Assets)
         .run(|cx: &mut App| {
+            gpui_component::init(cx);
             nook_core::init();
             platform::install();
             platform::install_status_item();

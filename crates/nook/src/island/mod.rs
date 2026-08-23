@@ -285,6 +285,7 @@ impl Island {
                 if this
                     .update(cx, |this, cx| {
                     let inside = nook_core::mouse::hit_test(mx, my);
+                    let drag_capture = nook_core::mouse::hit_test_drag_capture(mx, my);
                     let on_ui = nook_core::mouse::hit_test_exact(mx, my);
                     let settings = nook_core::settings::get_app_settings();
                     let mut dirty = false;
@@ -350,11 +351,13 @@ impl Island {
                     // keeps the menu bar, Settings, and apps underneath usable.
                     // Own the cursor only over the painted island. Exception:
                     // while Finder is dragging, the window must see the cursor
-                    // early (padded `inside`) or it never gets draggingEntered.
+                    // early (`drag_capture`) or it never gets draggingEntered.
+                    // This wider region only lifts click-through; `inside` stays
+                    // exact so it cannot hover or expand the island prematurely.
                     // Same while we are the drag source — AppKit needs the
                     // session's window live. Settings is a separate window and
                     // must not pin this overlay capturing.
-                    let ignore = this.overlay_ignores_mouse(on_ui, inside);
+                    let ignore = this.overlay_ignores_mouse(on_ui, drag_capture);
                     let changed = this.click_through != ignore;
                     // 20 ms per tick, so this re-asserts roughly every second.
                     if changed || this.click_through_age >= 50 {
@@ -816,21 +819,17 @@ impl Island {
             return (w, self.notch_height.max(32.0) + body);
         }
         if self.hovered {
-            return if self.mode() == CompactMode::Idle {
-                (base_w + 30.0, base_h + 10.0)
-            } else {
-                (base_w + 125.0, base_h + 15.0)
-            };
+            return (base_w + 125.0, base_h + 15.0);
         }
         if self.mode() == CompactMode::Idle {
             let h = if self.settings.non_notch_mode {
                 1.0
             } else {
-                base_h
+                self.notch_height + theme::IDLE_NOTCH_OVERFLOW + theme::COMPACT_HEIGHT_OVERFLOW
             };
-            return (base_w, h);
+            return (self.notch_width + theme::IDLE_NOTCH_OVERFLOW, h);
         }
-        (base_w + 120.0, base_h)
+        (base_w + 120.0, base_h + theme::COMPACT_HEIGHT_OVERFLOW)
     }
 
     pub(super) fn expanded_width(&self) -> f32 {
@@ -1018,16 +1017,16 @@ impl Island {
 
     /// Whether the overlay NSWindow should `ignoresMouseEvents`.
     ///
-    /// `on_ui` is a hit against the painted island (no hover pad). `inside` is
-    /// the padded hover region, used only so an inbound Finder drag meets the
-    /// window before `draggingEntered`. Settings must not appear here: it used
+    /// `on_ui` is a hit against the painted island. `drag_capture` is the wider
+    /// capture-only region used so an inbound Finder drag meets the window before
+    /// `draggingEntered`. Settings must not appear here: it used
     /// to force the overlay live, which ate every click in the window — the
     /// top of the screen when the overlay was ~280px, the whole display now.
     ///
     /// After we start an AppKit drag-out, the session is global. Keeping the
     /// full-screen overlay live made *us* the drop target, so Finder never
     /// saw the file. Click-through off the painted island; stay live on it.
-    fn overlay_ignores_mouse(&self, on_ui: bool, inside: bool) -> bool {
+    fn overlay_ignores_mouse(&self, on_ui: bool, drag_capture: bool) -> bool {
         if self.suppressed {
             return true;
         }
@@ -1037,7 +1036,7 @@ impl Island {
         if nook_core::files::outbound_drag_active() {
             return !on_ui;
         }
-        !(on_ui || (self.file_drag && inside) || self.pending_file_drag.is_some())
+        !(on_ui || (self.file_drag && drag_capture) || self.pending_file_drag.is_some())
     }
 
     fn on_island_press(&mut self, event: &MouseDownEvent, cx: &mut Context<Self>) {
@@ -1103,7 +1102,7 @@ impl Island {
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 titlebar: Some(gpui::TitlebarOptions {
-                    title: Some("Nook".into()),
+                    title: Some("Settings".into()),
                     appears_transparent: true,
                     ..Default::default()
                 }),
@@ -1521,6 +1520,41 @@ mod tests {
         let (w, h) = island.target_size();
         assert!(w >= 180.0);
         assert!(h >= 1.0);
+    }
+
+    #[test]
+    fn collapsed_idle_wraps_the_hardware_notch_by_one_pixel() {
+        let mut island = test_island();
+        island.notch_width = 185.0;
+        island.notch_height = 38.0;
+        let (w, h) = island.target_size();
+        assert_eq!(w, 185.0 + theme::IDLE_NOTCH_OVERFLOW);
+        assert_eq!(
+            h,
+            38.0 + theme::IDLE_NOTCH_OVERFLOW + theme::COMPACT_HEIGHT_OVERFLOW
+        );
+
+        island.settings.non_notch_mode = true;
+        let (w, h) = island.target_size();
+        assert_eq!(w, 185.0 + theme::IDLE_NOTCH_OVERFLOW);
+        assert_eq!(h, 1.0);
+    }
+
+    #[test]
+    fn empty_hover_matches_live_activity_hover() {
+        let mut island = test_island();
+        island.notch_width = 185.0;
+        island.notch_height = 38.0;
+        island.hovered = true;
+        assert_eq!(island.mode(), CompactMode::Idle);
+        let idle_hover = island.target_size();
+
+        island.now_playing.title = Some("Track".into());
+        island.now_playing.is_playing = true;
+        island.settings.show_media = true;
+        assert_eq!(island.mode(), CompactMode::Media);
+        assert_eq!(island.target_size(), idle_hover);
+        assert_eq!(idle_hover, (185.0 + 125.0, 38.0 + 15.0));
     }
 
     #[test]
