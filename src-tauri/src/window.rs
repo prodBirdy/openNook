@@ -1,10 +1,10 @@
 use crate::database::{get_connection, log_sql};
 use crate::models::NotchInfo;
 use serde::{Deserialize, Serialize};
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::RwLock;
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 use tauri::Emitter;
 use tauri::{
     AppHandle, LogicalPosition, LogicalSize, Manager, WebviewUrl, WebviewWindow,
@@ -1021,9 +1021,129 @@ pub fn setup_mouse_monitoring(app_handle: tauri::AppHandle) {
 
 #[cfg(target_os = "linux")]
 pub fn setup_mouse_monitoring(app_handle: tauri::AppHandle) {
-    let _ = app_handle;
-    // Mouse monitoring on Linux (Wayland/X11) is complex to do globally without heavy dependencies.
-    // For now, we will rely on window events if possible, or disable the hover feature.
-    // To avoid busy looping or useless threads, we just log a message.
-    log::info!("Global mouse monitoring not implemented for Linux yet.");
+    use x11rb::connection::Connection;
+    use x11rb::protocol::xproto::ConnectionExt as _;
+
+    if std::env::var_os("DISPLAY").is_none() {
+        log::info!("DISPLAY unset; skipping Linux mouse monitoring (pure Wayland?).");
+        return;
+    }
+
+    let (conn, screen_num) = match x11rb::connect(None) {
+        Ok(pair) => pair,
+        Err(err) => {
+            log::info!("X11 connect failed ({err}); skipping Linux mouse monitoring.");
+            return;
+        }
+    };
+    let root = conn.setup().roots[screen_num].root;
+
+    // Track whether mouse is currently in the UI area
+    static IS_INSIDE: AtomicBool = AtomicBool::new(false);
+
+    let (screen_width, _screen_height, _notch_height, notch_width) =
+        get_screen_info(Some(&app_handle));
+
+    log::info!("Linux mouse monitoring started (X11 QueryPointer).");
+
+    std::thread::spawn(move || {
+        const POLL_MS: u64 = 20;
+
+        loop {
+            // Refresh settings on every iteration to handle runtime toggles
+            // This is intentional - settings can be changed via update_window_settings
+            // and we need to immediately reflect those changes in mouse detection
+            let settings = get_window_settings();
+
+            let effective_notch_width = if settings.non_notch_mode {
+                0.0
+            } else {
+                notch_width
+            };
+
+            // Get actual window position instead of calculating it
+            // This ensures we match the real window position even with DPI scaling
+            let (window_x, win_width, scale_factor) =
+                if let Some(window) = app_handle.get_webview_window("main") {
+                    if let (Ok(pos), Ok(size)) = (window.outer_position(), window.outer_size()) {
+                        let scale = window.scale_factor().unwrap_or(1.0);
+                        ((pos.x as f64) / scale, (size.width as f64) / scale, scale)
+                    } else {
+                        // Fallback calculation
+                        let win_w = if effective_notch_width > 0.0 {
+                            effective_notch_width + 160.0 + settings.extra_width
+                        } else {
+                            800.0 + settings.extra_width
+                        };
+                        ((screen_width - win_w) / 2.0, win_w, 1.0)
+                    }
+                } else {
+                    // Fallback if window not available
+                    let win_w = if effective_notch_width > 0.0 {
+                        effective_notch_width + 160.0 + settings.extra_width
+                    } else {
+                        800.0 + settings.extra_width
+                    };
+                    ((screen_width - win_w) / 2.0, win_w, 1.0)
+                };
+
+            if let Ok(cookie) = conn.query_pointer(root) {
+                if let Ok(reply) = cookie.reply() {
+                    // Convert X11 root coordinates to logical pixels (same as Windows)
+                    let mouse_x = (reply.root_x as f64) / scale_factor;
+                    let mouse_y = (reply.root_y as f64) / scale_factor;
+
+                    let was_inside = IS_INSIDE.load(Ordering::Relaxed);
+
+                    // Logic adapted from the Windows / macOS versions
+                    let padding = if was_inside { 30.0 } else { 20.0 };
+
+                    let in_ui_area = if let Ok(guard) = get_ui_bounds_store().try_read() {
+                        if let Some(bounds) = *guard {
+                            // Center the bounds within the window (same as Windows)
+                            let screen_x = window_x + (win_width - bounds.width) / 2.0;
+                            let screen_y = bounds.y;
+                            mouse_x >= (screen_x - padding)
+                                && mouse_x <= (screen_x + bounds.width + padding)
+                                && mouse_y >= (screen_y - padding)
+                                && mouse_y <= (screen_y + bounds.height + padding)
+                        } else {
+                            // Fallback zone at top center
+                            // In non-notch mode we use a very small height for fallback
+                            let fallback_height = if settings.non_notch_mode { 1.0 } else { 100.0 };
+
+                            mouse_x >= (window_x - padding)
+                                && mouse_x <= (window_x + win_width + padding)
+                                && mouse_y >= 0.0
+                                && mouse_y <= (fallback_height + padding)
+                        }
+                    } else {
+                        let fallback_height = if settings.non_notch_mode { 1.0 } else { 100.0 };
+
+                        mouse_x >= (window_x - padding)
+                            && mouse_x <= (window_x + win_width + padding)
+                            && mouse_y >= 0.0
+                            && mouse_y <= (fallback_height + padding)
+                    };
+
+                    if in_ui_area && !was_inside {
+                        IS_INSIDE.store(true, Ordering::Relaxed);
+                        let _ = app_handle.emit("mouse-entered-notch", ());
+
+                        if let Some(window) = app_handle.get_webview_window("main") {
+                            let _ = window.set_ignore_cursor_events(false);
+                        }
+                    } else if !in_ui_area && was_inside {
+                        IS_INSIDE.store(false, Ordering::Relaxed);
+                        let _ = app_handle.emit("mouse-exited-notch", ());
+                        if let Some(window) = app_handle.get_webview_window("main") {
+                            let _ = window.set_ignore_cursor_events(true);
+                        }
+                    }
+                }
+            }
+
+            std::thread::sleep(std::time::Duration::from_millis(POLL_MS));
+        }
+    });
 }
