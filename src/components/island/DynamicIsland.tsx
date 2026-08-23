@@ -127,6 +127,9 @@ export function DynamicIsland() {
 
     // Toggle expanded mode
     const handleIslandClick = useCallback(() => {
+        // Mark hovered first so auto-collapse (!isHovered && expanded) cannot
+        // undo this click when Tauri enter events are missing or late.
+        setIsHovered(true);
         setExpanded(prev => {
             if (!prev) {
                 setIsAnimating(true);
@@ -135,12 +138,17 @@ export function DynamicIsland() {
             invoke('trigger_haptics').catch(console.error);
             return !prev;
         });
-    }, [mode, setExpanded, setIsAnimating, setActiveTab]);
+    }, [mode, setExpanded, setIsAnimating, setActiveTab, setIsHovered]);
 
-    // Hover handlers for haptics
+    // Hover: DOM pointer plus existing Tauri mouse-entered/exited listeners
     const handleHoverStart = useCallback(() => {
+        setIsHovered(true);
         invoke('trigger_haptics').catch(console.error);
-    }, []);
+    }, [setIsHovered]);
+
+    const handleHoverEnd = useCallback(() => {
+        setIsHovered(false);
+    }, [setIsHovered]);
 
     // Initialization and listeners
     useEffect(() => {
@@ -168,6 +176,7 @@ export function DynamicIsland() {
             }, 100);
         };
         window.addEventListener('resize', handleResize);
+        setWindowSize({ width: window.innerWidth, height: window.innerHeight });
 
         // Mouse hover listeners
         const unlistenEnter = listen('mouse-entered-notch', () => setIsHovered(true));
@@ -433,6 +442,7 @@ export function DynamicIsland() {
                 }}
                 transition={springTransition}
                 onHoverStart={handleHoverStart}
+                onHoverEnd={handleHoverEnd}
                 onClick={handleIslandClick}
                 onWheel={handleWheel}
                 style={{ cursor: 'pointer' }}
