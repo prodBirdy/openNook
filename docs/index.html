@@ -14,7 +14,7 @@
       background: #f3f3f3;
       color: #111;
     }
-    main { width: min(36rem, calc(100% - 3rem)); }
+    main { width: min(40rem, calc(100% - 3rem)); }
     h1 { font-size: 1.25rem; font-weight: 600; margin: 0 0 0.35rem; }
     .lede { margin: 0 0 1.5rem; color: #444; }
     .win {
@@ -28,6 +28,12 @@
     }
     .legacy { margin: 0.85rem 0 0; font-size: 0.8rem; color: #555; }
     .legacy a { color: inherit; }
+    .shots { margin: 1.5rem 0 0; }
+    .shots figure { margin: 0; }
+    .shots img { display: block; width: 100%; height: auto; border-radius: 0.5rem; }
+    .shots figcaption { margin: 0.35rem 0 0; font-size: 0.75rem; color: #555; }
+    .shots .lead { margin: 0 0 0.75rem; }
+    .shots .more { display: grid; grid-template-columns: 1fr 1fr; gap: 0.65rem; }
     nav { margin-top: 1.25rem; font-size: 0.9rem; color: #555; }
     nav a { color: inherit; }
   </style>
@@ -35,11 +41,35 @@
 <body>
   <main>
     <h1>openNook</h1>
-    <p class="lede">Mac Dynamic Island-style desktop (openNook). 0.3.0 is macOS only (settings sidebar, island hugs camera housing).</p>
+    <p class="lede">Mac Dynamic Island-style desktop (openNook)</p>
     <p>
       <a class="win" href="https://github.com/prodBirdy/openNook/releases/download/v0.3.0/openNook-0.3.0.dmg">Download for Mac</a>
     </p>
-    <p class="legacy">Windows / Linux (0.0.2a, old Tauri line — not 0.3.0): <a href="https://github.com/prodBirdy/openNook/releases/download/0.0.2a/openNook_0.1.0_x64-setup.exe">Windows installer</a> · <a href="https://github.com/prodBirdy/openNook/releases/tag/0.0.2a">0.0.2a release</a></p>
+    <p class="legacy">
+      <a href="https://github.com/prodBirdy/openNook/releases/download/v0.3.0-linux/openNook-0.3.0-x86_64-unknown-linux-gnu.tar.gz">Linux 0.3.0 (GPUI tarball)</a>
+      ·
+      <a href="https://github.com/prodBirdy/openNook/releases/download/0.0.2a/openNook_0.1.0_x64-setup.exe">Windows (0.0.2a)</a>
+    </p>
+    <div class="shots">
+      <figure class="lead">
+        <img src="linux-03-compact.png" alt="Linux 0.3.0 GPUI compact island at top center">
+        <figcaption>Linux 0.3.0 GPUI · compact</figcaption>
+      </figure>
+      <div class="more">
+        <figure>
+          <img src="linux-03-expanded.png" alt="Linux 0.3.0 GPUI expanded Nook tab">
+          <figcaption>Linux 0.3.0 GPUI · expanded</figcaption>
+        </figure>
+        <figure>
+          <img src="linux-03-settings.png" alt="Linux 0.3.0 GPUI Settings Widgets">
+          <figcaption>Linux 0.3.0 GPUI · settings</figcaption>
+        </figure>
+        <figure>
+          <img src="linux-03-file-tray.png" alt="Linux 0.3.0 GPUI Tray tab with tray-sampl">
+          <figcaption>Linux 0.3.0 GPUI · tray</figcaption>
+        </figure>
+      </div>
+    </div>
     <nav>
       <a href="https://github.com/prodBirdy/openNook">Source</a>
       ·
