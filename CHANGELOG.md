@@ -15,10 +15,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   retag or rewrite the macOS `v0.3.0` notes.
 - This is the current GPUI product. It is not the Tauri `0.0.2a` AppImage.
 
+Linux compact is the Idle housing wrap (no “openNook” title), top-center on
+the real X11 `DisplayWidth` / `DisplayHeight`. Hover polling is still
+stubbed — click or scroll the painted island.
+
 Linux does not get Metal, camera-housing notch metrics, MediaRemote, Liquid
 Glass, the menu-bar extra, camera Mirror, AirDrop, AppKit file drag-out,
-EventKit, hide-when-maximized occupancy, or `installer.dmg`. Hover polling is
-stubbed. Settings / Quit: Ctrl+, and Ctrl+Q.
+EventKit, hide-when-maximized occupancy, or `installer.dmg`. Settings / Quit:
+Ctrl+, and Ctrl+Q.
 
 ## [0.3.0] - 2026-08-23
 

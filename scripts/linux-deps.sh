@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # System packages needed to compile crates/nook (GPUI 0.2.2) on Debian/Ubuntu.
 # Metal / with-metal.sh is macOS-only. Linux uses Vulkan (blade) + X11/Wayland.
+# libx11 is also used at runtime for DisplayWidth / DisplayHeight centering.
 set -euo pipefail
 sudo apt-get update
 sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \

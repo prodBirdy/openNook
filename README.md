@@ -57,7 +57,9 @@ cargo run -p nook
 
 CI job `linux-release` uploads `openNook-0.3.0-x86_64-unknown-linux-gnu.tar.gz` (the `nook` binary). Trigger via **Actions → linux-release → Run workflow**, or push a `v*-linux` tag. That publishes GitHub Release `v0.3.0-linux` and does not rewrite the macOS `v0.3.0` dmg notes.
 
-**Unavailable on Linux:** Metal / `scripts/with-metal.sh`, camera-housing notch, MediaRemote, Liquid Glass, menu-bar extra, camera Mirror, AirDrop, AppKit file drag-out, EventKit Calendar/Reminders, hide-when-maximized, `installer.dmg`. Global hover polling is stubbed (cursor reports 0,0). Click or scroll the island; Ctrl+, opens Settings; Ctrl+Q quits. Needs a Vulkan driver at runtime.
+Compact has no app title and is top-center (Idle housing wrap). Screen size comes from X11 `DisplayWidth` / `DisplayHeight`. Settings, expanded island, and the file tray work on Linux.
+
+**Unavailable on Linux:** Metal / `scripts/with-metal.sh`, camera-housing notch, MediaRemote, Liquid Glass, menu-bar extra, camera Mirror, AirDrop, AppKit file drag-out, EventKit Calendar/Reminders, hide-when-maximized, `installer.dmg`. Global hover polling is still stubbed (cursor reports 0,0). Click or scroll the painted island; Ctrl+, opens Settings; Ctrl+Q quits. Needs a Vulkan driver at runtime.
 
 ## Features (v1)
 
