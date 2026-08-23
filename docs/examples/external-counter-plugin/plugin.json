@@ -1,0 +1,13 @@
+{
+    "id": "external-counter",
+    "name": "External Counter",
+    "version": "1.0.0",
+    "description": "Example external plugin - a simple counter",
+    "author": "openNook Team",
+    "main": "index.js",
+    "category": "utility",
+    "minWidth": 200,
+    "hasCompactMode": true,
+    "compactPriority": 100,
+    "permissions": []
+}

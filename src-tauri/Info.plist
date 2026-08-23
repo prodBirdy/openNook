@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>LSUIElement</key>
+	<true/>
+    <key>NSAudioCaptureUsageDescription</key>
+    <string>Need audio access for visualization.</string>
+    <key>NSCalendarsUsageDescription</key>
+    <string>Need access to show upcoming events.</string>
+    <key>NSRemindersUsageDescription</key>
+    <string>Need access to show and manage reminders.</string>
+    <key>NSCameraUsageDescription</key>
+    <string>Need camera access for Mirror widget.</string>
+</dict>
+</plist>

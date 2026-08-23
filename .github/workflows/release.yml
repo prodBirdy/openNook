@@ -1,0 +1,72 @@
+# Ship the Tauri product people download. Linux + Windows only.
+# macOS stays out of this job: CI has no Developer ID, and the hardcoded
+# signingIdentity made the whole Release workflow red even when Linux/Windows
+# already uploaded AppImage/deb/rpm and the setup exe.
+name: Release
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'src-tauri/**'
+      - 'src/**'
+      - 'package.json'
+      - 'bun.lock'
+      - 'index.html'
+      - 'vite.config.ts'
+      - '.github/workflows/release.yml'
+  push:
+    tags:
+      - 'v*'
+    branches:
+      - main
+
+jobs:
+  publish-tauri:
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: ubuntu-22.04
+            args: ''
+          - platform: windows-latest
+            args: ''
+
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Linux Tauri deps
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev \
+            libappindicator3-dev librsvg2-dev patchelf
+
+      - name: Install frontend dependencies
+        run: bun install
+
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: v__VERSION__
+          releaseName: 'openNook v__VERSION__'
+          releaseBody: |
+            Desktop installers for the Tauri openNook app.
+
+            **Windows:** `openNook_*_x64-setup.exe`
+            **Linux:** `.AppImage`, `.deb`, `.rpm`
+          releaseDraft: true
+          prerelease: false
+          args: ${{ matrix.args }}
