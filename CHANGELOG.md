@@ -5,6 +5,21 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Packaging
+
+- Linux GPUI artifact: `cargo build --release -p nook` on Ubuntu, uploaded as
+  `openNook-0.3.0-x86_64-unknown-linux-gnu.tar.gz` from `.github/workflows/linux-release.yml`
+  (`workflow_dispatch` or a `v*-linux` tag). Publishes `v0.3.0-linux`; does not
+  retag or rewrite the macOS `v0.3.0` notes.
+- This is the current GPUI product. It is not the Tauri `0.0.2a` AppImage.
+
+Linux does not get Metal, camera-housing notch metrics, MediaRemote, Liquid
+Glass, the menu-bar extra, camera Mirror, AirDrop, AppKit file drag-out,
+EventKit, hide-when-maximized occupancy, or `installer.dmg`. Hover polling is
+stubbed. Settings / Quit: Ctrl+, and Ctrl+Q.
+
 ## [0.3.0] - 2026-08-23
 
 Settings rebuilt as a native sidebar window, a compact island that hugs the

@@ -12,12 +12,12 @@
 //!      (not `visibleFrame`), without touching GPUI's `Window` (that RefCell-panics).
 
 use gpui::Window;
+#[cfg(target_os = "macos")]
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 #[cfg(target_os = "macos")]
 use nook_core::notch::{CGPoint, CGRect, CGSize};
-#[cfg(target_os = "macos")]
-use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(target_os = "macos")]
 use std::sync::Once;
 
@@ -25,7 +25,6 @@ use std::sync::Once;
 static INSTALL: Once = Once::new();
 #[cfg(target_os = "macos")]
 static LOGGED_PIN: AtomicBool = AtomicBool::new(false);
-#[cfg(target_os = "macos")]
 static OPEN_SETTINGS: AtomicBool = AtomicBool::new(false);
 #[cfg(target_os = "macos")]
 static STATUS_ITEM: std::sync::atomic::AtomicPtr<objc2::runtime::AnyObject> =
@@ -639,6 +638,8 @@ unsafe fn begin_file_drag(ns_win: *mut objc2::runtime::AnyObject, path: &str) {
 }
 
 pub fn set_accessory(accessory: bool) {
+    #[cfg(not(target_os = "macos"))]
+    let _ = accessory;
     #[cfg(target_os = "macos")]
     unsafe {
         use objc2::runtime::AnyObject;
@@ -668,14 +669,14 @@ fn ns_window(window: &Window) -> Option<*mut objc2::runtime::AnyObject> {
     }
 }
 
-/// True once if the status item asked to open Settings.
+/// True once if Settings was requested (menu-bar extra or a keybinding).
 pub fn take_open_settings() -> bool {
-    #[cfg(target_os = "macos")]
-    {
-        OPEN_SETTINGS.swap(false, Ordering::SeqCst)
-    }
-    #[cfg(not(target_os = "macos"))]
-    false
+    OPEN_SETTINGS.swap(false, Ordering::SeqCst)
+}
+
+/// Ask the island poll loop to open Settings. Works without a status item.
+pub fn request_open_settings() {
+    OPEN_SETTINGS.store(true, Ordering::SeqCst);
 }
 
 /// Menu-bar extra with Settings and Quit. Accessory apps have no Dock/menu otherwise.

@@ -38,12 +38,26 @@ Release installer (DMG with an Applications drop):
 
 ```bash
 ./scripts/with-metal.sh ./scripts/installer.sh
-open target/openNook-0.2.0.dmg
+open target/openNook-0.3.0.dmg
 ```
 
-See [CHANGELOG.md](CHANGELOG.md) for what landed in 0.2.0.
+See [CHANGELOG.md](CHANGELOG.md) for what landed in 0.3.0.
 
 On macOS the process is an accessory (`LSUIElement` / `NSApplicationActivationPolicyAccessory`): no dock icon. Hover the notch to take mouse events; click or scroll up to expand. Quit and Settings live on the **Nook** menu-bar extra.
+
+## Linux (GPUI)
+
+This is the current GPUI client (`crates/nook`), not the old Tauri `0.0.2a` AppImage.
+
+```bash
+./scripts/linux-deps.sh
+cargo run -p nook
+# or: cargo build --release -p nook
+```
+
+CI job `linux-release` uploads `openNook-0.3.0-x86_64-unknown-linux-gnu.tar.gz` (the `nook` binary). Trigger via **Actions → linux-release → Run workflow**, or push a `v*-linux` tag. That publishes GitHub Release `v0.3.0-linux` and does not rewrite the macOS `v0.3.0` dmg notes.
+
+**Unavailable on Linux:** Metal / `scripts/with-metal.sh`, camera-housing notch, MediaRemote, Liquid Glass, menu-bar extra, camera Mirror, AirDrop, AppKit file drag-out, EventKit Calendar/Reminders, hide-when-maximized, `installer.dmg`. Global hover polling is stubbed (cursor reports 0,0). Click or scroll the island; Ctrl+, opens Settings; Ctrl+Q quits. Needs a Vulkan driver at runtime.
 
 ## Features (v1)
 
