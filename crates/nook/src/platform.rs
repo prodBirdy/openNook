@@ -17,7 +17,7 @@ use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 #[cfg(target_os = "macos")]
 use nook_core::notch::{CGPoint, CGRect, CGSize};
 #[cfg(target_os = "macos")]
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 #[cfg(target_os = "macos")]
 use std::sync::Once;
 
@@ -212,7 +212,10 @@ fn pin_ns_window(ns_win: *mut objc2::runtime::AnyObject) {
             || (current.size.height - rect.size.height).abs() > 0.5;
 
         if moved {
-            let _: () = msg_send![ns_win, setFrame: rect, display: true];
+            // display:false — a forced synchronous draw here lands as a frame
+            // hitch when the strip resizes around an island animation; GPUI
+            // repaints on its own resize delegate a frame later.
+            let _: () = msg_send![ns_win, setFrame: rect, display: false];
             let top_left = CGPoint {
                 x: frame.origin.x,
                 y: frame.origin.y + frame.size.height,
@@ -1319,19 +1322,42 @@ fn accent_color_macos() -> Option<(f32, f32, f32)> {
     })
 }
 
+/// 1s-TTL cache for an AppKit accessibility flag. Both flags below are read
+/// from the 20ms island tick; two ObjC round-trips per tick is pointless for
+/// settings a human toggles at most a few times a day. Layout: bit0 = value,
+/// bit1 = valid, upper bits = last-read unix ms.
+#[cfg(target_os = "macos")]
+fn cached_accessibility_flag(cache: &AtomicU64, read: unsafe fn() -> bool) -> bool {
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let packed = cache.load(Ordering::Relaxed);
+    if packed & 0b10 != 0 && now_ms.saturating_sub(packed >> 2) < 1000 {
+        return packed & 1 != 0;
+    }
+    let value = unsafe { read() };
+    cache.store((now_ms << 2) | 0b10 | value as u64, Ordering::Relaxed);
+    value
+}
+
 /// Accessibility › Display › "Reduce transparency". HIG › Materials requires
 /// materials to respond to it, so the island drops its translucency when it is
-/// on. `false` when there is no AppKit to ask.
+/// on. `false` when there is no AppKit to ask. Cached for 1s.
 pub fn reduce_transparency() -> bool {
     #[cfg(target_os = "macos")]
-    unsafe {
-        use objc2::runtime::AnyObject;
-        use objc2::*;
-        let workspace: *mut AnyObject = msg_send![class!(NSWorkspace), sharedWorkspace];
-        if workspace.is_null() {
-            return false;
+    {
+        static CACHE: AtomicU64 = AtomicU64::new(0);
+        unsafe fn read() -> bool {
+            use objc2::runtime::AnyObject;
+            use objc2::*;
+            let workspace: *mut AnyObject = msg_send![class!(NSWorkspace), sharedWorkspace];
+            if workspace.is_null() {
+                return false;
+            }
+            msg_send![workspace, accessibilityDisplayShouldReduceTransparency]
         }
-        msg_send![workspace, accessibilityDisplayShouldReduceTransparency]
+        cached_accessibility_flag(&CACHE, read)
     }
     #[cfg(not(target_os = "macos"))]
     false
@@ -1340,20 +1366,71 @@ pub fn reduce_transparency() -> bool {
 /// Accessibility › Display › "Reduce motion". HIG › Motion requires motion to
 /// be optional, so the island parks its size spring and drops the motion blur
 /// when it is on, keeping only the crossfade (Apple's dissolve substitute).
-/// `false` when there is no AppKit to ask.
+/// `false` when there is no AppKit to ask. Cached for 1s.
 pub fn reduce_motion() -> bool {
     #[cfg(target_os = "macos")]
-    unsafe {
-        use objc2::runtime::AnyObject;
-        use objc2::*;
-        let workspace: *mut AnyObject = msg_send![class!(NSWorkspace), sharedWorkspace];
-        if workspace.is_null() {
-            return false;
+    {
+        static CACHE: AtomicU64 = AtomicU64::new(0);
+        unsafe fn read() -> bool {
+            use objc2::runtime::AnyObject;
+            use objc2::*;
+            let workspace: *mut AnyObject = msg_send![class!(NSWorkspace), sharedWorkspace];
+            if workspace.is_null() {
+                return false;
+            }
+            msg_send![workspace, accessibilityDisplayShouldReduceMotion]
         }
-        msg_send![workspace, accessibilityDisplayShouldReduceMotion]
+        cached_accessibility_flag(&CACHE, read)
     }
     #[cfg(not(target_os = "macos"))]
     false
+}
+
+/// Subscribe to Spotify's and Music's public playback-change broadcasts.
+///
+/// Both players post on the distributed notification center on every
+/// play/pause/track change (no TCC involved). With these installed the
+/// now-playing poll can idle at seconds-scale cadence and still react
+/// instantly — each poll spawns an osascript/perl child, so cadence is the
+/// battery cost that matters. Safari/YouTube posts nothing and rides the slow
+/// poll. Blocks only flip an atomic, so the posting thread is fine. Observer
+/// tokens are intentionally leaked — they live for the process.
+pub fn install_media_observers() {
+    #[cfg(target_os = "macos")]
+    unsafe {
+        use block2::RcBlock;
+        use objc2::runtime::AnyObject;
+        use objc2::*;
+
+        static INSTALLED: Once = Once::new();
+        INSTALLED.call_once(|| {
+            let center: *mut AnyObject =
+                msg_send![class!(NSDistributedNotificationCenter), defaultCenter];
+            if center.is_null() {
+                return;
+            }
+            for name in [
+                c"com.spotify.client.PlaybackStateChanged",
+                c"com.apple.Music.playerInfo",
+                c"com.apple.iTunes.playerInfo",
+            ] {
+                let ns_name: *mut AnyObject =
+                    msg_send![class!(NSString), stringWithUTF8String: name.as_ptr()];
+                let block = RcBlock::new(move |_note: *mut AnyObject| {
+                    nook_core::audio::note_media_event();
+                });
+                let token: *mut AnyObject = msg_send![
+                    center,
+                    addObserverForName: ns_name,
+                    object: std::ptr::null_mut::<AnyObject>(),
+                    queue: std::ptr::null_mut::<AnyObject>(),
+                    usingBlock: &*block
+                ];
+                std::mem::forget(block);
+                let _ = token;
+            }
+        });
+    }
 }
 
 /// GPUI-space island rect (origin top-left) for the native glass underlay.

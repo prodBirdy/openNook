@@ -96,6 +96,14 @@ pub struct Island {
     pub speed_gen: u64,
     pub last_tick: Instant,
     last_frame: Instant,
+    /// Last seen `nook_core::settings::settings_generation()`; the tick loop
+    /// only clones the settings struct when this moves.
+    settings_gen: u64,
+    /// Cursor is within approach distance of the island (from the tick loop).
+    /// Render pre-grows the overlay strip on this, so the NSWindow resize
+    /// happens while the island is still a static sliver — a resize that
+    /// lands mid-animation shows one stretched frame.
+    cursor_near: bool,
     pub settings_open: bool,
     settings_window: Option<WindowHandle<SettingsView>>,
     _settings_closed: Option<Subscription>,
@@ -103,9 +111,14 @@ pub struct Island {
     /// Island size on `motion::MORPH`.
     anim_w: SpringValue,
     anim_h: SpringValue,
-    /// Content crossfade after an expanded/mode swap, 0..1 on
+    /// Content crossfade after an expanded/mode/tab swap, 0..1 on
     /// `motion::CROSSFADE`.
     content_fade: SpringValue,
+    /// Short context-preserving travel for the incoming content. Expansion
+    /// follows the island vertically; compact modes and tabs follow their
+    /// horizontal ordering.
+    content_x: SpringValue,
+    content_y: SpringValue,
     /// Play/pause scrim over the compact album art, 0..1 on `motion::REVEAL`.
     overlay_fade: SpringValue,
     /// Mirrors Accessibility › Display › "Reduce motion"; refreshed by the
@@ -116,6 +129,7 @@ pub struct Island {
     blur: f32,
     last_expanded: bool,
     last_mode: CompactMode,
+    last_tab: Tab,
     file_drag: bool,
     pending_file_drag: Option<PendingFileDrag>,
     /// True while a full-screen / zoomed app is covering the display and
@@ -127,9 +141,9 @@ pub struct Island {
     reposition_grab_y: f32,
     /// Mirrors NSWindow.ignoresMouseEvents so we only cross into ObjC on change.
     click_through: bool,
-    /// Ticks since the flag above was last pushed to AppKit. The overlay covers
-    /// the whole display, so a window left grabbing events would eat every click
-    /// on the machine — too costly to trust a mirrored bool that AppKit or GPUI
+    /// Ticks since the flag above was last pushed to AppKit. The overlay strip
+    /// covers the menu bar and the top of every app, so a window left grabbing
+    /// events would eat those clicks — too costly to trust a mirrored bool that AppKit or GPUI
     /// can invalidate behind our back (a restyle drops it). Re-asserted about
     /// once a second regardless of whether we think it changed.
     click_through_age: u32,
@@ -207,6 +221,8 @@ impl Island {
             speed_gen: 0,
             last_tick: Instant::now(),
             last_frame: Instant::now(),
+            settings_gen: nook_core::settings::settings_generation(),
+            cursor_near: false,
             settings_open: false,
             settings_window: None,
             _settings_closed: None,
@@ -214,11 +230,14 @@ impl Island {
             anim_w: SpringValue::at(0.0),
             anim_h: SpringValue::at(0.0),
             content_fade: SpringValue::at(1.0),
+            content_x: SpringValue::at(0.0),
+            content_y: SpringValue::at(0.0),
             overlay_fade: SpringValue::at(0.0),
             reduce_motion: platform::reduce_motion(),
             blur: 0.0,
             last_expanded: false,
             last_mode: CompactMode::Idle,
+            last_tab: Tab::Widgets,
             file_drag: false,
             pending_file_drag: None,
             suppressed: false,
@@ -243,6 +262,7 @@ impl Island {
         this.anim_w.set(w);
         this.anim_h.set(h);
 
+        platform::install_media_observers();
         nook_core::runtime().spawn(async {
             let _ = nook_core::calendar::request_calendar_access().await;
         });
@@ -277,27 +297,42 @@ impl Island {
 
     fn spawn_loops(&self, cx: &mut Context<Self>) {
         cx.spawn(async move |this, cx| {
+            // Adaptive cadence: 20ms while anything is live (hover, springs,
+            // drags, media) or the cursor is near enough to reach the island
+            // within one slow tick; 80ms otherwise. The idle tick is the
+            // steady-state cost of the whole app, so it is the one to keep
+            // cheap and rare.
+            let mut wait_ms = 20u64;
             loop {
                 cx.background_executor()
-                    .timer(Duration::from_millis(20))
+                    .timer(Duration::from_millis(wait_ms))
                     .await;
                 let (mx, my) = nook_core::mouse::current_mouse_logical();
-                if this
+                match this
                     .update(cx, |this, cx| {
                     let inside = nook_core::mouse::hit_test(mx, my);
                     let drag_capture = nook_core::mouse::hit_test_drag_capture(mx, my);
                     let on_ui = nook_core::mouse::hit_test_exact(mx, my);
-                    let settings = nook_core::settings::get_app_settings();
                     let mut dirty = false;
-                    if this.repositioning {
-                        let (x, y) = (this.settings.island_x, this.settings.island_y);
-                        this.settings = settings;
-                        this.settings.island_x = x;
-                        this.settings.island_y = y;
-                        this.apply_reposition(mx as f32, my as f32);
+                    // Settings hold strings/vecs; clone them only when the
+                    // store's generation says something was actually written.
+                    let settings_gen = nook_core::settings::settings_generation();
+                    if this.settings_gen != settings_gen {
+                        this.settings_gen = settings_gen;
+                        let settings = nook_core::settings::get_app_settings();
+                        if this.repositioning {
+                            // Keep the in-flight drag's origin over the stored one.
+                            let (x, y) = (this.settings.island_x, this.settings.island_y);
+                            this.settings = settings;
+                            this.settings.island_x = x;
+                            this.settings.island_y = y;
+                        } else {
+                            this.settings = settings;
+                        }
                         dirty = true;
-                    } else if this.settings != settings {
-                        this.settings = settings;
+                    }
+                    if this.repositioning {
+                        this.apply_reposition(mx as f32, my as f32);
                         dirty = true;
                     }
                     if !platform::island_glass_setting_on() {
@@ -347,8 +382,9 @@ impl Island {
                             dirty = true;
                         }
                     }
-                    // Overlay paints the whole display; click-through is what
-                    // keeps the menu bar, Settings, and apps underneath usable.
+                    // The overlay strip paints over the menu bar and the top of
+                    // the screen; click-through is what keeps the menu bar,
+                    // Settings, and apps underneath usable.
                     // Own the cursor only over the painted island. Exception:
                     // while Finder is dragging, the window must see the cursor
                     // early (`drag_capture`) or it never gets draggingEntered.
@@ -395,17 +431,27 @@ impl Island {
                         dirty = true;
                     }
                     let now = Instant::now();
-                    // Do not clamp to 50ms here: that dt is past the Euler
-                    // stability cliff for this spring (see `SpringValue::step`).
-                    let dt = now.duration_since(this.last_frame).as_secs_f32();
+                    // `SpringValue::step` substeps at 120Hz internally, so a
+                    // large dt is numerically fine — but it would fast-forward
+                    // a freshly retargeted spring, visibly skipping the start
+                    // of an animation after an idle (80ms) tick. Cap perceived
+                    // time at one 30fps frame.
+                    let dt = now
+                        .duration_since(this.last_frame)
+                        .as_secs_f32()
+                        .min(1.0 / 30.0);
                     this.reduce_motion = platform::reduce_motion();
                     this.last_frame = now;
                     let elapsed_secs = now.duration_since(this.last_tick).as_secs() as u32;
                     if elapsed_secs >= 1 {
                         this.last_tick += Duration::from_secs(elapsed_secs as u64);
+                        // Repaint only when a countdown actually moved — an
+                        // unconditional dirty here kept the island rendering
+                        // (and Metal submitting) once a second forever.
                         for t in &mut this.timers {
                             if t.running && t.remaining > 0 {
                                 t.remaining = t.remaining.saturating_sub(elapsed_secs);
+                                dirty = true;
                                 if t.remaining == 0 {
                                     t.running = false;
                                     nook_core::haptics::trigger(Some(nook_core::haptics::HapticConfig {
@@ -415,7 +461,6 @@ impl Island {
                                 }
                             }
                         }
-                        dirty = true;
                     }
                     let levels = nook_core::audio::get_audio_levels();
                     if this.now_playing.audio_levels.as_deref() != Some(levels.as_slice()) {
@@ -427,6 +472,10 @@ impl Island {
                     }
                     let any_working = this.agents.iter().any(|a| a.status.is_working());
                     if any_working {
+                        // Full-rate on purpose: this repaints the island every
+                        // tick while an agent runs, which costs real battery,
+                        // but the Dot Matrix loader is the app's signature
+                        // animation and smoothness wins here.
                         this.pixel_t = now.duration_since(this.pixel_origin).as_secs_f32();
                         dirty = true;
                     }
@@ -444,17 +493,39 @@ impl Island {
                     if dirty {
                         cx.notify();
                     }
-                    })
-                    .is_err()
-                {
-                    break;
+                    let active = dirty
+                        || this.hovered
+                        || this.expanded
+                        || this.file_drag
+                        || this.repositioning
+                        || this.pending_file_drag.is_some()
+                        || this.mirror_on
+                        || this.settings_open
+                        || any_working;
+                    // Media playing promotes itself through `dirty` (the
+                    // visualizer levels change every frame), so it needs no
+                    // term of its own here.
+                    let near = nook_core::mouse::hit_test_near(mx, my);
+                    if this.cursor_near != near {
+                        this.cursor_near = near;
+                        // One render so the overlay strip pre-grows while the
+                        // island is still parked (see `sync_overlay_strip`).
+                        cx.notify();
+                    }
+                    if active || near {
+                        20
+                    } else {
+                        80
+                    }
+                    }) {
+                    Ok(next_wait) => wait_ms = next_wait,
+                    Err(_) => break,
                 }
             }
         })
         .detach();
 
         cx.spawn(async move |this, cx| {
-            let mut idle_polls = 0u32;
             loop {
                 let playing = cx
                     .background_executor()
@@ -488,22 +559,31 @@ impl Island {
                     if changed {
                         cx.notify();
                     }
-                    this.has_media()
+                    this.has_media() && this.now_playing.is_playing
                 });
-                let Ok(has_media) = alive else {
+                let Ok(is_playing) = alive else {
                     break;
                 };
-                if has_media {
-                    idle_polls = 0;
+                // Every poll spawns an osascript/perl child, so cadence is
+                // the battery cost that matters: 1s while playing (the
+                // elapsed display ticks in whole seconds anyway), 5s
+                // otherwise. The distributed-notification observers wake the
+                // wait instantly on Spotify/Music play/pause/track changes —
+                // the slow cadence only gates Safari/YouTube pickup.
+                let cadence = if is_playing {
+                    Duration::from_secs(1)
                 } else {
-                    idle_polls = idle_polls.saturating_add(1);
-                }
-                let wait = if idle_polls > 8 {
-                    Duration::from_secs(2)
-                } else {
-                    Duration::from_millis(400)
+                    Duration::from_secs(5)
                 };
-                cx.background_executor().timer(wait).await;
+                let slice = Duration::from_millis(250);
+                let mut waited = Duration::ZERO;
+                loop {
+                    cx.background_executor().timer(slice).await;
+                    waited += slice;
+                    if nook_core::audio::take_media_event() || waited >= cadence {
+                        break;
+                    }
+                }
             }
         })
         .detach();
@@ -836,27 +916,101 @@ impl Island {
         (self.screen_width - 40.0).min(theme::EXPANDED_MAX_WIDTH)
     }
 
+    /// Lowest screen edge the island can reach if it expands right now, over
+    /// either tab. Used to pre-size the overlay strip while the cursor hovers,
+    /// so the NSWindow resize happens before an expand can start instead of
+    /// stuttering inside the animation.
+    pub(super) fn expanded_bottom(&self) -> f32 {
+        let w = self.expanded_width();
+        let mut body = theme::NOOK_INSET + theme::NOOK_BODY;
+        if self.settings.show_files {
+            body = body.max(theme::EXPANDED_PAD * 2.0 + files::files_pane_min_height(w));
+        }
+        let h = self.notch_height.max(32.0) + body;
+        let (_, top) = self.settings.island_origin(
+            self.screen_width,
+            self.screen_height,
+            w.max(1.0),
+            h.max(1.0),
+        );
+        top + h
+    }
+
+    /// Pick a short incoming offset that explains where the new context came
+    /// from. The island is pinned at its top edge, so expansion follows the
+    /// vertical reveal; sibling compact modes and tabs preserve horizontal
+    /// ordering. This is deliberately small: continuity, not choreography.
+    fn content_transition_offset(&self, mode: CompactMode) -> (f32, f32) {
+        const HORIZONTAL: f32 = 14.0;
+        const VERTICAL: f32 = 10.0;
+
+        if self.expanded != self.last_expanded {
+            return (0.0, if self.expanded { -VERTICAL } else { VERTICAL });
+        }
+        if self.expanded && self.tab != self.last_tab {
+            return (
+                if self.tab == Tab::Files {
+                    HORIZONTAL
+                } else {
+                    -HORIZONTAL
+                },
+                0.0,
+            );
+        }
+        if !self.expanded && mode != self.last_mode {
+            let modes = self.available_modes();
+            let from = modes
+                .iter()
+                .position(|candidate| *candidate == self.last_mode);
+            let to = modes.iter().position(|candidate| *candidate == mode);
+            if let (Some(from), Some(to)) = (from, to) {
+                let len = modes.len() as isize;
+                let mut delta = to as isize - from as isize;
+                if delta.abs() > len / 2 {
+                    delta -= delta.signum() * len;
+                }
+                return (HORIZONTAL * delta.signum() as f32, 0.0);
+            }
+        }
+        (0.0, 0.0)
+    }
+
     /// Advance every animated value one frame on its `motion` spring.
     /// Returns whether we still need frames.
     fn step_spring(&mut self, dt: f32) -> bool {
         let (tw, th) = self.target_size();
         let mode = self.mode();
-        if self.expanded != self.last_expanded || mode != self.last_mode {
+        if self.expanded != self.last_expanded
+            || mode != self.last_mode
+            || self.tab != self.last_tab
+        {
+            let (x, y) = self.content_transition_offset(mode);
             self.content_fade.set(0.0);
+            self.content_x.set(x);
+            self.content_y.set(y);
             self.last_expanded = self.expanded;
             self.last_mode = mode;
+            self.last_tab = self.tab;
         }
 
         let mut moving = false;
         if self.reduce_motion {
-            // HIG › Motion: motion must be optional. The size parks instantly
-            // and the blur stays off; the crossfade below still runs — a
-            // dissolve is Apple's own stand-in for movement.
+            // HIG › Motion: motion must be optional. Size and spatial travel
+            // park instantly and the blur stays off; the crossfade below still
+            // runs as a simple dissolve.
             self.anim_w.set(tw);
             self.anim_h.set(th);
+            self.content_x.set(0.0);
+            self.content_y.set(0.0);
         } else {
             moving |= self.anim_w.step(motion::MORPH, tw, dt, motion::REST_PX);
             moving |= self.anim_h.step(motion::MORPH, th, dt, motion::REST_PX);
+            moving |= self
+                .content_x
+                .step(motion::CONTEXT_SHIFT, 0.0, dt, motion::REST_PX);
+            moving |= self
+                .content_y
+                .step(motion::CONTEXT_SHIFT, 0.0, dt, motion::REST_PX);
         }
         moving |= self
             .content_fade
@@ -873,10 +1027,13 @@ impl Island {
 
         // Width grows from the centre out, so the content on either flank only
         // travels at half the box velocity; height grows downwards from the
-        // pinned top edge, so there it tracks it 1:1. The fade term keeps the
-        // blur up through a crossfade that does not resize at all.
+        // pinned top edge, so there it tracks it 1:1. Context-shift velocity
+        // makes mode and tab swaps smear along their actual travel axis. The
+        // fade term keeps the blur up through a crossfade with little movement.
         const BLUR_SPEED: f32 = 900.0;
-        let content_speed = (self.anim_w.velocity * 0.5).hypot(self.anim_h.velocity);
+        let vx = self.anim_w.velocity * 0.5 + self.content_x.velocity;
+        let vy = self.anim_h.velocity + self.content_y.velocity;
+        let content_speed = vx.hypot(vy);
         self.blur = (content_speed / BLUR_SPEED)
             .min(1.0)
             .max(1.0 - self.content_fade.value);
@@ -895,7 +1052,8 @@ impl Island {
         if self.blur < MIN_BLUR {
             return None;
         }
-        let (vx, vy) = (self.anim_w.velocity.abs() * 0.5, self.anim_h.velocity.abs());
+        let vx = (self.anim_w.velocity * 0.5 + self.content_x.velocity).abs();
+        let vy = (self.anim_h.velocity + self.content_y.velocity).abs();
         let len = vx.hypot(vy);
         // A pure crossfade has no velocity to point at; the island's long axis
         // is the honest guess there.
@@ -1302,6 +1460,8 @@ mod tests {
             speed_gen: 0,
             last_tick: Instant::now(),
             last_frame: Instant::now(),
+            settings_gen: 0,
+            cursor_near: false,
             settings_open: false,
             settings_window: None,
             _settings_closed: None,
@@ -1309,11 +1469,14 @@ mod tests {
             anim_w: SpringValue::at(180.0),
             anim_h: SpringValue::at(32.0),
             content_fade: SpringValue::at(1.0),
+            content_x: SpringValue::at(0.0),
+            content_y: SpringValue::at(0.0),
             overlay_fade: SpringValue::at(0.0),
             reduce_motion: false,
             blur: 0.0,
             last_expanded: false,
             last_mode: CompactMode::Idle,
+            last_tab: Tab::Widgets,
             file_drag: false,
             pending_file_drag: None,
             suppressed: false,
@@ -1815,6 +1978,53 @@ mod tests {
             "height exploded: {}",
             island.anim_h.value
         );
+    }
+
+    #[test]
+    fn expansion_enters_from_the_notch() {
+        let mut island = test_island();
+        while island.step_spring(0.016) {}
+
+        island.expanded = true;
+        island.step_spring(0.016);
+
+        assert_eq!(island.content_x.value, 0.0);
+        assert!(
+            island.content_y.value < 0.0,
+            "expanded content should arrive from the pinned notch edge"
+        );
+    }
+
+    #[test]
+    fn compact_mode_changes_follow_horizontal_order() {
+        let mut island = test_island();
+        with_file(&mut island);
+        island.preferred = Some(CompactMode::Idle);
+        while island.step_spring(0.016) {}
+
+        island.preferred = Some(CompactMode::Files);
+        island.step_spring(0.016);
+
+        assert!(island.content_x.value.abs() > 1.0);
+        assert_eq!(island.content_y.value, 0.0);
+    }
+
+    #[test]
+    fn reduce_motion_keeps_only_the_dissolve() {
+        let mut island = test_island();
+        island.reduce_motion = true;
+        island.expanded = true;
+
+        island.step_spring(0.016);
+
+        assert_eq!(island.content_x.value, 0.0);
+        assert_eq!(island.content_y.value, 0.0);
+        assert_eq!(island.blur, 0.0);
+        assert_eq!(
+            (island.anim_w.value, island.anim_h.value),
+            island.target_size()
+        );
+        assert!(island.content_fade.value > 0.0 && island.content_fade.value < 1.0);
     }
 
     #[test]

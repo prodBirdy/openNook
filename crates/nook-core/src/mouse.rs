@@ -103,6 +103,19 @@ pub fn exact_bounds() -> UiBounds {
     rect(hit_region(0.0))
 }
 
+/// Whether the cursor is within approach distance of the island. The UI tick
+/// loop uses this to stay at its fast cadence while the pointer could reach
+/// the island within one slow tick, and to idle down otherwise. Plain math on
+/// the published bounds — no AppKit calls.
+pub fn hit_test_near(mouse_x: f64, mouse_y: f64) -> bool {
+    const NEAR: f64 = 96.0;
+    let b = exact_bounds();
+    mouse_x >= b.x - NEAR
+        && mouse_x <= b.x + b.width + NEAR
+        && mouse_y >= b.y - NEAR
+        && mouse_y <= b.y + b.height.max(MIN_GRAB_HEIGHT) + NEAR
+}
+
 fn rect((x0, x1, y0, y1): (f64, f64, f64, f64)) -> UiBounds {
     UiBounds {
         x: x0,

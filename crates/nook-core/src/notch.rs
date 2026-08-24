@@ -166,20 +166,108 @@ pub fn get_notch_info() -> NotchInfo {
     }
 }
 
-/// Overlay window size: the whole display.
+static OVERLAY_H: AtomicU64 = AtomicU64::new(0);
+
+/// Room below the island's lowest edge while a drag or reposition is active:
+/// the 80pt Finder drag-capture pad plus slack. Every backing buffer scales
+/// with this, so the pad is only paid for while something needs it.
+const OVERLAY_MARGIN_CAPTURE: f64 = 100.0;
+/// Quiet margin: spring overshoot plus the 7px motion-blur smear.
+const OVERLAY_MARGIN: f64 = 24.0;
+/// Height granularity. Coarse on purpose so a settling spring lands in one
+/// step instead of resizing the NSWindow frame by frame.
+const OVERLAY_STEP: f64 = 50.0;
+/// Floor covering the pre-paint notch fallback hit region.
+const OVERLAY_MIN: f64 = 100.0;
+
+/// Publish how far down the overlay strip must reach. Called by the island on
+/// paint with a [`quantized_overlay_height`] value. Returns the previously
+/// published height (0.0 if never set) so the caller can react to changes.
+pub fn set_overlay_height(height: f64) -> f64 {
+    f64::from_bits(OVERLAY_H.swap(height.to_bits(), Ordering::Relaxed))
+}
+
+/// The last height published via [`set_overlay_height`], 0.0 if never set.
+pub fn published_overlay_height() -> f64 {
+    f64::from_bits(OVERLAY_H.load(Ordering::Relaxed))
+}
+
+/// Strip height that covers an island whose lowest edge sits at
+/// `island_bottom`, padded, quantized to [`OVERLAY_STEP`], and clamped to the
+/// display. `capture` widens the pad to the Finder drag-capture region while a
+/// drag or reposition is in flight.
+pub fn quantized_overlay_height(island_bottom: f64, screen_height: f64, capture: bool) -> f64 {
+    let margin = if capture {
+        OVERLAY_MARGIN_CAPTURE
+    } else {
+        OVERLAY_MARGIN
+    };
+    (((island_bottom + margin) / OVERLAY_STEP).ceil() * OVERLAY_STEP)
+        .max(OVERLAY_MIN)
+        .min(screen_height)
+}
+
+/// Overlay window size: a full-width strip along the top of the display, just
+/// tall enough to hold the island.
 ///
-/// The window is a transparent canvas the island paints into, not a box around
-/// the island — anything the app wants to draw (drop targets, HUDs, anything
-/// that has to reach past the notch) has screen-sized room without resizing the
-/// NSWindow first. Input is unaffected: `crate::mouse` hit-tests the cursor
-/// against the *painted* island rect published by `update_ui_bounds`, and the
-/// window sets `ignoresMouseEvents` everywhere else, so the extra area is
-/// click-through and the menu bar, Dock, and apps underneath keep their clicks.
+/// The strip used to be the whole display, but Metal retains several
+/// screen-sized backing buffers for the window — hundreds of MB at Retina
+/// resolution for a mostly-empty transparent canvas. Full width and the fixed
+/// top-left anchor are kept so window coordinates stay equal to screen
+/// coordinates everywhere the strip covers: `crate::mouse` hit-testing, drag
+/// capture, and the glass underlay all carry over unchanged. The height is
+/// whatever the island last published via [`set_overlay_height`]; if the user
+/// drags the island toward the bottom edge the strip simply grows with it.
 pub fn overlay_window_size() -> (f64, f64) {
     let (screen_width, screen_height, _, _) = get_screen_info();
-    (screen_width, screen_height)
+    let published = f64::from_bits(OVERLAY_H.load(Ordering::Relaxed));
+    let height = if published > 0.0 {
+        published
+    } else {
+        OVERLAY_MIN
+    };
+    (
+        screen_width,
+        height.clamp(OVERLAY_MIN.min(screen_height), screen_height),
+    )
 }
 
 pub fn overlay_window_origin() -> (f64, f64) {
     (0.0, 0.0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn overlay_strip_quantizes_and_clamps() {
+        // Idle island attached to the notch; hover fits in the same step.
+        assert_eq!(quantized_overlay_height(44.0, 982.0, false), 100.0);
+        assert_eq!(quantized_overlay_height(56.0, 982.0, false), 100.0);
+        // Expanded widgets pane.
+        assert_eq!(quantized_overlay_height(182.0, 982.0, false), 250.0);
+        // Same step while a spring settles nearby — no per-frame resizes.
+        assert_eq!(
+            quantized_overlay_height(205.0, 982.0, false),
+            quantized_overlay_height(215.0, 982.0, false)
+        );
+        // A live Finder drag buys the 80pt capture pad below the island.
+        assert_eq!(quantized_overlay_height(44.0, 982.0, true), 150.0);
+        // Dragged to the bottom edge: never taller than the display.
+        assert_eq!(quantized_overlay_height(950.0, 982.0, true), 982.0);
+    }
+
+    #[test]
+    fn overlay_window_is_a_full_width_strip() {
+        let (screen_w, screen_h, _, _) = get_screen_info();
+        set_overlay_height(300.0);
+        let (w, h) = overlay_window_size();
+        assert_eq!(w, screen_w);
+        assert_eq!(h, 300.0f64.min(screen_h));
+        set_overlay_height(1e9);
+        assert_eq!(overlay_window_size().1, screen_h);
+        set_overlay_height(0.0);
+        assert_eq!(overlay_window_size().1, OVERLAY_MIN.min(screen_h));
+    }
 }

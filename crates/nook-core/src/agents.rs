@@ -129,7 +129,22 @@ struct ProcInfo {
 /// Live coding-agent sessions on this machine. Cheap enough for a 2s poll.
 pub fn snapshot() -> Vec<AgentSession> {
     let procs = scan_processes();
-    assemble(&procs)
+    let sessions = assemble(&procs);
+    if !sessions.is_empty() {
+        LAST_AGENT_SEEN.store(unix_secs(), std::sync::atomic::Ordering::Relaxed);
+    }
+    sessions
+}
+
+/// Unix time of the last scan that found a live session; drives the adaptive
+/// poll cadence below.
+static LAST_AGENT_SEEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn unix_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 fn process_system() -> &'static Mutex<System> {
@@ -139,15 +154,20 @@ fn process_system() -> &'static Mutex<System> {
 
 fn scan_processes() -> HashMap<u32, ProcInfo> {
     let mut sys = process_system().lock().unwrap_or_else(|e| e.into_inner());
+    // argv (KERN_PROCARGS2 sysctl) and the exe path are fixed at exec time, so
+    // OnlyIfNotSet fetches them once per new pid instead of re-reading them
+    // for every process on the system each scan — that re-read was one of the
+    // two biggest slices of openNook's idle CPU. cwd genuinely changes
+    // (sessions cd around) and stays Always.
     sys.refresh_processes_specifics(
         ProcessesToUpdate::All,
         true,
         ProcessRefreshKind::nothing()
             .without_tasks()
             .with_cpu()
-            .with_cmd(UpdateKind::Always)
+            .with_cmd(UpdateKind::OnlyIfNotSet)
             .with_cwd(UpdateKind::Always)
-            .with_exe(UpdateKind::Always),
+            .with_exe(UpdateKind::OnlyIfNotSet),
     );
 
     let mut map = HashMap::new();
@@ -970,9 +990,18 @@ fn activate(_pid: u32) -> bool {
     false
 }
 
-/// How long the island should wait between scans.
+/// How long the island should wait between scans: quick while sessions are
+/// live (status changes matter), relaxed once none have been seen for a
+/// while — a newly started agent then appears within one slow tick, which is
+/// fine for a status glance and keeps the recurring process-table walk off
+/// the battery.
 pub fn poll_interval() -> Duration {
-    Duration::from_secs(2)
+    let last = LAST_AGENT_SEEN.load(std::sync::atomic::Ordering::Relaxed);
+    if unix_secs().saturating_sub(last) < 30 {
+        Duration::from_secs(2)
+    } else {
+        Duration::from_secs(6)
+    }
 }
 
 #[cfg(test)]

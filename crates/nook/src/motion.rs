@@ -23,10 +23,14 @@ pub const MORPH: Spring = Spring::snappy(0.30);
 /// overshoots 1.0 just clips, so the crossfade must stay critically damped.
 pub const CROSSFADE: Spring = Spring::smooth(0.25);
 
+/// Content continuity after a context change. The travel is short and has no
+/// bounce so text and controls never wobble past their final position.
+pub const CONTEXT_SHIFT: Spring = Spring::smooth(0.28);
+
 /// Small hover reveals, e.g. the play/pause scrim over the album art.
 pub const REVEAL: Spring = Spring::smooth(0.20);
 
-/// Settle threshold for pixel-sized values (island width/height).
+/// Settle threshold for pixel-sized values (island width/height/offsets).
 pub const REST_PX: f32 = 0.4;
 
 /// Settle threshold for 0..1 opacities: a quarter of a percent is below

@@ -300,6 +300,40 @@ fn safari_artwork_url<'a>(page_url: &str, artwork_url: &'a str) -> Option<&'a st
         .then_some(artwork_url)
 }
 
+/// Something changed (or was told to change) in playback: a Spotify/Music
+/// distributed notification arrived, or the island itself sent a transport
+/// command. The now-playing loop consumes this to poll immediately instead of
+/// waiting out its idle cadence.
+static MEDIA_EVENT: AtomicBool = AtomicBool::new(false);
+
+pub fn note_media_event() {
+    MEDIA_EVENT.store(true, Ordering::Relaxed);
+}
+
+pub fn take_media_event() -> bool {
+    MEDIA_EVENT.swap(false, Ordering::Relaxed)
+}
+
+/// Whether an app with this bundle id is running, via Launch Services.
+#[cfg(target_os = "macos")]
+fn app_running(bundle_id: &std::ffi::CStr) -> bool {
+    use objc2::runtime::AnyObject;
+    use objc2::*;
+    unsafe {
+        let ident: *mut AnyObject =
+            msg_send![class!(NSString), stringWithUTF8String: bundle_id.as_ptr()];
+        let apps: *mut AnyObject = msg_send![
+            class!(NSRunningApplication),
+            runningApplicationsWithBundleIdentifier: ident
+        ];
+        if apps.is_null() {
+            return false;
+        }
+        let count: usize = msg_send![apps, count];
+        count > 0
+    }
+}
+
 /// Get currently playing music information.
 ///
 /// On macOS this prefers MediaRemote via [mediaremote-adapter]
@@ -324,35 +358,15 @@ pub async fn get_now_playing() -> NowPlayingData {
             }
         }
 
-        use sysinfo::System;
-
-        // Static system monitor to avoid re-initialization
-        static SYSTEM: std::sync::OnceLock<std::sync::Mutex<System>> = std::sync::OnceLock::new();
-
-        let apps_running = {
-            let sys_lock = SYSTEM.get_or_init(|| std::sync::Mutex::new(System::new()));
-
-            if let Ok(mut sys) = sys_lock.lock() {
-                sys.refresh_processes_specifics(
-                    sysinfo::ProcessesToUpdate::All,
-                    true,
-                    sysinfo::ProcessRefreshKind::nothing(),
-                );
-                let processes = sys.processes();
-                let named = |want: &str| {
-                    processes
-                        .values()
-                        .any(|p| p.name() == std::ffi::OsStr::new(want))
-                };
-
-                Some((named("Spotify"), named("Music"), named("Safari")))
-            } else {
-                None
-            }
-        };
-
-        let (spotify_running, music_running, safari_running) =
-            apps_running.unwrap_or((false, false, false));
+        // NSRunningApplication is documented thread-safe and reads Launch
+        // Services' in-process app list — no walk of the whole process table
+        // (the sysinfo refresh this replaces enumerated every pid on the
+        // system each poll, a measurable slice of idle CPU).
+        let (spotify_running, music_running, safari_running) = (
+            app_running(c"com.spotify.client"),
+            app_running(c"com.apple.Music"),
+            app_running(c"com.apple.Safari"),
+        );
 
         // If no relevant apps are running, return early with no overhead
         if !spotify_running && !music_running && !safari_running {
@@ -766,6 +780,7 @@ fn get_music_app_artwork() -> Option<String> {
 /// Toggle play/pause for the currently playing media.
 /// macOS: MediaRemote `kMRATogglePlayPause` (send 2), AppleScript fallback.
 pub async fn media_play_pause() -> Result<(), String> {
+    note_media_event();
     #[cfg(target_os = "macos")]
     {
         if crate::mediaremote::is_available() {
@@ -899,6 +914,7 @@ pub async fn media_play_pause() -> Result<(), String> {
 /// Skip to the next track.
 /// macOS: MediaRemote `kMRANextTrack` (send 4), AppleScript fallback.
 pub async fn media_next_track() -> Result<(), String> {
+    note_media_event();
     #[cfg(target_os = "macos")]
     {
         if crate::mediaremote::is_available() {
@@ -1037,6 +1053,7 @@ pub async fn media_next_track() -> Result<(), String> {
 /// Go to the previous track.
 /// macOS: MediaRemote `kMRAPreviousTrack` (send 5), AppleScript fallback.
 pub async fn media_previous_track() -> Result<(), String> {
+    note_media_event();
     #[cfg(target_os = "macos")]
     {
         if crate::mediaremote::is_available() {
@@ -1172,6 +1189,7 @@ pub async fn media_previous_track() -> Result<(), String> {
 /// Seek to a timeline position in seconds.
 /// macOS: MediaRemote `adapter_seek`, AppleScript fallback.
 pub async fn media_seek(position: f64) -> Result<(), String> {
+    note_media_event();
     #[cfg(target_os = "macos")]
     {
         if crate::mediaremote::is_available() {
@@ -1280,7 +1298,8 @@ pub fn setup_audio_monitoring() {
         let mut beat_phase = 0.0f64;
         let mut energy = 0.5f64;
 
-        // Reduce to 30fps to save IPC overhead and make transitions smoother
+        // 30fps: smooth bars; every level change repaints the island, so this
+        // is a battery/smoothness tradeoff decided in favor of smoothness.
         let frame_duration = std::time::Duration::from_micros(33333); // ~30fps
         let mut next_frame = std::time::Instant::now();
 

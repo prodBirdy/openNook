@@ -112,6 +112,27 @@ pub fn resolve_path(path: String) -> Result<String, String> {
 /// [`i64::MIN`] before we have ever observed an idle cursor.
 #[cfg(target_os = "macos")]
 static DRAG_PB_IDLE: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(i64::MIN);
+/// Left button was held on the previous [`file_drag_active`] sample; a release
+/// edge is when the drag-pasteboard baseline gets refreshed.
+static DRAG_PB_WAS_DOWN: AtomicBool = AtomicBool::new(false);
+
+/// One XPC read of the drag pasteboard's change count.
+#[cfg(target_os = "macos")]
+fn drag_pasteboard_change_count() -> i64 {
+    use objc2::runtime::AnyObject;
+    use objc2::*;
+    unsafe {
+        let name: *mut AnyObject = msg_send![
+            class!(NSString),
+            stringWithUTF8String: c"Apple CFPasteboard drag".as_ptr()
+        ];
+        let pb: *mut AnyObject = msg_send![class!(NSPasteboard), pasteboardWithName: name];
+        if pb.is_null() {
+            return i64::MIN;
+        }
+        msg_send![pb, changeCount]
+    }
+}
 
 static OUTBOUND_DRAG: AtomicBool = AtomicBool::new(false);
 static OUTBOUND_PATH: Mutex<Option<String>> = Mutex::new(None);
@@ -166,6 +187,29 @@ pub fn file_drag_active() -> bool {
         use std::sync::atomic::Ordering;
 
         unsafe {
+            // Cheap check first: `pressedMouseButtons` is a shared-memory read,
+            // while `changeCount` is an XPC round-trip to the pasteboard server.
+            // This runs 30-50×/sec from the mouse thread, so at idle (button up)
+            // the pasteboard must not be touched at all. A drag pasteboard can
+            // only change while the left button is held, so re-baselining once
+            // per release keeps the baseline exactly as fresh as re-reading it
+            // every tick did.
+            let buttons: usize = msg_send![class!(NSEvent), pressedMouseButtons];
+            if buttons & 1 == 0 {
+                if DRAG_PB_WAS_DOWN.swap(false, Ordering::Relaxed)
+                    || DRAG_PB_IDLE.load(Ordering::Relaxed) == i64::MIN
+                {
+                    let count = drag_pasteboard_change_count();
+                    DRAG_PB_IDLE.store(count, Ordering::Relaxed);
+                }
+                return false;
+            }
+            DRAG_PB_WAS_DOWN.store(true, Ordering::Relaxed);
+            // Launched mid-press: no baseline to compare against, stay quiet.
+            let idle = DRAG_PB_IDLE.load(Ordering::Relaxed);
+            if idle == i64::MIN {
+                return false;
+            }
             let name: *mut AnyObject = msg_send![
                 class!(NSString),
                 stringWithUTF8String: c"Apple CFPasteboard drag".as_ptr()
@@ -175,17 +219,7 @@ pub fn file_drag_active() -> bool {
                 return false;
             }
             let change_count: i64 = msg_send![pb, changeCount];
-
-            // No button down means nothing can be in flight; re-baseline so the
-            // next press only counts once something new lands on the board.
-            let buttons: usize = msg_send![class!(NSEvent), pressedMouseButtons];
-            if buttons & 1 == 0 {
-                DRAG_PB_IDLE.store(change_count, Ordering::Relaxed);
-                return false;
-            }
-            // Launched mid-press: no baseline to compare against, stay quiet.
-            let idle = DRAG_PB_IDLE.load(Ordering::Relaxed);
-            if idle == i64::MIN || change_count == idle {
+            if change_count == idle {
                 return false;
             }
 

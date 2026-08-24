@@ -497,7 +497,17 @@ pub fn update_app_settings(settings: AppSettings) {
     if let Ok(mut win) = window_store().write() {
         *win = settings.window;
     }
+    SETTINGS_GEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     persist();
+}
+
+/// Bumped on every [`update_app_settings`]. Hot loops compare this before
+/// paying for a [`get_app_settings`] clone — the settings struct holds
+/// strings and vecs, and cloning it 50×/sec was pure allocator churn.
+static SETTINGS_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+pub fn settings_generation() -> u64 {
+    SETTINGS_GEN.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 /// Read-modify-write the app settings in one step.

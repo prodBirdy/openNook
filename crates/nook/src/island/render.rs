@@ -6,7 +6,7 @@ use super::{CompactMode, Island};
 use crate::platform;
 use crate::theme;
 use gpui::{
-    div, point, prelude::*, px, rgba, size, AnyElement, App, Bounds, Context, CursorStyle,
+    div, point, prelude::*, px, rgba, AnyElement, App, Bounds, Context, CursorStyle,
     ExternalPaths, FontFallbacks, FontWeight, MouseButton, MouseDownEvent, MouseMoveEvent,
     MouseUpEvent, ScrollWheelEvent, Window, WindowBackgroundAppearance, WindowBounds, WindowKind,
     WindowOptions,
@@ -15,8 +15,8 @@ use nook_core::notch;
 use std::any::Any;
 
 impl gpui::Render for Island {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.sync_geometry(window);
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.sync_geometry(cx);
         if self.suppressed {
             nook_core::mouse::update_ui_bounds(0.0, -100.0, 0.0, 0.0);
             platform::sync_island_glass(None);
@@ -39,6 +39,7 @@ impl gpui::Render for Island {
                 th as f64,
             );
         }
+        self.sync_overlay_strip(body_top, th.max(1.0), cx);
 
         let mode = self.mode();
         let expanded = self.expanded;
@@ -102,10 +103,11 @@ impl gpui::Render for Island {
             theme::COMPACT_RADIUS
         };
 
-        // The root is the whole display. Every layer inside is absolutely
-        // positioned, so the island keeps its exact top-centre placement while
-        // the rest of the screen stays available to paint into — an earlier
-        // flow layout left a lit strip below the island in the leftover gap.
+        // The root is the overlay strip (full display width, sized by
+        // `sync_overlay_strip`). Every layer inside is absolutely positioned,
+        // so the island keeps its exact top-centre placement while the rest of
+        // the strip stays available to paint into — an earlier flow layout
+        // left a lit strip below the island in the leftover gap.
         // Nothing here decides input: click-through is driven by the mouse poll
         // loop against `update_ui_bounds` above, which still publishes only the
         // island's own rect.
@@ -237,8 +239,9 @@ impl Island {
     /// `hit_test` (what arms hover). They coincide unless a Finder drag has
     /// widened the hover, in which case only the faint one grows.
     ///
-    /// Screen x maps straight to root x because the overlay window spans the
-    /// whole display and the root is `w_full`. Carries no id or listeners, so it
+    /// Screen x/y map straight to root x/y because the overlay strip spans the
+    /// full display width from the top-left corner and the root is
+    /// `size_full`. Carries no id or listeners, so it
     /// inserts no hitbox of its own and can't change what it is measuring.
     fn hitbox_overlay(&self) -> AnyElement {
         const EXACT: u32 = 0xff3b30ff;
@@ -282,6 +285,8 @@ impl Island {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let alpha = self.content_fade.value.clamp(0.0, 1.0);
+        let content_x = self.content_x.value;
+        let content_y = self.content_y.value;
         // A Finder drag needs the root's drop hitbox reachable, and the crisp
         // layer below blocks the mouse to keep the taps inert — so no smear
         // while something is being dragged onto us.
@@ -302,8 +307,8 @@ impl Island {
                     div()
                         .id(id)
                         .absolute()
-                        .top(px(oy))
-                        .left(px(ox))
+                        .top(px(content_y + oy))
+                        .left(px(content_x + ox))
                         .w_full()
                         .h_full()
                         .opacity(tap_alpha)
@@ -325,8 +330,8 @@ impl Island {
                 div()
                     .id("island-content")
                     .absolute()
-                    .top_0()
-                    .left_0()
+                    .top(px(content_y))
+                    .left(px(content_x))
                     .w_full()
                     .h_full()
                     .overflow_hidden()
@@ -364,7 +369,76 @@ impl Island {
         }
     }
 
-    pub(super) fn sync_geometry(&mut self, window: &mut Window) {
+    /// Keep the overlay strip just tall enough for the island.
+    ///
+    /// The window is a full-width strip pinned to the top of the display, not
+    /// a screen-sized canvas — Metal retains several backing buffers for the
+    /// window, and at Retina resolution a full-screen transparent window costs
+    /// hundreds of MB of GPU memory for pixels that are never visible. The
+    /// strip covers the larger of the painted island and its animation target,
+    /// so the window grows *before* an expand starts rather than chasing it,
+    /// and the quantization inside `quantized_overlay_height` keeps a settling
+    /// spring from resizing the NSWindow frame by frame. Screen coordinates
+    /// stay equal to window coordinates everywhere the strip covers, so
+    /// hit-testing, repositioning, drops, and the glass underlay carry over.
+    fn sync_overlay_strip(&mut self, body_top: f32, body_h: f32, cx: &mut Context<Island>) {
+        let (tw, th) = self.target_size();
+        let (_, target_top) = self.settings.island_origin(
+            self.screen_width,
+            self.screen_height,
+            tw.max(1.0),
+            th.max(1.0),
+        );
+        let mut bottom = (body_top + body_h).max(target_top + th.max(1.0));
+        // Pre-arm on approach: reserve the expanded footprint while the
+        // cursor is merely near the parked island, before any animation can
+        // start. An NSWindow resize mid-animation shows one stretched frame
+        // (CoreAnimation scales the stale drawable), but over a resting
+        // collapsed island it is invisible — the sliver is black on the notch.
+        if (self.cursor_near || self.hovered) && !self.expanded {
+            bottom = bottom.max(self.expanded_bottom());
+        }
+        // The 80pt Finder drag-capture pad below the island is only paid for
+        // while a drag or reposition can actually use it; the strip regrows on
+        // the next paint after the poll loop arms `file_drag`.
+        let capture = self.file_drag || self.repositioning || self.pending_file_drag.is_some();
+        let needed =
+            notch::quantized_overlay_height(bottom as f64, self.screen_height as f64, capture);
+        let published = notch::published_overlay_height();
+        // Growing is urgent — content would clip. Shrinking is cosmetic: hold
+        // it until the springs are parked and nothing is dragging, so the
+        // resize never runs inside the collapse animation.
+        if needed < published {
+            let settled = (self.anim_w.value - tw).abs() < 0.5
+                && (self.anim_h.value - th).abs() < 0.5
+                && self.anim_w.velocity.abs() < 1.0
+                && self.anim_h.velocity.abs() < 1.0;
+            if !settled || capture {
+                return;
+            }
+        }
+        if notch::set_overlay_height(needed) != needed {
+            Self::spawn_strip_resize(cx);
+        }
+    }
+
+    /// Apply a published strip height to the NSWindow from a foreground task.
+    ///
+    /// Never resize from inside `render`: `Window::resize` fires
+    /// `windowDidResize` synchronously, which re-enters GPUI's window state
+    /// while render still borrows it — the resize is dropped with a "RefCell
+    /// already borrowed" error and the viewport never grows, clipping the
+    /// expanded island. The pin pass sets the frame through AppKit once the
+    /// current update has fully unwound (the same footing as `spawn_pin`),
+    /// and GPUI picks the new size up through its own resize delegate.
+    fn spawn_strip_resize(cx: &mut Context<Island>) {
+        cx.spawn(async move |_, _| {
+            platform::pin_island_windows();
+        })
+        .detach();
+    }
+
+    pub(super) fn sync_geometry(&mut self, cx: &mut Context<Island>) {
         let gen = notch::screen_generation();
         if gen == self.screen_gen {
             return;
@@ -379,9 +453,7 @@ impl Island {
         };
         self.screen_width = info.screen_width as f32;
         self.screen_height = info.screen_height as f32;
-        let (w, h) = notch::overlay_window_size();
-        window.resize(size(px(w as f32), px(h as f32)));
-        platform::pin_island_windows();
+        Self::spawn_strip_resize(cx);
     }
 }
 
