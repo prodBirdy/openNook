@@ -10,6 +10,7 @@ pub mod calendar;
 pub mod database;
 pub mod files;
 pub mod haptics;
+#[cfg(any(target_os = "macos", test))]
 mod mediaremote;
 pub mod models;
 pub mod mouse;
