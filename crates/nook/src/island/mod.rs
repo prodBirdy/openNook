@@ -263,6 +263,7 @@ impl Island {
         this.anim_h.set(h);
 
         platform::install_media_observers();
+        platform::install_mouse_monitors();
         nook_core::runtime().spawn(async {
             let _ = nook_core::calendar::request_calendar_access().await;
         });
@@ -284,12 +285,17 @@ impl Island {
                     .await;
                 platform::apply_island_chrome();
             }
+            platform::request_pin();
             loop {
-                cx.background_executor().timer(Duration::from_secs(2)).await;
+                cx.background_executor()
+                    .timer(Duration::from_millis(250))
+                    .await;
                 if this.update(cx, |_, _| ()).is_err() {
                     break;
                 }
-                platform::pin_island_windows();
+                if platform::take_pin_needed() {
+                    platform::pin_island_windows();
+                }
             }
         })
         .detach();
@@ -564,12 +570,11 @@ impl Island {
                 let Ok(is_playing) = alive else {
                     break;
                 };
-                // Every poll spawns an osascript/perl child, so cadence is
-                // the battery cost that matters: 1s while playing (the
-                // elapsed display ticks in whole seconds anyway), 5s
-                // otherwise. The distributed-notification observers wake the
-                // wait instantly on Spotify/Music play/pause/track changes —
-                // the slow cadence only gates Safari/YouTube pickup.
+                // Stream-backed adapter reads are a cheap lock; cadence is
+                // for interpolated elapsed (1s while playing) and the
+                // AppleScript fallback (5s idle). Distributed-notification
+                // observers and the MediaRemote stream flip `take_media_event`
+                // so the wait wakes instantly on real changes.
                 let cadence = if is_playing {
                     Duration::from_secs(1)
                 } else {

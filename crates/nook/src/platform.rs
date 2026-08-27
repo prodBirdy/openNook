@@ -28,13 +28,34 @@ static LOGGED_PIN: AtomicBool = AtomicBool::new(false);
 #[cfg(target_os = "macos")]
 static OPEN_SETTINGS: AtomicBool = AtomicBool::new(false);
 #[cfg(target_os = "macos")]
+static PIN_NEEDED: AtomicBool = AtomicBool::new(false);
+#[cfg(target_os = "macos")]
 static STATUS_ITEM: std::sync::atomic::AtomicPtr<objc2::runtime::AnyObject> =
     std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
 
 /// Call once before `open_island`. Safe to call again.
 pub fn install() {
     #[cfg(target_os = "macos")]
-    install_macos();
+    {
+        install_macos();
+        install_mouse_monitors();
+    }
+}
+
+/// Ask the pin backstop loop to restyle/pin island windows. Notification
+/// handlers also pin immediately on the main thread.
+pub fn request_pin() {
+    #[cfg(target_os = "macos")]
+    PIN_NEEDED.store(true, Ordering::Release);
+}
+
+pub fn take_pin_needed() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        return PIN_NEEDED.swap(false, Ordering::AcqRel);
+    }
+    #[cfg(not(target_os = "macos"))]
+    false
 }
 
 #[cfg(target_os = "macos")]
@@ -774,7 +795,16 @@ fn install_app_target() {
         }
         extern "C" fn screen_changed(_this: *mut AnyObject, _cmd: Sel, _note: *mut AnyObject) {
             nook_core::notch::invalidate_screen_cache();
+            request_pin();
             pin_island_windows();
+        }
+        extern "C" fn space_changed(_this: *mut AnyObject, _cmd: Sel, _note: *mut AnyObject) {
+            nook_core::notch::invalidate_screen_cache();
+            request_pin();
+            pin_island_windows();
+        }
+        extern "C" fn app_activated(_this: *mut AnyObject, _cmd: Sel, _note: *mut AnyObject) {
+            nook_core::occupancy::invalidate();
         }
 
         let super_cls = class!(NSObject) as *const AnyClass as *mut AnyClass;
@@ -790,8 +820,16 @@ fn install_app_target() {
         let imp_screen: Imp = std::mem::transmute(
             screen_changed as extern "C" fn(*mut AnyObject, Sel, *mut AnyObject),
         );
+        let imp_space: Imp = std::mem::transmute(
+            space_changed as extern "C" fn(*mut AnyObject, Sel, *mut AnyObject),
+        );
+        let imp_app: Imp = std::mem::transmute(
+            app_activated as extern "C" fn(*mut AnyObject, Sel, *mut AnyObject),
+        );
         let _ = class_addMethod(cls, sel!(openSettings:), imp_settings, types.as_ptr());
         let _ = class_addMethod(cls, sel!(screenChanged:), imp_screen, types.as_ptr());
+        let _ = class_addMethod(cls, sel!(spaceChanged:), imp_space, types.as_ptr());
+        let _ = class_addMethod(cls, sel!(appActivated:), imp_app, types.as_ptr());
         objc_registerClassPair(cls);
         observe_screen_changes();
     }
@@ -821,6 +859,78 @@ unsafe fn observe_screen_changes() {
         name: name,
         object: std::ptr::null_mut::<AnyObject>()
     ];
+
+    let workspace: *mut AnyObject = msg_send![class!(NSWorkspace), sharedWorkspace];
+    if workspace.is_null() {
+        return;
+    }
+    let wsnc: *mut AnyObject = msg_send![workspace, notificationCenter];
+    if wsnc.is_null() {
+        return;
+    }
+    let space_name: *mut AnyObject = msg_send![
+        class!(NSString),
+        stringWithUTF8String: c"NSWorkspaceActiveSpaceDidChangeNotification".as_ptr()
+    ];
+    let _: () = msg_send![
+        wsnc,
+        addObserver: target,
+        selector: sel!(spaceChanged:),
+        name: space_name,
+        object: std::ptr::null_mut::<AnyObject>()
+    ];
+    let app_name: *mut AnyObject = msg_send![
+        class!(NSString),
+        stringWithUTF8String: c"NSWorkspaceDidActivateApplicationNotification".as_ptr()
+    ];
+    let _: () = msg_send![
+        wsnc,
+        addObserver: target,
+        selector: sel!(appActivated:),
+        name: app_name,
+        object: std::ptr::null_mut::<AnyObject>()
+    ];
+}
+
+/// NSEvent global + local monitors for mouse moved / left-drag / left-up.
+/// Main thread only. Handlers write the same atomics as the 250 ms backstop
+/// poll in `nook_core::mouse`. Local handler must return the event.
+pub fn install_mouse_monitors() {
+    #[cfg(target_os = "macos")]
+    unsafe {
+        use block2::RcBlock;
+        use objc2::runtime::AnyObject;
+        use objc2::*;
+
+        static INSTALLED: Once = Once::new();
+        INSTALLED.call_once(|| {
+            // MouseMoved | LeftMouseDragged | LeftMouseUp
+            const MASK: u64 = (1 << 5) | (1 << 6) | (1 << 2);
+
+            let global = RcBlock::new(move |_event: *mut AnyObject| {
+                nook_core::mouse::sample_now();
+            });
+            let g: *mut AnyObject = msg_send![
+                class!(NSEvent),
+                addGlobalMonitorForEventsMatchingMask: MASK,
+                handler: &*global
+            ];
+            std::mem::forget(global);
+            let _ = g;
+
+            let local = RcBlock::new(move |event: *mut AnyObject| -> *mut AnyObject {
+                nook_core::mouse::sample_now();
+                event
+            });
+            let l: *mut AnyObject = msg_send![
+                class!(NSEvent),
+                addLocalMonitorForEventsMatchingMask: MASK,
+                handler: &*local
+            ];
+            std::mem::forget(local);
+            let _ = l;
+        });
+    }
 }
 
 /// Hand files to the system AirDrop picker (`NSSharingServiceNameSendViaAirDrop`).

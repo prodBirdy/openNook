@@ -25,6 +25,8 @@ pub fn init_audio_state() {
     let _ = AUDIO_LEVELS.set(std::sync::Mutex::new(vec![0.15; 6]));
     let _ = TRACK_CACHE.set(std::sync::Mutex::new((None, None, None)));
     let _ = LAST_PLAYED.set(std::sync::Mutex::new(None));
+    #[cfg(target_os = "macos")]
+    crate::mediaremote::ensure_stream();
 }
 
 fn lock_mutex<T>(m: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -337,7 +339,8 @@ fn app_running(bundle_id: &std::ffi::CStr) -> bool {
 /// Get currently playing music information.
 ///
 /// On macOS this prefers MediaRemote via [mediaremote-adapter]
-/// (`get --now`), which works for any now-playing app on 15.4+.
+/// (live `stream` cell, `get --now` only as primer / fallback),
+/// which works for any now-playing app on 15.4+.
 /// AppleScript (Spotify / Music / Safari) is the fallback.
 ///
 /// [mediaremote-adapter]: https://github.com/ungive/mediaremote-adapter
