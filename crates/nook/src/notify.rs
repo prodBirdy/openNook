@@ -33,6 +33,7 @@ pub fn identifier(id: u64) -> String {
 mod macos {
     use super::identifier;
     use block2::RcBlock;
+    use objc2::runtime::Bool;
     use objc2_foundation::{NSArray, NSError, NSString};
     use objc2_user_notifications::{
         UNAuthorizationOptions, UNMutableNotificationContent, UNNotificationRequest,
@@ -48,12 +49,12 @@ mod macos {
         }
         let center = UNUserNotificationCenter::currentNotificationCenter();
         let options = UNAuthorizationOptions::Alert | UNAuthorizationOptions::Sound;
-        let handler = RcBlock::new(move |granted: bool, error: *mut NSError| {
+        let handler = RcBlock::new(move |granted: Bool, error: *mut NSError| {
             if !error.is_null() {
                 let err = unsafe { &*error };
                 log::debug!("notification auth error: {err:?}");
             } else {
-                log::debug!("notification auth granted={granted}");
+                log::debug!("notification auth granted={}", granted.as_bool());
             }
         });
         unsafe {
