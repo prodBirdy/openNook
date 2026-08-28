@@ -19,6 +19,8 @@ pub mod notes;
 pub mod observe;
 pub mod occupancy;
 pub mod settings;
+pub mod shortcuts;
+pub mod system_timers;
 pub mod utils;
 pub mod widgets;
 
@@ -63,5 +65,6 @@ pub fn init() {
         audio::init_audio_state();
         audio::setup_audio_monitoring();
         mouse::start_polling();
+        system_timers::start_watcher();
     });
 }

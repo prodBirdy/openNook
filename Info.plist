@@ -30,5 +30,7 @@
 	<string>openNook shows a live camera preview in the Mirror control so you can check yourself before a call.</string>
 	<key>NSAppleEventsUsageDescription</key>
 	<string>openNook uses Automation to pause or skip Music, Spotify, and Safari if system media controls are unavailable, and to read the current Safari or Chrome tab URL so the island can show a YouTube thumbnail or site icon when the browser does not provide artwork.</string>
+	<key>NSUserNotificationsUsageDescription</key>
+	<string>openNook mirrors island timers into Notification Center so a countdown still fires if the overlay is hidden.</string>
 </dict>
 </plist>

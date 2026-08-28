@@ -27,6 +27,7 @@ use nook_core::models::NowPlayingData;
 use nook_core::notch;
 use nook_core::observe::{MetricHistory, ObserveSnapshot};
 use nook_core::settings::AppSettings;
+use nook_core::system_timers::{self, SystemTimer};
 use settings::SettingsView;
 use std::time::{Duration, Instant};
 
@@ -47,6 +48,14 @@ pub enum Tab {
     Files,
 }
 
+#[derive(Clone, Debug)]
+pub(crate) enum ClockTimerAction {
+    Pause,
+    Resume,
+    Cancel,
+    Open(String),
+}
+
 #[derive(Clone)]
 pub struct Timer {
     pub id: u64,
@@ -55,6 +64,22 @@ pub struct Timer {
     pub remaining: u32,
     pub total: u32,
     pub running: bool,
+}
+
+/// Compact-face view of a local island timer or a Clock.app timer.
+#[derive(Clone, Debug)]
+pub struct FaceTimer {
+    pub remaining: u32,
+    pub total: u32,
+    pub running: bool,
+    pub name: String,
+    pub source: FaceTimerSource,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FaceTimerSource {
+    Local(u64),
+    Clock(String),
 }
 
 pub struct Island {
@@ -78,6 +103,7 @@ pub struct Island {
     pub(crate) notes_editing: bool,
     notes_sub: Option<Subscription>,
     pub timers: Vec<Timer>,
+    pub system_timers: Vec<SystemTimer>,
     pub next_timer_id: u64,
     /// Index into the 7-day week strip (today − 3 … today + 3). 3 is today.
     pub calendar_day: u8,
@@ -207,6 +233,7 @@ impl Island {
             notes_editing: false,
             notes_sub: None,
             timers: Vec::new(),
+            system_timers: Vec::new(),
             next_timer_id: 1,
             calendar_day: 3,
             timer_composer: false,
@@ -454,6 +481,7 @@ impl Island {
                                 dirty = true;
                                 if t.remaining == 0 {
                                     t.running = false;
+                                    crate::notify::cancel_island_timer(t.id);
                                     nook_core::haptics::trigger(Some(nook_core::haptics::HapticConfig {
                                         pattern: nook_core::haptics::HapticPattern::Success,
                                         intensity: 1.0,
@@ -461,6 +489,10 @@ impl Island {
                                 }
                             }
                         }
+                        if this.clock_timer_visible() {
+                            dirty = true;
+                        }
+                    }
                     }
                     let levels = nook_core::audio::get_audio_levels();
                     if this.now_playing.audio_levels.as_deref() != Some(levels.as_slice()) {
@@ -690,6 +722,50 @@ impl Island {
                 .await;
         })
         .detach();
+
+        cx.spawn(async move |this, cx| {
+            let mut rx = system_timers::subscribe();
+            loop {
+                let timers = rx.borrow().clone();
+                if this
+                    .update(cx, |this, cx| {
+                        if this.system_timers == timers {
+                            return;
+                        }
+                        let was_running = this
+                            .system_timers
+                            .iter()
+                            .any(|t| t.state.is_running());
+                        let now_running = timers.iter().any(|t| t.state.is_running());
+                        let now_fired = timers.iter().any(|t| t.state == system_timers::MTTimerState::Fired);
+                        let was_fired = this
+                            .system_timers
+                            .iter()
+                            .any(|t| t.state == system_timers::MTTimerState::Fired);
+                        this.system_timers = timers;
+                        if this.settings.show_timers && this.settings.sync_clock_timers {
+                            if !was_running && now_running {
+                                this.preferred = Some(CompactMode::Timer);
+                            }
+                            if !was_fired && now_fired {
+                                nook_core::haptics::trigger(Some(nook_core::haptics::HapticConfig {
+                                    pattern: nook_core::haptics::HapticPattern::Success,
+                                    intensity: 1.0,
+                                }));
+                            }
+                        }
+                        cx.notify();
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+                if rx.changed().await.is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
     }
 
     /// Merge a fresh poll into the island: extend the local sample history and
@@ -737,26 +813,118 @@ impl Island {
         self.timers.iter().find(|t| t.running)
     }
 
-    /// Compact face: a finished timer first so the ring turns red, else running, else first.
-    pub(crate) fn face_timer(&self) -> Option<&Timer> {
-        self.timers
+    fn clock_timers(&self) -> impl Iterator<Item = &SystemTimer> {
+        self.system_timers.iter().filter(|t| t.state.is_active())
+    }
+
+    fn clock_timer_visible(&self) -> bool {
+        self.settings.show_timers
+            && self.settings.sync_clock_timers
+            && self.clock_timers().any(|t| t.state.is_counting())
+    }
+
+    fn has_live_timer(&self) -> bool {
+        self.running_timer().is_some()
+            || (self.settings.sync_clock_timers
+                && self.clock_timers().any(|t| t.state.is_running() || t.state.is_counting()))
+    }
+
+    fn clock_face(timer: &SystemTimer, now: f64) -> FaceTimer {
+        FaceTimer {
+            remaining: timer.remaining_secs(now),
+            total: timer.total_secs().max(1),
+            running: timer.state.is_running(),
+            name: if timer.title.is_empty() {
+                "Clock".into()
+            } else {
+                timer.title.clone()
+            },
+            source: FaceTimerSource::Clock(timer.id.clone()),
+        }
+    }
+
+    fn local_face(timer: &Timer) -> FaceTimer {
+        FaceTimer {
+            remaining: timer.remaining,
+            total: timer.total.max(1),
+            running: timer.running,
+            name: timer.name.clone(),
+            source: FaceTimerSource::Local(timer.id),
+        }
+    }
+
+    /// Compact face: a finished timer first so the ring turns red, else the
+    /// soonest running countdown (island or Clock), else the first local.
+    pub(crate) fn face_timer(&self) -> Option<FaceTimer> {
+        if !self.settings.show_timers {
+            return None;
+        }
+        let now = system_timers::unix_now();
+        let mut faces: Vec<FaceTimer> = self.timers.iter().map(Self::local_face).collect();
+        if self.settings.sync_clock_timers {
+            faces.extend(self.clock_timers().map(|t| Self::clock_face(t, now)));
+        }
+        faces
             .iter()
             .find(|t| t.remaining == 0 && t.total > 0)
-            .or_else(|| self.running_timer())
-            .or_else(|| self.timers.first())
+            .cloned()
+            .or_else(|| {
+                faces
+                    .iter()
+                    .filter(|t| t.running)
+                    .min_by_key(|t| t.remaining)
+                    .cloned()
+            })
+            .or_else(|| faces.into_iter().next())
+    }
+
+    pub(crate) fn toggle_face_timer(&mut self) {
+        match self.face_timer().map(|t| t.source) {
+            Some(FaceTimerSource::Local(id)) => self.toggle_local_timer(id),
+            Some(FaceTimerSource::Clock(_)) => {
+                if self.clock_timers().any(|t| t.state.is_running()) {
+                    nook_core::shortcuts::pause_timer();
+                } else {
+                    nook_core::shortcuts::resume_timer();
+                }
+            }
+            None => {}
+        }
+    }
+
+    pub(crate) fn toggle_local_timer(&mut self, id: u64) {
+        if let Some(t) = self.timers.iter_mut().find(|t| t.id == id) {
+            t.running = !t.running;
+            if t.running && t.remaining > 0 {
+                crate::notify::schedule_island_timer(t.id, t.remaining, &t.name);
+            } else {
+                crate::notify::cancel_island_timer(t.id);
+            }
+        }
     }
 
     pub(crate) fn reset_timer(&mut self, id: u64) {
         if let Some(t) = self.timers.iter_mut().find(|t| t.id == id) {
             t.remaining = t.total;
             t.running = false;
+            crate::notify::cancel_island_timer(t.id);
         }
     }
 
     pub(crate) fn remove_timer(&mut self, id: u64) {
+        crate::notify::cancel_island_timer(id);
         self.timers.retain(|t| t.id != id);
         if self.timers.is_empty() {
             self.timer_composer = false;
+        }
+    }
+
+    pub(crate) fn control_clock_timer(&self, action: ClockTimerAction) {
+        match action {
+            ClockTimerAction::Pause => nook_core::shortcuts::pause_timer(),
+            ClockTimerAction::Resume => nook_core::shortcuts::resume_timer(),
+            ClockTimerAction::Cancel => nook_core::shortcuts::cancel_timer(),
+            ClockTimerAction::Open(id) => nook_core::shortcuts::open_timer(&id),
         }
     }
 
@@ -871,7 +1039,7 @@ impl Island {
         if self.has_agents() {
             modes.push(CompactMode::Agents);
         }
-        if self.settings.show_timers && self.running_timer().is_some() {
+        if self.settings.show_timers && self.has_live_timer() {
             modes.push(CompactMode::Timer);
         }
         if self.settings.show_files && !self.files.is_empty() {
@@ -1325,8 +1493,9 @@ impl Island {
     }
 
     pub(crate) fn add_timer(&mut self, seconds: u32) {
+        let id = self.next_timer_id;
         self.timers.push(Timer {
-            id: self.next_timer_id,
+            id,
             name: String::new(),
             remaining: seconds,
             total: seconds,
@@ -1335,6 +1504,7 @@ impl Island {
         self.next_timer_id += 1;
         self.timer_composer = false;
         self.preferred = Some(CompactMode::Timer);
+        crate::notify::schedule_island_timer(id, seconds, "");
     }
 
     pub(crate) fn arm_file_drag(&mut self, path: String) {
@@ -1446,6 +1616,7 @@ mod tests {
             notes_editing: false,
             notes_sub: None,
             timers: Vec::new(),
+            system_timers: Vec::new(),
             next_timer_id: 1,
             calendar_day: 3,
             timer_composer: false,
@@ -1673,6 +1844,54 @@ mod tests {
         island.settings.show_files = false;
         island.settings.show_timers = false;
         assert_eq!(island.available_modes(), vec![CompactMode::Idle]);
+    }
+
+    #[test]
+    fn face_timer_lets_a_running_clock_timer_take_the_compact_face() {
+        let mut island = test_island();
+        island.settings.sync_clock_timers = true;
+        island.system_timers.push(nook_core::system_timers::SystemTimer {
+            id: "clock-1".into(),
+            title: "Pasta".into(),
+            duration: 600.0,
+            state: nook_core::system_timers::MTTimerState::Running,
+            fire_date: Some(nook_core::system_timers::unix_now() + 120.0),
+            remaining: None,
+            deep_link: "x-apple-clock:timer?id=clock-1".into(),
+        });
+        assert!(island.available_modes().contains(&CompactMode::Timer));
+        let face = island.face_timer().expect("clock timer on the face");
+        assert!(matches!(face.source, FaceTimerSource::Clock(_)));
+        assert!(face.running);
+        assert!(face.remaining <= 120);
+        assert_eq!(face.name, "Pasta");
+        island.settings.sync_clock_timers = false;
+        assert!(island.face_timer().is_none());
+        assert!(!island.available_modes().contains(&CompactMode::Timer));
+    }
+
+    #[test]
+    fn face_timer_prefers_a_finished_local_timer_over_a_running_clock() {
+        let mut island = test_island();
+        island.timers.push(Timer {
+            id: 1,
+            name: "Local".into(),
+            remaining: 0,
+            total: 60,
+            running: false,
+        });
+        island.system_timers.push(nook_core::system_timers::SystemTimer {
+            id: "clock-1".into(),
+            title: "Pasta".into(),
+            duration: 600.0,
+            state: nook_core::system_timers::MTTimerState::Running,
+            fire_date: Some(nook_core::system_timers::unix_now() + 30.0),
+            remaining: None,
+            deep_link: "x-apple-clock:timer?id=clock-1".into(),
+        });
+        let face = island.face_timer().expect("finished local wins");
+        assert!(matches!(face.source, FaceTimerSource::Local(1)));
+        assert_eq!(face.remaining, 0);
     }
 
     #[test]
