@@ -569,6 +569,77 @@ impl SettingsView {
                         .into_any_element(),
                     ]),
                     Some("Hover the island to expand. Settings and Quit are in the menu bar extra."),
+                ))
+                .child(section(
+                    "Window Snap",
+                    settings_group({
+                        let mut rows = vec![
+                            toggle_row(
+                                "Snap hotkeys",
+                                settings.window_snap_enabled,
+                                cx,
+                                |s| {
+                                    s.window_snap_enabled = !s.window_snap_enabled;
+                                    if s.window_snap_enabled {
+                                        nook_core::window_snap::prompt_trust();
+                                    }
+                                },
+                            )
+                            .into_any_element(),
+                            status_row(
+                                "Accessibility",
+                                nook_core::window_snap::accessibility_status().label(),
+                            )
+                            .into_any_element(),
+                            action_row(
+                                "ax-prompt",
+                                "Request Accessibility",
+                                "Prompt",
+                                cx,
+                                |_, _, cx| {
+                                    nook_core::window_snap::prompt_trust();
+                                    cx.notify();
+                                },
+                            )
+                            .into_any_element(),
+                            action_row(
+                                "ax-open",
+                                "Privacy settings",
+                                "Open",
+                                cx,
+                                |_, _, _| {
+                                    nook_core::window_snap::open_accessibility_settings();
+                                },
+                            )
+                            .into_any_element(),
+                        ];
+                        for (kind, hotkey) in nook_core::hotkeys::default_bindings() {
+                            rows.push(
+                                shortcut_row(kind.label(), hotkey.display()).into_any_element(),
+                            );
+                        }
+                        rows
+                    }),
+                    Some("⌃⌥ plus arrows, U/I/J/K, or Return. macOS 15+ tiling can fight drag-to-edge; hotkeys stay independent."),
+                ))
+                .child(section(
+                    "Menu bar (Thaw)",
+                    settings_group(vec![
+                        toggle_row("Hide extras with a separator", settings.thaw_enabled, cx, |s| {
+                            s.thaw_enabled = !s.thaw_enabled;
+                            if !s.thaw_enabled {
+                                s.thaw_hidden = false;
+                            }
+                        })
+                        .into_any_element(),
+                        toggle_row("Extras hidden", settings.thaw_hidden, cx, |s| {
+                            if s.thaw_enabled {
+                                s.thaw_hidden = !s.thaw_hidden;
+                            }
+                        })
+                        .into_any_element(),
+                    ]),
+                    Some("⌘-drag extras so hidden items sit to the left of the Nook chevron. Click the chevron to hide or show. No Screen Recording."),
                 )),
         )
     }
@@ -1437,6 +1508,18 @@ fn action_row(
         ))
 }
 
+fn status_row(title: &'static str, value: &'static str) -> impl IntoElement {
+    settings_row(title)
+        .child(label(title, theme::BODY, true))
+        .child(label(value, theme::SUBHEADLINE, false))
+}
+
+fn shortcut_row(title: &'static str, keys: String) -> impl IntoElement {
+    settings_row(SharedString::from(title))
+        .child(label(title, theme::BODY, true))
+        .child(label(keys, theme::SUBHEADLINE, false))
+}
+
 fn toggle_row(
     label_text: &'static str,
     on: bool,
@@ -1732,6 +1815,16 @@ mod tests {
         assert!(!names
             .iter()
             .any(|n| n.contains("Shortcuts") || n.contains("Tencent") || n.contains("License")));
+    }
+
+    #[test]
+    fn window_snap_hotkeys_are_listed() {
+        let rows: Vec<_> = nook_core::hotkeys::default_bindings()
+            .into_iter()
+            .map(|(kind, hotkey)| (kind.label(), hotkey.display()))
+            .collect();
+        assert_eq!(rows.len(), 9);
+        assert!(rows.iter().any(|(n, k)| *n == "Left half" && k.contains('←')));
     }
 
     #[test]

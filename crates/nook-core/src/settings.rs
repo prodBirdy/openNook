@@ -167,6 +167,19 @@ pub struct AppSettings {
     /// Per-widget widths in Nook cells. Missing entries use [`WidgetModule::default_cells`].
     #[serde(default)]
     pub widget_widths: Vec<(WidgetModule, u8)>,
+    /// Rectangle-style halves / quarters via Carbon hotkeys. Needs Accessibility.
+    #[serde(default)]
+    pub window_snap_enabled: bool,
+    /// Stretch our own menu-bar separator so extras to its left go off-screen.
+    #[serde(default)]
+    pub thaw_enabled: bool,
+    /// Separator is currently stretched (extras hidden). Ignored when Thaw is off.
+    #[serde(default)]
+    pub thaw_hidden: bool,
+    /// Reserved for drag-to-edge (tier 2). Geometry is implemented; the live
+    /// AX tracker is not wired so idle cost stays zero.
+    #[serde(default)]
+    pub snap_drag_to_edge: bool,
     #[serde(default)]
     pub window: WindowSettings,
 }
@@ -239,6 +252,10 @@ impl Default for AppSettings {
             hide_when_maximized: false,
             island_color: None,
             widget_widths: Vec::new(),
+            window_snap_enabled: false,
+            thaw_enabled: false,
+            thaw_hidden: false,
+            snap_drag_to_edge: false,
             window: WindowSettings::default(),
         }
     }
@@ -499,6 +516,8 @@ pub fn update_app_settings(settings: AppSettings) {
     }
     SETTINGS_GEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     persist();
+    crate::hotkeys::sync();
+    crate::menubar::sync();
 }
 
 /// Bumped on every [`update_app_settings`]. Hot loops compare this before
@@ -725,5 +744,14 @@ mod tests {
         let legacy: AppSettings =
             serde_json::from_str(r#"{"observe":{"metrics_token":"legacy-secret"}}"#).unwrap();
         assert_eq!(legacy.observe.metrics_token, "legacy-secret");
+    }
+
+    #[test]
+    fn window_management_flags_default_off() {
+        let parsed: AppSettings = serde_json::from_str("{}").unwrap();
+        assert!(!parsed.window_snap_enabled);
+        assert!(!parsed.thaw_enabled);
+        assert!(!parsed.thaw_hidden);
+        assert!(!parsed.snap_drag_to_edge);
     }
 }

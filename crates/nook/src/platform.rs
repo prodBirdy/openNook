@@ -1386,6 +1386,17 @@ pub fn reduce_motion() -> bool {
     false
 }
 
+/// Accessibility (TCC) for window snap. Cached by the AX call itself; Settings
+/// reads this when the pane is open, never from the island tick.
+pub fn accessibility_trusted() -> bool {
+    nook_core::window_snap::is_trusted()
+}
+
+/// Show the system Accessibility prompt. Call from a user gesture.
+pub fn prompt_accessibility() -> bool {
+    nook_core::window_snap::prompt_trust()
+}
+
 /// Subscribe to Spotify's and Music's public playback-change broadcasts.
 ///
 /// Both players post on the distributed notification center on every

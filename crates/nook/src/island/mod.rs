@@ -158,6 +158,8 @@ pub struct Island {
     pub(crate) mirror_on: bool,
     mirror_gen: u64,
     pub(crate) mirror_frame: Option<std::sync::Arc<gpui::RenderImage>>,
+    /// Compact-face snap confirmation; driven by window_snap::flash_is_live.
+    snap_flashing: bool,
 }
 
 struct PendingFileDrag {
@@ -256,6 +258,7 @@ impl Island {
             mirror_on: false,
             mirror_gen: 0,
             mirror_frame: None,
+            snap_flashing: false,
         };
         // Start at the compact idle size so the first paint isn't a jump.
         let (w, h) = this.target_size();
@@ -340,6 +343,11 @@ impl Island {
                     }
                     if platform::take_open_settings() {
                         this.open_settings(cx);
+                        dirty = true;
+                    }
+                    let flash = nook_core::window_snap::flash_is_live();
+                    if flash || this.snap_flashing {
+                        this.snap_flashing = flash;
                         dirty = true;
                     }
                     let want_suppress = this.settings.hide_when_maximized
@@ -1494,6 +1502,7 @@ mod tests {
             mirror_on: false,
             mirror_gen: 0,
             mirror_frame: None,
+            snap_flashing: false,
         }
     }
 

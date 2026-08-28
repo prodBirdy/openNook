@@ -10,8 +10,10 @@ pub mod calendar;
 pub mod database;
 pub mod files;
 pub mod haptics;
+pub mod hotkeys;
 #[cfg(target_os = "macos")]
 mod mediaremote;
+pub mod menubar;
 pub mod models;
 pub mod mouse;
 pub mod notch;
@@ -21,6 +23,7 @@ pub mod occupancy;
 pub mod settings;
 pub mod utils;
 pub mod widgets;
+pub mod window_snap;
 
 pub use models::{NotchInfo, NowPlayingData};
 pub use settings::{AppSettings, WindowSettings};
@@ -64,4 +67,11 @@ pub fn init() {
         audio::setup_audio_monitoring();
         mouse::start_polling();
     });
+}
+
+/// Carbon snap hotkeys + Thaw separator. Call on the AppKit main thread
+/// after the Nook status item exists so the separator sits to its left.
+pub fn install_window_management() {
+    hotkeys::install();
+    menubar::install();
 }

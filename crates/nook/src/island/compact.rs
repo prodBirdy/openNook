@@ -53,6 +53,9 @@ impl Island {
     }
 
     fn compact_left(&self, mode: CompactMode, cx: &mut Context<Self>) -> AnyElement {
+        if let Some(text) = nook_core::window_snap::flash_label() {
+            return label(text, theme::BODY, true).into_any_element();
+        }
         match mode {
             CompactMode::Media => {
                 album_chip(&self.now_playing, self.overlay_fade.value, cx).into_any_element()
@@ -105,6 +108,11 @@ impl Island {
                 };
                 label(text, theme::BODY, true).into_any_element()
             }
+            CompactMode::Idle if self.settings.thaw_enabled => thaw_toggle(
+                self.settings.thaw_hidden,
+                cx,
+            )
+            .into_any_element(),
             CompactMode::Onboard if hovered => div()
                 .id("github")
                 .cursor(CursorStyle::PointingHand)
@@ -183,3 +191,19 @@ impl Island {
         row.into_any_element()
     }
 }
+
+fn thaw_toggle(hidden: bool, cx: &mut Context<Island>) -> impl IntoElement {
+    div()
+        .id("thaw-toggle")
+        .cursor(CursorStyle::PointingHand)
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(|_, _: &MouseDownEvent, _, cx| {
+                cx.stop_propagation();
+                nook_core::menubar::toggle();
+            }),
+        )
+        .child(lucide("eye", theme::COMPACT_FACE))
+        .when(hidden, |d| d.opacity(0.45))
+}
+
