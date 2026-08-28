@@ -1478,6 +1478,59 @@ unsafe fn app_icon_png_macos(bundle_id: Option<&str>, app_name: Option<&str>) ->
     })
 }
 
+/// Directory picker for the Obsidian vault. Blocks on the main thread via
+/// `NSOpenPanel.runModal`. `None` when cancelled or off macOS.
+pub fn choose_directory() -> Option<std::path::PathBuf> {
+    #[cfg(target_os = "macos")]
+    {
+        choose_directory_macos()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        None
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn choose_directory_macos() -> Option<std::path::PathBuf> {
+    use objc2::runtime::AnyObject;
+    use objc2::*;
+    use std::ffi::CStr;
+    use std::path::PathBuf;
+
+    unsafe {
+        let panel: *mut AnyObject = msg_send![class!(NSOpenPanel), openPanel];
+        if panel.is_null() {
+            return None;
+        }
+        let _: () = msg_send![panel, setCanChooseFiles: false];
+        let _: () = msg_send![panel, setCanChooseDirectories: true];
+        let _: () = msg_send![panel, setAllowsMultipleSelection: false];
+        let _: () = msg_send![panel, setCanCreateDirectories: true];
+        let message: *mut AnyObject =
+            msg_send![class!(NSString), stringWithUTF8String: c"Choose Obsidian Vault".as_ptr()];
+        let _: () = msg_send![panel, setMessage: message];
+        let response: i64 = msg_send![panel, runModal];
+        // NSModalResponseOK == 1
+        if response != 1 {
+            return None;
+        }
+        let url: *mut AnyObject = msg_send![panel, URL];
+        if url.is_null() {
+            return None;
+        }
+        let path_ns: *mut AnyObject = msg_send![url, path];
+        if path_ns.is_null() {
+            return None;
+        }
+        let cstr: *const i8 = msg_send![path_ns, UTF8String];
+        if cstr.is_null() {
+            return None;
+        }
+        Some(PathBuf::from(CStr::from_ptr(cstr).to_string_lossy().into_owned()))
+    }
+}
+
 /// Open the system Calendar app. No-op off macOS.
 pub fn open_calendar() {
     #[cfg(target_os = "macos")]

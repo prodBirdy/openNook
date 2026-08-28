@@ -19,6 +19,9 @@ open.workspace = true
 sysinfo = "0.37"
 notify = "7"
 plist = "1"
+walkdir = "2"
+notify = "7"
+notify-debouncer-mini = "0.5"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"

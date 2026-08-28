@@ -33,5 +33,11 @@
 	<string>openNook uses Automation to pause or skip Music, Spotify, and Safari if system media controls are unavailable, and to read the current Safari or Chrome tab URL so the island can show a YouTube thumbnail or site icon when the browser does not provide artwork.</string>
 	<key>NSUserNotificationsUsageDescription</key>
 	<string>openNook mirrors island timers into Notification Center so a countdown still fires if the overlay is hidden.</string>
+	<key>NSDocumentsFolderUsageDescription</key>
+	<string>openNook reads and writes notes in the Obsidian vault you choose, which may live in Documents.</string>
+	<key>NSDesktopFolderUsageDescription</key>
+	<string>openNook reads and writes notes in the Obsidian vault you choose, which may live on the Desktop.</string>
+	<key>NSDownloadsFolderUsageDescription</key>
+	<string>openNook reads and writes notes in the Obsidian vault you choose, which may live in Downloads.</string>
 </dict>
 </plist>

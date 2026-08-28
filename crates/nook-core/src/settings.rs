@@ -1,6 +1,7 @@
 use crate::database;
 use crate::observe::ObserveConfig;
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 use std::sync::RwLock;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -19,6 +20,7 @@ pub enum WidgetModule {
     Mirror = 9,
     Battery = 10,
     Messages = 10,
+    Obsidian = 10,
 }
 
 impl WidgetModule {
@@ -35,6 +37,7 @@ impl WidgetModule {
         Self::Mirror,
         Self::Battery,
         Self::Messages,
+        Self::Obsidian,
     ];
 
     pub fn from_u8(value: u8) -> Self {
@@ -51,6 +54,7 @@ impl WidgetModule {
             Self::Files | Self::Notes | Self::Observe | Self::Reminders | Self::Agents => 4,
             Self::Timers | Self::Speed | Self::Mirror | Self::Battery => 3,
             Self::Files | Self::Notes | Self::Observe | Self::Reminders | Self::Agents | Self::Messages => {
+            Self::Files | Self::Notes | Self::Observe | Self::Reminders | Self::Agents | Self::Obsidian => {
                 4
             }
             Self::Timers | Self::Speed | Self::Mirror => 3,
@@ -66,6 +70,7 @@ impl WidgetModule {
                 3
             }
             Self::Notes | Self::Timers | Self::Speed | Self::Agents => 2,
+            Self::Notes | Self::Timers | Self::Speed | Self::Agents | Self::Obsidian => 2,
         }
     }
 
@@ -93,6 +98,7 @@ fn default_widget_order() -> Vec<WidgetModule> {
         WidgetModule::Reminders,
         WidgetModule::Timers,
         WidgetModule::Notes,
+        WidgetModule::Obsidian,
         WidgetModule::Speed,
         WidgetModule::Battery,
         WidgetModule::Messages,
@@ -175,6 +181,16 @@ pub struct AppSettings {
     /// Mirror Apple Clock timers in the Timers widget (plist / vnode watch).
     #[serde(default = "default_true")]
     pub sync_clock_timers: bool,
+    pub show_obsidian: bool,
+    /// User-chosen vault folder. `None` until Settings picks one.
+    #[serde(default)]
+    pub obsidian_vault: Option<PathBuf>,
+    /// Optional markdown heading that daily-note capture appends under.
+    #[serde(default)]
+    pub obsidian_capture_heading: Option<String>,
+    /// Use `obsidian://new?append=true` instead of writing the daily note.
+    #[serde(default)]
+    pub obsidian_uri_capture: bool,
     #[serde(default)]
     pub observe: ObserveConfig,
     #[serde(default)]
@@ -299,6 +315,10 @@ impl Default for AppSettings {
             show_messages: true,
             experimental_whatsapp_autosend: false,
             sync_clock_timers: true,
+            show_obsidian: true,
+            obsidian_vault: None,
+            obsidian_capture_heading: None,
+            obsidian_uri_capture: false,
             observe: ObserveConfig::default(),
             liquid_glass_mode: false,
             non_notch_mode: false,
@@ -352,6 +372,7 @@ impl AppSettings {
             WidgetModule::Mirror => self.show_mirror,
             WidgetModule::Battery => self.show_battery,
             WidgetModule::Messages => self.show_messages,
+            WidgetModule::Obsidian => self.show_obsidian,
         }
     }
 
@@ -372,6 +393,7 @@ impl AppSettings {
                 self.show_messages = !self.show_messages;
                 crate::messages::request_refresh();
             }
+            WidgetModule::Obsidian => self.show_obsidian = !self.show_obsidian,
         }
     }
 
@@ -704,6 +726,10 @@ mod tests {
         assert!(parsed.show_messages);
         assert!(!parsed.experimental_whatsapp_autosend);
         assert!(parsed.sync_clock_timers);
+        assert!(parsed.show_obsidian);
+        assert_eq!(parsed.obsidian_vault, None);
+        assert_eq!(parsed.obsidian_capture_heading, None);
+        assert!(!parsed.obsidian_uri_capture);
         assert!(parsed.liquid_glass_mode);
         assert!(!parsed.non_notch_mode);
         assert!((parsed.island_x - 0.5).abs() < f32::EPSILON);
@@ -793,6 +819,7 @@ mod tests {
         settings.show_mirror = false;
         settings.show_battery = false;
         settings.show_messages = false;
+        settings.show_obsidian = false;
         settings.set_cells(WidgetModule::Music, 5);
         assert_eq!(settings.used_cells(), 5);
         assert_eq!(settings.remaining_cells(), AppSettings::TOTAL_CELLS - 5);

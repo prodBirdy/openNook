@@ -28,11 +28,13 @@ use nook_core::notch;
 use nook_core::messages::MessagesSnapshot;
 use nook_core::observe::{MetricHistory, ObserveSnapshot};
 use nook_core::power::PowerSnapshot;
+use nook_core::obsidian::{NoteEntry, VaultWatch};
 use nook_core::settings::AppSettings;
 use nook_core::system_timers::{self, SystemTimer};
 use nook_core::sysvol::{self, HudEvent, HudKind, HUD_TTL};
 use settings::SettingsView;
 use std::sync::Arc;
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -135,6 +137,16 @@ pub struct Island {
     pub(crate) notes_editor: Option<Entity<crate::widgets::NotesEditor>>,
     pub(crate) notes_editing: bool,
     notes_sub: Option<Subscription>,
+    pub(crate) obsidian_notes: Vec<NoteEntry>,
+    pub(crate) obsidian_dirty: bool,
+    obsidian_watch: Option<VaultWatch>,
+    obsidian_watch_vault: Option<PathBuf>,
+    pub(crate) obsidian_capture: String,
+    pub(crate) obsidian_capture_focus: Option<gpui::FocusHandle>,
+    pub(crate) obsidian_typing: bool,
+    pub(crate) obsidian_selected: Option<String>,
+    pub(crate) obsidian_body: Option<String>,
+    pub(crate) obsidian_flash: Option<String>,
     pub timers: Vec<Timer>,
     pub system_timers: Vec<SystemTimer>,
     pub next_timer_id: u64,
@@ -282,6 +294,16 @@ impl Island {
             notes_editor: None,
             notes_editing: false,
             notes_sub: None,
+            obsidian_notes: Vec::new(),
+            obsidian_dirty: false,
+            obsidian_watch: None,
+            obsidian_watch_vault: None,
+            obsidian_capture: String::new(),
+            obsidian_capture_focus: None,
+            obsidian_typing: false,
+            obsidian_selected: None,
+            obsidian_body: None,
+            obsidian_flash: None,
             timers: Vec::new(),
             system_timers: Vec::new(),
             next_timer_id: 1,
@@ -361,6 +383,7 @@ impl Island {
         let _ = window;
         this.spawn_loops(cx);
         Self::spawn_pin(cx);
+        this.sync_obsidian_watch(cx);
         this
     }
 
@@ -434,6 +457,7 @@ impl Island {
                             this.hud = None;
                             this.hud_dragging = false;
                         }
+                        this.sync_obsidian_watch(cx);
                         dirty = true;
                     }
                     if this.repositioning {
@@ -531,12 +555,14 @@ impl Island {
                         } else if this.expanded
                             && !this.settings_open
                             && !this.notes_editing
+                            && !this.obsidian_typing
                             && !this.mirror_on
                             && !this.file_drag
                             && !nook_core::files::outbound_drag_active()
                         {
                             this.expanded = false;
                             this.close_notes_editor(cx);
+                            this.obsidian_typing = false;
                         }
                         dirty = true;
                     }
@@ -1302,6 +1328,254 @@ impl Island {
         }
     }
 
+    pub(crate) fn obsidian_capture_focus(&mut self, cx: &mut Context<Self>) -> gpui::FocusHandle {
+        self.obsidian_capture_focus
+            .get_or_insert_with(|| cx.focus_handle())
+            .clone()
+    }
+
+    pub(crate) fn focus_obsidian_capture(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let focus = self.obsidian_capture_focus(cx);
+        window.focus(&focus);
+        window.activate_window();
+        platform::activate_app();
+        self.obsidian_typing = true;
+        cx.notify();
+    }
+
+    pub(crate) fn on_obsidian_capture_key(
+        &mut self,
+        event: &gpui::KeyDownEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let ks = &event.keystroke;
+        if ks.key == "enter" {
+            self.submit_obsidian_capture(cx);
+            return;
+        }
+        if ks.key == "escape" {
+            self.obsidian_typing = false;
+            cx.notify();
+            return;
+        }
+        if ks.modifiers.secondary() && ks.key == "v" {
+            if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
+                self.obsidian_capture = text.trim().to_string();
+                cx.notify();
+            }
+            return;
+        }
+        if ks.modifiers.platform || ks.modifiers.control {
+            return;
+        }
+        match ks.key.as_str() {
+            "backspace" => {
+                self.obsidian_capture.pop();
+                cx.notify();
+            }
+            _ => {
+                if let Some(ch) = &ks.key_char {
+                    if !ch.chars().any(|c| c.is_control()) {
+                        self.obsidian_capture.push_str(ch);
+                        cx.notify();
+                    }
+                }
+            }
+        }
+    }
+
+    pub(crate) fn submit_obsidian_capture(&mut self, cx: &mut Context<Self>) {
+        let text = self.obsidian_capture.trim().to_string();
+        if text.is_empty() {
+            return;
+        }
+        let Some(vault) = self.settings.obsidian_vault.clone() else {
+            self.obsidian_flash = Some("Choose a vault in Settings".into());
+            cx.notify();
+            return;
+        };
+        self.obsidian_capture.clear();
+        self.obsidian_typing = false;
+        let heading = self.settings.obsidian_capture_heading.clone();
+        let use_uri = self.settings.obsidian_uri_capture;
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    nook_core::obsidian::capture_to_daily(
+                        &vault,
+                        heading.as_deref(),
+                        &text,
+                        use_uri,
+                    )
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                match result {
+                    Ok(_) => {
+                        this.obsidian_flash = Some("Captured".into());
+                        this.obsidian_dirty = true;
+                        this.flush_obsidian_dirty(cx);
+                    }
+                    Err(err) => this.obsidian_flash = Some(err),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    pub(crate) fn select_obsidian_note(&mut self, rel: String, cx: &mut Context<Self>) {
+        let Some(vault) = self.settings.obsidian_vault.clone() else {
+            return;
+        };
+        self.obsidian_selected = Some(rel.clone());
+        self.obsidian_body = None;
+        cx.spawn(async move |this, cx| {
+            let body = cx
+                .background_executor()
+                .spawn(async move { nook_core::obsidian::read_note(&vault, &rel).ok() })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.obsidian_body = body;
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    pub(crate) fn open_obsidian_note(&mut self, rel: &str, _cx: &mut Context<Self>) {
+        let Some(vault) = self.settings.obsidian_vault.as_ref() else {
+            return;
+        };
+        let url = nook_core::obsidian::open_file_url(&nook_core::obsidian::vault_name(vault), rel);
+        if let Err(err) = nook_core::obsidian::open_url(&url) {
+            log::warn!("obsidian open: {err}");
+        }
+    }
+
+    pub(crate) fn open_obsidian_daily(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        let Some(vault) = self.settings.obsidian_vault.clone() else {
+            self.obsidian_flash = Some("Choose a vault in Settings".into());
+            cx.notify();
+            return;
+        };
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    let config = nook_core::obsidian::read_daily_notes_config(&vault);
+                    let rel = nook_core::obsidian::ensure_daily_note(
+                        &vault,
+                        &config,
+                        nook_core::obsidian::CivilDate::today(),
+                    )?;
+                    let url = nook_core::obsidian::open_file_url(
+                        &nook_core::obsidian::vault_name(&vault),
+                        &rel,
+                    );
+                    nook_core::obsidian::open_url(&url)?;
+                    Ok::<_, String>(rel)
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                match result {
+                    Ok(_) => {
+                        this.obsidian_flash = Some("Today".into());
+                        this.obsidian_dirty = true;
+                        this.flush_obsidian_dirty(cx);
+                    }
+                    Err(err) => this.obsidian_flash = Some(err),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    pub(crate) fn flush_obsidian_dirty(&mut self, cx: &mut Context<Self>) {
+        if !self.obsidian_dirty {
+            return;
+        }
+        self.refresh_obsidian_index(cx);
+    }
+
+    fn refresh_obsidian_index(&mut self, cx: &mut Context<Self>) {
+        let Some(vault) = self.settings.obsidian_vault.clone() else {
+            self.obsidian_notes.clear();
+            self.obsidian_dirty = false;
+            return;
+        };
+        self.obsidian_dirty = false;
+        cx.spawn(async move |this, cx| {
+            let notes = cx
+                .background_executor()
+                .spawn(async move { nook_core::obsidian::index_vault(&vault) })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.obsidian_notes = notes;
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn sync_obsidian_watch(&mut self, cx: &mut Context<Self>) {
+        let want = if self.settings.show_obsidian {
+            self.settings.obsidian_vault.clone()
+        } else {
+            None
+        };
+        if want == self.obsidian_watch_vault {
+            if want.is_none() {
+                self.stop_obsidian_watch();
+            }
+            return;
+        }
+        self.stop_obsidian_watch();
+        if let Some(vault) = want {
+            self.start_obsidian_watch(vault, cx);
+        }
+    }
+
+    fn stop_obsidian_watch(&mut self) {
+        self.obsidian_watch = None;
+        self.obsidian_watch_vault = None;
+    }
+
+    fn start_obsidian_watch(&mut self, vault: PathBuf, cx: &mut Context<Self>) {
+        self.obsidian_watch_vault = Some(vault.clone());
+        self.obsidian_dirty = true;
+        self.refresh_obsidian_index(cx);
+        match nook_core::obsidian::watch_vault(vault.clone()) {
+            Ok((watch, mut rx)) => {
+                self.obsidian_watch = Some(watch);
+                cx.spawn(async move |this, cx| {
+                    while let Some(paths) = rx.recv().await {
+                        let vault = vault.clone();
+                        let _ = this.update(cx, |this, cx| {
+                            if this.expanded {
+                                nook_core::obsidian::patch_index(
+                                    &mut this.obsidian_notes,
+                                    &vault,
+                                    &paths,
+                                );
+                                cx.notify();
+                            } else {
+                                this.obsidian_dirty = true;
+                            }
+                        });
+                    }
+                })
+                .detach();
+            }
+            Err(err) => log::warn!("obsidian watch: {err}"),
+        }
+    }
+
     /// Flush pending edits back into `self.notes` and restore the preview.
     pub(crate) fn close_notes_editor(&mut self, cx: &mut Context<Self>) {
         self.notes_sub.take();
@@ -2049,6 +2323,16 @@ mod tests {
             notes_editor: None,
             notes_editing: false,
             notes_sub: None,
+            obsidian_notes: Vec::new(),
+            obsidian_dirty: false,
+            obsidian_watch: None,
+            obsidian_watch_vault: None,
+            obsidian_capture: String::new(),
+            obsidian_capture_focus: None,
+            obsidian_typing: false,
+            obsidian_selected: None,
+            obsidian_body: None,
+            obsidian_flash: None,
             timers: Vec::new(),
             system_timers: Vec::new(),
             next_timer_id: 1,
