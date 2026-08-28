@@ -3,7 +3,7 @@
 use super::media::{album_chip, visualizer};
 use super::ui::{label, timer_text};
 use super::{CompactMode, Island};
-use crate::icons::lucide;
+use crate::icons::{lucide, lucide_color};
 use crate::theme;
 use crate::widgets;
 use gpui::{
@@ -63,6 +63,16 @@ impl Island {
             CompactMode::Observe => {
                 lucide("triangle-alert", theme::COMPACT_FACE).into_any_element()
             }
+            CompactMode::Vpn => lucide_color(
+                "shield",
+                theme::COMPACT_FACE,
+                if self.vpn.connected {
+                    theme::SUCCESS
+                } else {
+                    theme::TERTIARY_LABEL
+                },
+            )
+            .into_any_element(),
             CompactMode::Onboard => label("openNook", theme::BODY, true).into_any_element(),
             CompactMode::Idle => div().into_any_element(),
         }
@@ -104,6 +114,15 @@ impl Island {
                     _ => self.observe.firing_count().to_string(),
                 };
                 label(text, theme::BODY, true).into_any_element()
+            }
+            CompactMode::Vpn => {
+                let text = self
+                    .vpn
+                    .compact_right(self.settings.vpn_show_timer, std::time::SystemTime::now());
+                timer_text(text, theme::BODY)
+                    .min_w(px(40.))
+                    .text_right()
+                    .into_any_element()
             }
             CompactMode::Onboard if hovered => div()
                 .id("github")
@@ -147,6 +166,7 @@ impl Island {
                 CompactMode::Files => "files",
                 CompactMode::Timer => "timer",
                 CompactMode::Observe => "observe",
+                CompactMode::Vpn => "vpn",
                 CompactMode::Onboard => "onboard",
             };
             row = row.child(

@@ -20,6 +20,7 @@ pub mod observe;
 pub mod occupancy;
 pub mod settings;
 pub mod utils;
+pub mod vpn;
 pub mod widgets;
 
 pub use models::{NotchInfo, NowPlayingData};
@@ -63,5 +64,6 @@ pub fn init() {
         audio::init_audio_state();
         audio::setup_audio_monitoring();
         mouse::start_polling();
+        vpn::start();
     });
 }

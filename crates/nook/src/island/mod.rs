@@ -27,6 +27,7 @@ use nook_core::models::NowPlayingData;
 use nook_core::notch;
 use nook_core::observe::{MetricHistory, ObserveSnapshot};
 use nook_core::settings::AppSettings;
+use nook_core::vpn::VpnSnapshot;
 use settings::SettingsView;
 use std::time::{Duration, Instant};
 
@@ -38,6 +39,7 @@ pub enum CompactMode {
     Files,
     Timer,
     Observe,
+    Vpn,
     Onboard,
 }
 
@@ -86,6 +88,9 @@ pub struct Island {
     pub observe: ObserveSnapshot,
     observe_history: MetricHistory,
     pub(crate) observe_hover: Option<crate::widgets::ObserveHover>,
+    pub vpn: VpnSnapshot,
+    /// Brief compact-face takeover after a connect/disconnect edge.
+    vpn_reveal_until: Option<Instant>,
     pub settings: AppSettings,
     pub first_run: bool,
     pub speed_mbps: Option<f64>,
@@ -213,6 +218,8 @@ impl Island {
             observe: ObserveSnapshot::default(),
             observe_history: nook_core::observe::load_history(),
             observe_hover: None,
+            vpn: nook_core::vpn::current(),
+            vpn_reveal_until: None,
             settings,
             first_run,
             speed_mbps: None,
@@ -329,6 +336,7 @@ impl Island {
                         } else {
                             this.settings = settings;
                         }
+                        nook_core::vpn::refresh();
                         dirty = true;
                     }
                     if this.repositioning {
@@ -461,6 +469,12 @@ impl Island {
                                 }
                             }
                         }
+                        if this.vpn_elapsed_should_tick() {
+                            dirty = true;
+                        }
+                    }
+                    if this.clear_expired_vpn_reveal() {
+                        dirty = true;
                     }
                     let levels = nook_core::audio::get_audio_levels();
                     if this.now_playing.audio_levels.as_deref() != Some(levels.as_slice()) {
@@ -690,6 +704,82 @@ impl Island {
                 .await;
         })
         .detach();
+
+        // VPN is push-based: SCDynamicStore / getifaddrs publish on the watch.
+        cx.spawn(async move |this, cx| {
+            let mut rx = nook_core::vpn::subscribe();
+            loop {
+                let snap = rx.borrow().clone();
+                if this
+                    .update(cx, |this, cx| {
+                        this.apply_vpn_snapshot(snap, cx);
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+                let (alive, next_rx) = cx
+                    .background_executor()
+                    .spawn(async move {
+                        let ok = nook_core::runtime().block_on(rx.changed()).is_ok();
+                        (ok, rx)
+                    })
+                    .await;
+                rx = next_rx;
+                if !alive {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
+    fn apply_vpn_snapshot(&mut self, snap: VpnSnapshot, cx: &mut Context<Self>) {
+        let was = self.vpn.connected;
+        let changed = self.vpn != snap;
+        self.vpn = snap;
+        if was != self.vpn.connected {
+            self.preferred = Some(CompactMode::Vpn);
+            self.vpn_reveal_until = Some(Instant::now() + Duration::from_secs(4));
+            nook_core::haptics::trigger(None);
+        }
+        if changed {
+            cx.notify();
+        }
+    }
+
+    fn has_vpn_face(&self) -> bool {
+        self.settings.show_vpn && (self.vpn.connected || self.vpn_revealing())
+    }
+
+    fn vpn_revealing(&self) -> bool {
+        self.vpn_reveal_until
+            .is_some_and(|until| Instant::now() < until)
+    }
+
+    fn clear_expired_vpn_reveal(&mut self) -> bool {
+        let Some(until) = self.vpn_reveal_until else {
+            return false;
+        };
+        if Instant::now() < until {
+            return false;
+        }
+        self.vpn_reveal_until = None;
+        if !self.vpn.connected && self.preferred == Some(CompactMode::Vpn) {
+            self.preferred = None;
+        }
+        true
+    }
+
+    fn vpn_elapsed_should_tick(&self) -> bool {
+        if !self.settings.show_vpn || self.vpn.since.is_none() {
+            return false;
+        }
+        let compact = !self.expanded
+            && self.mode() == CompactMode::Vpn
+            && self.settings.vpn_show_timer;
+        let card = self.expanded && self.tab == Tab::Widgets;
+        compact || card
     }
 
     /// Merge a fresh poll into the island: extend the local sample history and
@@ -864,6 +954,9 @@ impl Island {
         let mut modes = Vec::new();
         if self.has_observe_outage() {
             modes.push(CompactMode::Observe);
+        }
+        if self.has_vpn_face() {
+            modes.push(CompactMode::Vpn);
         }
         if self.has_media() {
             modes.push(CompactMode::Media);
@@ -1452,6 +1545,8 @@ mod tests {
             observe: ObserveSnapshot::default(),
             observe_history: HashMap::new(),
             observe_hover: None,
+            vpn: VpnSnapshot::default(),
+            vpn_reveal_until: None,
             settings: AppSettings::default(),
             first_run: false,
             speed_mbps: None,
@@ -1759,6 +1854,39 @@ mod tests {
         assert_eq!(island.mode(), CompactMode::Observe);
         island.settings.show_observe = false;
         assert_eq!(island.available_modes(), vec![CompactMode::Idle]);
+    }
+
+    #[test]
+    fn available_modes_includes_vpn_while_connected() {
+        let mut island = test_island();
+        island.settings.show_vpn = true;
+        assert_eq!(island.available_modes(), vec![CompactMode::Idle]);
+        island.vpn.connected = true;
+        island.vpn.service_name = "Tailscale".into();
+        island.vpn.interface = "utun4".into();
+        assert_eq!(
+            island.available_modes(),
+            vec![CompactMode::Vpn, CompactMode::Idle]
+        );
+        assert_eq!(island.mode(), CompactMode::Vpn);
+        island.settings.show_vpn = false;
+        assert_eq!(island.available_modes(), vec![CompactMode::Idle]);
+    }
+
+    #[test]
+    fn vpn_reveal_keeps_the_face_after_disconnect() {
+        let mut island = test_island();
+        island.vpn.connected = false;
+        island.vpn.service_name = "Tailscale".into();
+        island.vpn_reveal_until = Some(Instant::now() + Duration::from_secs(4));
+        island.preferred = Some(CompactMode::Vpn);
+        assert!(island.has_vpn_face());
+        assert_eq!(island.mode(), CompactMode::Vpn);
+        island.vpn_reveal_until = Some(Instant::now() - Duration::from_secs(1));
+        assert!(island.clear_expired_vpn_reveal());
+        assert!(!island.has_vpn_face());
+        assert_eq!(island.preferred, None);
+        assert_eq!(island.mode(), CompactMode::Idle);
     }
 
     #[test]
