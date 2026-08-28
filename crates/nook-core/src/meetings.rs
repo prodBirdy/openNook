@@ -14,6 +14,8 @@
 use crate::settings::MeetControlMode;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{OnceLock, RwLock};
+#[cfg(target_os = "macos")]
+use std::sync::{Mutex, Once};
 use std::time::Instant;
 
 pub const ZOOM_BUNDLE: &str = "us.zoom.xos";
