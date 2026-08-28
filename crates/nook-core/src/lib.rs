@@ -11,12 +11,14 @@ pub mod audio_devices;
 pub mod browser_media;
 pub mod calendar;
 pub mod database;
+pub mod eventtap;
 pub mod files;
 pub mod focus;
 pub mod haptics;
 pub mod hotkeys;
 pub mod location;
 pub mod high_alert;
+pub mod keysounds;
 #[cfg(target_os = "macos")]
 pub mod lyrics;
 #[cfg(any(target_os = "macos", test))]
@@ -34,6 +36,7 @@ pub mod observe;
 pub mod occupancy;
 pub mod power;
 pub mod pomodoro;
+pub mod scroll;
 pub mod settings;
 pub mod shortcuts;
 pub mod system_timers;
@@ -99,6 +102,7 @@ pub fn init() {
         osd::install();
         vpn::start();
         shell::reap_orphaned_jobs();
+        eventtap::sync();
     });
 }
 

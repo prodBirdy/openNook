@@ -59,12 +59,16 @@ fn desktop_wallpaper_image() -> Option<std::sync::Arc<Image>> {
 enum SettingsCategory {
     General = 0,
     Widgets = 1,
+    Keyboard = 2,
+    Scrolling = 3,
 }
 
 impl SettingsCategory {
     fn from_u8(v: u8) -> Self {
         match v {
             1 => Self::Widgets,
+            2 => Self::Keyboard,
+            3 => Self::Scrolling,
             _ => Self::General,
         }
     }
@@ -73,6 +77,8 @@ impl SettingsCategory {
         match self {
             Self::General => "General",
             Self::Widgets => "Widgets",
+            Self::Keyboard => "Keyboard",
+            Self::Scrolling => "Scrolling",
         }
     }
 
@@ -80,6 +86,8 @@ impl SettingsCategory {
         match self {
             Self::General => "settings",
             Self::Widgets => "layout-grid",
+            Self::Keyboard => "keyboard",
+            Self::Scrolling => "mouse",
         }
     }
 }
@@ -322,6 +330,29 @@ fn create_width_slider(
     (slider, subscription)
 }
 
+fn create_float_slider(
+    min: f32,
+    max: f32,
+    step: f32,
+    value: f32,
+    cx: &mut Context<SettingsView>,
+    write: impl Fn(f32) + 'static,
+) -> (Entity<SliderState>, Subscription) {
+    let slider = cx.new(|_| {
+        SliderState::new()
+            .min(min)
+            .max(max)
+            .step(step)
+            .default_value(value)
+    });
+    let subscription = cx.subscribe(&slider, move |_, _, event: &SliderEvent, cx| {
+        let SliderEvent::Change(value) = event;
+        write(value.start());
+        cx.notify();
+    });
+    (slider, subscription)
+}
+
 pub(super) struct SettingsView {
     category: SettingsCategory,
     module: WidgetModule,
@@ -365,6 +396,14 @@ pub(super) struct SettingsView {
     width_slider: Entity<SliderState>,
     width_slider_config: (WidgetModule, u8, u8),
     _width_slider_subscription: Subscription,
+    volume_slider: Entity<SliderState>,
+    _volume_slider_subscription: Subscription,
+    scroll_speed_slider: Entity<SliderState>,
+    _scroll_speed_slider_subscription: Subscription,
+    scroll_duration_slider: Entity<SliderState>,
+    _scroll_duration_slider_subscription: Subscription,
+    exclude_focus: FocusHandle,
+    exclude_draft: String,
     placement_drag: bool,
     placement_bounds: Rc<RefCell<Option<Bounds<Pixels>>>>,
 }
@@ -379,6 +418,42 @@ impl SettingsView {
         let min = module.min_cells();
         let max = settings.max_cells_for(module).max(min);
         let (width_slider, width_slider_subscription) = create_width_slider(module, &settings, cx);
+        let (volume_slider, volume_slider_subscription) = create_float_slider(
+            0.0,
+            1.0,
+            0.05,
+            settings.keysound_volume.clamp(0.0, 1.0),
+            cx,
+            |value| {
+                nook_core::settings::tweak_app_settings(|s| {
+                    s.keysound_volume = value.clamp(0.0, 1.0);
+                });
+            },
+        );
+        let (scroll_speed_slider, scroll_speed_subscription) = create_float_slider(
+            0.25,
+            3.0,
+            0.05,
+            settings.scroll_speed.clamp(0.25, 3.0),
+            cx,
+            |value| {
+                nook_core::settings::tweak_app_settings(|s| {
+                    s.scroll_speed = value.clamp(0.25, 3.0);
+                });
+            },
+        );
+        let (scroll_duration_slider, scroll_duration_subscription) = create_float_slider(
+            0.1,
+            1.0,
+            0.05,
+            settings.scroll_duration.clamp(0.1, 1.0),
+            cx,
+            |value| {
+                nook_core::settings::tweak_app_settings(|s| {
+                    s.scroll_duration = value.clamp(0.1, 1.0);
+                });
+            },
+        );
         Self {
             category: SettingsCategory::from_u8(LAST_CATEGORY.load(Ordering::Relaxed)),
             module,
@@ -400,6 +475,7 @@ impl SettingsView {
             ignore_focus: cx.focus_handle(),
             shell_focus: cx.focus_handle(),
             timeout_focus: cx.focus_handle(),
+            exclude_focus: cx.focus_handle(),
             url_draft: settings.observe.prometheus_url,
             token_draft: settings.observe.metrics_token,
             ignore_draft: nook_core::vpn::format_ignore_list(&settings.vpn_ignore_interfaces),
@@ -414,12 +490,19 @@ impl SettingsView {
             location_busy: false,
             shell_draft: settings.terminal_shell.clone(),
             timeout_draft: settings.terminal_timeout_secs.to_string(),
+            exclude_draft: String::new(),
             catalog: Vec::new(),
             catalog_error: None,
             catalog_loading: false,
             width_slider,
             width_slider_config: (module, min, max),
             _width_slider_subscription: width_slider_subscription,
+            volume_slider,
+            _volume_slider_subscription: volume_slider_subscription,
+            scroll_speed_slider,
+            _scroll_speed_slider_subscription: scroll_speed_subscription,
+            scroll_duration_slider,
+            _scroll_duration_slider_subscription: scroll_duration_subscription,
             placement_drag: false,
             placement_bounds: Rc::new(RefCell::new(None)),
         }
@@ -664,6 +747,7 @@ impl gpui::Render for SettingsView {
         let share_c_focused = self.share_c_focus.is_focused(window);
         let city_focused = self.city_focus.is_focused(window);
         let ignore_focused = self.ignore_focus.is_focused(window);
+        let exclude_focused = self.exclude_focus.is_focused(window);
 
         div()
             .id("settings-root")
@@ -709,6 +793,15 @@ impl gpui::Render for SettingsView {
                 )
                 .into_any_element()
                 self.render_general(&settings, window, cx).into_any_element()
+            .child(match self.category {
+                SettingsCategory::Widgets => self
+                    .render_widgets(&settings, url_focused, token_focused, query_focused, cx)
+                    .into_any_element(),
+                SettingsCategory::Keyboard => self.render_keyboard(&settings, cx).into_any_element(),
+                SettingsCategory::Scrolling => self
+                    .render_scrolling(&settings, exclude_focused, cx)
+                    .into_any_element(),
+                SettingsCategory::General => self.render_general(&settings, cx).into_any_element(),
             })
     }
 }
@@ -729,6 +822,8 @@ impl SettingsView {
             .gap(px(2.))
             .child(self.sidebar_item(SettingsCategory::General, cx))
             .child(self.sidebar_item(SettingsCategory::Widgets, cx))
+            .child(self.sidebar_item(SettingsCategory::Keyboard, cx))
+            .child(self.sidebar_item(SettingsCategory::Scrolling, cx))
     }
 
     fn sidebar_item(&self, category: SettingsCategory, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1112,6 +1207,129 @@ impl SettingsView {
                     if Self::apply_key(&mut this.alias_draft, event, cx) {
                         this.persist_share_alias();
                         cx.notify();
+    fn render_keyboard(&self, settings: &AppSettings, cx: &mut Context<Self>) -> impl IntoElement {
+        let listen = nook_core::eventtap::input_monitoring_status();
+        let packs = nook_core::keysounds::list_packs();
+        let mut pack_rows = Vec::new();
+        for pack in packs {
+            let selected = settings.keysound_pack == pack.id;
+            let id = pack.id.clone();
+            pack_rows.push(
+                settings_row(SharedString::from(format!("pack-{}", pack.id)))
+                    .cursor(CursorStyle::PointingHand)
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |_, _, _, cx| {
+                            let id = id.clone();
+                            nook_core::settings::tweak_app_settings(|s| s.keysound_pack = id);
+                            cx.notify();
+                        }),
+                    )
+                    .child(label(pack.name, theme::BODY, true))
+                    .child(label(
+                        if selected { "Selected" } else { " " },
+                        theme::SUBHEADLINE,
+                        false,
+                    ))
+                    .into_any_element(),
+            );
+        }
+        Self::pane(
+            "Keyboard Sounds",
+            div()
+                .id("keyboard-pane")
+                .flex()
+                .flex_col()
+                .gap(px(16.))
+                .child(section(
+                    "Mechey",
+                    settings_group(vec![
+                        toggle_row(
+                            "Play sounds while typing",
+                            settings.keysounds_enabled,
+                            cx,
+                            |s| {
+                                s.keysounds_enabled = !s.keysounds_enabled;
+                                if s.keysounds_enabled
+                                    && !nook_core::eventtap::input_monitoring_status().granted()
+                                {
+                                    nook_core::eventtap::request_input_monitoring();
+                                }
+                            },
+                        )
+                        .into_any_element(),
+                        permission_row("Input Monitoring", listen).into_any_element(),
+                        action_row(
+                            "listen-prompt",
+                            "Request Input Monitoring",
+                            "Prompt",
+                            cx,
+                            |_, _, cx| {
+                                nook_core::eventtap::request_input_monitoring();
+                                cx.notify();
+                            },
+                        )
+                        .into_any_element(),
+                        action_row(
+                            "listen-open",
+                            "Privacy settings",
+                            "Open",
+                            cx,
+                            |_, _, _| {
+                                nook_core::eventtap::open_input_monitoring_settings();
+                            },
+                        )
+                        .into_any_element(),
+                    ]),
+                    Some("Opt-in. The key tap is created only while this is on. Password fields stay silent (secure input). Ad-hoc signing can drop the grant after each rebuild."),
+                ))
+                .child(section(
+                    "Pack",
+                    settings_group({
+                        let mut rows = pack_rows;
+                        rows.push(
+                            self.float_slider_row(
+                                "keysound-volume",
+                                "Volume",
+                                settings.keysound_volume,
+                                &self.volume_slider,
+                                format!("{:.0}%", settings.keysound_volume * 100.0),
+                            )
+                            .into_any_element(),
+                        );
+                        rows.push(
+                            action_row("keysound-test", "Preview this pack", "Test", cx, |_, _, cx| {
+                                nook_core::keysounds::play_test();
+                                cx.notify();
+                            })
+                            .into_any_element(),
+                        );
+                        rows
+                    }),
+                    Some("Drop Mechvibes packs (config.json + OGG) into Application Support/openNook-gpui/soundpacks. Builtin clicks are original CC0 tones, not switch recordings."),
+                )),
+        )
+    }
+
+    fn render_scrolling(
+        &self,
+        settings: &AppSettings,
+        exclude_focused: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let ax = nook_core::eventtap::accessibility_status();
+        let conflicts = nook_core::eventtap::running_conflict_ids();
+        let mut rows = vec![
+            toggle_row(
+                "Smooth scrolling for mice",
+                settings.smooth_scroll_enabled,
+                cx,
+                |s| {
+                    s.smooth_scroll_enabled = !s.smooth_scroll_enabled;
+                    if s.smooth_scroll_enabled
+                        && !nook_core::eventtap::accessibility_status().granted()
+                    {
+                        nook_core::eventtap::request_accessibility();
                     }
                 },
             )
@@ -1139,6 +1357,15 @@ impl SettingsView {
                     if Self::apply_key(&mut this.pin_draft, event, cx) {
                         this.persist_share_pin();
                         cx.notify();
+                "Reverse mouse wheel",
+                settings.reverse_mouse_scroll,
+                cx,
+                |s| {
+                    s.reverse_mouse_scroll = !s.reverse_mouse_scroll;
+                    if s.reverse_mouse_scroll
+                        && !nook_core::eventtap::accessibility_status().granted()
+                    {
+                        nook_core::eventtap::request_accessibility();
                     }
                 },
             )
@@ -1334,6 +1561,160 @@ impl SettingsView {
             on_key,
         )
         .into_any_element()
+            permission_row("Accessibility", ax).into_any_element(),
+            action_row(
+                "scroll-ax-prompt",
+                "Request Accessibility",
+                "Prompt",
+                cx,
+                |_, _, cx| {
+                    nook_core::eventtap::request_accessibility();
+                    cx.notify();
+                },
+            )
+            .into_any_element(),
+            action_row(
+                "scroll-ax-open",
+                "Privacy settings",
+                "Open",
+                cx,
+                |_, _, _| {
+                    nook_core::eventtap::open_accessibility_settings();
+                },
+            )
+            .into_any_element(),
+            self.float_slider_row(
+                "scroll-speed",
+                "Speed",
+                settings.scroll_speed,
+                &self.scroll_speed_slider,
+                format!("{:.2}×", settings.scroll_speed),
+            )
+            .into_any_element(),
+            self.float_slider_row(
+                "scroll-duration",
+                "Coast",
+                settings.scroll_duration,
+                &self.scroll_duration_slider,
+                format!("{:.0} ms", settings.scroll_duration * 1000.0),
+            )
+            .into_any_element(),
+        ];
+        if !conflicts.is_empty() {
+            rows.push(
+                status_row(
+                    "Also running",
+                    "Mos / LinearMouse / similar — expect conflicts",
+                )
+                .into_any_element(),
+            );
+        }
+        let mut exclude_rows = vec![field_row(
+            "scroll-exclude",
+            "Add",
+            if self.exclude_draft.is_empty() {
+                "com.example.app"
+            } else {
+                &self.exclude_draft
+            },
+            self.exclude_draft.is_empty(),
+            exclude_focused,
+            &self.exclude_focus,
+            cx,
+            |this, event, cx| {
+                if Self::apply_key(&mut this.exclude_draft, event, cx) {
+                    cx.notify();
+                }
+                if event.keystroke.key == "enter" {
+                    let id = this.exclude_draft.trim().to_string();
+                    if !id.is_empty() {
+                        nook_core::settings::tweak_app_settings(|s| {
+                            if !s.scroll_excluded_apps.iter().any(|item| item == &id) {
+                                s.scroll_excluded_apps.push(id);
+                            }
+                        });
+                        this.exclude_draft.clear();
+                    }
+                    cx.notify();
+                }
+            },
+        )
+        .into_any_element()];
+        for bundle in &settings.scroll_excluded_apps {
+            let id = bundle.clone();
+            exclude_rows.push(
+                settings_row(SharedString::from(format!("ex-{id}")))
+                    .child(label(id.clone(), theme::BODY, true))
+                    .child(push_button(
+                        SharedString::from(format!("rm-{id}")),
+                        "Remove",
+                        cx,
+                        move |_, _, cx| {
+                            let id = id.clone();
+                            nook_core::settings::tweak_app_settings(|s| {
+                                s.scroll_excluded_apps.retain(|item| item != &id);
+                            });
+                            cx.notify();
+                        },
+                    ))
+                    .into_any_element(),
+            );
+        }
+
+        Self::pane(
+            "Scrolling",
+            div()
+                .id("scrolling-pane")
+                .flex()
+                .flex_col()
+                .gap(px(16.))
+                .child(section(
+                    "LiquidMouse",
+                    settings_group(rows),
+                    Some("Trackpads pass through (IsContinuous). Wheel mice get pixel momentum. The tap exists only while a toggle is on. Per-device overrides are not shipped — they need private sender IDs."),
+                ))
+                .child(section(
+                    "Excluded apps",
+                    settings_group(exclude_rows),
+                    Some("Games, VMs, and remotes should stay on the raw wheel. Built-in defaults already cover UTM, VMware, Parallels, VirtualBox, Steam, and Screen Sharing."),
+                )),
+        )
+    }
+
+    fn float_slider_row(
+        &self,
+        id: &'static str,
+        title: &'static str,
+        value: f32,
+        slider: &Entity<SliderState>,
+        caption: String,
+    ) -> impl IntoElement {
+        let _ = value;
+        settings_row(id)
+            .child(label(title, theme::BODY, true))
+            .child(
+                div()
+                    .id(SharedString::from(format!("{id}-slider")))
+                    .flex_1()
+                    .h(px(theme::HIT_MIN))
+                    .px(px(8.))
+                    .flex()
+                    .items_center()
+                    .child(
+                        Slider::new(slider)
+                            .bg(theme::accent())
+                            .text_color(rgb(0xffffff)),
+                    ),
+            )
+            .child(
+                div().w(px(52.)).flex().justify_end().child(
+                    div()
+                        .text_size(px(theme::BODY.size))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(theme::SECONDARY_LABEL)
+                        .child(caption),
+                ),
+            )
     }
 
     fn color_row(&self, settings: &AppSettings, cx: &mut Context<Self>) -> impl IntoElement {
@@ -2971,6 +3352,27 @@ fn shortcut_row(title: &'static str, keys: String) -> impl IntoElement {
     settings_row(SharedString::from(title))
         .child(label(title, theme::BODY, true))
         .child(label(keys, theme::SUBHEADLINE, false))
+fn permission_row(title: &'static str, status: nook_core::eventtap::PermissionStatus) -> impl IntoElement {
+    let (text, color) = match status {
+        nook_core::eventtap::PermissionStatus::Granted => ("Granted", theme::SUCCESS),
+        nook_core::eventtap::PermissionStatus::Denied => ("Not granted", theme::DESTRUCTIVE),
+        nook_core::eventtap::PermissionStatus::Unsupported => ("macOS only", theme::TERTIARY_LABEL),
+    };
+    settings_row(title)
+        .child(label(title, theme::BODY, true))
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(6.))
+                .child(div().size(px(7.)).rounded_full().bg(color))
+                .child(
+                    div()
+                        .text_size(px(theme::SUBHEADLINE.size))
+                        .text_color(color)
+                        .child(text),
+                ),
+        )
 }
 
 fn toggle_row(
@@ -3335,8 +3737,12 @@ mod tests {
     #[test]
     fn nav_enums_round_trip() {
         assert_eq!(SettingsCategory::from_u8(1), SettingsCategory::Widgets);
+        assert_eq!(SettingsCategory::from_u8(2), SettingsCategory::Keyboard);
+        assert_eq!(SettingsCategory::from_u8(3), SettingsCategory::Scrolling);
         assert_eq!(SettingsCategory::from_u8(0), SettingsCategory::General);
         assert_eq!(SettingsCategory::from_u8(99), SettingsCategory::General);
+        assert_eq!(SettingsCategory::Keyboard.title(), "Keyboard");
+        assert_eq!(SettingsCategory::Scrolling.title(), "Scrolling");
         assert_eq!(WidgetModule::from_u8(0), WidgetModule::Calendar);
         assert_eq!(WidgetModule::from_u8(99), WidgetModule::Calendar);
     }

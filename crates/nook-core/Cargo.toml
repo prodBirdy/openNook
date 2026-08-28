@@ -45,6 +45,8 @@ objc2-core-foundation = { version = "0.3.2", features = ["CFDictionary", "CFStri
 objc2-core-location = { version = "0.3", features = ["CLLocationManager", "CLLocation"] }
 block2 = "0.6"
 security-framework = "3.7"
+cpal = "0.15"
+symphonia = { version = "0.5", default-features = false, features = ["ogg", "vorbis", "wav", "pcm"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { version = "0.52", features = [
