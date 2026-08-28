@@ -18,6 +18,7 @@ pub mod lyrics;
 mod mediaremote;
 pub mod menubar;
 pub mod messages;
+pub mod mixer;
 pub mod models;
 pub mod mouse;
 pub mod notch;
@@ -76,6 +77,7 @@ pub fn init() {
         }
         audio::init_audio_state();
         audio::setup_audio_monitoring();
+        mixer::init();
         mouse::start_polling();
         power::start();
         messages::start_watchers();

@@ -134,6 +134,7 @@ impl WidgetModuleExt for WidgetModule {
             Self::Battery => "Battery",
             Self::Messages => "Messages",
             Self::Obsidian => "Obsidian",
+            Self::Mixer => "Mixer",
         }
     }
 
@@ -152,6 +153,7 @@ impl WidgetModuleExt for WidgetModule {
             Self::Battery => "battery",
             Self::Messages => "message-circle",
             Self::Obsidian => "book",
+            Self::Mixer => "volume-2",
         }
     }
 
@@ -185,6 +187,7 @@ impl WidgetModuleExt for WidgetModule {
                 .and_then(|path| path.file_name())
                 .map(|name| SharedString::from(name.to_string_lossy().into_owned()))
                 .unwrap_or_else(|| "No vault".into()),
+            Self::Mixer => "Per-app volume".into(),
         }
     }
 
@@ -211,6 +214,7 @@ impl WidgetModuleExt for WidgetModule {
             Self::Battery => "Battery",
             Self::Messages => "Messages",
             Self::Obsidian => "Obsidian",
+            Self::Mixer => "Mixer",
         }
     }
 }
@@ -273,7 +277,10 @@ pub(super) struct SettingsView {
 impl SettingsView {
     pub(super) fn new(cx: &mut Context<Self>) -> Self {
         let settings = nook_core::settings::get_app_settings();
-        let module = WidgetModule::from_u8(LAST_MODULE.load(Ordering::Relaxed));
+        let mut module = WidgetModule::from_u8(LAST_MODULE.load(Ordering::Relaxed));
+        if module == WidgetModule::Mixer && !nook_core::mixer::is_available() {
+            module = WidgetModule::Calendar;
+        }
         let min = module.min_cells();
         let max = settings.max_cells_for(module).max(min);
         let (width_slider, width_slider_subscription) = create_width_slider(module, &settings, cx);
@@ -844,6 +851,9 @@ impl SettingsView {
 
         let mut list = Vec::new();
         for module in settings.ordered_widgets() {
+            if module == WidgetModule::Mixer && !nook_core::mixer::is_available() {
+                continue;
+            }
             list.push(self.widget_row(module, settings, cx).into_any_element());
         }
 
@@ -1176,6 +1186,17 @@ impl SettingsView {
                     settings_row("obsidian-path")
                         .child(label("Vault", theme::BODY, true))
                         .child(label(vault_label, theme::SUBHEADLINE, false))
+            WidgetModule::Mixer => {
+                rows.push(
+                    settings_row("mixer-permission")
+                        .child(label("Permission", theme::BODY, true))
+                        .child(label(
+                            nook_core::mixer::capture_status_label(
+                                nook_core::mixer::capture_status(),
+                            ),
+                            theme::SUBHEADLINE,
+                            false,
+                        ))
                         .into_any_element(),
                 );
                 rows.push(
@@ -1246,6 +1267,15 @@ impl SettingsView {
                         settings.obsidian_uri_capture,
                         cx,
                         |s| s.obsidian_uri_capture = !s.obsidian_uri_capture,
+                        "mixer-reset",
+                        "Volumes",
+                        "Reset All",
+                        cx,
+                        |_, _, cx| {
+                            nook_core::mixer::reset_all();
+                            nook_core::mixer::pump();
+                            cx.notify();
+                        },
                     )
                     .into_any_element(),
                 );
@@ -1737,6 +1767,7 @@ fn module_blurb(module: WidgetModule) -> SharedString {
         WidgetModule::Obsidian => {
             "Vault notes on the shelf. FSEvents keeps the list current; capture appends to today's daily note.".into()
         }
+        WidgetModule::Mixer => nook_core::mixer::TCC_PREPROMPT.into(),
     }
 }
 
@@ -2209,6 +2240,7 @@ mod tests {
                 "Battery",
                 "Messages",
                 "Obsidian",
+                "Mixer",
             ]
         );
         assert!(!names

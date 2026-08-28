@@ -21,6 +21,7 @@ pub enum WidgetModule {
     Battery = 10,
     Messages = 10,
     Obsidian = 10,
+    Mixer = 10,
 }
 
 impl WidgetModule {
@@ -38,6 +39,7 @@ impl WidgetModule {
         Self::Battery,
         Self::Messages,
         Self::Obsidian,
+        Self::Mixer,
     ];
 
     pub fn from_u8(value: u8) -> Self {
@@ -55,6 +57,7 @@ impl WidgetModule {
             Self::Timers | Self::Speed | Self::Mirror | Self::Battery => 3,
             Self::Files | Self::Notes | Self::Observe | Self::Reminders | Self::Agents | Self::Messages => {
             Self::Files | Self::Notes | Self::Observe | Self::Reminders | Self::Agents | Self::Obsidian => {
+            Self::Files | Self::Notes | Self::Observe | Self::Reminders | Self::Agents | Self::Mixer => {
                 4
             }
             Self::Timers | Self::Speed | Self::Mirror => 3,
@@ -67,6 +70,7 @@ impl WidgetModule {
             Self::Music | Self::Files | Self::Observe | Self::Reminders | Self::Mirror => 3,
             Self::Notes | Self::Timers | Self::Speed | Self::Agents | Self::Battery => 2,
             Self::Music | Self::Files | Self::Observe | Self::Reminders | Self::Mirror | Self::Messages => {
+            Self::Music | Self::Files | Self::Observe | Self::Reminders | Self::Mirror | Self::Mixer => {
                 3
             }
             Self::Notes | Self::Timers | Self::Speed | Self::Agents => 2,
@@ -90,6 +94,7 @@ impl WidgetModule {
 fn default_widget_order() -> Vec<WidgetModule> {
     vec![
         WidgetModule::Music,
+        WidgetModule::Mixer,
         WidgetModule::Calendar,
         WidgetModule::Mirror,
         WidgetModule::Files,
@@ -191,6 +196,7 @@ pub struct AppSettings {
     /// Use `obsidian://new?append=true` instead of writing the daily note.
     #[serde(default)]
     pub obsidian_uri_capture: bool,
+    pub show_mixer: bool,
     #[serde(default)]
     pub observe: ObserveConfig,
     #[serde(default)]
@@ -319,6 +325,7 @@ impl Default for AppSettings {
             obsidian_vault: None,
             obsidian_capture_heading: None,
             obsidian_uri_capture: false,
+            show_mixer: true,
             observe: ObserveConfig::default(),
             liquid_glass_mode: false,
             non_notch_mode: false,
@@ -373,6 +380,7 @@ impl AppSettings {
             WidgetModule::Battery => self.show_battery,
             WidgetModule::Messages => self.show_messages,
             WidgetModule::Obsidian => self.show_obsidian,
+            WidgetModule::Mixer => self.show_mixer && crate::mixer::is_available(),
         }
     }
 
@@ -394,6 +402,7 @@ impl AppSettings {
                 crate::messages::request_refresh();
             }
             WidgetModule::Obsidian => self.show_obsidian = !self.show_obsidian,
+            WidgetModule::Mixer => self.show_mixer = !self.show_mixer,
         }
     }
 
@@ -730,6 +739,7 @@ mod tests {
         assert_eq!(parsed.obsidian_vault, None);
         assert_eq!(parsed.obsidian_capture_heading, None);
         assert!(!parsed.obsidian_uri_capture);
+        assert!(parsed.show_mixer);
         assert!(parsed.liquid_glass_mode);
         assert!(!parsed.non_notch_mode);
         assert!((parsed.island_x - 0.5).abs() < f32::EPSILON);
@@ -820,6 +830,7 @@ mod tests {
         settings.show_battery = false;
         settings.show_messages = false;
         settings.show_obsidian = false;
+        settings.show_mixer = false;
         settings.set_cells(WidgetModule::Music, 5);
         assert_eq!(settings.used_cells(), 5);
         assert_eq!(settings.remaining_cells(), AppSettings::TOTAL_CELLS - 5);

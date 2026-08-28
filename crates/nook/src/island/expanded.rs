@@ -8,6 +8,7 @@ use crate::widgets::{
     agents_card, battery_card, calendar_card, notes_card, observe_card, reminders_card, speed_card,
     agents_card, calendar_card, messages_card, notes_card, observe_card, reminders_card, speed_card,
     agents_card, calendar_card, notes_card, observe_card, obsidian_card, reminders_card, speed_card,
+    agents_card, calendar_card, mixer_card, notes_card, observe_card, reminders_card, speed_card,
     timer_card,
 };
 use gpui::{
@@ -173,6 +174,9 @@ impl Island {
                         self.settings.cells_for(module),
                         messages_card(self, cx),
                     ),
+                WidgetModule::Mixer if self.settings.is_enabled(WidgetModule::Mixer) => add(
+                    &mut kids,
+                    cell_pane(self.settings.cells_for(module), mixer_card(self, cx)),
                 ),
                 _ => {}
             }
