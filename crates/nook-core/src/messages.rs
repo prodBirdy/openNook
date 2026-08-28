@@ -12,6 +12,7 @@
 //! `opennook.db` — only ROWID watermarks.
 
 use crate::database;
+use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use rusqlite::{Connection, OpenFlags};
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
@@ -691,7 +692,7 @@ pub fn start_watchers() {
                 }
             }) {
                 Ok(mut watcher) => {
-                    if let Err(err) = watcher.watch(&root, notify::RecursiveMode::NonRecursive) {
+                    if let Err(err) = watcher.watch(&root, RecursiveMode::NonRecursive) {
                         log::debug!("messages watch {root:?}: {err}");
                     } else {
                         log::info!("messages watching {root:?}");
@@ -708,7 +709,7 @@ pub fn start_watchers() {
         {
             log::warn!("messages watch thread: {err}");
         }
-        static WATCHERS: OnceLock<Mutex<Vec<notify::RecommendedWatcher>>> = OnceLock::new();
+        static WATCHERS: OnceLock<Mutex<Vec<RecommendedWatcher>>> = OnceLock::new();
         let _ = WATCHERS.set(Mutex::new(watchers));
     });
 }
@@ -1310,7 +1311,7 @@ mod tests {
             })
             .unwrap();
         watcher
-            .watch(&dir, notify::RecursiveMode::NonRecursive)
+            .watch(&dir, RecursiveMode::NonRecursive)
             .unwrap();
         fs::write(&path, b"changed").unwrap();
         rx.recv_timeout(Duration::from_secs(3))
