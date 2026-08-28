@@ -23,13 +23,14 @@ use gpui::{
 use nook_core::agents::AgentSession;
 use nook_core::calendar::{CalendarEvent, Reminder};
 use nook_core::files::FileTrayItem;
-use nook_core::models::NowPlayingData;
+use nook_core::models::{NowPlayingData, SyncedLyrics};
 use nook_core::notch;
 use nook_core::messages::MessagesSnapshot;
 use nook_core::observe::{MetricHistory, ObserveSnapshot};
 use nook_core::power::PowerSnapshot;
 use nook_core::settings::AppSettings;
 use settings::SettingsView;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -72,6 +73,12 @@ pub struct Island {
     pub tab: Tab,
     pub now_playing: NowPlayingData,
     pub visualizer_color: Option<gpui::Rgba>,
+    /// Cached lyrics for the current title/artist. `None` until a fetch lands.
+    pub lyrics: Option<Arc<SyncedLyrics>>,
+    lyrics_key: Option<(String, String)>,
+    lyrics_anchor_elapsed: f64,
+    lyrics_anchor_at: Instant,
+    lyrics_timer_gen: u64,
     pub files: Vec<FileTrayItem>,
     pub events: Vec<CalendarEvent>,
     pub reminders: Vec<Reminder>,
@@ -211,6 +218,11 @@ impl Island {
             tab: Tab::Widgets,
             now_playing: NowPlayingData::default(),
             visualizer_color: None,
+            lyrics: None,
+            lyrics_key: None,
+            lyrics_anchor_elapsed: 0.0,
+            lyrics_anchor_at: Instant::now(),
+            lyrics_timer_gen: 0,
             files,
             events: Vec::new(),
             reminders: Vec::new(),
@@ -284,6 +296,7 @@ impl Island {
         this.anim_h.set(h);
 
         platform::install_media_observers();
+        platform::install_mouse_monitors();
         nook_core::runtime().spawn(async {
             let _ = nook_core::calendar::request_calendar_access().await;
         });
@@ -305,12 +318,21 @@ impl Island {
                     .await;
                 platform::apply_island_chrome();
             }
+            platform::request_pin();
+            // Park until a screen/space notification (or a 30s backstop).
+            // The previous 250 ms poll was an idle wakeup; handlers already
+            // pin on the main thread, this only covers a missed first pin.
             loop {
-                cx.background_executor().timer(Duration::from_secs(2)).await;
+                let needed = cx
+                    .background_executor()
+                    .spawn(async { platform::wait_pin_needed(Duration::from_secs(30)) })
+                    .await;
                 if this.update(cx, |_, _| ()).is_err() {
                     break;
                 }
-                platform::pin_island_windows();
+                if needed || platform::take_pin_needed() {
+                    platform::pin_island_windows();
+                }
             }
         })
         .detach();
@@ -350,6 +372,7 @@ impl Island {
                         } else {
                             this.settings = settings;
                         }
+                        this.sync_lyrics(cx);
                         dirty = true;
                     }
                     if this.repositioning {
@@ -576,13 +599,17 @@ impl Island {
                     this.now_playing.is_playing = playing.is_playing;
                     this.now_playing.app_name = playing.app_name;
                     this.now_playing.bundle_id = playing.bundle_id;
+                    this.lyrics_anchor_elapsed = this.now_playing.elapsed_time.unwrap_or(0.0);
+                    this.lyrics_anchor_at = Instant::now();
                     this.visualizer_color = media::visualizer_color_from_art(
                         this.now_playing.artwork_base64.as_deref(),
                     );
                     if !was_media && this.has_media() {
                         this.preferred = Some(CompactMode::Media);
                     }
+                    this.sync_lyrics(cx);
                     if changed {
+                        this.arm_lyrics_line_timer(cx);
                         cx.notify();
                     }
                     this.has_media() && this.now_playing.is_playing
@@ -590,26 +617,22 @@ impl Island {
                 let Ok(is_playing) = alive else {
                     break;
                 };
-                // Every poll spawns an osascript/perl child, so cadence is
-                // the battery cost that matters: 1s while playing (the
-                // elapsed display ticks in whole seconds anyway), 5s
-                // otherwise. The distributed-notification observers wake the
-                // wait instantly on Spotify/Music play/pause/track changes —
-                // the slow cadence only gates Safari/YouTube pickup.
+                // Stream-backed adapter reads are a cheap lock; cadence is
+                // for interpolated elapsed (1s while playing) and the
+                // AppleScript fallback (5s idle). Distributed-notification
+                // observers and the MediaRemote stream poke `note_media_event`
+                // so this parks until a real change instead of slicing 250 ms.
                 let cadence = if is_playing {
                     Duration::from_secs(1)
                 } else {
                     Duration::from_secs(5)
                 };
-                let slice = Duration::from_millis(250);
-                let mut waited = Duration::ZERO;
-                loop {
-                    cx.background_executor().timer(slice).await;
-                    waited += slice;
-                    if nook_core::audio::take_media_event() || waited >= cadence {
-                        break;
-                    }
-                }
+                cx.background_executor()
+                    .spawn(async move {
+                        nook_core::runtime()
+                            .block_on(nook_core::audio::wait_media_or_timeout(cadence))
+                    })
+                    .await;
             }
         })
         .detach();
@@ -872,6 +895,133 @@ impl Island {
             && (self.now_playing.is_playing
                 || self.now_playing.title.is_some()
                 || self.now_playing.artist.is_some())
+    }
+
+    /// Interpolated playback position from the last now-playing snapshot.
+    pub(crate) fn lyrics_position(&self) -> f64 {
+        let extra = if self.now_playing.is_playing {
+            self.lyrics_anchor_at.elapsed().as_secs_f64()
+        } else {
+            0.0
+        };
+        let pos = (self.lyrics_anchor_elapsed + extra).max(0.0);
+        match self.now_playing.duration {
+            Some(duration) if duration > 0.0 => pos.min(duration),
+            _ => pos,
+        }
+    }
+
+    pub(crate) fn lyrics_position_ms(&self) -> u64 {
+        (self.lyrics_position() * 1000.0).max(0.0) as u64
+    }
+
+    pub(crate) fn note_media_seek(&mut self, position: f64, cx: &mut Context<Self>) {
+        let position = position.max(0.0);
+        self.now_playing.elapsed_time = Some(position);
+        self.lyrics_anchor_elapsed = position;
+        self.lyrics_anchor_at = Instant::now();
+        self.arm_lyrics_line_timer(cx);
+        cx.notify();
+    }
+
+    pub(crate) fn note_media_play_pause(&mut self, cx: &mut Context<Self>) {
+        let pos = self.lyrics_position();
+        self.now_playing.is_playing = !self.now_playing.is_playing;
+        self.lyrics_anchor_elapsed = pos;
+        self.lyrics_anchor_at = Instant::now();
+        self.arm_lyrics_line_timer(cx);
+        cx.notify();
+    }
+
+    fn lyrics_timer_should_run(&self) -> bool {
+        self.settings.show_lyrics
+            && self.settings.show_media
+            && self.expanded
+            && self.now_playing.is_playing
+            && self.lyrics.as_ref().is_some_and(|lyrics| lyrics.has_synced())
+    }
+
+    fn disarm_lyrics_timer(&mut self) {
+        self.lyrics_timer_gen = self.lyrics_timer_gen.wrapping_add(1);
+    }
+
+    /// One-shot timer for the next lyric line. Bumping `lyrics_timer_gen`
+    /// cancels a previously armed wait. Not a poll loop.
+    fn arm_lyrics_line_timer(&mut self, cx: &mut Context<Self>) {
+        self.disarm_lyrics_timer();
+        if !self.lyrics_timer_should_run() {
+            return;
+        }
+        let Some(lyrics) = self.lyrics.clone() else {
+            return;
+        };
+        let Some(wait) = lyrics.delay_until_next(self.lyrics_position_ms()) else {
+            return;
+        };
+        let gen = self.lyrics_timer_gen;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(wait).await;
+            let _ = this.update(cx, |this, cx| {
+                if this.lyrics_timer_gen != gen {
+                    return;
+                }
+                cx.notify();
+                this.arm_lyrics_line_timer(cx);
+            });
+        })
+        .detach();
+    }
+
+    fn sync_lyrics(&mut self, cx: &mut Context<Self>) {
+        if !self.settings.show_lyrics || !self.settings.show_media {
+            if self.lyrics.is_some() || self.lyrics_key.is_some() {
+                self.lyrics = None;
+                self.lyrics_key = None;
+                self.disarm_lyrics_timer();
+            }
+            return;
+        }
+        let title = self.now_playing.title.clone().unwrap_or_default();
+        let artist = self.now_playing.artist.clone().unwrap_or_default();
+        if title.is_empty() && artist.is_empty() {
+            self.lyrics = None;
+            self.lyrics_key = None;
+            self.disarm_lyrics_timer();
+            return;
+        }
+        let key = (title, artist);
+        if self.lyrics_key.as_ref() == Some(&key) {
+            return;
+        }
+        self.lyrics_key = Some(key.clone());
+        self.lyrics = None;
+        self.disarm_lyrics_timer();
+        let album = self.now_playing.album.clone();
+        let duration = self.now_playing.duration;
+        let artist = key.1.clone();
+        let title = key.0.clone();
+        cx.spawn(async move |this, cx| {
+            let fetched = cx
+                .background_executor()
+                .spawn(async move {
+                    nook_core::runtime().block_on(nook_core::lyrics::fetch_for_track(
+                        &artist,
+                        &title,
+                        album.as_deref(),
+                        duration,
+                    ))
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if this.lyrics_key.as_ref() != Some(&key) {
+                    return;
+                }
+                this.lyrics = fetched.map(Arc::new);
+                this.arm_lyrics_line_timer(cx);
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     pub(crate) fn running_timer(&self) -> Option<&Timer> {
@@ -1235,6 +1385,7 @@ impl Island {
         }
         nook_core::power::set_detail_watch(self.expanded && self.settings.show_battery);
         nook_core::haptics::trigger(None);
+        self.arm_lyrics_line_timer(cx);
         cx.notify();
     }
 
@@ -1261,6 +1412,7 @@ impl Island {
             if !self.expanded {
                 self.close_notes_editor(cx);
             }
+            self.arm_lyrics_line_timer(cx);
             cx.notify();
         }
     }
@@ -1591,6 +1743,11 @@ mod tests {
             tab: Tab::Widgets,
             now_playing: NowPlayingData::default(),
             visualizer_color: None,
+            lyrics: None,
+            lyrics_key: None,
+            lyrics_anchor_elapsed: 0.0,
+            lyrics_anchor_at: Instant::now(),
+            lyrics_timer_gen: 0,
             files: Vec::new(),
             events: Vec::new(),
             reminders: Vec::new(),
@@ -2310,6 +2467,30 @@ mod tests {
         // ...and collapse to one crisp layer once parked.
         assert_eq!(island.blur, 0.0);
         assert!(island.blur_offset().is_none());
+    }
+
+    #[test]
+    fn lyrics_position_holds_when_paused_and_advances_when_playing() {
+        let mut island = test_island();
+        island.lyrics_anchor_elapsed = 12.0;
+        island.lyrics_anchor_at = Instant::now() - Duration::from_millis(80);
+        island.now_playing.is_playing = false;
+        assert!((island.lyrics_position() - 12.0).abs() < 0.01);
+        island.now_playing.is_playing = true;
+        island.now_playing.duration = Some(100.0);
+        let pos = island.lyrics_position();
+        assert!(pos >= 12.05, "pos={pos}");
+        assert!(pos < 13.0, "pos={pos}");
+        assert!(!island.lyrics_timer_should_run());
+        island.settings.show_lyrics = true;
+        island.expanded = true;
+        island.lyrics = Some(Arc::new(SyncedLyrics {
+            lines: nook_core::lyrics::parse_lrc("[00:00.00] A\n[00:20.00] B\n"),
+            ..SyncedLyrics::default()
+        }));
+        assert!(island.lyrics_timer_should_run());
+        island.expanded = false;
+        assert!(!island.lyrics_timer_should_run());
     }
 
     #[test]

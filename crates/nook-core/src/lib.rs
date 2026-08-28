@@ -12,6 +12,8 @@ pub mod files;
 pub mod haptics;
 pub mod hotkeys;
 #[cfg(target_os = "macos")]
+pub mod lyrics;
+#[cfg(any(target_os = "macos", test))]
 mod mediaremote;
 pub mod menubar;
 pub mod messages;
@@ -27,7 +29,7 @@ pub mod utils;
 pub mod widgets;
 pub mod window_snap;
 
-pub use models::{NotchInfo, NowPlayingData};
+pub use models::{LyricLine, NotchInfo, NowPlayingData, SyncedLyrics};
 pub use settings::{AppSettings, WindowSettings};
 
 use std::sync::{Once, OnceLock};

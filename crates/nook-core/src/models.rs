@@ -42,3 +42,24 @@ pub struct NowPlayingData {
     #[serde(default)]
     pub bundle_id: Option<String>,
 }
+
+/// One timed line from an LRC file.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LyricLine {
+    pub time_ms: u64,
+    pub text: String,
+}
+
+/// Lyrics for the current track. `lines` is empty when only plain text (or
+/// an instrumental) is available. Text is fetched at runtime and never bundled.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct SyncedLyrics {
+    #[serde(default)]
+    pub lines: Vec<LyricLine>,
+    #[serde(default)]
+    pub plain: Option<String>,
+    #[serde(default)]
+    pub instrumental: bool,
+    #[serde(default)]
+    pub source: String,
+}

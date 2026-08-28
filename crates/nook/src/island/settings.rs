@@ -1045,6 +1045,14 @@ impl SettingsView {
         let enabled = self.module.enabled(settings);
         let mut rows = vec![self.width_slider(settings, cx).into_any_element()];
         match self.module {
+            WidgetModule::Music => {
+                rows.push(
+                    toggle_row("Show lyrics", settings.show_lyrics, cx, |s| {
+                        s.show_lyrics = !s.show_lyrics;
+                    })
+                    .into_any_element(),
+                );
+            }
             WidgetModule::Calendar => {
                 rows.push(
                     action_row(
@@ -1480,8 +1488,8 @@ fn module_blurb(module: WidgetModule) -> SharedString {
         WidgetModule::Observe => {
             "Pinned metrics on the compact island and the expanded card.".into()
         }
-        WidgetModule::Music => {
-            "Now Playing from MediaRemote on macOS, with an AppleScript fallback.".into()
+            WidgetModule::Music => {
+            "Now Playing from MediaRemote. Optional time-synced lyrics from LRCLIB — opt-in, fetched at runtime, never bundled.".into()
         }
         WidgetModule::Files => "Drop zone and tray live on the Tray tab of the expanded island.".into(),
         WidgetModule::Timers => "Countdown presets and a compact ring while a timer is running.".into(),

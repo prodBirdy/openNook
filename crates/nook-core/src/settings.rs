@@ -138,6 +138,9 @@ pub struct AppSettings {
     pub widget_order: Vec<WidgetModule>,
     #[serde(default = "default_true")]
     pub show_media: bool,
+    /// Opt-in time-synced lyrics beside Now Playing (LRCLIB, cached locally).
+    #[serde(default)]
+    pub show_lyrics: bool,
     #[serde(default = "default_true")]
     pub show_calendar: bool,
     #[serde(default = "default_true")]
@@ -270,6 +273,7 @@ impl Default for AppSettings {
         Self {
             widget_order: default_widget_order(),
             show_media: true,
+            show_lyrics: false,
             show_calendar: true,
             show_reminders: true,
             show_agents: true,
@@ -668,6 +672,7 @@ mod tests {
         let parsed: AppSettings = serde_json::from_str(r#"{"liquid_glass_mode":true}"#).unwrap();
         assert_eq!(parsed.widget_order, default_widget_order());
         assert!(parsed.show_media);
+        assert!(!parsed.show_lyrics);
         assert!(parsed.show_calendar);
         assert!(parsed.show_reminders);
         assert!(parsed.show_agents);

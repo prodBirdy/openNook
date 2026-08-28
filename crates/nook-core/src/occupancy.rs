@@ -8,8 +8,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Refresh at most this often — `CGWindowListCopyWindowInfo` is not cheap
-/// enough for the 20 ms mouse poll.
-const CACHE_MS: u64 = 250;
+/// enough for the mouse path. App-activate notifications invalidate sooner.
+const CACHE_MS: u64 = 1000;
 
 static CACHE: AtomicBool = AtomicBool::new(false);
 static LAST_MS: AtomicU64 = AtomicU64::new(0);
@@ -42,9 +42,19 @@ pub fn window_fills_display(window: ScreenRect, screen: ScreenRect, visible: Scr
     window.covers(screen, TOL) || window.covers(visible, TOL)
 }
 
+/// Drop the occupancy cache so the next sample talks to the window server.
+/// Driven from `NSWorkspaceDidActivateApplicationNotification`.
+pub fn invalidate() {
+    LAST_MS.store(0, Ordering::Relaxed);
+}
+
 /// Cached sample of [`query_frontmost_fills`]. Safe to call from the island
-/// poll loop.
+/// poll loop. No-ops when hide-when-maximized is off so the window-list
+/// walk never runs for users who disabled the setting.
 pub fn frontmost_fills_display() -> bool {
+    if !crate::settings::get_app_settings().hide_when_maximized {
+        return false;
+    }
     let now = unix_ms();
     let last = LAST_MS.load(Ordering::Relaxed);
     if now.saturating_sub(last) < CACHE_MS {
@@ -297,5 +307,15 @@ mod tests {
             screen,
             visible
         ));
+    }
+
+    #[test]
+    fn hide_when_maximized_off_is_a_cheap_false() {
+        invalidate();
+        assert!(
+            !crate::settings::get_app_settings().hide_when_maximized,
+            "default settings keep the occupancy walk off"
+        );
+        assert!(!frontmost_fills_display());
     }
 }

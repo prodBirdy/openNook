@@ -78,6 +78,11 @@ fn migrate(conn: &Connection) -> Result<()> {
         "CREATE TABLE IF NOT EXISTS message_watermarks (
             conversation_id TEXT PRIMARY KEY,
             last_rowid INTEGER NOT NULL
+        "CREATE TABLE IF NOT EXISTS lyrics (
+            cache_key TEXT PRIMARY KEY,
+            payload TEXT,
+            hit INTEGER NOT NULL DEFAULT 0,
+            fetched_at INTEGER NOT NULL
         )",
         [],
     )?;

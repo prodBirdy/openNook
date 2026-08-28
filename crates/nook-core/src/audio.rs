@@ -2,6 +2,9 @@ use crate::models::NowPlayingData;
 use crate::utils::fetch_artwork_from_url;
 
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::OnceLock;
+use std::time::Duration;
+use tokio::sync::Notify;
 
 /// Global state for audio levels (updated by audio monitoring thread)
 static AUDIO_LEVELS: std::sync::OnceLock<std::sync::Mutex<Vec<f64>>> = std::sync::OnceLock::new();
@@ -25,6 +28,8 @@ pub fn init_audio_state() {
     let _ = AUDIO_LEVELS.set(std::sync::Mutex::new(vec![0.15; 6]));
     let _ = TRACK_CACHE.set(std::sync::Mutex::new((None, None, None)));
     let _ = LAST_PLAYED.set(std::sync::Mutex::new(None));
+    #[cfg(target_os = "macos")]
+    crate::mediaremote::ensure_stream();
 }
 
 fn lock_mutex<T>(m: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -306,12 +311,101 @@ fn safari_artwork_url<'a>(page_url: &str, artwork_url: &'a str) -> Option<&'a st
 /// waiting out its idle cadence.
 static MEDIA_EVENT: AtomicBool = AtomicBool::new(false);
 
+/// Launch Services snapshot of the AppleScript fallback players, refreshed
+/// from `NSWorkspace` launch/terminate notifications instead of walking the
+/// process table. Bit0 = primed, bit1 = Spotify, bit2 = Music, bit3 = Safari.
+static MEDIA_APPS: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+const MEDIA_APPS_PRIMED: u8 = 1 << 0;
+const MEDIA_APP_SPOTIFY: u8 = 1 << 1;
+const MEDIA_APP_MUSIC: u8 = 1 << 2;
+const MEDIA_APP_SAFARI: u8 = 1 << 3;
+
+static MEDIA_WAKE: OnceLock<Notify> = OnceLock::new();
+
+fn media_wake() -> &'static Notify {
+    MEDIA_WAKE.get_or_init(Notify::new)
+}
+
 pub fn note_media_event() {
     MEDIA_EVENT.store(true, Ordering::Relaxed);
+    media_wake().notify_waiters();
 }
 
 pub fn take_media_event() -> bool {
     MEDIA_EVENT.swap(false, Ordering::Relaxed)
+}
+
+/// Park until a playback-change poke or `timeout`.
+///
+/// The island now-playing loop uses this so idle is one timer, not a 250 ms
+/// poll of the event flag. Subscribe before checking the flag so a poke that
+/// lands in between cannot be missed.
+pub async fn wait_media_or_timeout(timeout: Duration) {
+    let notified = media_wake().notified();
+    tokio::pin!(notified);
+    if MEDIA_EVENT.swap(false, Ordering::Relaxed) {
+        return;
+    }
+    tokio::select! {
+        _ = notified => {
+            let _ = MEDIA_EVENT.swap(false, Ordering::Relaxed);
+        }
+        _ = tokio::time::sleep(timeout) => {}
+    }
+}
+
+/// Record that a media-capable app launched or quit. Unknown bundle ids are
+/// ignored so the workspace observers can be wired to every app event.
+pub fn note_media_app_running(bundle_id: &str, running: bool) {
+    let bit = match bundle_id {
+        "com.spotify.client" => MEDIA_APP_SPOTIFY,
+        "com.apple.Music" => MEDIA_APP_MUSIC,
+        "com.apple.Safari" => MEDIA_APP_SAFARI,
+        _ => return,
+    };
+    let mut packed = MEDIA_APPS.load(Ordering::Relaxed) | MEDIA_APPS_PRIMED;
+    if running {
+        packed |= bit;
+    } else {
+        packed &= !bit;
+    }
+    MEDIA_APPS.store(packed, Ordering::Relaxed);
+}
+
+/// `(spotify, music, safari)` from the launch/terminate cache, priming via
+/// `NSRunningApplication` once if no observer has run yet.
+#[cfg(target_os = "macos")]
+fn media_players_running() -> (bool, bool, bool) {
+    let packed = MEDIA_APPS.load(Ordering::Relaxed);
+    if packed & MEDIA_APPS_PRIMED == 0 {
+        return prime_media_apps();
+    }
+    (
+        packed & MEDIA_APP_SPOTIFY != 0,
+        packed & MEDIA_APP_MUSIC != 0,
+        packed & MEDIA_APP_SAFARI != 0,
+    )
+}
+
+/// Seed the media-app bits from Launch Services. Called from
+/// `install_media_observers` so the first AppleScript poll does not race.
+#[cfg(target_os = "macos")]
+pub fn prime_media_apps() -> (bool, bool, bool) {
+    let spotify = app_running(c"com.spotify.client");
+    let music = app_running(c"com.apple.Music");
+    let safari = app_running(c"com.apple.Safari");
+    let mut packed = MEDIA_APPS_PRIMED;
+    if spotify {
+        packed |= MEDIA_APP_SPOTIFY;
+    }
+    if music {
+        packed |= MEDIA_APP_MUSIC;
+    }
+    if safari {
+        packed |= MEDIA_APP_SAFARI;
+    }
+    MEDIA_APPS.store(packed, Ordering::Relaxed);
+    (spotify, music, safari)
 }
 
 /// Whether an app with this bundle id is running, via Launch Services.
@@ -337,7 +431,8 @@ fn app_running(bundle_id: &std::ffi::CStr) -> bool {
 /// Get currently playing music information.
 ///
 /// On macOS this prefers MediaRemote via [mediaremote-adapter]
-/// (`get --now`), which works for any now-playing app on 15.4+.
+/// (live `stream` cell, `get --now` only as primer / fallback),
+/// which works for any now-playing app on 15.4+.
 /// AppleScript (Spotify / Music / Safari) is the fallback.
 ///
 /// [mediaremote-adapter]: https://github.com/ungive/mediaremote-adapter
@@ -362,11 +457,7 @@ pub async fn get_now_playing() -> NowPlayingData {
         // Services' in-process app list — no walk of the whole process table
         // (the sysinfo refresh this replaces enumerated every pid on the
         // system each poll, a measurable slice of idle CPU).
-        let (spotify_running, music_running, safari_running) = (
-            app_running(c"com.spotify.client"),
-            app_running(c"com.apple.Music"),
-            app_running(c"com.apple.Safari"),
-        );
+        let (spotify_running, music_running, safari_running) = media_players_running();
 
         // If no relevant apps are running, return early with no overhead
         if !spotify_running && !music_running && !safari_running {
@@ -1381,6 +1472,22 @@ mod tests {
     }
 
     #[test]
+    fn media_app_running_cache_ignores_unrelated_bundles() {
+        note_media_app_running("com.apple.finder", true);
+        note_media_app_running("com.spotify.client", true);
+        note_media_app_running("com.apple.Music", false);
+        note_media_app_running("com.apple.Safari", true);
+        let packed = MEDIA_APPS.load(Ordering::Relaxed);
+        assert_ne!(packed & MEDIA_APPS_PRIMED, 0);
+        assert_ne!(packed & MEDIA_APP_SPOTIFY, 0);
+        assert_eq!(packed & MEDIA_APP_MUSIC, 0);
+        assert_ne!(packed & MEDIA_APP_SAFARI, 0);
+        note_media_app_running("com.spotify.client", false);
+        let packed = MEDIA_APPS.load(Ordering::Relaxed);
+        assert_eq!(packed & MEDIA_APP_SPOTIFY, 0);
+    }
+
+    #[test]
     fn safari_artwork_accepts_supported_https_origins() {
         assert_eq!(
             safari_artwork_url(
@@ -1389,5 +1496,41 @@ mod tests {
             ),
             Some("https://music.youtube.com/favicon.ico")
         );
+    }
+
+    static MEDIA_WAIT_TEST: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn wait_media_returns_when_event_already_set() {
+        let _g = MEDIA_WAIT_TEST.lock().unwrap_or_else(|e| e.into_inner());
+        let _ = take_media_event();
+        note_media_event();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        let start = std::time::Instant::now();
+        rt.block_on(wait_media_or_timeout(Duration::from_secs(3)));
+        assert!(start.elapsed() < Duration::from_millis(250));
+    }
+
+    #[test]
+    fn wait_media_wakes_on_note() {
+        let _g = MEDIA_WAIT_TEST.lock().unwrap_or_else(|e| e.into_inner());
+        let _ = take_media_event();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        let start = std::time::Instant::now();
+        rt.block_on(async {
+            let waiter = wait_media_or_timeout(Duration::from_secs(3));
+            let poker = async {
+                tokio::time::sleep(Duration::from_millis(15)).await;
+                note_media_event();
+            };
+            tokio::join!(waiter, poker);
+        });
+        assert!(start.elapsed() < Duration::from_millis(500));
     }
 }
