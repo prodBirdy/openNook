@@ -3834,6 +3834,8 @@ dependencies = [
  "futures-executor",
  "futures-util",
  "log",
+ "notify",
+ "notify-debouncer-mini",
  "objc2",
  "objc2-event-kit",
  "objc2-foundation",
@@ -3845,6 +3847,7 @@ dependencies = [
  "serde_json",
  "sysinfo 0.37.2",
  "tokio",
+ "walkdir",
  "windows 0.52.0",
  "winreg",
  "zbus 4.4.0",
@@ -3882,6 +3885,18 @@ dependencies = [
  "notify-types",
  "walkdir",
  "windows-sys 0.52.0",
+]
+
+[[package]]
+name = "notify-debouncer-mini"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "aaa5a66d07ed97dce782be94dcf5ab4d1b457f4243f7566c7557f15cabc8c799"
+dependencies = [
+ "log",
+ "notify",
+ "notify-types",
+ "tempfile",
 ]
 
 [[package]]

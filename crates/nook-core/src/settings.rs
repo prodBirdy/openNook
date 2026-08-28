@@ -1,6 +1,7 @@
 use crate::database;
 use crate::observe::ObserveConfig;
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 use std::sync::RwLock;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -17,10 +18,11 @@ pub enum WidgetModule {
     Speed = 7,
     Agents = 8,
     Mirror = 9,
+    Obsidian = 10,
 }
 
 impl WidgetModule {
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 11] = [
         Self::Calendar,
         Self::Music,
         Self::Files,
@@ -31,6 +33,7 @@ impl WidgetModule {
         Self::Speed,
         Self::Agents,
         Self::Mirror,
+        Self::Obsidian,
     ];
 
     pub fn from_u8(value: u8) -> Self {
@@ -44,7 +47,9 @@ impl WidgetModule {
     pub fn default_cells(self) -> u8 {
         match self {
             Self::Calendar | Self::Music => 5,
-            Self::Files | Self::Notes | Self::Observe | Self::Reminders | Self::Agents => 4,
+            Self::Files | Self::Notes | Self::Observe | Self::Reminders | Self::Agents | Self::Obsidian => {
+                4
+            }
             Self::Timers | Self::Speed | Self::Mirror => 3,
         }
     }
@@ -53,7 +58,7 @@ impl WidgetModule {
         match self {
             Self::Calendar => 4,
             Self::Music | Self::Files | Self::Observe | Self::Reminders | Self::Mirror => 3,
-            Self::Notes | Self::Timers | Self::Speed | Self::Agents => 2,
+            Self::Notes | Self::Timers | Self::Speed | Self::Agents | Self::Obsidian => 2,
         }
     }
 
@@ -81,6 +86,7 @@ fn default_widget_order() -> Vec<WidgetModule> {
         WidgetModule::Reminders,
         WidgetModule::Timers,
         WidgetModule::Notes,
+        WidgetModule::Obsidian,
         WidgetModule::Speed,
     ]
 }
@@ -142,6 +148,17 @@ pub struct AppSettings {
     pub show_files: bool,
     #[serde(default = "default_true")]
     pub show_mirror: bool,
+    #[serde(default = "default_true")]
+    pub show_obsidian: bool,
+    /// User-chosen vault folder. `None` until Settings picks one.
+    #[serde(default)]
+    pub obsidian_vault: Option<PathBuf>,
+    /// Optional markdown heading that daily-note capture appends under.
+    #[serde(default)]
+    pub obsidian_capture_heading: Option<String>,
+    /// Use `obsidian://new?append=true` instead of writing the daily note.
+    #[serde(default)]
+    pub obsidian_uri_capture: bool,
     #[serde(default)]
     pub observe: ObserveConfig,
     #[serde(default)]
@@ -231,6 +248,10 @@ impl Default for AppSettings {
             show_speed: true,
             show_files: true,
             show_mirror: true,
+            show_obsidian: true,
+            obsidian_vault: None,
+            obsidian_capture_heading: None,
+            obsidian_uri_capture: false,
             observe: ObserveConfig::default(),
             liquid_glass_mode: false,
             non_notch_mode: false,
@@ -276,6 +297,7 @@ impl AppSettings {
             WidgetModule::Speed => self.show_speed,
             WidgetModule::Agents => self.show_agents,
             WidgetModule::Mirror => self.show_mirror,
+            WidgetModule::Obsidian => self.show_obsidian,
         }
     }
 
@@ -291,6 +313,7 @@ impl AppSettings {
             WidgetModule::Speed => self.show_speed = !self.show_speed,
             WidgetModule::Agents => self.show_agents = !self.show_agents,
             WidgetModule::Mirror => self.show_mirror = !self.show_mirror,
+            WidgetModule::Obsidian => self.show_obsidian = !self.show_obsidian,
         }
     }
 
@@ -611,6 +634,10 @@ mod tests {
         assert!(parsed.show_speed);
         assert!(parsed.show_files);
         assert!(parsed.show_mirror);
+        assert!(parsed.show_obsidian);
+        assert_eq!(parsed.obsidian_vault, None);
+        assert_eq!(parsed.obsidian_capture_heading, None);
+        assert!(!parsed.obsidian_uri_capture);
         assert!(parsed.liquid_glass_mode);
         assert!(!parsed.non_notch_mode);
         assert!((parsed.island_x - 0.5).abs() < f32::EPSILON);
@@ -696,6 +723,7 @@ mod tests {
         settings.show_speed = false;
         settings.show_agents = false;
         settings.show_mirror = false;
+        settings.show_obsidian = false;
         settings.set_cells(WidgetModule::Music, 5);
         assert_eq!(settings.used_cells(), 5);
         assert_eq!(settings.remaining_cells(), AppSettings::TOTAL_CELLS - 5);

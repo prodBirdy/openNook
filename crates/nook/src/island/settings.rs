@@ -131,6 +131,7 @@ impl WidgetModuleExt for WidgetModule {
             Self::Speed => "Speed Test",
             Self::Agents => "Agents",
             Self::Mirror => "Mirror",
+            Self::Obsidian => "Obsidian",
         }
     }
 
@@ -146,6 +147,7 @@ impl WidgetModuleExt for WidgetModule {
             Self::Speed => "gauge",
             Self::Agents => "bot",
             Self::Mirror => "webcam",
+            Self::Obsidian => "book",
         }
     }
 
@@ -161,6 +163,12 @@ impl WidgetModuleExt for WidgetModule {
             Self::Speed => "Cloudflare".into(),
             Self::Agents => "Sessions".into(),
             Self::Mirror => "Camera".into(),
+            Self::Obsidian => settings
+                .obsidian_vault
+                .as_ref()
+                .and_then(|path| path.file_name())
+                .map(|name| SharedString::from(name.to_string_lossy().into_owned()))
+                .unwrap_or_else(|| "No vault".into()),
         }
     }
 
@@ -184,6 +192,7 @@ impl WidgetModuleExt for WidgetModule {
             Self::Speed => "Speed",
             Self::Agents => "Agents",
             Self::Mirror => "Mirror",
+            Self::Obsidian => "Obsidian",
         }
     }
 }
@@ -227,10 +236,12 @@ pub(super) struct SettingsView {
     url_focus: FocusHandle,
     token_focus: FocusHandle,
     query_focus: FocusHandle,
+    heading_focus: FocusHandle,
     url_draft: String,
     token_draft: String,
     token_revealed: bool,
     query_draft: String,
+    heading_draft: String,
     catalog: Vec<String>,
     catalog_error: Option<String>,
     catalog_loading: bool,
@@ -254,10 +265,12 @@ impl SettingsView {
             url_focus: cx.focus_handle(),
             token_focus: cx.focus_handle(),
             query_focus: cx.focus_handle(),
+            heading_focus: cx.focus_handle(),
             url_draft: settings.observe.prometheus_url,
             token_draft: settings.observe.metrics_token,
             token_revealed: false,
             query_draft: String::new(),
+            heading_draft: settings.obsidian_capture_heading.clone().unwrap_or_default(),
             catalog: Vec::new(),
             catalog_error: None,
             catalog_loading: false,
@@ -390,6 +403,7 @@ impl gpui::Render for SettingsView {
         let url_focused = self.url_focus.is_focused(window);
         let token_focused = self.token_focus.is_focused(window);
         let query_focused = self.query_focus.is_focused(window);
+        let heading_focused = self.heading_focus.is_focused(window);
 
         div()
             .id("settings-root")
@@ -412,7 +426,14 @@ impl gpui::Render for SettingsView {
             .child(self.sidebar(cx))
             .child(div().w(px(1.)).h_full().bg(hairline()))
             .child(if self.category == SettingsCategory::Widgets {
-                self.render_widgets(&settings, url_focused, token_focused, query_focused, cx)
+                self.render_widgets(
+                    &settings,
+                    url_focused,
+                    token_focused,
+                    query_focused,
+                    heading_focused,
+                    cx,
+                )
                     .into_any_element()
             } else {
                 self.render_general(&settings, cx).into_any_element()
@@ -694,6 +715,7 @@ impl SettingsView {
         url_focused: bool,
         token_focused: bool,
         query_focused: bool,
+        heading_focused: bool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let remaining = settings.remaining_cells();
@@ -733,6 +755,7 @@ impl SettingsView {
                     url_focused,
                     token_focused,
                     query_focused,
+                    heading_focused,
                     cx,
                 )),
         )
@@ -954,6 +977,7 @@ impl SettingsView {
         url_focused: bool,
         token_focused: bool,
         query_focused: bool,
+        heading_focused: bool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let name = self.module.name();
@@ -998,6 +1022,56 @@ impl SettingsView {
                     .into_any_element(),
                 );
             }
+            WidgetModule::Obsidian => {
+                let vault_label = settings
+                    .obsidian_vault
+                    .as_ref()
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_else(|| "None".into());
+                rows.push(
+                    settings_row("obsidian-path")
+                        .child(label("Vault", theme::BODY, true))
+                        .child(label(vault_label, theme::SUBHEADLINE, false))
+                        .into_any_element(),
+                );
+                rows.push(
+                    action_row(
+                        "obsidian-folder",
+                        "Folder",
+                        "Choose Folder…",
+                        cx,
+                        |_, _, cx| {
+                            if let Some(path) = crate::platform::choose_directory() {
+                                nook_core::settings::tweak_app_settings(|s| {
+                                    s.obsidian_vault = Some(path);
+                                });
+                                cx.notify();
+                            }
+                        },
+                    )
+                    .into_any_element(),
+                );
+                if settings.obsidian_vault.is_some() {
+                    rows.push(
+                        action_row("obsidian-clear", "Vault", "Clear", cx, |_, _, cx| {
+                            nook_core::settings::tweak_app_settings(|s| {
+                                s.obsidian_vault = None;
+                            });
+                            cx.notify();
+                        })
+                        .into_any_element(),
+                    );
+                }
+                rows.push(
+                    toggle_row(
+                        "Capture via Obsidian URI",
+                        settings.obsidian_uri_capture,
+                        cx,
+                        |s| s.obsidian_uri_capture = !s.obsidian_uri_capture,
+                    )
+                    .into_any_element(),
+                );
+            }
             _ => {}
         }
 
@@ -1020,6 +1094,9 @@ impl SettingsView {
                     query_focused,
                     cx,
                 ))
+            })
+            .when(self.module == WidgetModule::Obsidian, |d| {
+                d.child(self.render_obsidian_settings(settings, heading_focused, cx))
             })
     }
 
@@ -1334,6 +1411,115 @@ impl SettingsView {
                 ))
             })
     }
+
+    fn persist_heading(&self) {
+        let draft = self.heading_draft.trim().to_string();
+        let heading = if draft.is_empty() { None } else { Some(draft) };
+        nook_core::settings::tweak_app_settings(|s| {
+            s.obsidian_capture_heading = heading;
+        });
+    }
+
+    fn render_obsidian_settings(
+        &self,
+        settings: &AppSettings,
+        heading_focused: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let known = nook_core::obsidian::discover_vaults();
+        let mut vault_rows = Vec::new();
+        if known.is_empty() {
+            vault_rows.push(
+                settings_row("obs-known-empty")
+                    .child(label("No vaults in Obsidian yet", theme::BODY, false))
+                    .into_any_element(),
+            );
+        } else {
+            for vault in &known {
+                let path = vault.path.clone();
+                let selected = settings.obsidian_vault.as_ref() == Some(&vault.path);
+                let name = vault.name.clone();
+                let open = vault.open;
+                vault_rows.push(
+                    div()
+                        .id(SharedString::from(format!("obs-vault-{}", vault.id)))
+                        .px(px(GROUP_PAD))
+                        .min_h(px(ROW_H))
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .gap(px(8.))
+                        .when(selected, |d| d.bg(theme::FILL_TERTIARY))
+                        .hover(|s| s.bg(theme::FILL_TERTIARY))
+                        .cursor(CursorStyle::PointingHand)
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |_, _, _, cx| {
+                                cx.stop_propagation();
+                                let path = path.clone();
+                                nook_core::settings::tweak_app_settings(|s| {
+                                    s.obsidian_vault = Some(path);
+                                });
+                                cx.notify();
+                            }),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w(px(0.))
+                                .flex()
+                                .flex_col()
+                                .child(label(name, theme::BODY, true))
+                                .child(label(
+                                    if open { "Open in Obsidian" } else { "Registered" },
+                                    theme::SUBHEADLINE,
+                                    false,
+                                )),
+                        )
+                        .into_any_element(),
+                );
+            }
+        }
+
+        let heading_placeholder = self.heading_draft.is_empty();
+        let heading_text = if heading_placeholder {
+            "Inbox (optional)"
+        } else {
+            self.heading_draft.as_str()
+        };
+
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(16.))
+            .child(section(
+                "Known Vaults",
+                settings_group(vault_rows),
+                Some("Read from Obsidian’s vault registry. Choose Folder if yours is not listed."),
+            ))
+            .child(section(
+                "Capture",
+                settings_group(vec![field_row(
+                    "obs-heading",
+                    "Heading",
+                    heading_text,
+                    heading_placeholder,
+                    heading_focused,
+                    &self.heading_focus,
+                    cx,
+                    |this, event, cx| {
+                        let persist = SettingsView::apply_key(&mut this.heading_draft, event, cx)
+                            || event.keystroke.key == "enter";
+                        if persist {
+                            this.persist_heading();
+                            cx.notify();
+                        }
+                    },
+                )
+                .into_any_element()]),
+                Some("Daily-note capture appends under this heading, or at the end of the file if empty."),
+            ))
+    }
 }
 
 fn module_blurb(module: WidgetModule) -> SharedString {
@@ -1356,6 +1542,9 @@ fn module_blurb(module: WidgetModule) -> SharedString {
             "Working coding-agent sessions on the compact face and expanded card.".into()
         }
         WidgetModule::Mirror => "A live camera preview that opens when you click the Mirror card.".into(),
+        WidgetModule::Obsidian => {
+            "Vault notes on the shelf. FSEvents keeps the list current; capture appends to today's daily note.".into()
+        }
     }
 }
 
@@ -1727,6 +1916,7 @@ mod tests {
                 "Speed Test",
                 "Agents",
                 "Mirror",
+                "Obsidian",
             ]
         );
         assert!(!names

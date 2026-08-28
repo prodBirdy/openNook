@@ -16,6 +16,7 @@ pub mod models;
 pub mod mouse;
 pub mod notch;
 pub mod notes;
+pub mod obsidian;
 pub mod observe;
 pub mod occupancy;
 pub mod settings;
