@@ -1071,6 +1071,15 @@ impl SettingsView {
                         .into_any_element(),
                     ]),
                     Some("Typed in the island only. opennook://, the CLI, and Finder Services never run commands. Default off."),
+                    "Sound",
+                    settings_group(vec![toggle_row(
+                        "Output picker on the media card",
+                        settings.audio_output_picker,
+                        cx,
+                        |s| s.audio_output_picker = !s.audio_output_picker,
+                    )
+                    .into_any_element()]),
+                    Some(nook_core::audio_devices::AIRPLAY_INITIATE_NOTE),
                 )),
         )
     }
@@ -2578,6 +2587,8 @@ fn module_blurb(module: WidgetModule) -> SharedString {
         }
             WidgetModule::Music => {
             "Now Playing from MediaRemote. Optional time-synced lyrics from LRCLIB — opt-in, fetched at runtime, never bundled.".into()
+        WidgetModule::Music => {
+            "Now Playing from MediaRemote on macOS. The output picker lists CoreAudio devices; it cannot start AirPlay to a HomePod or Apple TV.".into()
         }
         WidgetModule::Files => "Drop zone and tray live on the Tray tab of the expanded island.".into(),
         WidgetModule::Timers => {

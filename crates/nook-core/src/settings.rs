@@ -315,6 +315,10 @@ pub struct AppSettings {
     /// Persist typed commands in the settings DB. Off by default.
     #[serde(default)]
     pub terminal_history: bool,
+    /// AirPlay / output-device picker on the expanded media card. CoreAudio
+    /// HAL only — cannot initiate a new AirPlay route to a HomePod / Apple TV.
+    #[serde(default = "default_true")]
+    pub audio_output_picker: bool,
     #[serde(default)]
     pub window: WindowSettings,
 }
@@ -461,6 +465,7 @@ impl Default for AppSettings {
             terminal_shell: String::new(),
             terminal_timeout_secs: default_terminal_timeout(),
             terminal_history: false,
+            audio_output_picker: true,
             window: WindowSettings::default(),
         }
     }
@@ -1099,5 +1104,12 @@ mod tests {
         assert!(!parsed.thaw_enabled);
         assert!(!parsed.thaw_hidden);
         assert!(!parsed.snap_drag_to_edge);
+    fn audio_output_picker_defaults_on() {
+        let parsed: AppSettings = serde_json::from_str("{}").unwrap();
+        assert!(parsed.audio_output_picker);
+        assert_eq!(
+            parsed.audio_output_picker,
+            AppSettings::default().audio_output_picker
+        );
     }
 }

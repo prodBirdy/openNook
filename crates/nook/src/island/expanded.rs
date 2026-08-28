@@ -127,6 +127,7 @@ impl Island {
                         self.settings.cells_for(module),
                         nook_media_pane(self, cx),
                     ),
+                    cell_pane(self.settings.cells_for(module), nook_media_pane(self, cx)),
                 ),
                 WidgetModule::Calendar if self.settings.show_calendar => add(
                     &mut kids,

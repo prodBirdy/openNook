@@ -292,6 +292,11 @@ pub struct Island {
     pub(crate) shell_focus: Option<FocusHandle>,
     pub(crate) shell_history_idx: Option<usize>,
     shell_job: Option<JobHandle>,
+    /// Output-device list for the media-card picker. Rebuilt when the HAL dirty flag flips.
+    pub(crate) output_devices: Vec<nook_core::audio_devices::OutputDevice>,
+    pub(crate) output_picker_open: bool,
+    output_hud_name: Option<String>,
+    output_hud_until: Option<Instant>,
 }
 
 struct PendingFileDrag {
@@ -441,6 +446,10 @@ impl Island {
             shell_focus: Some(cx.focus_handle()),
             shell_history_idx: None,
             shell_job: None,
+            output_devices: nook_core::audio_devices::snapshot(),
+            output_picker_open: false,
+            output_hud_name: None,
+            output_hud_until: None,
         };
         // Start at the compact idle size so the first paint isn't a jump.
         let (w, h) = this.target_size();
@@ -573,6 +582,7 @@ impl Island {
                     let flash = nook_core::window_snap::flash_is_live();
                     if flash || this.snap_flashing {
                         this.snap_flashing = flash;
+                    if this.sync_output_devices() {
                         dirty = true;
                     }
                     let want_suppress = this.settings.hide_when_maximized
@@ -1222,6 +1232,86 @@ impl Island {
             });
         })
         .detach();
+    }
+
+    /// Consume the HAL dirty flag (and HUD expiry) without adding a timer.
+    fn sync_output_devices(&mut self) -> bool {
+        let mut dirty = false;
+        if !self.settings.audio_output_picker && self.output_picker_open {
+            self.output_picker_open = false;
+            dirty = true;
+        }
+        if !self.expanded && self.output_picker_open {
+            self.output_picker_open = false;
+            dirty = true;
+        }
+        if nook_core::audio_devices::take_dirty() {
+            let devices = nook_core::audio_devices::snapshot();
+            let old_id = self
+                .output_devices
+                .iter()
+                .find(|d| d.is_default)
+                .map(|d| d.id);
+            let had_list = !self.output_devices.is_empty();
+            let new_default = devices.iter().find(|d| d.is_default).cloned();
+            self.output_devices = devices;
+            if had_list {
+                if let Some(dev) = new_default {
+                    if Some(dev.id) != old_id {
+                        self.output_hud_name = Some(dev.name);
+                        self.output_hud_until = Some(Instant::now() + Duration::from_millis(1500));
+                    }
+                }
+            }
+            dirty = true;
+        }
+        if let Some(until) = self.output_hud_until {
+            if Instant::now() >= until {
+                self.output_hud_until = None;
+                self.output_hud_name = None;
+                dirty = true;
+            }
+        }
+        dirty
+    }
+
+    pub(crate) fn output_picker_enabled(&self) -> bool {
+        self.settings.audio_output_picker && nook_core::audio_devices::available()
+    }
+
+    pub(crate) fn output_hud_label(&self) -> Option<&str> {
+        let until = self.output_hud_until?;
+        if Instant::now() < until {
+            self.output_hud_name.as_deref()
+        } else {
+            None
+        }
+    }
+
+    pub(crate) fn toggle_output_picker(&mut self, cx: &mut Context<Self>) {
+        if !self.output_picker_enabled() {
+            self.output_picker_open = false;
+            cx.notify();
+            return;
+        }
+        if self.output_picker_open {
+            self.output_picker_open = false;
+        } else {
+            nook_core::audio_devices::refresh();
+            self.output_devices = nook_core::audio_devices::snapshot();
+            let _ = nook_core::audio_devices::take_dirty();
+            self.output_picker_open = true;
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn select_output_device(&mut self, id: u32, cx: &mut Context<Self>) {
+        let _ = nook_core::audio_devices::set_default_output(id);
+        for device in &mut self.output_devices {
+            device.is_default = device.id == id;
+        }
+        self.output_picker_open = false;
+        cx.notify();
     }
 
     pub(crate) fn has_media(&self) -> bool {
@@ -3051,6 +3141,10 @@ mod tests {
             shell_focus: None,
             shell_history_idx: None,
             shell_job: None,
+            output_devices: Vec::new(),
+            output_picker_open: false,
+            output_hud_name: None,
+            output_hud_until: None,
         }
     }
 
@@ -3280,6 +3374,18 @@ mod tests {
         let face = island.face_timer().expect("finished local wins");
         assert!(matches!(face.source, FaceTimerSource::Local(1)));
         assert_eq!(face.remaining, 0);
+    fn output_hud_label_tracks_ttl() {
+        let mut island = test_island();
+        assert!(island.output_hud_label().is_none());
+        island.output_hud_name = Some("AirPods Pro".into());
+        island.output_hud_until = Some(Instant::now() + Duration::from_secs(2));
+        assert_eq!(island.output_hud_label(), Some("AirPods Pro"));
+        island.output_hud_until = Some(Instant::now() - Duration::from_millis(1));
+        assert!(island.output_hud_label().is_none());
+        island.settings.audio_output_picker = false;
+        island.output_picker_open = true;
+        assert!(island.sync_output_devices());
+        assert!(!island.output_picker_open);
     }
 
     #[test]

@@ -261,6 +261,14 @@ pub(crate) fn nook_media_pane(island: &Island, cx: &mut Context<Island>) -> impl
         .as_deref()
         .and_then(|b64| artwork_element(b64, NOOK_ART, NOOK_ART_RADIUS));
     let lyrics = lyrics_pane(island);
+    let show_picker = island.output_picker_enabled();
+    let picker_open = island.output_picker_open && show_picker;
+    let picker_icon = island
+        .output_devices
+        .iter()
+        .find(|d| d.is_default)
+        .map(|d| d.icon())
+        .unwrap_or("airplay");
 
     div()
         .id("nook-media")
@@ -306,7 +314,9 @@ pub(crate) fn nook_media_pane(island: &Island, cx: &mut Context<Island>) -> impl
                         .child(app_badge(np.bundle_id.as_deref(), np.app_name.as_deref())),
                 ),
         )
-        .child(
+        .child(if picker_open {
+            output_picker_list(island, cx).into_any_element()
+        } else {
             div()
                 .flex()
                 .flex_col()
@@ -325,7 +335,7 @@ pub(crate) fn nook_media_pane(island: &Island, cx: &mut Context<Island>) -> impl
                     div()
                         .flex()
                         .items_center()
-                        .gap(px(18.))
+                        .gap(px(14.))
                         .mt(px(6.))
                         .child(nook_skip("skip-back", "nook-skip-back", cx, |_, _, _| {
                             nook_core::runtime().spawn(async {
@@ -337,9 +347,34 @@ pub(crate) fn nook_media_pane(island: &Island, cx: &mut Context<Island>) -> impl
                             nook_core::runtime().spawn(async {
                                 let _ = nook_core::audio::media_next_track().await;
                             });
-                        })),
+                        }))
+                        .when(show_picker, |d| {
+                            d.child(output_picker_btn(picker_icon, false, cx))
+                        }),
                 )
-                .child(nook_progress(progress, elapsed, duration, seekable, cx)),
+                .child(nook_progress(progress, elapsed, duration, seekable, cx))
+                .into_any_element()
+        })
+}
+
+fn output_picker_btn(icon: &'static str, open: bool, cx: &mut Context<Island>) -> impl IntoElement {
+    div()
+        .id("nook-output-picker")
+        .size(px(22.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .opacity(if open { 1.0 } else { 0.9 })
+        .hover(|s| s.opacity(1.0))
+        .active(|s| s.opacity(0.75))
+        .cursor(CursorStyle::PointingHand)
+        .child(lucide_color(icon, 15.0, rgb(0xffffff)))
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                cx.stop_propagation();
+                this.toggle_output_picker(cx);
+            }),
         )
         .when_some(lyrics, |d, pane| d.child(pane))
 }
@@ -394,6 +429,90 @@ fn lyric_line(text: &str, current: bool) -> AnyElement {
     slide_label(text.to_string(), theme::CALLOUT, current)
         .w_full()
         .into_any_element()
+}
+
+fn output_picker_list(island: &Island, cx: &mut Context<Island>) -> impl IntoElement {
+    let mut list = div()
+        .id("nook-output-list")
+        .flex()
+        .flex_col()
+        .min_w(px(0.))
+        .w(px(200.))
+        .h_full()
+        .overflow_hidden();
+    list = list.child(
+        div()
+            .flex()
+            .items_center()
+            .justify_between()
+            .mb(px(4.))
+            .child(
+                div()
+                    .text_color(rgba(0xffffff99))
+                    .text_size(px(theme::SUBHEADLINE.size))
+                    .line_height(px(theme::SUBHEADLINE.leading))
+                    .child("Output"),
+            )
+            .child(output_picker_btn("airplay", true, cx)),
+    );
+    if island.output_devices.is_empty() {
+        list = list.child(
+            div()
+                .text_color(rgba(0xffffff66))
+                .text_size(px(theme::SUBHEADLINE.size))
+                .child("No output devices"),
+        );
+    } else {
+        for device in &island.output_devices {
+            let id = device.id;
+            let name = device.name.clone();
+            let icon = device.icon();
+            let selected = device.is_default;
+            list = list.child(
+                div()
+                    .id(SharedString::from(format!("out-dev-{id}")))
+                    .flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .h(px(22.))
+                    .rounded(px(4.))
+                    .px(px(2.))
+                    .when(selected, |d| d.bg(rgba(0xffffff18)))
+                    .hover(|s| s.bg(rgba(0xffffff22)))
+                    .cursor(CursorStyle::PointingHand)
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                            cx.stop_propagation();
+                            this.select_output_device(id, cx);
+                        }),
+                    )
+                    .child(lucide_color(icon, 12.0, rgb(0xffffff)))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.))
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .text_color(rgb(0xffffff))
+                            .text_size(px(theme::SUBHEADLINE.size))
+                            .line_height(px(theme::SUBHEADLINE.leading))
+                            .child(name),
+                    )
+                    .when(selected, |d| {
+                        d.child(lucide_color("check", 12.0, rgb(0xffffff)))
+                    }),
+            );
+        }
+    }
+    list.child(
+        div()
+            .mt(px(4.))
+            .text_color(rgba(0xffffff55))
+            .text_size(px(9.))
+            .line_height(px(11.))
+            .child(nook_core::audio_devices::AIRPLAY_INITIATE_NOTE),
+    )
 }
 
 fn app_badge(bundle_id: Option<&str>, app_name: Option<&str>) -> AnyElement {

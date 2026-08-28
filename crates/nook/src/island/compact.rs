@@ -69,6 +69,8 @@ impl Island {
                 .into_any_element();
         if let Some(hud) = self.shell_hud.as_ref() {
             return label(hud.clone(), theme::BODY, true).into_any_element();
+        if let Some(name) = self.output_hud_label() {
+            return label(name.to_string(), theme::BODY, true).into_any_element();
         }
         match mode {
             CompactMode::Media => {

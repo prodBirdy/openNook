@@ -7,6 +7,7 @@ pub mod agents;
 pub mod audio;
 pub mod brightness;
 pub mod automation;
+pub mod audio_devices;
 pub mod browser_media;
 pub mod calendar;
 pub mod database;
@@ -88,6 +89,7 @@ pub fn init() {
         audio::init_audio_state();
         audio::setup_audio_monitoring();
         mixer::init();
+        audio_devices::start();
         mouse::start_polling();
         power::start();
         messages::start_watchers();
