@@ -87,6 +87,12 @@ fn migrate(conn: &Connection) -> Result<()> {
             preview TEXT,
             hit INTEGER NOT NULL DEFAULT 0,
             fetched_at INTEGER NOT NULL
+        "CREATE TABLE IF NOT EXISTS recordings (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            path TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            duration_ms INTEGER NOT NULL,
+            transcript TEXT NOT NULL DEFAULT ''
         )",
         [],
     )?;

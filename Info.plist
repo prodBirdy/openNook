@@ -84,5 +84,9 @@
 			</array>
 		</dict>
 	</array>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>openNook records voice memos from the island. Audio stays on this Mac.</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>openNook transcribes voice memos on-device so you can read them back from the island.</string>
 </dict>
 </plist>

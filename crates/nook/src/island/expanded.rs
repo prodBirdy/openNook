@@ -19,6 +19,8 @@ use crate::widgets::{
     timer_card,
     agents_card, calendar_card, notes_card, observe_card, reminders_card, speed_card,
     sysstats_card, timer_card,
+    agents_card, calendar_card, notes_card, observe_card, recorder_card, reminders_card, speed_card,
+    timer_card,
 };
 use gpui::{
     div, img, prelude::*, px, rgba, AnyElement, Context, CursorStyle, FontWeight, MouseButton,
@@ -217,6 +219,12 @@ impl Island {
                 WidgetModule::SysStats if self.settings.show_sysstats => add(
                     &mut kids,
                     cell_pane(self.settings.cells_for(module), sysstats_card(self, cx)),
+                WidgetModule::Recorder if self.settings.show_recorder => add(
+                    &mut kids,
+                    cell_pane(
+                        self.settings.cells_for(module),
+                        recorder_card(self, cx),
+                    ),
                 ),
                 _ => {}
             }

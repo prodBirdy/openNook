@@ -43,6 +43,9 @@ objc2-core-audio = { version = "0.3.2", features = ["AudioHardware", "objc2", "o
 objc2-core-audio-types = "0.3.2"
 objc2-core-foundation = { version = "0.3.2", features = ["CFDictionary", "CFString"] }
 objc2-core-location = { version = "0.3", features = ["CLLocationManager", "CLLocation"] }
+objc2-avf-audio = "0.3"
+objc2-speech = "0.3"
+objc2-av-foundation = "0.3"
 block2 = "0.6"
 security-framework = "3.7"
 cpal = "0.15"

@@ -38,6 +38,7 @@ pub mod occupancy;
 pub mod power;
 pub mod pomodoro;
 pub mod scroll;
+pub mod recorder;
 pub mod settings;
 pub mod shortcuts;
 pub mod system_timers;

@@ -149,6 +149,7 @@ impl WidgetModuleExt for WidgetModule {
             Self::Vpn => "VPN",
             Self::HighAlert => "High Alert",
             Self::SysStats => "Stats",
+            Self::Recorder => "Voice",
         }
     }
 
@@ -172,6 +173,7 @@ impl WidgetModuleExt for WidgetModule {
             Self::Vpn => "shield",
             Self::HighAlert => "sun",
             Self::SysStats => "activity",
+            Self::Recorder => "mic",
         }
     }
 
@@ -210,6 +212,13 @@ impl WidgetModuleExt for WidgetModule {
             Self::Vpn => vpn_subtitle(settings.vpn_show_timer),
             Self::HighAlert => "Keep awake".into(),
             Self::SysStats => sysstats_subtitle(settings),
+            Self::Recorder => {
+                if settings.recorder_transcribe {
+                    "Live transcript".into()
+                } else {
+                    "Record only".into()
+                }
+            }
         }
     }
 
@@ -241,6 +250,7 @@ impl WidgetModuleExt for WidgetModule {
             Self::Vpn => "VPN",
             Self::HighAlert => "Alert",
             Self::SysStats => "Stats",
+            Self::Recorder => "Voice",
         }
     }
 }
@@ -2375,6 +2385,16 @@ impl SettingsView {
             }
             WidgetModule::Timers => {
                 rows.extend(pomodoro_rows(settings, &self.catalog, cx));
+            WidgetModule::Recorder => {
+                rows.push(
+                    toggle_row(
+                        "Live transcription",
+                        settings.recorder_transcribe,
+                        cx,
+                        |s| s.recorder_transcribe = !s.recorder_transcribe,
+                    )
+                    .into_any_element(),
+                );
             }
             _ => {}
         }
@@ -3075,6 +3095,8 @@ fn module_blurb(module: WidgetModule) -> SharedString {
             "IOPM keep-awake. Timed chips expire in powerd — lid-close sleep is not prevented.".into()
         WidgetModule::SysStats => {
             "Live CPU, memory, network, and disk capacity. Idle cost is zero — sampling starts on expand and stops on collapse.".into()
+        WidgetModule::Recorder => {
+            "Record from the island. Transcription uses Apple's on-device Speech model when available; turn it off for long recordings.".into()
         }
     }
 }
@@ -3806,6 +3828,7 @@ mod tests {
                 "VPN",
                 "High Alert",
                 "Stats",
+                "Voice",
             ]
         );
         assert!(!names

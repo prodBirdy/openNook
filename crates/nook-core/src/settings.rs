@@ -30,6 +30,7 @@ pub enum WidgetModule {
     Vpn = 10,
     HighAlert = 10,
     SysStats = 10,
+    Recorder = 10,
 }
 
 impl WidgetModule {
@@ -52,6 +53,7 @@ impl WidgetModule {
         Self::Vpn,
         Self::HighAlert,
         Self::SysStats,
+        Self::Recorder,
     ];
 
     pub fn from_u8(value: u8) -> Self {
@@ -78,6 +80,7 @@ impl WidgetModule {
             | Self::Reminders
             | Self::Agents
             | Self::SysStats => 4,
+            Self::Files | Self::Notes | Self::Observe | Self::Reminders | Self::Agents | Self::Recorder => 4,
             Self::Timers | Self::Speed | Self::Mirror => 3,
             Self::Timers | Self::Speed | Self::Mirror | Self::Weather => 3,
             Self::Timers | Self::Speed | Self::Mirror | Self::Vpn => 3,
@@ -105,6 +108,7 @@ impl WidgetModule {
             Self::Notes | Self::Timers | Self::Speed | Self::Agents | Self::Weather => 2,
             Self::Notes | Self::Timers | Self::Speed | Self::Agents | Self::Vpn => 2,
             Self::Notes | Self::Timers | Self::Speed | Self::Agents | Self::HighAlert => 2,
+            Self::Notes | Self::Timers | Self::Speed | Self::Agents | Self::Recorder => 2,
         }
     }
 
@@ -144,6 +148,7 @@ fn default_widget_order() -> Vec<WidgetModule> {
         WidgetModule::Vpn,
         WidgetModule::HighAlert,
         WidgetModule::SysStats,
+        WidgetModule::Recorder,
     ]
 }
 
@@ -274,6 +279,10 @@ pub struct AppSettings {
     pub show_sysstats: bool,
     #[serde(default)]
     pub sysstats: SysStatsSettings,
+    pub show_recorder: bool,
+    /// On-device Speech while recording. Off = record-only (cheaper).
+    #[serde(default = "default_true")]
+    pub recorder_transcribe: bool,
     #[serde(default)]
     pub observe: ObserveConfig,
     #[serde(default)]
@@ -523,6 +532,8 @@ impl Default for AppSettings {
             focus_shortcut_break: None,
             show_sysstats: true,
             sysstats: SysStatsSettings::default(),
+            show_recorder: true,
+            recorder_transcribe: true,
             observe: ObserveConfig::default(),
             liquid_glass_mode: false,
             non_notch_mode: false,
@@ -599,6 +610,7 @@ impl AppSettings {
             WidgetModule::Vpn => self.show_vpn,
             WidgetModule::HighAlert => self.show_high_alert,
             WidgetModule::SysStats => self.show_sysstats,
+            WidgetModule::Recorder => self.show_recorder,
         }
     }
 
@@ -625,6 +637,7 @@ impl AppSettings {
             WidgetModule::Vpn => self.show_vpn = !self.show_vpn,
             WidgetModule::HighAlert => self.show_high_alert = !self.show_high_alert,
             WidgetModule::SysStats => self.show_sysstats = !self.show_sysstats,
+            WidgetModule::Recorder => self.show_recorder = !self.show_recorder,
         }
     }
 
@@ -1056,6 +1069,8 @@ mod tests {
         assert_eq!(parsed.focus_shortcut_work, None);
         assert!(parsed.show_sysstats);
         assert_eq!(parsed.sysstats, SysStatsSettings::default());
+        assert!(parsed.show_recorder);
+        assert!(parsed.recorder_transcribe);
         assert!(parsed.liquid_glass_mode);
         assert!(!parsed.non_notch_mode);
         assert!((parsed.island_x - 0.5).abs() < f32::EPSILON);
@@ -1172,6 +1187,7 @@ mod tests {
         settings.show_vpn = false;
         settings.show_high_alert = false;
         settings.show_sysstats = false;
+        settings.show_recorder = false;
         settings.set_cells(WidgetModule::Music, 5);
         assert_eq!(settings.used_cells(), 5);
         assert_eq!(settings.remaining_cells(), AppSettings::TOTAL_CELLS - 5);

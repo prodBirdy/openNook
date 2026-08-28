@@ -104,6 +104,7 @@ impl Island {
             )
             .into_any_element(),
             CompactMode::Shell => lucide("terminal", theme::COMPACT_FACE).into_any_element(),
+            CompactMode::Recording => rec_dot().into_any_element(),
             CompactMode::Onboard => label("openNook", theme::BODY, true).into_any_element(),
             CompactMode::Messages => self
                 .messages
@@ -188,6 +189,8 @@ impl Island {
                 let text = self
                     .vpn
                     .compact_right(self.settings.vpn_show_timer, std::time::SystemTime::now());
+            CompactMode::Recording => {
+                let text = super::ui::format_timer_compact(self.recording_elapsed_secs());
                 timer_text(text, theme::BODY)
                     .min_w(px(40.))
                     .text_right()
@@ -307,6 +310,7 @@ impl Island {
                 CompactMode::Observe => "observe",
                 CompactMode::Battery => "battery",
                 CompactMode::Vpn => "vpn",
+                CompactMode::Recording => "recording",
                 CompactMode::Onboard => "onboard",
                 CompactMode::Messages => "messages",
                 CompactMode::Share => "share",
@@ -380,4 +384,10 @@ mod tests {
         assert_eq!(hud_icon(HudKind::Mute), "volume-x");
         assert_eq!(hud_icon(HudKind::Brightness), "sun");
     }
+fn rec_dot() -> gpui::Div {
+    div()
+        .size(px(8.))
+        .rounded_full()
+        .flex_shrink_0()
+        .bg(theme::DESTRUCTIVE)
 }
