@@ -17,6 +17,9 @@ reqwest.workspace = true
 futures-util.workspace = true
 open.workspace = true
 sysinfo = "0.37"
+sha2 = "0.10"
+hmac = "0.12"
+uuid = { version = "1", features = ["v4"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"

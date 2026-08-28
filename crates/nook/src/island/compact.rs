@@ -64,6 +64,7 @@ impl Island {
                 lucide("triangle-alert", theme::COMPACT_FACE).into_any_element()
             }
             CompactMode::Onboard => label("openNook", theme::BODY, true).into_any_element(),
+            CompactMode::Share => lucide("share", theme::COMPACT_FACE).into_any_element(),
             CompactMode::Idle => div().into_any_element(),
         }
     }
@@ -104,6 +105,9 @@ impl Island {
                     _ => self.observe.firing_count().to_string(),
                 };
                 label(text, theme::BODY, true).into_any_element()
+            }
+            CompactMode::Share => {
+                label(self.share.compact_label(), theme::BODY, true).into_any_element()
             }
             CompactMode::Onboard if hovered => div()
                 .id("github")
@@ -148,6 +152,7 @@ impl Island {
                 CompactMode::Timer => "timer",
                 CompactMode::Observe => "observe",
                 CompactMode::Onboard => "onboard",
+                CompactMode::Share => "share",
             };
             row = row.child(
                 div()

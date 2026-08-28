@@ -10,6 +10,7 @@ use gpui::{
 };
 use gpui_component::slider::{Slider, SliderEvent, SliderState};
 use nook_core::settings::{AppSettings, IslandSwatch, WidgetModule, ISLAND_SWATCHES};
+use nook_core::share::LinkBackendKind;
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU8, Ordering};
@@ -188,6 +189,51 @@ impl WidgetModuleExt for WidgetModule {
     }
 }
 
+fn share_field_a(settings: &AppSettings) -> String {
+    match settings.share.link_backend {
+        LinkBackendKind::WebDav => settings.share.webdav_url.clone(),
+        LinkBackendKind::S3 => settings.share.s3_bucket.clone(),
+        LinkBackendKind::ZeroXZero => String::new(),
+    }
+}
+
+fn share_field_b(settings: &AppSettings) -> String {
+    match settings.share.link_backend {
+        LinkBackendKind::WebDav => settings.share.webdav_username.clone(),
+        LinkBackendKind::S3 => settings.share.s3_access_key.clone(),
+        LinkBackendKind::ZeroXZero => String::new(),
+    }
+}
+
+fn share_field_c(settings: &AppSettings) -> String {
+    match settings.share.link_backend {
+        LinkBackendKind::WebDav => settings.share.webdav_password.clone(),
+        LinkBackendKind::S3 => settings.share.s3_secret_key.clone(),
+        LinkBackendKind::ZeroXZero => String::new(),
+    }
+}
+
+fn share_blurb(backend: LinkBackendKind, receive: bool) -> SharedString {
+    let host = match backend {
+        LinkBackendKind::ZeroXZero => {
+            "0x0.st is a public community host (512 MiB, 30–365 day retention). Files are public-by-URL."
+        }
+        LinkBackendKind::WebDav => {
+            "WebDAV PUT needs a base URL that is already publicly readable. Nextcloud share links need its OCS API — not this mode."
+        }
+        LinkBackendKind::S3 => {
+            "S3 PUT uses SigV4. Permanent links need a public bucket or CloudFront; otherwise treat the object URL as short-lived."
+        }
+    };
+    if receive {
+        format!("{host} Receive is saved but this release does not open a listener.")
+            .into()
+    } else {
+        format!("{host} LocalSend is send-only until you turn receive on (listener ships later).")
+            .into()
+    }
+}
+
 fn observe_subtitle(pinned: usize) -> SharedString {
     match pinned {
         0 => "Prometheus".into(),
@@ -227,8 +273,18 @@ pub(super) struct SettingsView {
     url_focus: FocusHandle,
     token_focus: FocusHandle,
     query_focus: FocusHandle,
+    alias_focus: FocusHandle,
+    pin_focus: FocusHandle,
+    share_a_focus: FocusHandle,
+    share_b_focus: FocusHandle,
+    share_c_focus: FocusHandle,
     url_draft: String,
     token_draft: String,
+    alias_draft: String,
+    pin_draft: String,
+    share_a_draft: String,
+    share_b_draft: String,
+    share_c_draft: String,
     token_revealed: bool,
     query_draft: String,
     catalog: Vec<String>,
@@ -254,6 +310,16 @@ impl SettingsView {
             url_focus: cx.focus_handle(),
             token_focus: cx.focus_handle(),
             query_focus: cx.focus_handle(),
+            alias_focus: cx.focus_handle(),
+            pin_focus: cx.focus_handle(),
+            share_a_focus: cx.focus_handle(),
+            share_b_focus: cx.focus_handle(),
+            share_c_focus: cx.focus_handle(),
+            alias_draft: settings.share.device_alias.clone(),
+            pin_draft: settings.share.localsend_pin.clone(),
+            share_a_draft: share_field_a(&settings),
+            share_b_draft: share_field_b(&settings),
+            share_c_draft: share_field_c(&settings),
             url_draft: settings.observe.prometheus_url,
             token_draft: settings.observe.metrics_token,
             token_revealed: false,
@@ -390,6 +456,11 @@ impl gpui::Render for SettingsView {
         let url_focused = self.url_focus.is_focused(window);
         let token_focused = self.token_focus.is_focused(window);
         let query_focused = self.query_focus.is_focused(window);
+        let alias_focused = self.alias_focus.is_focused(window);
+        let pin_focused = self.pin_focus.is_focused(window);
+        let share_a_focused = self.share_a_focus.is_focused(window);
+        let share_b_focused = self.share_b_focus.is_focused(window);
+        let share_c_focused = self.share_c_focus.is_focused(window);
 
         div()
             .id("settings-root")
@@ -415,7 +486,16 @@ impl gpui::Render for SettingsView {
                 self.render_widgets(&settings, url_focused, token_focused, query_focused, cx)
                     .into_any_element()
             } else {
-                self.render_general(&settings, cx).into_any_element()
+                self.render_general(
+                    &settings,
+                    alias_focused,
+                    pin_focused,
+                    share_a_focused,
+                    share_b_focused,
+                    share_c_focused,
+                    cx,
+                )
+                .into_any_element()
             })
     }
 }
@@ -518,7 +598,50 @@ impl SettingsView {
             )
     }
 
-    fn render_general(&self, settings: &AppSettings, cx: &mut Context<Self>) -> impl IntoElement {
+    fn persist_share_alias(&self) {
+        let draft = self.alias_draft.trim().to_string();
+        let alias = if draft.is_empty() {
+            nook_core::share::default_device_alias()
+        } else {
+            draft
+        };
+        nook_core::settings::tweak_app_settings(|s| s.share.device_alias = alias);
+    }
+
+    fn persist_share_pin(&self) {
+        let draft = self.pin_draft.trim().to_string();
+        nook_core::settings::tweak_app_settings(|s| s.share.localsend_pin = draft);
+    }
+
+    fn persist_share_creds(&self) {
+        let a = self.share_a_draft.trim().to_string();
+        let b = self.share_b_draft.trim().to_string();
+        let c = self.share_c_draft.trim().to_string();
+        nook_core::settings::tweak_app_settings(|s| match s.share.link_backend {
+            LinkBackendKind::WebDav => {
+                s.share.webdav_url = a;
+                s.share.webdav_username = b;
+                s.share.webdav_password = c;
+            }
+            LinkBackendKind::S3 => {
+                s.share.s3_bucket = a;
+                s.share.s3_access_key = b;
+                s.share.s3_secret_key = c;
+            }
+            LinkBackendKind::ZeroXZero => {}
+        });
+    }
+
+    fn render_general(
+        &self,
+        settings: &AppSettings,
+        alias_focused: bool,
+        pin_focused: bool,
+        share_a_focused: bool,
+        share_b_focused: bool,
+        share_c_focused: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         Self::pane(
             "General",
             div()
@@ -569,8 +692,269 @@ impl SettingsView {
                         .into_any_element(),
                     ]),
                     Some("Hover the island to expand. Settings and Quit are in the menu bar extra."),
+                ))
+                .child(self.render_sharing(
+                    settings,
+                    alias_focused,
+                    pin_focused,
+                    share_a_focused,
+                    share_b_focused,
+                    share_c_focused,
+                    cx,
                 )),
         )
+    }
+
+    fn render_sharing(
+        &self,
+        settings: &AppSettings,
+        alias_focused: bool,
+        pin_focused: bool,
+        share_a_focused: bool,
+        share_b_focused: bool,
+        share_c_focused: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let backend = settings.share.link_backend;
+        let mut rows = vec![
+            field_row(
+                "share-alias",
+                "Alias",
+                if self.alias_draft.is_empty() {
+                    "openNook"
+                } else {
+                    &self.alias_draft
+                },
+                self.alias_draft.is_empty(),
+                alias_focused,
+                &self.alias_focus,
+                cx,
+                |this, event, cx| {
+                    if Self::apply_key(&mut this.alias_draft, event, cx) {
+                        this.persist_share_alias();
+                        cx.notify();
+                    }
+                },
+            )
+            .into_any_element(),
+            toggle_row(
+                "Receive LocalSend",
+                settings.share.localsend_receive,
+                cx,
+                |s| s.share.localsend_receive = !s.share.localsend_receive,
+            )
+            .into_any_element(),
+            field_row(
+                "share-pin",
+                "PIN",
+                if self.pin_draft.is_empty() {
+                    "optional"
+                } else {
+                    &self.pin_draft
+                },
+                self.pin_draft.is_empty(),
+                pin_focused,
+                &self.pin_focus,
+                cx,
+                |this, event, cx| {
+                    if Self::apply_key(&mut this.pin_draft, event, cx) {
+                        this.persist_share_pin();
+                        cx.notify();
+                    }
+                },
+            )
+            .into_any_element(),
+            settings_row("share-backend")
+                .child(label("Link host", theme::BODY, true))
+                .child(
+                    segmented_group()
+                        .child(segment(
+                            "0x0.st",
+                            backend == LinkBackendKind::ZeroXZero,
+                            cx,
+                            |this, _, cx| {
+                                nook_core::settings::tweak_app_settings(|s| {
+                                    s.share.link_backend = LinkBackendKind::ZeroXZero
+                                });
+                                let settings = nook_core::settings::get_app_settings();
+                                this.share_a_draft = share_field_a(&settings);
+                                this.share_b_draft = share_field_b(&settings);
+                                this.share_c_draft = share_field_c(&settings);
+                                cx.notify();
+                            },
+                        ))
+                        .child(segment(
+                            "WebDAV",
+                            backend == LinkBackendKind::WebDav,
+                            cx,
+                            |this, _, cx| {
+                                nook_core::settings::tweak_app_settings(|s| {
+                                    s.share.link_backend = LinkBackendKind::WebDav
+                                });
+                                let settings = nook_core::settings::get_app_settings();
+                                this.share_a_draft = share_field_a(&settings);
+                                this.share_b_draft = share_field_b(&settings);
+                                this.share_c_draft = share_field_c(&settings);
+                                cx.notify();
+                            },
+                        ))
+                        .child(segment(
+                            "S3",
+                            backend == LinkBackendKind::S3,
+                            cx,
+                            |this, _, cx| {
+                                nook_core::settings::tweak_app_settings(|s| {
+                                    s.share.link_backend = LinkBackendKind::S3
+                                });
+                                let settings = nook_core::settings::get_app_settings();
+                                this.share_a_draft = share_field_a(&settings);
+                                this.share_b_draft = share_field_b(&settings);
+                                this.share_c_draft = share_field_c(&settings);
+                                cx.notify();
+                            },
+                        )),
+                )
+                .into_any_element(),
+        ];
+        match backend {
+            LinkBackendKind::ZeroXZero => {}
+            LinkBackendKind::WebDav => {
+                rows.push(self.share_cred_row(
+                    "share-url",
+                    "URL",
+                    &self.share_a_draft,
+                    "https://dav.example/public",
+                    share_a_focused,
+                    &self.share_a_focus,
+                    cx,
+                    |this, event, cx| {
+                        if Self::apply_key(&mut this.share_a_draft, event, cx) {
+                            this.persist_share_creds();
+                            cx.notify();
+                        }
+                    },
+                ));
+                rows.push(self.share_cred_row(
+                    "share-user",
+                    "User",
+                    &self.share_b_draft,
+                    "optional",
+                    share_b_focused,
+                    &self.share_b_focus,
+                    cx,
+                    |this, event, cx| {
+                        if Self::apply_key(&mut this.share_b_draft, event, cx) {
+                            this.persist_share_creds();
+                            cx.notify();
+                        }
+                    },
+                ));
+                rows.push(self.share_cred_row(
+                    "share-pass",
+                    "Pass",
+                    if share_c_focused {
+                        &self.share_c_draft
+                    } else if self.share_c_draft.is_empty() {
+                        "Keychain"
+                    } else {
+                        "••••••••"
+                    },
+                    "Keychain",
+                    share_c_focused,
+                    &self.share_c_focus,
+                    cx,
+                    |this, event, cx| {
+                        if Self::apply_key(&mut this.share_c_draft, event, cx) {
+                            this.persist_share_creds();
+                            cx.notify();
+                        }
+                    },
+                ));
+            }
+            LinkBackendKind::S3 => {
+                rows.push(self.share_cred_row(
+                    "share-bucket",
+                    "Bucket",
+                    &self.share_a_draft,
+                    "bucket",
+                    share_a_focused,
+                    &self.share_a_focus,
+                    cx,
+                    |this, event, cx| {
+                        if Self::apply_key(&mut this.share_a_draft, event, cx) {
+                            this.persist_share_creds();
+                            cx.notify();
+                        }
+                    },
+                ));
+                rows.push(self.share_cred_row(
+                    "share-access",
+                    "Key",
+                    &self.share_b_draft,
+                    "access key",
+                    share_b_focused,
+                    &self.share_b_focus,
+                    cx,
+                    |this, event, cx| {
+                        if Self::apply_key(&mut this.share_b_draft, event, cx) {
+                            this.persist_share_creds();
+                            cx.notify();
+                        }
+                    },
+                ));
+                rows.push(self.share_cred_row(
+                    "share-secret",
+                    "Secret",
+                    if share_c_focused {
+                        &self.share_c_draft
+                    } else if self.share_c_draft.is_empty() {
+                        "Keychain"
+                    } else {
+                        "••••••••"
+                    },
+                    "Keychain",
+                    share_c_focused,
+                    &self.share_c_focus,
+                    cx,
+                    |this, event, cx| {
+                        if Self::apply_key(&mut this.share_c_draft, event, cx) {
+                            this.persist_share_creds();
+                            cx.notify();
+                        }
+                    },
+                ));
+            }
+        }
+        section(
+            "Sharing",
+            settings_group(rows),
+            Some(share_blurb(backend, settings.share.localsend_receive)),
+        )
+    }
+
+    fn share_cred_row(
+        &self,
+        id: &'static str,
+        title: &'static str,
+        value: &str,
+        placeholder: &str,
+        focused: bool,
+        focus: &FocusHandle,
+        cx: &mut Context<Self>,
+        on_key: impl Fn(&mut SettingsView, &KeyDownEvent, &mut Context<SettingsView>) + 'static,
+    ) -> AnyElement {
+        let empty = value.is_empty();
+        field_row(
+            id,
+            title,
+            if empty { placeholder } else { value },
+            empty,
+            focused,
+            focus,
+            cx,
+            on_key,
+        )
+        .into_any_element()
     }
 
     fn color_row(&self, settings: &AppSettings, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1348,7 +1732,9 @@ fn module_blurb(module: WidgetModule) -> SharedString {
         WidgetModule::Music => {
             "Now Playing from MediaRemote on macOS, with an AppleScript fallback.".into()
         }
-        WidgetModule::Files => "Drop zone and tray live on the Tray tab of the expanded island.".into(),
+        WidgetModule::Files => {
+            "Drop zone and tray live on the Tray tab. Drag onto LocalSend or Get a link.".into()
+        }
         WidgetModule::Timers => "Countdown presets and a compact ring while a timer is running.".into(),
         WidgetModule::Reminders => "Incomplete reminders from EventKit, same store as Calendar.".into(),
         WidgetModule::Speed => "Cloudflare (then OVH) download probe. Runs from the island card.".into(),

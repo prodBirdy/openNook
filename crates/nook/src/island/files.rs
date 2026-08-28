@@ -9,6 +9,7 @@ use gpui::{
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, ObjectFit, ScrollWheelEvent, SharedString,
 };
 use nook_core::files::FileTrayItem;
+use nook_core::share::{self, DeviceInfo, ShareKind, SharePhase};
 use std::path::PathBuf;
 
 /// Dashed drop-zone chrome. Tiles are a compact horizontal row, not a grid.
@@ -19,7 +20,7 @@ const TILE_RADIUS: f32 = 8.0;
 const TRAY_PREVIEW: f32 = 48.0;
 const TRAY_PAD: f32 = 16.0;
 const TRAY_ZONE_RADIUS: f32 = 22.0;
-const AIRDROP_W: f32 = 156.0;
+const AIRDROP_W: f32 = 132.0;
 /// Same face as the compact album chip.
 const COMPACT_PREVIEW: f32 = theme::COMPACT_FACE;
 const COMPACT_PREVIEW_RADIUS: f32 = 5.0;
@@ -152,14 +153,21 @@ const AIRDROP_BLUE: gpui::Rgba = gpui::Rgba {
     a: 1.0,
 };
 
-fn airdrop_target(cx: &mut Context<Island>) -> impl IntoElement {
+fn drop_target(
+    id: &'static str,
+    title: &'static str,
+    icon: &'static str,
+    fill: gpui::Rgba,
+    cx: &mut Context<Island>,
+    on_drop: impl Fn(&mut Island, &gpui::ExternalPaths, &mut Context<Island>) + 'static,
+) -> impl IntoElement {
     div()
-        .id("airdrop-target")
+        .id(id)
         .flex_shrink_0()
         .h_full()
         .w(px(AIRDROP_W))
         .rounded(px(TRAY_ZONE_RADIUS))
-        .bg(AIRDROP_BLUE)
+        .bg(fill)
         .flex()
         .flex_col()
         .items_center()
@@ -170,19 +178,65 @@ fn airdrop_target(cx: &mut Context<Island>) -> impl IntoElement {
         .can_drop(|drag: &dyn std::any::Any, _, _| {
             drag.downcast_ref::<gpui::ExternalPaths>().is_some()
         })
-        .on_drop(cx.listener(|this, paths: &gpui::ExternalPaths, _, cx| {
+        .on_drop(cx.listener(move |this, paths: &gpui::ExternalPaths, _, cx| {
             cx.stop_propagation();
-            this.airdrop_paths(paths, cx);
+            on_drop(this, paths, cx);
         }))
-        .child(lucide_color("airdrop", 28.0, rgb(0xffffff)))
+        .child(lucide_color(icon, 28.0, rgb(0xffffff)))
         .child(
             div()
-                .text_size(px(15.))
-                .line_height(px(18.))
+                .text_size(px(14.))
+                .line_height(px(17.))
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(rgb(0xffffff))
-                .child("AirDrop"),
+                .child(title),
         )
+}
+
+const LOCALSEND_GREEN: gpui::Rgba = gpui::Rgba {
+    r: 0.10,
+    g: 0.62,
+    b: 0.47,
+    a: 1.0,
+};
+const LINK_AMBER: gpui::Rgba = gpui::Rgba {
+    r: 0.78,
+    g: 0.48,
+    b: 0.12,
+    a: 1.0,
+};
+
+fn airdrop_target(cx: &mut Context<Island>) -> impl IntoElement {
+    drop_target(
+        "airdrop-target",
+        "AirDrop",
+        "airdrop",
+        AIRDROP_BLUE,
+        cx,
+        |this, paths, cx| this.airdrop_paths(paths, cx),
+    )
+}
+
+fn localsend_target(cx: &mut Context<Island>) -> impl IntoElement {
+    drop_target(
+        "localsend-target",
+        "LocalSend",
+        "share",
+        LOCALSEND_GREEN,
+        cx,
+        |this, paths, cx| this.localsend_paths(paths, cx),
+    )
+}
+
+fn get_link_target(cx: &mut Context<Island>) -> impl IntoElement {
+    drop_target(
+        "get-link-target",
+        "Get a link",
+        "link",
+        LINK_AMBER,
+        cx,
+        |this, paths, cx| this.get_link_paths(paths, cx),
+    )
 }
 
 fn is_pdf(file: &FileTrayItem) -> bool {
@@ -227,6 +281,7 @@ fn file_preview(file: &FileTrayItem) -> impl IntoElement {
 
 fn file_card(file: &FileTrayItem, cx: &mut Context<Island>) -> impl IntoElement {
     let path = file.path.clone();
+    let path_send = path.clone();
     let name = file.name.clone();
 
     div()
@@ -259,6 +314,18 @@ fn file_card(file: &FileTrayItem, cx: &mut Context<Island>) -> impl IntoElement 
                 cx.stop_propagation();
                 if this.finish_file_press() {
                     cx.notify();
+                }
+            }),
+        )
+        .on_mouse_down(
+            MouseButton::Right,
+            cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                cx.stop_propagation();
+                let paths = vec![PathBuf::from(path_send.clone())];
+                if event.modifiers.secondary() {
+                    this.start_link_upload(paths, cx);
+                } else {
+                    this.start_localsend(paths, cx);
                 }
             }),
         )
@@ -324,6 +391,7 @@ impl Island {
             );
         }
 
+        let picking = self.share.shows_picker();
         let zone = div()
             .relative()
             .flex_1()
@@ -338,13 +406,94 @@ impl Island {
             } else {
                 rgba(0xFFFFFF2E)
             })
-            .child(row);
+            .child(row)
+            .when(picking, |d| d.child(self.localsend_picker(cx)));
 
         let mut pane = div().flex().size_full().gap(px(12.)).child(zone);
         if hot {
-            pane = pane.child(airdrop_target(cx));
+            pane = pane
+                .child(airdrop_target(cx))
+                .child(localsend_target(cx))
+                .child(get_link_target(cx));
         }
         pane
+    }
+
+    fn localsend_picker(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let mut list = div().flex().flex_col().gap(px(6.)).w_full();
+        if self.share.phase == SharePhase::Discovering {
+            list = list.child(label("Looking for LocalSend devices…", theme::CALLOUT, true));
+        } else if self.share.peers.is_empty() {
+            list = list
+                .child(label("No devices found", theme::BODY, true))
+                .child(label(
+                    "Open LocalSend on the other device, or allow Local Network for openNook.",
+                    theme::CALLOUT,
+                    false,
+                ));
+        } else {
+            for peer in &self.share.peers {
+                let peer = peer.clone();
+                let caption = if peer.device_model.as_deref().unwrap_or("").is_empty() {
+                    peer.alias.clone()
+                } else {
+                    format!(
+                        "{} · {}",
+                        peer.alias,
+                        peer.device_model.as_deref().unwrap_or("")
+                    )
+                };
+                list = list.child(
+                    div()
+                        .id(SharedString::from(format!("peer-{}", peer.fingerprint)))
+                        .h(px(32.))
+                        .px(px(10.))
+                        .rounded(px(8.))
+                        .bg(rgba(0xffffff18))
+                        .flex()
+                        .items_center()
+                        .cursor(CursorStyle::PointingHand)
+                        .hover(|s| s.bg(rgba(0xffffff28)))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                                cx.stop_propagation();
+                                this.send_to_peer(peer.clone(), cx);
+                            }),
+                        )
+                        .child(label(caption, theme::CALLOUT, true)),
+                );
+            }
+        }
+        div()
+            .absolute()
+            .inset_0()
+            .bg(rgba(0x000000CC))
+            .flex()
+            .flex_col()
+            .p(px(12.))
+            .gap(px(8.))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(label("Send with LocalSend", theme::BODY, true))
+                    .child(
+                        div()
+                            .id("share-cancel")
+                            .cursor(CursorStyle::PointingHand)
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                                    cx.stop_propagation();
+                                    this.cancel_share(cx);
+                                }),
+                            )
+                            .child(label("Cancel", theme::CALLOUT, false)),
+                    ),
+            )
+            .child(list)
     }
 
     pub(super) fn file_layout(&self) -> (u16, f32) {
@@ -370,6 +519,247 @@ impl Island {
         self.preferred = Some(super::CompactMode::Files);
         nook_core::haptics::trigger(None);
         cx.notify();
+    }
+
+    pub(super) fn localsend_paths(&mut self, paths: &gpui::ExternalPaths, cx: &mut Context<Self>) {
+        self.start_localsend(paths.paths().iter().cloned().collect(), cx);
+    }
+
+    pub(super) fn get_link_paths(&mut self, paths: &gpui::ExternalPaths, cx: &mut Context<Self>) {
+        self.start_link_upload(paths.paths().iter().cloned().collect(), cx);
+    }
+
+    fn begin_share(&mut self, kind: ShareKind, paths: Vec<PathBuf>, cx: &mut Context<Self>) -> u64 {
+        self.share.gen = self.share.gen.wrapping_add(1);
+        self.share.kind = kind;
+        self.share.paths = paths;
+        self.share.peers.clear();
+        self.share.progress = 0.0;
+        self.share.error = None;
+        self.share.hud = None;
+        self.share.status.clear();
+        self.expanded = true;
+        self.tab = Tab::Files;
+        self.preferred = Some(super::CompactMode::Share);
+        nook_core::haptics::trigger(None);
+        cx.notify();
+        self.share.gen
+    }
+
+    pub(crate) fn cancel_share(&mut self, cx: &mut Context<Self>) {
+        self.share.gen = self.share.gen.wrapping_add(1);
+        self.share = share::ShareSession {
+            gen: self.share.gen,
+            ..share::ShareSession::default()
+        };
+        cx.notify();
+    }
+
+    pub(crate) fn start_localsend(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
+        let paths: Vec<PathBuf> = paths
+            .into_iter()
+            .filter(|path| path.is_file())
+            .collect();
+        if paths.is_empty() {
+            return;
+        }
+        let gen = self.begin_share(ShareKind::LocalSend, paths, cx);
+        self.share.phase = SharePhase::Discovering;
+        self.share.status = "Looking for devices".into();
+        let alias = self.settings.share.device_alias.clone();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    nook_core::runtime()
+                        .block_on(share::localsend::discover_peers(&alias, share::localsend::DISCOVER_WINDOW))
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                if this.share.gen != gen {
+                    return;
+                }
+                match result {
+                    Ok(peers) => {
+                        this.share.peers = peers;
+                        this.share.phase = SharePhase::Picking;
+                        this.share.status = if this.share.peers.is_empty() {
+                            "No devices found".into()
+                        } else {
+                            format!("{} nearby", this.share.peers.len())
+                        };
+                    }
+                    Err(err) => {
+                        this.share.phase = SharePhase::Failed;
+                        this.share.error = Some(err);
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    pub(crate) fn send_to_peer(&mut self, peer: DeviceInfo, cx: &mut Context<Self>) {
+        if self.share.paths.is_empty() {
+            return;
+        }
+        let gen = self.share.gen;
+        self.share.phase = SharePhase::Transferring;
+        self.share.status = format!("Sending to {}", peer.alias);
+        self.share.progress = 0.0;
+        let paths = self.share.paths.clone();
+        let alias = self.settings.share.device_alias.clone();
+        let pin = self.settings.share.localsend_pin.clone();
+        let progress = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let slot = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let progress_ui = progress.clone();
+        let done_ui = done.clone();
+        cx.spawn(async move |this, cx| {
+            let pin = if pin.is_empty() { None } else { Some(pin) };
+            {
+                let progress = progress.clone();
+                let done = done.clone();
+                let slot = slot.clone();
+                cx.background_executor()
+                    .spawn(async move {
+                        let outcome = nook_core::runtime().block_on(share::localsend::send_files(
+                            &alias,
+                            &peer,
+                            &paths,
+                            pin.as_deref(),
+                            |sample| {
+                                progress.store(
+                                    (sample.fraction() * 1000.0) as u32,
+                                    std::sync::atomic::Ordering::Relaxed,
+                                );
+                            },
+                        ));
+                        if let Ok(mut guard) = slot.lock() {
+                            *guard = Some(outcome);
+                        }
+                        done.store(true, std::sync::atomic::Ordering::SeqCst);
+                    })
+                    .detach();
+            }
+            loop {
+                let keep = this
+                    .update(cx, |this, cx| {
+                        if this.share.gen != gen {
+                            return false;
+                        }
+                        this.share.progress =
+                            progress_ui.load(std::sync::atomic::Ordering::Relaxed) as f32 / 1000.0;
+                        cx.notify();
+                        !done_ui.load(std::sync::atomic::Ordering::SeqCst)
+                    })
+                    .unwrap_or(false);
+                if !keep {
+                    break;
+                }
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(80))
+                    .await;
+            }
+            let outcome = slot
+                .lock()
+                .ok()
+                .and_then(|mut guard| guard.take())
+                .unwrap_or_else(|| Err("transfer cancelled".into()));
+            this.update(cx, |this, cx| {
+                if this.share.gen != gen {
+                    return;
+                }
+                match outcome {
+                    Ok(()) => {
+                        this.share.phase = SharePhase::Done;
+                        this.share.progress = 1.0;
+                        this.share.status = "Sent".into();
+                        this.share.hud = Some("Sent".into());
+                    }
+                    Err(err) => {
+                        this.share.phase = SharePhase::Failed;
+                        this.share.error = Some(err);
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+            cx.background_executor()
+                .timer(std::time::Duration::from_secs(2))
+                .await;
+            this.update(cx, |this, cx| {
+                if this.share.gen != gen {
+                    return;
+                }
+                if matches!(this.share.phase, SharePhase::Done) {
+                    this.share = share::ShareSession {
+                        gen: this.share.gen,
+                        ..share::ShareSession::default()
+                    };
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+        cx.notify();
+    }
+
+    pub(crate) fn start_link_upload(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
+        let Some(path) = paths.into_iter().find(|path| path.is_file()) else {
+            return;
+        };
+        let gen = self.begin_share(ShareKind::Link, vec![path.clone()], cx);
+        self.share.phase = SharePhase::Transferring;
+        self.share.status = "Uploading".into();
+        let settings = self.settings.share.clone();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    nook_core::runtime().block_on(share::upload::upload_path(&settings, &path))
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                if this.share.gen != gen {
+                    return;
+                }
+                match result {
+                    Ok(uploaded) => {
+                        this.share.phase = SharePhase::Done;
+                        this.share.progress = 1.0;
+                        this.share.status = uploaded.url.clone();
+                        this.share.hud = Some("Link copied".into());
+                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(uploaded.url));
+                    }
+                    Err(err) => {
+                        this.share.phase = SharePhase::Failed;
+                        this.share.error = Some(err);
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+            cx.background_executor()
+                .timer(std::time::Duration::from_secs(2))
+                .await;
+            this.update(cx, |this, cx| {
+                if this.share.gen != gen {
+                    return;
+                }
+                this.share.hud = None;
+                if matches!(this.share.phase, SharePhase::Done) {
+                    this.share.phase = SharePhase::Idle;
+                    this.share.kind = ShareKind::Idle;
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 }
 

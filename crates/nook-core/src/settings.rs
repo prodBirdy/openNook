@@ -1,5 +1,6 @@
 use crate::database;
 use crate::observe::ObserveConfig;
+use crate::share::ShareSettings;
 use serde::{Deserialize, Serialize};
 use std::sync::RwLock;
 
@@ -168,6 +169,8 @@ pub struct AppSettings {
     #[serde(default)]
     pub widget_widths: Vec<(WidgetModule, u8)>,
     #[serde(default)]
+    pub share: ShareSettings,
+    #[serde(default)]
     pub window: WindowSettings,
 }
 
@@ -239,6 +242,7 @@ impl Default for AppSettings {
             hide_when_maximized: false,
             island_color: None,
             widget_widths: Vec::new(),
+            share: ShareSettings::default(),
             window: WindowSettings::default(),
         }
     }
@@ -422,6 +426,14 @@ static APP_SETTINGS: std::sync::OnceLock<RwLock<AppSettings>> = std::sync::OnceL
 const METRICS_TOKEN_SERVICE: &str = "com.prodBirdy.openNook.metrics";
 #[cfg(target_os = "macos")]
 const METRICS_TOKEN_ACCOUNT: &str = "warmup-bearer";
+#[cfg(target_os = "macos")]
+const SHARE_SECRET_SERVICE: &str = "com.prodBirdy.openNook.share";
+#[cfg(target_os = "macos")]
+const SHARE_WEBDAV_ACCOUNT: &str = "webdav-password";
+#[cfg(target_os = "macos")]
+const SHARE_S3_ACCESS_ACCOUNT: &str = "s3-access-key";
+#[cfg(target_os = "macos")]
+const SHARE_S3_SECRET_ACCOUNT: &str = "s3-secret-key";
 
 #[cfg(target_os = "macos")]
 fn load_metrics_token() -> Option<String> {
@@ -458,6 +470,66 @@ fn load_metrics_token() -> Option<String> {
 
 #[cfg(not(target_os = "macos"))]
 fn store_metrics_token(_token: &str) -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn load_share_secret(account: &str) -> Option<String> {
+    security_framework::passwords::get_generic_password(SHARE_SECRET_SERVICE, account)
+        .ok()
+        .and_then(|bytes| String::from_utf8(bytes).ok())
+}
+
+#[cfg(target_os = "macos")]
+fn store_share_secret(account: &str, secret: &str) -> Result<(), String> {
+    if secret.is_empty() {
+        let _ = security_framework::passwords::delete_generic_password(
+            SHARE_SECRET_SERVICE,
+            account,
+        );
+        Ok(())
+    } else {
+        security_framework::passwords::set_generic_password(
+            SHARE_SECRET_SERVICE,
+            account,
+            secret.as_bytes(),
+        )
+        .map_err(|err| err.to_string())
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn hydrate_share_secrets(share: &mut ShareSettings) {
+    if share.webdav_password.is_empty() {
+        if let Some(secret) = load_share_secret(SHARE_WEBDAV_ACCOUNT) {
+            share.webdav_password = secret;
+        }
+    }
+    if share.s3_access_key.is_empty() {
+        if let Some(secret) = load_share_secret(SHARE_S3_ACCESS_ACCOUNT) {
+            share.s3_access_key = secret;
+        }
+    }
+    if share.s3_secret_key.is_empty() {
+        if let Some(secret) = load_share_secret(SHARE_S3_SECRET_ACCOUNT) {
+            share.s3_secret_key = secret;
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn hydrate_share_secrets(_share: &mut ShareSettings) {}
+
+#[cfg(target_os = "macos")]
+fn persist_share_secrets(share: &ShareSettings) -> Result<(), String> {
+    store_share_secret(SHARE_WEBDAV_ACCOUNT, &share.webdav_password)?;
+    store_share_secret(SHARE_S3_ACCESS_ACCOUNT, &share.s3_access_key)?;
+    store_share_secret(SHARE_S3_SECRET_ACCOUNT, &share.s3_secret_key)?;
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn persist_share_secrets(_share: &ShareSettings) -> Result<(), String> {
     Ok(())
 }
 
@@ -532,6 +604,7 @@ pub fn load_from_db() {
             if settings.window.non_notch_mode {
                 settings.non_notch_mode = true;
             }
+            hydrate_share_secrets(&mut settings.share);
             let filled_url = settings.observe.prometheus_url.trim().is_empty();
             crate::observe::fill_default_url(&mut settings.observe);
             if let Ok(mut guard) = app_store().write() {
@@ -580,6 +653,10 @@ fn persist() {
         log::warn!("failed to persist metrics token to Keychain: {err}");
         return;
     }
+    if let Err(err) = persist_share_secrets(&settings.share) {
+        log::warn!("failed to persist share secrets: {err}");
+        return;
+    }
     if let Ok(json) = serde_json::to_string(&settings) {
         if let Err(err) = database::set_setting("app_settings", &json) {
             log::warn!("failed to persist app settings: {err}");
@@ -617,6 +694,12 @@ mod tests {
         assert_eq!(parsed.island_y, 0.0);
         assert!(!parsed.hide_when_maximized);
         assert_eq!(parsed.island_color, None);
+        assert!(!parsed.share.localsend_receive);
+        assert_eq!(parsed.share.device_alias, "openNook");
+        assert_eq!(
+            parsed.share.link_backend,
+            crate::share::LinkBackendKind::ZeroXZero
+        );
     }
 
     #[test]

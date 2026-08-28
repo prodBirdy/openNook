@@ -19,6 +19,7 @@ pub mod notes;
 pub mod observe;
 pub mod occupancy;
 pub mod settings;
+pub mod share;
 pub mod utils;
 pub mod widgets;
 
