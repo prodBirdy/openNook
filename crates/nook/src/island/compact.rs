@@ -128,14 +128,18 @@ impl Island {
                     div().into_any_element()
                 }
             }
+            // Onboard is not a titled compact face (Mac 0.3.0 has no app-name
+            // pill). Keep the arm empty so a leftover preferred mode cannot
+            // paint "openNook" / clip to "openNc".
+            CompactMode::Onboard | CompactMode::Idle => div().into_any_element(),
         }
     }
 
     fn compact_right(
         &self,
         mode: CompactMode,
-        hovered: bool,
-        cx: &mut Context<Self>,
+        _hovered: bool,
+        _cx: &mut Context<Self>,
     ) -> AnyElement {
         if self.hud_active() {
             return self.hud_slider(cx);

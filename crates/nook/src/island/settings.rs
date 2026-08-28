@@ -1525,6 +1525,11 @@ impl SettingsView {
                     "Exclude apps",
                     settings_group(vec![self.exclude_row(exclude, cx).into_any_element()]),
                     Some("Comma-separated bundle IDs. Frontmost app at copy time is the heuristic."),
+                    Some(if cfg!(target_os = "macos") {
+                        "Hover the island to expand. Settings and Quit are in the menu bar extra."
+                    } else {
+                        "Click or scroll the island to expand. Ctrl+, opens Settings; Ctrl+Q quits."
+                    }),
                 )),
         )
     }

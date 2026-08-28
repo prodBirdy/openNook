@@ -1461,6 +1461,31 @@ mod tests {
     }
 
     #[test]
+    fn linux_stub_notch_origin_is_top_center() {
+        // Linux reports has_notch=false and a stub width from
+        // calculate_dynamic_notch_width(real_width). Default island_x=0.5
+        // then centres that wrap on the *reported* screen — a leftover
+        // 1920-wide canvas parked the same pill at x≈860 on a 1280 display.
+        let settings = AppSettings::default();
+        assert!((settings.island_x - 0.5).abs() < f32::EPSILON);
+        assert_eq!(settings.island_y, 0.0);
+        let screen_w = 1280.0;
+        let screen_h = 800.0;
+        let notch_w = (screen_w as f64 * 0.1).clamp(200.0, 260.0) as f32;
+        let wrap_w = notch_w + 1.0;
+        let wrap_h = 32.0 + 1.0 + 1.0;
+        let (x, y) = settings.island_origin(screen_w, screen_h, wrap_w, wrap_h);
+        assert_eq!(y, 0.0);
+        assert!((x - (screen_w - wrap_w) / 2.0).abs() < 0.01);
+        let parked_on_1920 = (1920.0 - wrap_w) / 2.0;
+        assert!(
+            (x - parked_on_1920).abs() > 100.0,
+            "a 1920-wide canvas parks the pill at {parked_on_1920}, which is the right of 1280; got {x}"
+        );
+        assert!(settings.island_attached(screen_h));
+    }
+
+    #[test]
     fn island_origin_tracks_a_drag_and_clamps() {
         let mut settings = AppSettings::default();
         settings.set_island_origin(0.0, 120.0, 1512.0, 982.0, 180.0);

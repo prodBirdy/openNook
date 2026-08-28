@@ -2763,6 +2763,8 @@ impl Island {
         if self.first_run {
             modes.push(CompactMode::Onboard);
         }
+        // First-run still calls mark_onboarded() on first expand. Do not
+        // expose Onboard as a compact face — Mac 0.3.0 has no titled pill.
         modes.push(CompactMode::Idle);
         modes
     }
@@ -2862,6 +2864,7 @@ impl Island {
             return (base_w + 120.0, base_h + theme::COMPACT_HEIGHT_OVERFLOW);
         }
         if self.mode() == CompactMode::Idle {
+        if matches!(self.mode(), CompactMode::Idle | CompactMode::Onboard) {
             let h = if self.settings.non_notch_mode {
                 1.0
             } else {
@@ -4173,6 +4176,37 @@ mod tests {
         let (w, h) = island.target_size();
         assert_eq!(w, 185.0 + theme::IDLE_NOTCH_OVERFLOW);
         assert_eq!(h, 1.0);
+    }
+
+    #[test]
+    fn first_run_compact_is_idle_housing_wrap() {
+        let mut island = test_island();
+        island.first_run = true;
+        island.notch_width = 185.0;
+        island.notch_height = 38.0;
+        assert_eq!(island.available_modes(), vec![CompactMode::Idle]);
+        assert_eq!(island.mode(), CompactMode::Idle);
+        let idle = island.target_size();
+        assert_eq!(idle.0, 185.0 + theme::IDLE_NOTCH_OVERFLOW);
+        assert_eq!(
+            idle.1,
+            38.0 + theme::IDLE_NOTCH_OVERFLOW + theme::COMPACT_HEIGHT_OVERFLOW
+        );
+
+        // If Onboard is still selected, it must use the same wrap — not the
+        // live-activity capsule that painted a clipped "openNook" title.
+        island.preferred = Some(CompactMode::Onboard);
+        assert!(
+            !island.available_modes().contains(&CompactMode::Onboard),
+            "Onboard is not a compact face and does not imply a title"
+        );
+        assert_eq!(island.mode(), CompactMode::Idle);
+        assert_eq!(island.target_size(), idle);
+        let capsule = (
+            island.notch_width.max(180.0) + 120.0,
+            island.notch_height.max(32.0) + theme::COMPACT_HEIGHT_OVERFLOW,
+        );
+        assert_ne!(idle, capsule);
     }
 
     #[test]
