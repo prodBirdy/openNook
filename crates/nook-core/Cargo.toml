@@ -17,6 +17,8 @@ reqwest.workspace = true
 futures-util.workspace = true
 open.workspace = true
 sysinfo = "0.37"
+notify = "7"
+plist = "1"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"

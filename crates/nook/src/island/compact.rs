@@ -78,6 +78,13 @@ impl Island {
                     .into_any_element()
             }
             CompactMode::Onboard => label("openNook", theme::BODY, true).into_any_element(),
+            CompactMode::Messages => self
+                .messages
+                .incoming
+                .as_ref()
+                .map(widgets::messages_compact_left)
+                .map(|el| el.into_any_element())
+                .unwrap_or_else(|| div().into_any_element()),
             CompactMode::Idle => div().into_any_element(),
         }
     }
@@ -128,6 +135,13 @@ impl Island {
                 cx,
             )
             .into_any_element(),
+            CompactMode::Messages => self
+                .messages
+                .incoming
+                .as_ref()
+                .map(widgets::messages_compact_right)
+                .map(|el| el.into_any_element())
+                .unwrap_or_else(|| div().into_any_element()),
             CompactMode::Onboard if hovered => div()
                 .id("github")
                 .cursor(CursorStyle::PointingHand)
@@ -172,6 +186,7 @@ impl Island {
                 CompactMode::Observe => "observe",
                 CompactMode::Battery => "battery",
                 CompactMode::Onboard => "onboard",
+                CompactMode::Messages => "messages",
             };
             row = row.child(
                 div()

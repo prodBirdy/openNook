@@ -18,6 +18,7 @@ pub enum WidgetModule {
     Agents = 8,
     Mirror = 9,
     Battery = 10,
+    Messages = 10,
 }
 
 impl WidgetModule {
@@ -33,6 +34,7 @@ impl WidgetModule {
         Self::Agents,
         Self::Mirror,
         Self::Battery,
+        Self::Messages,
     ];
 
     pub fn from_u8(value: u8) -> Self {
@@ -48,6 +50,10 @@ impl WidgetModule {
             Self::Calendar | Self::Music => 5,
             Self::Files | Self::Notes | Self::Observe | Self::Reminders | Self::Agents => 4,
             Self::Timers | Self::Speed | Self::Mirror | Self::Battery => 3,
+            Self::Files | Self::Notes | Self::Observe | Self::Reminders | Self::Agents | Self::Messages => {
+                4
+            }
+            Self::Timers | Self::Speed | Self::Mirror => 3,
         }
     }
 
@@ -56,6 +62,10 @@ impl WidgetModule {
             Self::Calendar => 4,
             Self::Music | Self::Files | Self::Observe | Self::Reminders | Self::Mirror => 3,
             Self::Notes | Self::Timers | Self::Speed | Self::Agents | Self::Battery => 2,
+            Self::Music | Self::Files | Self::Observe | Self::Reminders | Self::Mirror | Self::Messages => {
+                3
+            }
+            Self::Notes | Self::Timers | Self::Speed | Self::Agents => 2,
         }
     }
 
@@ -85,6 +95,7 @@ fn default_widget_order() -> Vec<WidgetModule> {
         WidgetModule::Notes,
         WidgetModule::Speed,
         WidgetModule::Battery,
+        WidgetModule::Messages,
     ]
 }
 
@@ -154,6 +165,10 @@ pub struct AppSettings {
     /// shortcut falls back to the osascript-admin prompt.
     #[serde(default = "default_lpm_shortcut_name")]
     pub lpm_shortcut_name: Option<String>,
+    pub show_messages: bool,
+    /// Fragile Accessibility CGEvent Return after opening `whatsapp://`.
+    #[serde(default)]
+    pub experimental_whatsapp_autosend: bool,
     #[serde(default)]
     pub observe: ObserveConfig,
     #[serde(default)]
@@ -267,6 +282,8 @@ impl Default for AppSettings {
             show_battery: true,
             battery_alert_threshold: default_battery_alert_threshold(),
             lpm_shortcut_name: default_lpm_shortcut_name(),
+            show_messages: true,
+            experimental_whatsapp_autosend: false,
             observe: ObserveConfig::default(),
             liquid_glass_mode: false,
             non_notch_mode: false,
@@ -317,6 +334,7 @@ impl AppSettings {
             WidgetModule::Agents => self.show_agents,
             WidgetModule::Mirror => self.show_mirror,
             WidgetModule::Battery => self.show_battery,
+            WidgetModule::Messages => self.show_messages,
         }
     }
 
@@ -333,6 +351,10 @@ impl AppSettings {
             WidgetModule::Agents => self.show_agents = !self.show_agents,
             WidgetModule::Mirror => self.show_mirror = !self.show_mirror,
             WidgetModule::Battery => self.show_battery = !self.show_battery,
+            WidgetModule::Messages => {
+                self.show_messages = !self.show_messages;
+                crate::messages::request_refresh();
+            }
         }
     }
 
@@ -661,6 +683,8 @@ mod tests {
             parsed.lpm_shortcut_name.as_deref(),
             Some(crate::power::default_lpm_shortcut_name())
         );
+        assert!(parsed.show_messages);
+        assert!(!parsed.experimental_whatsapp_autosend);
         assert!(parsed.liquid_glass_mode);
         assert!(!parsed.non_notch_mode);
         assert!((parsed.island_x - 0.5).abs() < f32::EPSILON);
@@ -747,6 +771,7 @@ mod tests {
         settings.show_agents = false;
         settings.show_mirror = false;
         settings.show_battery = false;
+        settings.show_messages = false;
         settings.set_cells(WidgetModule::Music, 5);
         assert_eq!(settings.used_cells(), 5);
         assert_eq!(settings.remaining_cells(), AppSettings::TOTAL_CELLS - 5);

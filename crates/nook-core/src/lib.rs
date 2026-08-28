@@ -14,6 +14,7 @@ pub mod hotkeys;
 #[cfg(target_os = "macos")]
 mod mediaremote;
 pub mod menubar;
+pub mod messages;
 pub mod models;
 pub mod mouse;
 pub mod notch;
@@ -68,6 +69,7 @@ pub fn init() {
         audio::setup_audio_monitoring();
         mouse::start_polling();
         power::start();
+        messages::start_watchers();
     });
 }
 

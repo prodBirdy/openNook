@@ -6,6 +6,7 @@ use crate::icons::lucide_color;
 use crate::theme;
 use crate::widgets::{
     agents_card, battery_card, calendar_card, notes_card, observe_card, reminders_card, speed_card,
+    agents_card, calendar_card, messages_card, notes_card, observe_card, reminders_card, speed_card,
     timer_card,
 };
 use gpui::{
@@ -161,6 +162,12 @@ impl Island {
                 WidgetModule::Battery if self.settings.show_battery => add(
                     &mut kids,
                     cell_pane(self.settings.cells_for(module), battery_card(self, cx)),
+                WidgetModule::Messages if self.settings.show_messages => add(
+                    &mut kids,
+                    cell_pane(
+                        self.settings.cells_for(module),
+                        messages_card(self, cx),
+                    ),
                 ),
                 _ => {}
             }

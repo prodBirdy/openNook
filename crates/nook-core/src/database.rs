@@ -74,6 +74,14 @@ fn migrate(conn: &Connection) -> Result<()> {
         [],
     )?;
 
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS message_watermarks (
+            conversation_id TEXT PRIMARY KEY,
+            last_rowid INTEGER NOT NULL
+        )",
+        [],
+    )?;
+
     Ok(())
 }
 

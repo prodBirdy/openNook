@@ -677,28 +677,7 @@ pub async fn get_now_playing() -> NowPlayingData {
 }
 
 #[cfg(target_os = "macos")]
-fn run_osascript(script: &str) -> Result<String, String> {
-    use std::process::Command;
-    let output = Command::new("/usr/bin/osascript")
-        .arg("-e")
-        .arg(script)
-        .output()
-        .map_err(|e| e.to_string())?;
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    if !output.status.success() {
-        log::warn!("osascript failed ({}): {stderr}", output.status);
-        if stderr.contains("-1743") || stderr.to_lowercase().contains("not allowed") {
-            log::warn!(
-                "Automation permission denied. Grant access in System Settings → Privacy & Security → Automation."
-            );
-        }
-        return Err(format!("osascript failed: {}", output.status));
-    }
-    if !stderr.is_empty() {
-        log::debug!("osascript stderr: {stderr}");
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
-}
+use crate::utils::run_osascript;
 
 /// Get artwork from Music.app using AppleScript to write under the app data dir.
 #[cfg(target_os = "macos")]
