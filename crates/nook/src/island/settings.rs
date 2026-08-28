@@ -131,6 +131,7 @@ impl WidgetModuleExt for WidgetModule {
             Self::Speed => "Speed Test",
             Self::Agents => "Agents",
             Self::Mirror => "Mirror",
+            Self::Notifications => "Notifications",
         }
     }
 
@@ -146,6 +147,7 @@ impl WidgetModuleExt for WidgetModule {
             Self::Speed => "gauge",
             Self::Agents => "bot",
             Self::Mirror => "webcam",
+            Self::Notifications => "bell",
         }
     }
 
@@ -161,6 +163,7 @@ impl WidgetModuleExt for WidgetModule {
             Self::Speed => "Cloudflare".into(),
             Self::Agents => "Sessions".into(),
             Self::Mirror => "Camera".into(),
+            Self::Notifications => notify_subtitle(settings),
         }
     }
 
@@ -184,7 +187,49 @@ impl WidgetModuleExt for WidgetModule {
             Self::Speed => "Speed",
             Self::Agents => "Agents",
             Self::Mirror => "Mirror",
+            Self::Notifications => "Notify",
         }
+    }
+}
+
+fn notification_permission_rows(cx: &mut Context<SettingsView>) -> Vec<AnyElement> {
+    use nook_core::notifications::PermissionState;
+    let ax = crate::platform::ax_process_trusted(false);
+    let fda = crate::platform::full_disk_access();
+    let ax_label = if ax { "Granted" } else { "Not granted" };
+    let fda_label = match fda {
+        PermissionState::Granted => "Granted",
+        PermissionState::Denied => "Not granted",
+        PermissionState::Unavailable => "Unavailable",
+    };
+    vec![
+        action_row("notify-ax", "Accessibility", ax_label, cx, |_, _, _| {
+            if !crate::platform::ax_process_trusted(true) {
+                crate::platform::open_privacy_accessibility();
+            }
+        })
+        .into_any_element(),
+        action_row(
+            "notify-fda",
+            "Full Disk Access",
+            fda_label,
+            cx,
+            |_, _, _| {
+                crate::platform::open_privacy_full_disk_access();
+            },
+        )
+        .into_any_element(),
+    ]
+}
+
+fn notify_subtitle(settings: &AppSettings) -> SharedString {
+    if !settings.show_notifications {
+        return "Off".into();
+    }
+    if crate::platform::ax_process_trusted(false) {
+        "Accessibility".into()
+    } else {
+        "Needs Accessibility".into()
     }
 }
 
@@ -998,6 +1043,9 @@ impl SettingsView {
                     .into_any_element(),
                 );
             }
+            WidgetModule::Notifications => {
+                rows.extend(notification_permission_rows(cx));
+            }
             _ => {}
         }
 
@@ -1021,6 +1069,86 @@ impl SettingsView {
                     cx,
                 ))
             })
+            .when(self.module == WidgetModule::Notifications, |d| {
+                d.child(self.render_notification_settings(settings, cx))
+            })
+    }
+
+    fn render_notification_settings(
+        &self,
+        settings: &AppSettings,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let mut filter_rows = Vec::new();
+        let apps = nook_core::notifications::known_apps();
+        if apps.is_empty() {
+            filter_rows.push(
+                settings_row("notify-apps-empty")
+                    .child(label(
+                        "Apps appear here after a notification is captured.",
+                        theme::BODY,
+                        false,
+                    ))
+                    .into_any_element(),
+            );
+        } else {
+            for (id, name) in apps {
+                let blocked = settings.notification_app_blocked(&id);
+                let toggle_id = id.clone();
+                filter_rows.push(
+                    settings_row(SharedString::from(format!("notify-app-{id}")))
+                        .cursor(CursorStyle::PointingHand)
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |_, _, _, cx| {
+                                cx.stop_propagation();
+                                nook_core::settings::tweak_app_settings(|s| {
+                                    s.toggle_notification_app(&toggle_id);
+                                });
+                                cx.notify();
+                            }),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w(px(0.))
+                                .flex()
+                                .flex_col()
+                                .gap(px(1.))
+                                .child(label(name, theme::BODY, true))
+                                .child(label(id, theme::SUBHEADLINE, false)),
+                        )
+                        .child(label(
+                            if blocked { "Hidden" } else { "Shown" },
+                            theme::SUBHEADLINE,
+                            false,
+                        ))
+                        .child(toggle_knob(!blocked))
+                        .into_any_element(),
+                );
+            }
+        }
+
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(16.))
+            .child(section(
+                "Full Disk Access",
+                settings_group(vec![toggle_row(
+                    "Read notification history",
+                    settings.notification_fda_opt_in,
+                    cx,
+                    |s| s.notification_fda_opt_in = !s.notification_fda_opt_in,
+                )
+                .into_any_element()]),
+                Some("Backfills banners the Accessibility scrape missed. You must add openNook in System Settings › Privacy & Security › Full Disk Access — there is no prompt."),
+            ))
+            .child(section(
+                "Per-app filter",
+                settings_group(filter_rows),
+                Some("Hidden apps never enter the shelf."),
+            ))
     }
 
     fn render_observe_settings(
@@ -1356,6 +1484,9 @@ fn module_blurb(module: WidgetModule) -> SharedString {
             "Working coding-agent sessions on the compact face and expanded card.".into()
         }
         WidgetModule::Mirror => "A live camera preview that opens when you click the Mirror card.".into(),
+        WidgetModule::Notifications => {
+            "Captures other apps' banners via Accessibility. Optional usernoted backfill needs a manual Full Disk Access grant. Misses Focus / Do Not Disturb / 'None' styles.".into()
+        }
     }
 }
 
@@ -1705,6 +1836,16 @@ mod tests {
     }
 
     #[test]
+    fn notifications_subtitle_is_honest_when_off() {
+        let settings = AppSettings::default();
+        assert!(!settings.show_notifications);
+        assert_eq!(
+            WidgetModule::Notifications.subtitle(&settings).as_ref(),
+            "Off"
+        );
+    }
+
+    #[test]
     fn observe_subtitle_counts_pinned_metrics() {
         assert_eq!(observe_subtitle(0).as_ref(), "Prometheus");
         assert_eq!(observe_subtitle(1).as_ref(), "1 metric");
@@ -1727,6 +1868,7 @@ mod tests {
                 "Speed Test",
                 "Agents",
                 "Mirror",
+                "Notifications",
             ]
         );
         assert!(!names

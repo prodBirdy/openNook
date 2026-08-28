@@ -63,6 +63,9 @@ impl Island {
             CompactMode::Observe => {
                 lucide("triangle-alert", theme::COMPACT_FACE).into_any_element()
             }
+            CompactMode::Notifications => {
+                widgets::notifications_compact_left(self.notifications.first())
+            }
             CompactMode::Onboard => label("openNook", theme::BODY, true).into_any_element(),
             CompactMode::Idle => div().into_any_element(),
         }
@@ -105,6 +108,10 @@ impl Island {
                 };
                 label(text, theme::BODY, true).into_any_element()
             }
+            CompactMode::Notifications => widgets::notifications_compact_right(
+                self.notification_unread,
+                self.notifications.first(),
+            ),
             CompactMode::Onboard if hovered => div()
                 .id("github")
                 .cursor(CursorStyle::PointingHand)
@@ -147,6 +154,7 @@ impl Island {
                 CompactMode::Files => "files",
                 CompactMode::Timer => "timer",
                 CompactMode::Observe => "observe",
+                CompactMode::Notifications => "notify",
                 CompactMode::Onboard => "onboard",
             };
             row = row.child(

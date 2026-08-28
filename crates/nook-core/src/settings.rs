@@ -17,10 +17,11 @@ pub enum WidgetModule {
     Speed = 7,
     Agents = 8,
     Mirror = 9,
+    Notifications = 10,
 }
 
 impl WidgetModule {
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 11] = [
         Self::Calendar,
         Self::Music,
         Self::Files,
@@ -31,6 +32,7 @@ impl WidgetModule {
         Self::Speed,
         Self::Agents,
         Self::Mirror,
+        Self::Notifications,
     ];
 
     pub fn from_u8(value: u8) -> Self {
@@ -44,7 +46,12 @@ impl WidgetModule {
     pub fn default_cells(self) -> u8 {
         match self {
             Self::Calendar | Self::Music => 5,
-            Self::Files | Self::Notes | Self::Observe | Self::Reminders | Self::Agents => 4,
+            Self::Files
+            | Self::Notes
+            | Self::Observe
+            | Self::Reminders
+            | Self::Agents
+            | Self::Notifications => 4,
             Self::Timers | Self::Speed | Self::Mirror => 3,
         }
     }
@@ -52,7 +59,12 @@ impl WidgetModule {
     pub fn min_cells(self) -> u8 {
         match self {
             Self::Calendar => 4,
-            Self::Music | Self::Files | Self::Observe | Self::Reminders | Self::Mirror => 3,
+            Self::Music
+            | Self::Files
+            | Self::Observe
+            | Self::Reminders
+            | Self::Mirror
+            | Self::Notifications => 3,
             Self::Notes | Self::Timers | Self::Speed | Self::Agents => 2,
         }
     }
@@ -82,6 +94,7 @@ fn default_widget_order() -> Vec<WidgetModule> {
         WidgetModule::Timers,
         WidgetModule::Notes,
         WidgetModule::Speed,
+        WidgetModule::Notifications,
     ]
 }
 
@@ -142,6 +155,17 @@ pub struct AppSettings {
     pub show_files: bool,
     #[serde(default = "default_true")]
     pub show_mirror: bool,
+    /// Off by default: Accessibility (and optional Full Disk Access) must be
+    /// granted before the shelf can see other apps' notifications.
+    #[serde(default)]
+    pub show_notifications: bool,
+    /// User opted into reading the usernoted SQLite store. Still requires a
+    /// manual Full Disk Access grant — there is no programmatic prompt.
+    #[serde(default)]
+    pub notification_fda_opt_in: bool,
+    /// Bundle IDs (or app names) hidden from the shelf.
+    #[serde(default)]
+    pub notification_blocked_apps: Vec<String>,
     #[serde(default)]
     pub observe: ObserveConfig,
     #[serde(default)]
@@ -231,6 +255,9 @@ impl Default for AppSettings {
             show_speed: true,
             show_files: true,
             show_mirror: true,
+            show_notifications: false,
+            notification_fda_opt_in: false,
+            notification_blocked_apps: Vec::new(),
             observe: ObserveConfig::default(),
             liquid_glass_mode: false,
             non_notch_mode: false,
@@ -276,6 +303,25 @@ impl AppSettings {
             WidgetModule::Speed => self.show_speed,
             WidgetModule::Agents => self.show_agents,
             WidgetModule::Mirror => self.show_mirror,
+            WidgetModule::Notifications => self.show_notifications,
+        }
+    }
+
+    pub fn notification_app_blocked(&self, id: &str) -> bool {
+        self.notification_blocked_apps
+            .iter()
+            .any(|entry| entry.eq_ignore_ascii_case(id))
+    }
+
+    pub fn toggle_notification_app(&mut self, id: &str) {
+        if let Some(index) = self
+            .notification_blocked_apps
+            .iter()
+            .position(|entry| entry.eq_ignore_ascii_case(id))
+        {
+            self.notification_blocked_apps.remove(index);
+        } else if !id.is_empty() {
+            self.notification_blocked_apps.push(id.to_string());
         }
     }
 
@@ -291,6 +337,7 @@ impl AppSettings {
             WidgetModule::Speed => self.show_speed = !self.show_speed,
             WidgetModule::Agents => self.show_agents = !self.show_agents,
             WidgetModule::Mirror => self.show_mirror = !self.show_mirror,
+            WidgetModule::Notifications => self.show_notifications = !self.show_notifications,
         }
     }
 
@@ -611,6 +658,9 @@ mod tests {
         assert!(parsed.show_speed);
         assert!(parsed.show_files);
         assert!(parsed.show_mirror);
+        assert!(!parsed.show_notifications);
+        assert!(!parsed.notification_fda_opt_in);
+        assert!(parsed.notification_blocked_apps.is_empty());
         assert!(parsed.liquid_glass_mode);
         assert!(!parsed.non_notch_mode);
         assert!((parsed.island_x - 0.5).abs() < f32::EPSILON);
@@ -696,6 +746,7 @@ mod tests {
         settings.show_speed = false;
         settings.show_agents = false;
         settings.show_mirror = false;
+        settings.show_notifications = false;
         settings.set_cells(WidgetModule::Music, 5);
         assert_eq!(settings.used_cells(), 5);
         assert_eq!(settings.remaining_cells(), AppSettings::TOTAL_CELLS - 5);
@@ -711,6 +762,21 @@ mod tests {
             settings.max_cells_for(WidgetModule::Music),
             WidgetModule::Music.max_cells()
         );
+    }
+
+    #[test]
+    fn notifications_default_off_and_filter_toggles() {
+        let parsed: AppSettings = serde_json::from_str("{}").unwrap();
+        assert!(!parsed.show_notifications);
+        assert!(!parsed.notification_fda_opt_in);
+        assert!(!parsed.is_enabled(WidgetModule::Notifications));
+        let mut settings = AppSettings::default();
+        settings.toggle_enabled(WidgetModule::Notifications);
+        assert!(settings.show_notifications);
+        settings.toggle_notification_app("com.apple.mail");
+        assert!(settings.notification_app_blocked("com.apple.mail"));
+        settings.toggle_notification_app("com.apple.mail");
+        assert!(!settings.notification_app_blocked("com.apple.mail"));
     }
 
     #[cfg(target_os = "macos")]

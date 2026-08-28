@@ -4,6 +4,7 @@ mod agents;
 mod calendar;
 mod notes;
 mod notes_editor;
+mod notifications;
 mod observe;
 mod reminders;
 mod speed;
@@ -15,6 +16,10 @@ pub(crate) use agents::{
 pub(crate) use calendar::calendar_card;
 pub(crate) use notes::notes_card;
 pub(crate) use notes_editor::{NotesEditor, NotesEditorEvent};
+pub(crate) use notifications::{
+    compact_left as notifications_compact_left, compact_right as notifications_compact_right,
+    notifications_card,
+};
 pub(crate) use observe::{observe_card, ObserveHover};
 pub(crate) use reminders::reminders_card;
 pub(crate) use speed::speed_card;

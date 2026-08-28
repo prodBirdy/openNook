@@ -1270,6 +1270,37 @@ pub fn open_calendar() {
     }
 }
 
+/// Accessibility TCC via `AXIsProcessTrustedWithOptions`. `prompt` shows the
+/// system dialog (and deep-links if the user agrees).
+pub fn ax_process_trusted(prompt: bool) -> bool {
+    nook_core::notifications::ax_trusted(prompt)
+}
+
+/// Probe Full Disk Access by trying a readonly open of the usernoted store.
+pub fn full_disk_access() -> nook_core::notifications::PermissionState {
+    nook_core::notifications::fda_status()
+}
+
+pub fn open_privacy_accessibility() {
+    open_privacy_pane("Privacy_Accessibility");
+}
+
+pub fn open_privacy_full_disk_access() {
+    open_privacy_pane("Privacy_AllFiles");
+}
+
+fn open_privacy_pane(anchor: &str) {
+    #[cfg(target_os = "macos")]
+    {
+        let url = format!("x-apple.systempreferences:com.apple.preference.security?{anchor}");
+        let _ = std::process::Command::new("/usr/bin/open").arg(url).spawn();
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = anchor;
+    }
+}
+
 /// System Settings → Appearance → *Accent color* (`NSColor.controlAccentColor`),
 /// as sRGB components in 0..=1. `None` when there is no AppKit to ask or the
 /// color cannot be converted to an RGB space — callers fall back to systemBlue.

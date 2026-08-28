@@ -5,7 +5,8 @@ use super::{Island, Tab};
 use crate::icons::lucide_color;
 use crate::theme;
 use crate::widgets::{
-    agents_card, calendar_card, notes_card, observe_card, reminders_card, speed_card, timer_card,
+    agents_card, calendar_card, notes_card, notifications_card, observe_card, reminders_card,
+    speed_card, timer_card,
 };
 use gpui::{
     div, img, prelude::*, px, rgba, AnyElement, Context, CursorStyle, FontWeight, MouseButton,
@@ -155,6 +156,13 @@ impl Island {
                     cell_pane(
                         self.settings.cells_for(module),
                         speed_card(self.speed_mbps, self.speed_progress, self.speed_running, cx),
+                    ),
+                ),
+                WidgetModule::Notifications if self.settings.show_notifications => add(
+                    &mut kids,
+                    cell_pane(
+                        self.settings.cells_for(module),
+                        notifications_card(&self.notifications, cx),
                     ),
                 ),
                 _ => {}
