@@ -2146,6 +2146,17 @@ impl SettingsView {
                 rows.push(
                     toggle_row("Show lyrics", settings.show_lyrics, cx, |s| {
                         s.show_lyrics = !s.show_lyrics;
+                    toggle_row(
+                        "Animated album art (Apple Music)",
+                        settings.animated_album_art,
+                        cx,
+                        |s| s.animated_album_art = !s.animated_album_art,
+                    )
+                    .into_any_element(),
+                );
+                rows.push(
+                    toggle_row("Ambient art glow", settings.ambient_art_glow, cx, |s| {
+                        s.ambient_art_glow = !s.ambient_art_glow
                     })
                     .into_any_element(),
                 );
@@ -3027,6 +3038,7 @@ fn module_blurb(module: WidgetModule) -> SharedString {
             "Now Playing from MediaRemote. Optional time-synced lyrics from LRCLIB — opt-in, fetched at runtime, never bundled.".into()
         WidgetModule::Music => {
             "Now Playing from MediaRemote on macOS. The output picker lists CoreAudio devices; it cannot start AirPlay to a HomePod or Apple TV.".into()
+            "Now Playing from MediaRemote. Optional Apple Music motion art is opt-in and fails silent to static covers; the glow uses local artwork colors.".into()
         }
         WidgetModule::Files => "Drop zone and tray live on the Tray tab of the expanded island.".into(),
         WidgetModule::Timers => {

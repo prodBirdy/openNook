@@ -143,6 +143,7 @@ async fn now_playing_from_adapter(track: crate::mediaremote::AdapterTrack) -> No
         audio_levels: Some(get_audio_levels_internal()),
         app_name: track.app_name,
         bundle_id: track.bundle_id,
+        motion_artwork_url: None,
     };
     save_last_played(&data);
     data
@@ -545,6 +546,7 @@ pub async fn get_now_playing() -> NowPlayingData {
                         "safari" => Some("com.apple.Safari".into()),
                         _ => None,
                     },
+                    motion_artwork_url: None,
                 };
 
                 save_last_played(&data);
@@ -631,6 +633,7 @@ pub async fn get_now_playing() -> NowPlayingData {
                     audio_levels: Some(get_audio_levels_internal()),
                     app_name: Some("System".to_string()),
                     bundle_id: None,
+                    motion_artwork_url: None,
                 })
             })();
 
@@ -754,6 +757,7 @@ pub async fn get_now_playing() -> NowPlayingData {
                                 audio_levels: Some(get_audio_levels_internal()),
                                 app_name: Some(name.replace("org.mpris.MediaPlayer2.", "")),
                                 bundle_id: None,
+                                motion_artwork_url: None,
                             };
                             save_last_played(&data);
                             return data;

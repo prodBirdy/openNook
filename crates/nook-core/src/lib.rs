@@ -27,6 +27,7 @@ pub mod menubar;
 pub mod messages;
 pub mod mixer;
 pub mod models;
+pub mod motion_artwork;
 pub mod mouse;
 pub mod nl_parse;
 pub mod notch;

@@ -14,6 +14,15 @@
 
 use std::f32::consts::PI;
 
+/// Slow drift for the ambient media-card glow. Periods stay in the 8–14 s
+/// range so the blobs read as atmosphere, not a screensaver.
+pub fn aura_blob_offset(index: usize, t: f32) -> (f32, f32) {
+    let i = index as f32;
+    let x = ((t * (0.22 + i * 0.05)) + i * 1.7).sin() * (18.0 + i * 6.0);
+    let y = ((t * (0.18 + i * 0.04)) + i * 2.3).cos() * (10.0 + i * 4.0);
+    (x, y)
+}
+
 /// Island size morph: expand/collapse and compact mode changes. `snappy` at
 /// the pace of the previous hand-tuned spring (stiffness 400, damping 30,
 /// mass 0.8 ⇒ response 0.28s, damping fraction 0.84 — i.e. this, unnamed).
@@ -223,5 +232,21 @@ mod tests {
         assert!(!v.step(MORPH, 42.0, 0.016, REST_PX));
         assert_eq!(v.value, 42.0);
         assert_eq!(v.velocity, 0.0);
+    }
+
+    #[test]
+    fn aura_blobs_drift_slowly_and_stay_nearby() {
+        let (x0, y0) = aura_blob_offset(0, 0.0);
+        let (x1, y1) = aura_blob_offset(0, 0.5);
+        assert!((x1 - x0).abs() < 8.0 && (y1 - y0).abs() < 6.0);
+        for i in 0..3 {
+            for t in [0.0, 3.0, 11.0] {
+                let (x, y) = aura_blob_offset(i, t);
+                assert!(x.abs() < 50.0 && y.abs() < 40.0, "blob {i} escaped: {x},{y}");
+            }
+        }
+        let a = aura_blob_offset(0, 1.0);
+        let b = aura_blob_offset(1, 1.0);
+        assert_ne!(a, b);
     }
 }

@@ -81,6 +81,10 @@ fn migrate(conn: &Connection) -> Result<()> {
         "CREATE TABLE IF NOT EXISTS lyrics (
             cache_key TEXT PRIMARY KEY,
             payload TEXT,
+        "CREATE TABLE IF NOT EXISTS motion_artwork (
+            cache_key TEXT PRIMARY KEY,
+            m3u8 TEXT,
+            preview TEXT,
             hit INTEGER NOT NULL DEFAULT 0,
             fetched_at INTEGER NOT NULL
         )",

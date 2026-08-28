@@ -9,8 +9,8 @@ use super::Island;
 use crate::icons::lucide_color;
 use crate::theme;
 use gpui::{
-    div, img, linear_color_stop, linear_gradient, prelude::*, px, relative, rgb, rgba, AnyElement,
-    Context, CursorStyle, Image, MouseButton, MouseDownEvent, Rgba, SharedString,
+    canvas, div, img, linear_color_stop, linear_gradient, prelude::*, px, relative, rgb, rgba,
+    AnyElement, Context, CursorStyle, Image, MouseButton, MouseDownEvent, Rgba, SharedString,
 };
 use nook_core::models::NowPlayingData;
 use std::sync::{Mutex, OnceLock};
@@ -235,7 +235,7 @@ pub(super) fn visualizer(levels: &[f64], playing: bool, color: Option<Rgba>) -> 
 }
 
 const NOOK_ART: f32 = 84.0;
-const NOOK_ART_RADIUS: f32 = 14.0;
+pub(crate) const NOOK_ART_RADIUS: f32 = 14.0;
 const APP_BADGE: f32 = 22.0;
 const APP_BADGE_RADIUS: f32 = 5.0;
 
@@ -249,6 +249,8 @@ pub(crate) fn nook_media_pane(island: &Island, cx: &mut Context<Island>) -> impl
     let album = np.album.clone().filter(|s| !s.is_empty());
     let playing = np.is_playing;
     let elapsed = island.lyrics_position();
+    let aura = media_aura(island);
+    let elapsed = np.elapsed_time.unwrap_or(0.0);
     let duration = np.duration.unwrap_or(0.0);
     let progress = if duration > 0.0 {
         (elapsed / duration) as f32
@@ -272,9 +274,11 @@ pub(crate) fn nook_media_pane(island: &Island, cx: &mut Context<Island>) -> impl
 
     div()
         .id("nook-media")
+        .relative()
         .w_full()
         .h_full()
         .overflow_hidden()
+        .when_some(aura, |d, aura| d.child(aura))
         .flex()
         .items_center()
         .gap(px(14.))
@@ -303,7 +307,21 @@ pub(crate) fn nook_media_pane(island: &Island, cx: &mut Context<Island>) -> impl
                                 .justify_center()
                                 .child(lucide_color("music", 28.0, rgba(0xffffff66)))
                                 .into_any_element()
-                        })),
+                        }))
+                        .child(
+                            canvas(
+                                |bounds, _, _| {
+                                    let x: f32 = bounds.origin.x.into();
+                                    let y: f32 = bounds.origin.y.into();
+                                    let w: f32 = bounds.size.width.into();
+                                    let h: f32 = bounds.size.height.into();
+                                    report_art_bounds(x, y, w, h);
+                                },
+                                |_, _, _, _| {},
+                            )
+                            .absolute()
+                            .inset_0(),
+                        ),
                 )
                 .child(
                     div()
@@ -1019,6 +1037,147 @@ fn sample_dominant_color(b64: &str) -> Option<Rgba> {
     })
 }
 
+pub(crate) fn art_palette(artwork_base64: Option<&str>) -> Option<[Rgba; 3]> {
+    let b64 = artwork_base64?;
+    use std::hash::{DefaultHasher, Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    b64.hash(&mut hasher);
+    let key = hasher.finish();
+    static CACHE: OnceLock<Mutex<(u64, Option<[Rgba; 3]>)>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new((0, None)));
+    if let Ok(guard) = cache.lock() {
+        if guard.0 == key {
+            return guard.1;
+        }
+    }
+    let palette = sample_palette(b64);
+    if let Ok(mut guard) = cache.lock() {
+        *guard = (key, palette);
+    }
+    palette
+}
+
+fn sample_palette(b64: &str) -> Option<[Rgba; 3]> {
+    use image::GenericImageView;
+    use std::collections::HashMap;
+
+    let bytes = artwork_bytes(b64)?;
+    let img = image::load_from_memory(&bytes).ok()?.thumbnail(32, 32);
+    let mut buckets: HashMap<(u8, u8, u8), u32> = HashMap::new();
+    for (_, _, px) in img.pixels() {
+        let [r, g, b, a] = px.0;
+        if a < 200 {
+            continue;
+        }
+        let brightness = (r as u16 + g as u16 + b as u16) / 3;
+        if !(16..=240).contains(&brightness) {
+            continue;
+        }
+        *buckets.entry((r >> 4, g >> 4, b >> 4)).or_insert(0) += 1;
+    }
+    if buckets.is_empty() {
+        return sample_dominant_color(b64).map(|c| [c, shift_color(c, 0.08), shift_color(c, 0.16)]);
+    }
+    let mut ranked: Vec<_> = buckets.into_iter().collect();
+    ranked.sort_by(|a, b| b.1.cmp(&a.1));
+    let mut picked: Vec<Rgba> = Vec::new();
+    for ((r, g, b), _) in ranked {
+        let color = Rgba {
+            r: (r as f32 + 0.5) * 16.0 / 255.0,
+            g: (g as f32 + 0.5) * 16.0 / 255.0,
+            b: (b as f32 + 0.5) * 16.0 / 255.0,
+            a: 1.0,
+        };
+        if picked.iter().all(|p| color_dist(*p, color) > 0.18) {
+            picked.push(color);
+        }
+        if picked.len() == 3 {
+            break;
+        }
+    }
+    while picked.len() < 3 {
+        let base = picked.first().copied().or_else(|| sample_dominant_color(b64))?;
+        picked.push(shift_color(base, 0.08 * picked.len() as f32));
+    }
+    Some([picked[0], picked[1], picked[2]])
+}
+
+fn shift_color(color: Rgba, amount: f32) -> Rgba {
+    Rgba {
+        r: (color.r + amount).clamp(0.0, 1.0),
+        g: (color.g + amount * 0.5).clamp(0.0, 1.0),
+        b: (color.b + amount * 0.75).clamp(0.0, 1.0),
+        a: 1.0,
+    }
+}
+
+fn color_dist(a: Rgba, b: Rgba) -> f32 {
+    let dr = a.r - b.r;
+    let dg = a.g - b.g;
+    let db = a.b - b.b;
+    (dr * dr + dg * dg + db * db).sqrt()
+}
+
+fn media_aura(island: &Island) -> Option<AnyElement> {
+    if !island.settings.ambient_art_glow || island.reduce_motion {
+        return None;
+    }
+    let palette = island.aura_palette?;
+    let t = if island.now_playing.is_playing {
+        island.aura_t
+    } else {
+        0.0
+    };
+    let mut layer = div()
+        .absolute()
+        .inset_0()
+        .overflow_hidden()
+        .opacity(0.9);
+    for (i, color) in palette.iter().enumerate() {
+        let (dx, dy) = crate::motion::aura_blob_offset(i, t);
+        let faded = Rgba {
+            r: color.r,
+            g: color.g,
+            b: color.b,
+            a: 0.32,
+        };
+        layer = layer.child(
+            div()
+                .absolute()
+                .left(px(8.0 + dx))
+                .top(px(-16.0 + dy))
+                .size(px(140.0))
+                .rounded_full()
+                .bg(faded),
+        );
+    }
+    Some(layer.into_any_element())
+}
+
+static ART_BOUNDS: OnceLock<Mutex<(u64, f32, f32, f32, f32)>> = OnceLock::new();
+
+fn report_art_bounds(x: f32, y: f32, w: f32, h: f32) {
+    let cache = ART_BOUNDS.get_or_init(|| Mutex::new((0, 0.0, 0.0, 0.0, 0.0)));
+    let Ok(mut guard) = cache.lock() else {
+        return;
+    };
+    let (gen, ox, oy, ow, oh) = *guard;
+    if (ox - x).abs() < 0.5 && (oy - y).abs() < 0.5 && (ow - w).abs() < 0.5 && (oh - h).abs() < 0.5 {
+        return;
+    }
+    *guard = (gen.wrapping_add(1), x, y, w, h);
+}
+
+pub(crate) fn take_art_bounds(seen: &mut u64) -> Option<(f32, f32, f32, f32)> {
+    let cache = ART_BOUNDS.get_or_init(|| Mutex::new((0, 0.0, 0.0, 0.0, 0.0)));
+    let guard = cache.lock().ok()?;
+    if guard.0 == *seen || guard.0 == 0 {
+        return None;
+    }
+    *seen = guard.0;
+    Some((guard.1, guard.2, guard.3, guard.4))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1087,5 +1246,47 @@ mod tests {
         assert_eq!(gpui_format(&jpeg), gpui::ImageFormat::Jpeg);
         let png = artwork_bytes(&encode_rgba(8, 8, image::ImageFormat::Png)).unwrap();
         assert_eq!(gpui_format(&png), gpui::ImageFormat::Png);
+    }
+
+    fn encode_two_tone() -> String {
+        use base64::Engine;
+        use std::io::Cursor;
+        let mut img = image::RgbaImage::new(16, 16);
+        for (x, y, px) in img.enumerate_pixels_mut() {
+            *px = if x < 8 {
+                image::Rgba([0x20, 0x40, 0xC0, 0xff])
+            } else if y < 8 {
+                image::Rgba([0xC0, 0x30, 0x20, 0xff])
+            } else {
+                image::Rgba([0x20, 0xB0, 0x40, 0xff])
+            };
+        }
+        let mut encoded = Cursor::new(Vec::new());
+        img.write_to(&mut encoded, image::ImageFormat::Png).unwrap();
+        base64::engine::general_purpose::STANDARD.encode(encoded.into_inner())
+    }
+
+    #[test]
+    fn artwork_palette_returns_three_distinct_colors() {
+        let palette = art_palette(Some(&encode_two_tone())).expect("palette");
+        assert_eq!(palette.len(), 3);
+        assert!(color_dist(palette[0], palette[1]) > 0.1);
+        assert!(art_palette(None).is_none());
+    }
+
+    #[test]
+    fn art_bounds_only_surface_when_the_rect_moves() {
+        let mut seen = 0;
+        assert!(take_art_bounds(&mut seen).is_none());
+        report_art_bounds(10.0, 20.0, 84.0, 84.0);
+        let first = take_art_bounds(&mut seen).expect("first report");
+        assert_eq!(first, (10.0, 20.0, 84.0, 84.0));
+        report_art_bounds(10.2, 20.1, 84.0, 84.0);
+        assert!(take_art_bounds(&mut seen).is_none());
+        report_art_bounds(40.0, 20.0, 84.0, 84.0);
+        assert_eq!(
+            take_art_bounds(&mut seen).expect("moved"),
+            (40.0, 20.0, 84.0, 84.0)
+        );
     }
 }

@@ -365,6 +365,12 @@ pub struct AppSettings {
     /// Reserved: per-device overrides need private sender IDs (phase 2).
     #[serde(default)]
     pub scroll_device_overrides: std::collections::BTreeMap<String, ScrollDeviceOverride>,
+    /// Network lookup for Apple Music editorialVideo loops. Opt-in; ToS-gray.
+    #[serde(default)]
+    pub animated_album_art: bool,
+    /// Local dominant-color glow behind the expanded media card.
+    #[serde(default = "default_true")]
+    pub ambient_art_glow: bool,
     #[serde(default)]
     pub window: WindowSettings,
 }
@@ -546,6 +552,8 @@ impl Default for AppSettings {
             reverse_mouse_scroll: false,
             scroll_excluded_apps: Vec::new(),
             scroll_device_overrides: std::collections::BTreeMap::new(),
+            animated_album_art: false,
+            ambient_art_glow: true,
             window: WindowSettings::default(),
         }
     }
@@ -1066,6 +1074,17 @@ mod tests {
         assert!(parsed.terminal_shell.is_empty());
         assert_eq!(parsed.terminal_timeout_secs, 30);
         assert!(!parsed.terminal_history);
+        assert!(!parsed.animated_album_art);
+        assert!(parsed.ambient_art_glow);
+    }
+
+    #[test]
+    fn motion_art_toggles_default_network_off_aura_on() {
+        let parsed: AppSettings = serde_json::from_str("{}").unwrap();
+        assert!(!parsed.animated_album_art);
+        assert!(parsed.ambient_art_glow);
+        assert_eq!(parsed.animated_album_art, AppSettings::default().animated_album_art);
+        assert_eq!(parsed.ambient_art_glow, AppSettings::default().ambient_art_glow);
     }
 
     #[test]
