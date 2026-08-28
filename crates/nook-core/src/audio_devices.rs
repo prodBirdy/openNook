@@ -7,7 +7,7 @@
 //! here — those targets never appear in the HAL until the route is active, and
 //! MediaRemote routing has been entitlement-blocked since macOS 15.4.
 //!
-//! Idle cost is zero: `AudioObjectAddPropertyListenerBlock` writes a snapshot
+//! Idle cost is zero: `AudioObjectAddPropertyListener` writes a snapshot
 //! and flips a dirty flag. The island tick consumes the flag; there is no
 //! sampling loop.
 
@@ -207,9 +207,9 @@ mod macos {
         is_output_capable, mark_default, output_channels_from_stream_config, publish, OutputDevice,
         OutputTransport, AVAILABLE,
     };
-    use block2::{Block, RcBlock};
     use std::ffi::c_void;
-    use std::sync::{Mutex, Once};
+    use std::sync::atomic::Ordering;
+    use std::sync::Once;
 
     type AudioObjectId = u32;
     type OsStatus = i32;
@@ -261,11 +261,16 @@ mod macos {
             data_size: u32,
             data: *const c_void,
         ) -> OsStatus;
-        fn AudioObjectAddPropertyListenerBlock(
+        fn AudioObjectAddPropertyListener(
             object: AudioObjectId,
             address: *const PropertyAddress,
-            queue: *mut c_void,
-            listener: *mut Block<dyn Fn(u32, *const PropertyAddress)>,
+            listener: unsafe extern "C" fn(
+                AudioObjectId,
+                u32,
+                *const PropertyAddress,
+                *mut c_void,
+            ) -> OsStatus,
+            client_data: *mut c_void,
         ) -> OsStatus;
     }
 
@@ -278,8 +283,6 @@ mod macos {
     }
 
     static STARTED: Once = Once::new();
-    static BLOCKS: Mutex<Vec<RcBlock<dyn Fn(u32, *const PropertyAddress)>>> =
-        Mutex::new(Vec::new());
 
     fn addr(selector: u32, scope: u32, element: u32) -> PropertyAddress {
         PropertyAddress {
@@ -496,38 +499,31 @@ mod macos {
         Ok(())
     }
 
-    fn listen(object: AudioObjectId, address: PropertyAddress, on_change: fn()) {
-        let block = RcBlock::new(move |_n: u32, _addrs: *const PropertyAddress| {
-            on_change();
-        });
+    unsafe extern "C" fn on_hal_change(
+        _object: AudioObjectId,
+        _n: u32,
+        _addrs: *const PropertyAddress,
+        _client: *mut c_void,
+    ) -> OsStatus {
+        refresh();
+        0
+    }
+
+    fn listen(object: AudioObjectId, address: PropertyAddress) {
         let status = unsafe {
-            let block_ref = &*block;
-            let block_ptr = block_ref as *const Block<dyn Fn(u32, *const PropertyAddress)>
-                as *mut Block<dyn Fn(u32, *const PropertyAddress)>;
-            AudioObjectAddPropertyListenerBlock(object, &address, std::ptr::null_mut(), block_ptr)
+            AudioObjectAddPropertyListener(object, &address, on_hal_change, std::ptr::null_mut())
         };
-        if status == 0 {
-            if let Ok(mut guard) = BLOCKS.lock() {
-                guard.push(block);
-            } else {
-                std::mem::forget(block);
-            }
-        } else {
+        if status != 0 {
             log::warn!("CoreAudio output-device listener failed ({status:#x})");
         }
     }
 
     pub(super) fn start() {
         STARTED.call_once(|| {
-            listen(
-                SYSTEM_OBJECT,
-                addr(DEVICES, SCOPE_GLOBAL, ELEMENT_MAIN),
-                refresh,
-            );
+            listen(SYSTEM_OBJECT, addr(DEVICES, SCOPE_GLOBAL, ELEMENT_MAIN));
             listen(
                 SYSTEM_OBJECT,
                 addr(DEFAULT_OUTPUT, SCOPE_GLOBAL, ELEMENT_MAIN),
-                refresh,
             );
             refresh();
             AVAILABLE.store(true, Ordering::Relaxed);
