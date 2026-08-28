@@ -580,8 +580,10 @@ impl SettingsView {
                                 cx,
                                 |s| {
                                     s.window_snap_enabled = !s.window_snap_enabled;
-                                    if s.window_snap_enabled {
-                                        nook_core::window_snap::prompt_trust();
+                                    if s.window_snap_enabled
+                                        && !crate::platform::accessibility_trusted()
+                                    {
+                                        crate::platform::prompt_accessibility();
                                     }
                                 },
                             )
@@ -597,7 +599,7 @@ impl SettingsView {
                                 "Prompt",
                                 cx,
                                 |_, _, cx| {
-                                    nook_core::window_snap::prompt_trust();
+                                    crate::platform::prompt_accessibility();
                                     cx.notify();
                                 },
                             )

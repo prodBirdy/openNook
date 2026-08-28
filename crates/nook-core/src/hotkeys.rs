@@ -26,6 +26,7 @@ pub const KEY_I: u16 = 34;
 pub const KEY_J: u16 = 38;
 pub const KEY_K: u16 = 40;
 
+#[cfg(target_os = "macos")]
 const SIGNATURE: u32 = 0x4E4F4F4B; // 'NOOK'
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -6,7 +6,7 @@
 //! the screen edge. Show restores a few points. No TCC, no idle work, no
 //! Screen Recording (Ice-bar capture is a later flag).
 
-use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// `NSStatusItem` length that shoves left-side extras off the display.
 pub const HIDDEN_LENGTH: f64 = 10_000.0;
