@@ -131,6 +131,7 @@ impl WidgetModuleExt for WidgetModule {
             Self::Speed => "Speed Test",
             Self::Agents => "Agents",
             Self::Mirror => "Mirror",
+            Self::SysStats => "Stats",
         }
     }
 
@@ -146,6 +147,7 @@ impl WidgetModuleExt for WidgetModule {
             Self::Speed => "gauge",
             Self::Agents => "bot",
             Self::Mirror => "webcam",
+            Self::SysStats => "activity",
         }
     }
 
@@ -161,6 +163,7 @@ impl WidgetModuleExt for WidgetModule {
             Self::Speed => "Cloudflare".into(),
             Self::Agents => "Sessions".into(),
             Self::Mirror => "Camera".into(),
+            Self::SysStats => sysstats_subtitle(settings),
         }
     }
 
@@ -184,7 +187,25 @@ impl WidgetModuleExt for WidgetModule {
             Self::Speed => "Speed",
             Self::Agents => "Agents",
             Self::Mirror => "Mirror",
+            Self::SysStats => "Stats",
         }
+    }
+}
+
+fn sysstats_subtitle(settings: &AppSettings) -> SharedString {
+    let n = [
+        settings.sysstats.show_cpu,
+        settings.sysstats.show_mem,
+        settings.sysstats.show_net,
+        settings.sysstats.show_disk,
+    ]
+    .into_iter()
+    .filter(|on| *on)
+    .count();
+    match n {
+        0 => "Hidden".into(),
+        1 => "1 readout".into(),
+        n => format!("{n} readouts").into(),
     }
 }
 
@@ -1021,6 +1042,45 @@ impl SettingsView {
                     cx,
                 ))
             })
+            .when(self.module == WidgetModule::SysStats, |d| {
+                d.child(self.render_sysstats_settings(settings, cx))
+            })
+    }
+
+    fn render_sysstats_settings(
+        &self,
+        settings: &AppSettings,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        section(
+            "Readouts",
+            settings_group(vec![
+                toggle_row("CPU", settings.sysstats.show_cpu, cx, |s| {
+                    s.sysstats.show_cpu = !s.sysstats.show_cpu;
+                })
+                .into_any_element(),
+                toggle_row("Memory", settings.sysstats.show_mem, cx, |s| {
+                    s.sysstats.show_mem = !s.sysstats.show_mem;
+                })
+                .into_any_element(),
+                toggle_row("Network", settings.sysstats.show_net, cx, |s| {
+                    s.sysstats.show_net = !s.sysstats.show_net;
+                })
+                .into_any_element(),
+                toggle_row("Disk", settings.sysstats.show_disk, cx, |s| {
+                    s.sysstats.show_disk = !s.sysstats.show_disk;
+                })
+                .into_any_element(),
+                toggle_row(
+                    "Physical interfaces only",
+                    settings.sysstats.physical_nics,
+                    cx,
+                    |s| s.sysstats.physical_nics = !s.sysstats.physical_nics,
+                )
+                .into_any_element(),
+            ]),
+            Some("Samples only while the expanded card is visible. CPU and network need two ticks; a collapse longer than a few minutes resets the rates."),
+        )
     }
 
     fn render_observe_settings(
@@ -1356,6 +1416,9 @@ fn module_blurb(module: WidgetModule) -> SharedString {
             "Working coding-agent sessions on the compact face and expanded card.".into()
         }
         WidgetModule::Mirror => "A live camera preview that opens when you click the Mirror card.".into(),
+        WidgetModule::SysStats => {
+            "Live CPU, memory, network, and disk capacity. Idle cost is zero — sampling starts on expand and stops on collapse.".into()
+        }
     }
 }
 
@@ -1705,6 +1768,26 @@ mod tests {
     }
 
     #[test]
+    fn sysstats_subtitle_counts_enabled_readouts() {
+        let mut settings = AppSettings::default();
+        assert_eq!(
+            WidgetModule::SysStats.subtitle(&settings).as_ref(),
+            "4 readouts"
+        );
+        settings.sysstats.show_disk = false;
+        settings.sysstats.show_net = false;
+        settings.sysstats.show_mem = false;
+        assert_eq!(
+            WidgetModule::SysStats.subtitle(&settings).as_ref(),
+            "1 readout"
+        );
+        settings.sysstats.show_cpu = false;
+        assert_eq!(
+            WidgetModule::SysStats.subtitle(&settings).as_ref(),
+            "Hidden"
+        );
+    }
+
     fn observe_subtitle_counts_pinned_metrics() {
         assert_eq!(observe_subtitle(0).as_ref(), "Prometheus");
         assert_eq!(observe_subtitle(1).as_ref(), "1 metric");
@@ -1727,6 +1810,7 @@ mod tests {
                 "Speed Test",
                 "Agents",
                 "Mirror",
+                "Stats",
             ]
         );
         assert!(!names
