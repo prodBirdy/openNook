@@ -244,6 +244,12 @@ pub const FOOTNOTE: Text = Text {
     emphasized: FontWeight::SEMIBOLD,
 };
 
+/// Incoming-message HUD hanging below the notch (Droppy-style pill).
+/// Width is at least this; taller notches still add the same body.
+pub const MESSAGES_PEEK_WIDTH: f32 = 332.0;
+/// Content below the camera housing: avatar + 2-line snippet + reply row.
+pub const MESSAGES_PEEK_BODY: f32 = 108.0;
+
 /// Compact Live Activity face — album chip, mode icons, timer ring, loader.
 pub const COMPACT_FACE: f32 = 26.0;
 /// Expanded Nook Mirror circle. Fills `NOOK_BODY` minus the pane inset.

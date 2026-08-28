@@ -96,6 +96,8 @@ pub struct IncomingPeek {
     pub sender: String,
     pub snippet: String,
     pub service: MessageService,
+    /// Unix seconds (`apple_date_to_unix` for iMessage, wall time for WhatsApp).
+    pub last_date: f64,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -539,7 +541,53 @@ pub fn incoming_peek(conversations: &[Conversation]) -> Option<IncomingPeek> {
             sender: c.title.clone(),
             snippet: c.snippet.clone(),
             service: c.service,
+            last_date: c.last_date,
         })
+}
+
+/// Compact HUD clock: `now`, `2m`, `3h`, `1d`.
+pub fn relative_time(unix: f64, now: f64) -> String {
+    let secs = (now - unix).max(0.0);
+    if secs < 45.0 {
+        "now".into()
+    } else if secs < 3_600.0 {
+        format!("{}m", (secs / 60.0).round() as i64)
+    } else if secs < 86_400.0 {
+        format!("{}h", (secs / 3_600.0).round() as i64)
+    } else {
+        format!("{}d", (secs / 86_400.0).round() as i64)
+    }
+}
+
+/// One or two letters for an initials avatar. Phone numbers fall back to `?`.
+pub fn sender_initials(name: &str) -> String {
+    let words: Vec<char> = name
+        .split_whitespace()
+        .filter_map(|word| word.chars().find(|c| c.is_alphabetic()))
+        .collect();
+    if words.len() >= 2 {
+        return format!(
+            "{}{}",
+            words[0].to_uppercase(),
+            words[1].to_uppercase()
+        );
+    }
+    if let Some(ch) = words.first() {
+        return ch.to_uppercase().to_string();
+    }
+    "?".into()
+}
+
+/// Stable palette index for a sender name (no Contacts photo).
+pub fn sender_avatar_rgb(name: &str) -> u32 {
+    const PALETTE: [u32; 8] = [
+        0x5AC8FA, 0xFF9F0A, 0xBF5AF2, 0xFF375F, 0x30D158, 0x64D2FF, 0xFFD60A, 0xFF453A,
+    ];
+    let mut h: u32 = 0;
+    for b in name.as_bytes() {
+        h = h.wrapping_mul(31).wrapping_add(*b as u32);
+    }
+    PALETTE[h as usize % PALETTE.len()]
 }
 
 /// First launch seeds the watermark at the current max ROWID so history
@@ -1226,6 +1274,25 @@ mod tests {
         assert_eq!(peek.sender, "Bea");
         assert_eq!(peek.snippet, "new");
         assert_eq!(peek.service, MessageService::WhatsApp);
+        assert_eq!(peek.last_date, 20.0);
+    }
+
+    #[test]
+    fn relative_time_buckets() {
+        assert_eq!(relative_time(100.0, 110.0), "now");
+        assert_eq!(relative_time(100.0, 220.0), "2m");
+        assert_eq!(relative_time(100.0, 7_300.0), "2h");
+        assert_eq!(relative_time(100.0, 180_000.0), "2d");
+    }
+
+    #[test]
+    fn sender_initials_from_name_or_question() {
+        assert_eq!(sender_initials("Ada Lovelace"), "AL");
+        assert_eq!(sender_initials("Ada"), "A");
+        assert_eq!(sender_initials("+49 151 0000"), "?");
+        assert_eq!(sender_initials(""), "?");
+        assert_eq!(sender_avatar_rgb("Ada"), sender_avatar_rgb("Ada"));
+        assert_ne!(sender_avatar_rgb("Ada"), sender_avatar_rgb("Bea"));
     }
 
     #[test]

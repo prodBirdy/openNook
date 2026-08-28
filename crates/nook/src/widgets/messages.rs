@@ -1,5 +1,6 @@
 //! Messages Nook pane — recent iMessage / WhatsApp threads and inline reply.
 
+use crate::icons::lucide_color;
 use crate::island::ui::{nook_empty, nook_icon_btn, nook_pane, nook_row};
 use crate::island::Island;
 use crate::theme;
@@ -7,7 +8,15 @@ use gpui::{
     div, prelude::*, px, rgba, Context, CursorStyle, FocusHandle, FontWeight, KeyDownEvent,
     MouseButton, MouseDownEvent, SharedString,
 };
-use nook_core::messages::{Conversation, FdaStatus, MessageService, MessagesSnapshot};
+use nook_core::messages::{
+    relative_time, sender_avatar_rgb, sender_initials, Conversation, FdaStatus, IncomingPeek,
+    MessageService, MessagesSnapshot,
+};
+
+const PEEK_AVATAR: f32 = 36.0;
+const PEEK_SEND: f32 = 28.0;
+const WA_GREEN: u32 = 0x25D366FF;
+const IMESSAGE_BLUE: u32 = 0x0A84FFFF;
 
 pub(crate) fn messages_card(island: &mut Island, cx: &mut Context<Island>) -> impl IntoElement {
     if island.message_focus.is_none() {
@@ -292,11 +301,38 @@ fn send_selected(island: &mut Island, cx: &mut Context<Island>) {
     else {
         return;
     };
+    send_conversation(island, conv, cx);
+}
+
+fn send_incoming(island: &mut Island, cx: &mut Context<Island>) {
+    let Some(id) = island
+        .messages
+        .incoming
+        .as_ref()
+        .map(|p| p.conversation_id.clone())
+    else {
+        send_selected(island, cx);
+        return;
+    };
+    let Some(conv) = island
+        .messages
+        .conversations
+        .iter()
+        .find(|c| c.id == id)
+        .cloned()
+    else {
+        return;
+    };
+    send_conversation(island, conv, cx);
+}
+
+fn send_conversation(island: &mut Island, conv: Conversation, cx: &mut Context<Island>) {
     let text = island.message_draft.trim().to_string();
     if text.is_empty() {
         return;
     }
     island.message_draft.clear();
+    let id = conv.id.clone();
     let auto = island.settings.experimental_whatsapp_autosend;
     nook_core::runtime().spawn(async move {
         let result = match conv.service {
@@ -350,10 +386,253 @@ fn apply_draft_key(draft: &mut String, event: &KeyDownEvent, cx: &Context<Island
     }
 }
 
-pub(crate) fn compact_left(_peek: &nook_core::messages::IncomingPeek) -> impl IntoElement {
+pub(crate) fn compact_left(_peek: &IncomingPeek) -> impl IntoElement {
     crate::icons::lucide("message-circle", theme::COMPACT_FACE)
 }
 
-pub(crate) fn compact_right(peek: &nook_core::messages::IncomingPeek) -> impl IntoElement {
+pub(crate) fn compact_right(peek: &IncomingPeek) -> impl IntoElement {
     crate::island::ui::slide_label(peek.sender.clone(), theme::BODY, true)
+}
+
+/// Droppy-style incoming HUD: avatar, sender + time, snippet, inline Reply.
+pub(crate) fn messages_peek(island: &Island, cx: &mut Context<Island>) -> impl IntoElement {
+    let Some(peek) = island.messages.incoming.as_ref() else {
+        return div().into_any_element();
+    };
+    let notch_h = island.notch_height.max(32.0);
+    let now = unix_now();
+    let when = relative_time(peek.last_date, now);
+    let whatsapp = peek.service == MessageService::WhatsApp;
+    let send_fill = if whatsapp { WA_GREEN } else { IMESSAGE_BLUE };
+    let draft = island.message_draft.clone();
+    let focus = island.message_focus.clone();
+    let empty = draft.is_empty();
+    let shown = if empty { "Reply…" } else { draft.as_str() };
+
+    div()
+        .id("msg-peek")
+        .size_full()
+        .flex()
+        .flex_col()
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(|this, _: &MouseDownEvent, window, cx| {
+                cx.stop_propagation();
+                this.activate_message_composer(window, cx);
+            }),
+        )
+        .child(div().h(px(notch_h)).w_full().flex_shrink_0())
+        .child(
+            div()
+                .flex_1()
+                .w_full()
+                .px(px(14.))
+                .pb(px(10.))
+                .flex()
+                .flex_col()
+                .justify_center()
+                .gap(px(8.))
+                .child(peek_header(peek, &when))
+                .child(peek_composer(
+                    focus,
+                    shown,
+                    empty,
+                    send_fill,
+                    cx,
+                )),
+        )
+        .into_any_element()
+}
+
+fn peek_header(peek: &IncomingPeek, when: &str) -> impl IntoElement {
+    let snippet = if peek.snippet.is_empty() {
+        SharedString::from("Attachment")
+    } else {
+        SharedString::from(peek.snippet.clone())
+    };
+    div()
+        .flex()
+        .items_start()
+        .gap(px(10.))
+        .child(peek_avatar(&peek.sender, peek.service))
+        .child(
+            div()
+                .flex_1()
+                .min_w(px(0.))
+                .flex()
+                .flex_col()
+                .justify_center()
+                .overflow_hidden()
+                .child(
+                    div()
+                        .flex()
+                        .items_baseline()
+                        .gap(px(6.))
+                        .child(
+                            div()
+                                .min_w(px(0.))
+                                .text_size(px(14.))
+                                .line_height(px(18.))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(theme::LABEL)
+                                .whitespace_nowrap()
+                                .overflow_hidden()
+                                .text_ellipsis()
+                                .child(peek.sender.clone()),
+                        )
+                        .child(
+                            div()
+                                .flex_shrink_0()
+                                .text_size(px(11.))
+                                .line_height(px(14.))
+                                .text_color(theme::TERTIARY_LABEL)
+                                .child(SharedString::from(when.to_string())),
+                        ),
+                )
+                .child(
+                    div()
+                        .text_size(px(12.))
+                        .line_height(px(15.))
+                        .h(px(30.))
+                        .text_color(rgba(0xffffffB3))
+                        .overflow_hidden()
+                        .child(snippet),
+                ),
+        )
+}
+
+fn peek_avatar(sender: &str, service: MessageService) -> impl IntoElement {
+    let initials = sender_initials(sender);
+    let fill = theme::rgba_from_u32(sender_avatar_rgb(sender), 1.0);
+    let badge = match service {
+        MessageService::WhatsApp => WA_GREEN,
+        MessageService::IMessage => IMESSAGE_BLUE,
+        MessageService::Sms => 0x30D158FF,
+    };
+    div()
+        .relative()
+        .size(px(PEEK_AVATAR))
+        .flex_shrink_0()
+        .child(
+            div()
+                .size_full()
+                .rounded_full()
+                .bg(fill)
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(
+                    div()
+                        .text_size(px(13.))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(theme::LABEL)
+                        .child(SharedString::from(initials)),
+                ),
+        )
+        .child(
+            div()
+                .absolute()
+                .bottom(px(-1.))
+                .right(px(-1.))
+                .size(px(14.))
+                .rounded_full()
+                .bg(rgba(badge))
+                .border_1()
+                .border_color(rgba(0x000000FF))
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(lucide_color("message-circle", 8.0, theme::LABEL)),
+        )
+}
+
+fn peek_composer(
+    focus: Option<FocusHandle>,
+    shown: &str,
+    empty: bool,
+    send_fill: u32,
+    cx: &mut Context<Island>,
+) -> impl IntoElement {
+    let shown = SharedString::from(shown.to_string());
+    let mut row = div()
+        .id("msg-peek-composer")
+        .flex()
+        .items_center()
+        .gap(px(8.));
+    if let Some(focus) = focus {
+        let focus_input = focus.clone();
+        row = row.child(
+            div()
+                .id("msg-peek-draft")
+                .track_focus(&focus)
+                .flex_1()
+                .min_w(px(0.))
+                .h(px(PEEK_SEND))
+                .px(px(12.))
+                .rounded_full()
+                .bg(rgba(0xffffff18))
+                .flex()
+                .items_center()
+                .cursor(CursorStyle::IBeam)
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _: &MouseDownEvent, window, cx| {
+                        cx.stop_propagation();
+                        this.activate_message_composer(window, cx);
+                        window.focus(&focus_input);
+                    }),
+                )
+                .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+                    if event.keystroke.key == "enter" {
+                        send_incoming(this, cx);
+                        return;
+                    }
+                    if apply_draft_key(&mut this.message_draft, event, cx) {
+                        cx.notify();
+                    }
+                }))
+                .child(
+                    div()
+                        .w_full()
+                        .overflow_hidden()
+                        .text_ellipsis()
+                        .whitespace_nowrap()
+                        .text_size(px(12.))
+                        .text_color(if empty {
+                            theme::TERTIARY_LABEL
+                        } else {
+                            theme::LABEL
+                        })
+                        .child(shown),
+                ),
+        );
+    }
+    row.child(
+        div()
+            .id("msg-peek-send")
+            .size(px(PEEK_SEND))
+            .rounded_full()
+            .bg(rgba(send_fill))
+            .flex()
+            .items_center()
+            .justify_center()
+            .flex_shrink_0()
+            .cursor(CursorStyle::PointingHand)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                    cx.stop_propagation();
+                    send_incoming(this, cx);
+                }),
+            )
+            .child(lucide_color("send", 14.0, theme::LABEL)),
+    )
+    .into_any_element()
+}
+
+fn unix_now() -> f64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0)
 }

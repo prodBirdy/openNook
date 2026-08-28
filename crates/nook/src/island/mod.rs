@@ -925,6 +925,27 @@ impl Island {
         self.settings.show_messages && self.messages.incoming.is_some()
     }
 
+    /// Compact incoming HUD — taller than a Live Activity, not the widgets grid.
+    pub(super) fn shows_messages_peek(&self) -> bool {
+        !self.expanded && self.mode() == CompactMode::Messages && self.messages.incoming.is_some()
+    }
+
+    pub(crate) fn activate_message_composer(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.message_focus.is_none() {
+            self.message_focus = Some(cx.focus_handle());
+        }
+        if let Some(focus) = self.message_focus.clone() {
+            window.activate_window();
+            platform::activate_app();
+            window.focus(&focus);
+        }
+        cx.notify();
+    }
+
     fn available_modes(&self) -> Vec<CompactMode> {
         let mut modes = Vec::new();
         if self.has_observe_outage() {
@@ -965,6 +986,11 @@ impl Island {
                 theme::NOOK_INSET + theme::NOOK_BODY
             };
             return (w, self.notch_height.max(32.0) + body);
+        }
+        if self.shows_messages_peek() {
+            let w = (base_w + 152.0).max(theme::MESSAGES_PEEK_WIDTH);
+            let h = self.notch_height.max(32.0) + theme::MESSAGES_PEEK_BODY;
+            return (w, h);
         }
         if self.hovered {
             return (base_w + 125.0, base_h + 15.0);
@@ -1265,10 +1291,19 @@ impl Island {
         !(on_ui || (self.file_drag && drag_capture) || self.pending_file_drag.is_some())
     }
 
-    fn on_island_press(&mut self, event: &MouseDownEvent, cx: &mut Context<Self>) {
+    fn on_island_press(
+        &mut self,
+        event: &MouseDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if event.modifiers.alt {
             self.begin_reposition(event);
             cx.notify();
+            return;
+        }
+        if self.shows_messages_peek() {
+            self.activate_message_composer(window, cx);
             return;
         }
         self.toggle_expanded(cx);
@@ -1822,6 +1857,7 @@ mod tests {
             sender: "Ada".into(),
             snippet: "hi".into(),
             service: nook_core::messages::MessageService::IMessage,
+            last_date: 1_700_000_000.0,
         });
         assert_eq!(
             island.available_modes(),
@@ -1830,6 +1866,31 @@ mod tests {
         assert_eq!(island.mode(), CompactMode::Messages);
         island.settings.show_messages = false;
         assert_eq!(island.available_modes(), vec![CompactMode::Idle]);
+    }
+
+    #[test]
+    fn incoming_messages_peek_is_taller_than_live_activity() {
+        let mut island = test_island();
+        island.notch_width = 185.0;
+        island.notch_height = 38.0;
+        island.messages.incoming = Some(nook_core::messages::IncomingPeek {
+            conversation_id: "iMessage;-;+1".into(),
+            sender: "Ada Lovelace".into(),
+            snippet: "On my way".into(),
+            service: nook_core::messages::MessageService::IMessage,
+            last_date: 1_700_000_000.0,
+        });
+        assert!(island.shows_messages_peek());
+        let (w, h) = island.target_size();
+        assert!(w >= theme::MESSAGES_PEEK_WIDTH);
+        assert_eq!(h, 38.0 + theme::MESSAGES_PEEK_BODY);
+        island.hovered = true;
+        let (hw, hh) = island.target_size();
+        assert_eq!((hw, hh), (w, h), "hover must not shrink the HUD");
+        island.expanded = true;
+        assert!(!island.shows_messages_peek());
+        let (_, eh) = island.target_size();
+        assert!(eh > h, "full Messages card stays available via expand");
     }
 
     #[test]

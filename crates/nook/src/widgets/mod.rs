@@ -16,6 +16,7 @@ pub(crate) use agents::{
 pub(crate) use calendar::calendar_card;
 pub(crate) use messages::{
     compact_left as messages_compact_left, compact_right as messages_compact_right, messages_card,
+    messages_peek,
 };
 pub(crate) use notes::notes_card;
 pub(crate) use notes_editor::{NotesEditor, NotesEditorEvent};

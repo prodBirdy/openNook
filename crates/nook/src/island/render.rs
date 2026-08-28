@@ -5,6 +5,7 @@ use super::files::drop_veil;
 use super::{CompactMode, Island};
 use crate::platform;
 use crate::theme;
+use crate::widgets;
 use gpui::{
     div, point, prelude::*, px, rgba, AnyElement, App, Bounds, Context, CursorStyle,
     ExternalPaths, FontFallbacks, FontWeight, MouseButton, MouseDownEvent, MouseMoveEvent,
@@ -97,7 +98,7 @@ impl gpui::Render for Island {
             .any(|agent| agent.status.is_working())
             .then(theme::accent);
         let debug_hitbox = hitbox_debug();
-        let content_radius = if expanded {
+        let content_radius = if expanded || chrome_h > 80.0 {
             theme::EXPANDED_RADIUS
         } else {
             theme::COMPACT_RADIUS
@@ -173,8 +174,8 @@ impl gpui::Render for Island {
                         )
                         .on_mouse_down(
                             MouseButton::Left,
-                            cx.listener(|this, event: &MouseDownEvent, _, cx| {
-                                this.on_island_press(event, cx);
+                            cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                                this.on_island_press(event, window, cx);
                             }),
                         )
                         .when(!expanded, |d| {
@@ -211,7 +212,9 @@ impl gpui::Render for Island {
                                 .when(!attached, |d| d.rounded(px(content_radius)))
                                 .child(self.content_stack(expanded, mode, hovered, notch_w, cx))
                                 .when(dropping && !expanded, |d| d.child(drop_veil()))
-                                .when(!expanded, |d| d.child(self.mode_dots(cx))),
+                                .when(!expanded && !self.shows_messages_peek(), |d| {
+                                    d.child(self.mode_dots(cx))
+                                }),
                         ),
                     ),
             )
@@ -343,8 +346,8 @@ impl Island {
                         // expand toggle the blocked root would have handled.
                         d.block_mouse_except_scroll().on_mouse_down(
                             MouseButton::Left,
-                            cx.listener(|this, event: &MouseDownEvent, _, cx| {
-                                this.on_island_press(event, cx);
+                            cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                                this.on_island_press(event, window, cx);
                             }),
                         )
                     })
@@ -363,6 +366,11 @@ impl Island {
     ) -> AnyElement {
         if expanded {
             self.render_expanded(notch_w, cx).into_any_element()
+        } else if mode == CompactMode::Messages && self.messages.incoming.is_some() {
+            if self.message_focus.is_none() {
+                self.message_focus = Some(cx.focus_handle());
+            }
+            widgets::messages_peek(self, cx).into_any_element()
         } else {
             self.render_compact(mode, hovered, notch_w, cx)
                 .into_any_element()
@@ -390,6 +398,8 @@ impl Island {
             th.max(1.0),
         );
         let mut bottom = (body_top + body_h).max(target_top + th.max(1.0));
+        // Incoming-message HUD is taller than a Live Activity; target_size
+        // already returns that footprint so the strip grows before the spring.
         // Pre-arm on approach: reserve the expanded footprint while the
         // cursor is merely near the parked island, before any animation can
         // start. An NSWindow resize mid-animation shows one stretched frame
