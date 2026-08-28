@@ -3830,6 +3830,7 @@ version = "0.3.0"
 dependencies = [
  "base64",
  "block2",
+ "chrono",
  "dirs 6.0.0",
  "futures-executor",
  "futures-util",

@@ -77,6 +77,11 @@ pub struct Island {
     pub(crate) notes_editor: Option<Entity<crate::widgets::NotesEditor>>,
     pub(crate) notes_editing: bool,
     notes_sub: Option<Subscription>,
+    /// Quick-add fields, created the first time the expanded card renders.
+    pub(crate) calendar_quick_add: Option<Entity<crate::widgets::QuickAdd>>,
+    pub(crate) reminders_quick_add: Option<Entity<crate::widgets::QuickAdd>>,
+    calendar_qa_sub: Option<Subscription>,
+    reminders_qa_sub: Option<Subscription>,
     pub timers: Vec<Timer>,
     pub next_timer_id: u64,
     /// Index into the 7-day week strip (today − 3 … today + 3). 3 is today.
@@ -206,6 +211,10 @@ impl Island {
             notes_editor: None,
             notes_editing: false,
             notes_sub: None,
+            calendar_quick_add: None,
+            reminders_quick_add: None,
+            calendar_qa_sub: None,
+            reminders_qa_sub: None,
             timers: Vec::new(),
             next_timer_id: 1,
             calendar_day: 3,
@@ -815,6 +824,54 @@ impl Island {
             self.notes_editing = false;
             cx.notify();
         }
+    }
+
+    pub(crate) fn ensure_calendar_quick_add(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> Entity<crate::widgets::QuickAdd> {
+        if let Some(entity) = &self.calendar_quick_add {
+            return entity.clone();
+        }
+        let entity = cx.new(|cx| {
+            crate::widgets::QuickAdd::new(
+                nook_core::nl_parse::EntryKind::Event,
+                "Lunch tomorrow 12:30…",
+                cx,
+            )
+        });
+        self.calendar_qa_sub = Some(cx.subscribe(
+            &entity,
+            |this, _, _: &crate::widgets::QuickAddEvent, cx| {
+                this.refresh_calendar(cx);
+            },
+        ));
+        self.calendar_quick_add = Some(entity.clone());
+        entity
+    }
+
+    pub(crate) fn ensure_reminders_quick_add(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> Entity<crate::widgets::QuickAdd> {
+        if let Some(entity) = &self.reminders_quick_add {
+            return entity.clone();
+        }
+        let entity = cx.new(|cx| {
+            crate::widgets::QuickAdd::new(
+                nook_core::nl_parse::EntryKind::Reminder,
+                "Remind me to call mom at 5pm…",
+                cx,
+            )
+        });
+        self.reminders_qa_sub = Some(cx.subscribe(
+            &entity,
+            |this, _, _: &crate::widgets::QuickAddEvent, cx| {
+                this.refresh_calendar(cx);
+            },
+        ));
+        self.reminders_quick_add = Some(entity.clone());
+        entity
     }
 
     pub(crate) fn refresh_calendar(&mut self, cx: &mut Context<Self>) {
@@ -1445,6 +1502,10 @@ mod tests {
             notes_editor: None,
             notes_editing: false,
             notes_sub: None,
+            calendar_quick_add: None,
+            reminders_quick_add: None,
+            calendar_qa_sub: None,
+            reminders_qa_sub: None,
             timers: Vec::new(),
             next_timer_id: 1,
             calendar_day: 3,

@@ -3,9 +3,11 @@
 use crate::island::ui::{nook_accent_bar, nook_empty};
 use crate::island::Island;
 use crate::theme;
+use crate::widgets::QuickAdd;
 use chrono::{Datelike, Local, TimeZone, Weekday};
 use gpui::{
-    div, prelude::*, px, rgba, Context, FontWeight, MouseButton, MouseDownEvent, SharedString,
+    div, prelude::*, px, rgba, Context, Entity, FontWeight, MouseButton, MouseDownEvent,
+    SharedString,
 };
 use nook_core::calendar::CalendarEvent;
 
@@ -19,6 +21,7 @@ const WEEKEND: gpui::Rgba = gpui::Rgba {
 pub(crate) fn calendar_card(
     events: &[CalendarEvent],
     selected_day: u8,
+    quick_add: Option<Entity<QuickAdd>>,
     cx: &mut Context<Island>,
 ) -> impl IntoElement {
     let today = Local::now().date_naive();
@@ -67,6 +70,7 @@ pub(crate) fn calendar_card(
         .flex()
         .flex_col()
         .overflow_hidden()
+        .when_some(quick_add, |d, field| d.child(field).child(div().h(px(6.))))
         .child(
             div()
                 .flex()
