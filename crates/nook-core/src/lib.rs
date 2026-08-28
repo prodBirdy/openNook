@@ -38,6 +38,7 @@ pub mod sysvol;
 pub mod share;
 pub mod utils;
 pub mod weather;
+pub mod vpn;
 pub mod widgets;
 pub mod window_snap;
 
@@ -89,6 +90,7 @@ pub fn init() {
         sysvol::start();
         brightness::start();
         osd::install();
+        vpn::start();
     });
 }
 

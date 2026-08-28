@@ -25,6 +25,7 @@ pub enum WidgetModule {
     Obsidian = 10,
     Mixer = 10,
     Weather = 10,
+    Vpn = 10,
 }
 
 impl WidgetModule {
@@ -44,6 +45,7 @@ impl WidgetModule {
         Self::Obsidian,
         Self::Mixer,
         Self::Weather,
+        Self::Vpn,
     ];
 
     pub fn from_u8(value: u8) -> Self {
@@ -66,6 +68,7 @@ impl WidgetModule {
             }
             Self::Timers | Self::Speed | Self::Mirror => 3,
             Self::Timers | Self::Speed | Self::Mirror | Self::Weather => 3,
+            Self::Timers | Self::Speed | Self::Mirror | Self::Vpn => 3,
         }
     }
 
@@ -81,6 +84,7 @@ impl WidgetModule {
             Self::Notes | Self::Timers | Self::Speed | Self::Agents => 2,
             Self::Notes | Self::Timers | Self::Speed | Self::Agents | Self::Obsidian => 2,
             Self::Notes | Self::Timers | Self::Speed | Self::Agents | Self::Weather => 2,
+            Self::Notes | Self::Timers | Self::Speed | Self::Agents | Self::Vpn => 2,
         }
     }
 
@@ -88,6 +92,7 @@ impl WidgetModule {
         match self {
             Self::Timers | Self::Speed | Self::Agents | Self::Mirror | Self::Battery => 6,
             Self::Timers | Self::Speed | Self::Agents | Self::Mirror | Self::Weather => 6,
+            Self::Timers | Self::Speed | Self::Agents | Self::Mirror | Self::Vpn => 6,
             _ => 8,
         }
     }
@@ -115,6 +120,7 @@ fn default_widget_order() -> Vec<WidgetModule> {
         WidgetModule::Battery,
         WidgetModule::Messages,
         WidgetModule::Weather,
+        WidgetModule::Vpn,
     ]
 }
 
@@ -210,6 +216,13 @@ pub struct AppSettings {
     pub show_mixer: bool,
     #[serde(default)]
     pub weather: WeatherSettings,
+    pub show_vpn: bool,
+    /// Elapsed session clock on the compact VPN face.
+    #[serde(default = "default_true")]
+    pub vpn_show_timer: bool,
+    /// Interface names the classifier must ignore (utun helpers, ZTNA, etc.).
+    #[serde(default)]
+    pub vpn_ignore_interfaces: Vec<String>,
     #[serde(default)]
     pub observe: ObserveConfig,
     #[serde(default)]
@@ -343,6 +356,9 @@ impl Default for AppSettings {
             obsidian_uri_capture: false,
             show_mixer: true,
             weather: WeatherSettings::default(),
+            show_vpn: true,
+            vpn_show_timer: true,
+            vpn_ignore_interfaces: Vec::new(),
             observe: ObserveConfig::default(),
             liquid_glass_mode: false,
             non_notch_mode: false,
@@ -400,6 +416,7 @@ impl AppSettings {
             WidgetModule::Obsidian => self.show_obsidian,
             WidgetModule::Mixer => self.show_mixer && crate::mixer::is_available(),
             WidgetModule::Weather => self.weather.enabled,
+            WidgetModule::Vpn => self.show_vpn,
         }
     }
 
@@ -423,6 +440,7 @@ impl AppSettings {
             WidgetModule::Obsidian => self.show_obsidian = !self.show_obsidian,
             WidgetModule::Mixer => self.show_mixer = !self.show_mixer,
             WidgetModule::Weather => self.weather.enabled = !self.weather.enabled,
+            WidgetModule::Vpn => self.show_vpn = !self.show_vpn,
         }
     }
 
@@ -836,6 +854,9 @@ mod tests {
         assert!(parsed.show_mixer);
         assert!(parsed.weather.enabled);
         assert!(parsed.weather.show_on_compact_face);
+        assert!(parsed.show_vpn);
+        assert!(parsed.vpn_show_timer);
+        assert!(parsed.vpn_ignore_interfaces.is_empty());
         assert!(parsed.liquid_glass_mode);
         assert!(!parsed.non_notch_mode);
         assert!((parsed.island_x - 0.5).abs() < f32::EPSILON);
@@ -934,6 +955,7 @@ mod tests {
         settings.show_obsidian = false;
         settings.show_mixer = false;
         settings.weather.enabled = false;
+        settings.show_vpn = false;
         settings.set_cells(WidgetModule::Music, 5);
         assert_eq!(settings.used_cells(), 5);
         assert_eq!(settings.remaining_cells(), AppSettings::TOTAL_CELLS - 5);

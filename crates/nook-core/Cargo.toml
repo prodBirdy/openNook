@@ -26,8 +26,11 @@ notify-debouncer-mini = "0.5"
 sha2 = "0.10"
 hmac = "0.12"
 uuid = { version = "1", features = ["v4"] }
+libc = "0.2"
 
 [target.'cfg(target_os = "macos")'.dependencies]
+system-configuration = "0.6"
+core-foundation = "0.10"
 objc2 = "0.6"
 objc2-foundation = "0.3"
 libc = "0.2"

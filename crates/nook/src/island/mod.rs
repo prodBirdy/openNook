@@ -33,6 +33,7 @@ use nook_core::settings::AppSettings;
 use nook_core::system_timers::{self, SystemTimer};
 use nook_core::sysvol::{self, HudEvent, HudKind, HUD_TTL};
 use nook_core::weather::WeatherSnapshot;
+use nook_core::vpn::VpnSnapshot;
 use settings::SettingsView;
 use std::sync::Arc;
 use std::path::PathBuf;
@@ -68,6 +69,7 @@ pub enum CompactMode {
     Timer,
     Observe,
     Battery,
+    Vpn,
     Onboard,
     Messages,
     Share,
@@ -171,6 +173,9 @@ pub struct Island {
     pub power: PowerSnapshot,
     pub(crate) lpm_pending: bool,
     pub(crate) lpm_error: Option<String>,
+    pub vpn: VpnSnapshot,
+    /// Brief compact-face takeover after a connect/disconnect edge.
+    vpn_reveal_until: Option<Instant>,
     pub settings: AppSettings,
     pub first_run: bool,
     pub speed_mbps: Option<f64>,
@@ -338,6 +343,8 @@ impl Island {
             power: nook_core::power::current(),
             lpm_pending: false,
             lpm_error: None,
+            vpn: nook_core::vpn::current(),
+            vpn_reveal_until: None,
             settings,
             first_run,
             speed_mbps: None,
@@ -485,6 +492,7 @@ impl Island {
                             this.hud_dragging = false;
                         }
                         this.sync_obsidian_watch(cx);
+                        nook_core::vpn::refresh();
                         dirty = true;
                     }
                     let mixer_on = this
@@ -646,6 +654,12 @@ impl Island {
                         if this.clock_timer_visible() {
                             dirty = true;
                         }
+                        if this.vpn_elapsed_should_tick() {
+                            dirty = true;
+                        }
+                    }
+                    if this.clear_expired_vpn_reveal() {
+                        dirty = true;
                     }
                     let levels = nook_core::audio::get_audio_levels();
                     if this.now_playing.audio_levels.as_deref() != Some(levels.as_slice()) {
@@ -959,6 +973,14 @@ impl Island {
                             }
                         }
                         cx.notify();
+        // VPN is push-based: SCDynamicStore / getifaddrs publish on the watch.
+        cx.spawn(async move |this, cx| {
+            let mut rx = nook_core::vpn::subscribe();
+            loop {
+                let snap = rx.borrow().clone();
+                if this
+                    .update(cx, |this, cx| {
+                        this.apply_vpn_snapshot(snap, cx);
                     })
                     .is_err()
                 {
@@ -1063,6 +1085,52 @@ impl Island {
             cx.background_executor().timer(wait).await;
         })
         .detach();
+    fn apply_vpn_snapshot(&mut self, snap: VpnSnapshot, cx: &mut Context<Self>) {
+        let was = self.vpn.connected;
+        let changed = self.vpn != snap;
+        self.vpn = snap;
+        if was != self.vpn.connected {
+            self.preferred = Some(CompactMode::Vpn);
+            self.vpn_reveal_until = Some(Instant::now() + Duration::from_secs(4));
+            nook_core::haptics::trigger(None);
+        }
+        if changed {
+            cx.notify();
+        }
+    }
+
+    fn has_vpn_face(&self) -> bool {
+        self.settings.show_vpn && (self.vpn.connected || self.vpn_revealing())
+    }
+
+    fn vpn_revealing(&self) -> bool {
+        self.vpn_reveal_until
+            .is_some_and(|until| Instant::now() < until)
+    }
+
+    fn clear_expired_vpn_reveal(&mut self) -> bool {
+        let Some(until) = self.vpn_reveal_until else {
+            return false;
+        };
+        if Instant::now() < until {
+            return false;
+        }
+        self.vpn_reveal_until = None;
+        if !self.vpn.connected && self.preferred == Some(CompactMode::Vpn) {
+            self.preferred = None;
+        }
+        true
+    }
+
+    fn vpn_elapsed_should_tick(&self) -> bool {
+        if !self.settings.show_vpn || self.vpn.since.is_none() {
+            return false;
+        }
+        let compact = !self.expanded
+            && self.mode() == CompactMode::Vpn
+            && self.settings.vpn_show_timer;
+        let card = self.expanded && self.tab == Tab::Widgets;
+        compact || card
     }
 
     /// Merge a fresh poll into the island: extend the local sample history and
@@ -1764,6 +1832,8 @@ impl Island {
         }
         if self.has_incoming_message() {
             modes.push(CompactMode::Messages);
+        if self.has_vpn_face() {
+            modes.push(CompactMode::Vpn);
         }
         if self.has_media() {
             modes.push(CompactMode::Media);
@@ -2471,6 +2541,8 @@ mod tests {
             power: PowerSnapshot::default(),
             lpm_pending: false,
             lpm_error: None,
+            vpn: VpnSnapshot::default(),
+            vpn_reveal_until: None,
             settings: AppSettings::default(),
             first_run: false,
             speed_mbps: None,
@@ -2960,7 +3032,36 @@ mod tests {
         );
         island.power.has_battery = true;
         island.settings.show_battery = false;
+    fn available_modes_includes_vpn_while_connected() {
+        let mut island = test_island();
+        island.settings.show_vpn = true;
         assert_eq!(island.available_modes(), vec![CompactMode::Idle]);
+        island.vpn.connected = true;
+        island.vpn.service_name = "Tailscale".into();
+        island.vpn.interface = "utun4".into();
+        assert_eq!(
+            island.available_modes(),
+            vec![CompactMode::Vpn, CompactMode::Idle]
+        );
+        assert_eq!(island.mode(), CompactMode::Vpn);
+        island.settings.show_vpn = false;
+        assert_eq!(island.available_modes(), vec![CompactMode::Idle]);
+    }
+
+    #[test]
+    fn vpn_reveal_keeps_the_face_after_disconnect() {
+        let mut island = test_island();
+        island.vpn.connected = false;
+        island.vpn.service_name = "Tailscale".into();
+        island.vpn_reveal_until = Some(Instant::now() + Duration::from_secs(4));
+        island.preferred = Some(CompactMode::Vpn);
+        assert!(island.has_vpn_face());
+        assert_eq!(island.mode(), CompactMode::Vpn);
+        island.vpn_reveal_until = Some(Instant::now() - Duration::from_secs(1));
+        assert!(island.clear_expired_vpn_reveal());
+        assert!(!island.has_vpn_face());
+        assert_eq!(island.preferred, None);
+        assert_eq!(island.mode(), CompactMode::Idle);
     }
 
     #[test]

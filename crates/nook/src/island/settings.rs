@@ -137,6 +137,7 @@ impl WidgetModuleExt for WidgetModule {
             Self::Obsidian => "Obsidian",
             Self::Mixer => "Mixer",
             Self::Weather => "Weather",
+            Self::Vpn => "VPN",
         }
     }
 
@@ -157,6 +158,7 @@ impl WidgetModuleExt for WidgetModule {
             Self::Obsidian => "book",
             Self::Mixer => "volume-2",
             Self::Weather => "cloud-sun",
+            Self::Vpn => "shield",
         }
     }
 
@@ -192,6 +194,7 @@ impl WidgetModuleExt for WidgetModule {
                 .unwrap_or_else(|| "No vault".into()),
             Self::Mixer => "Per-app volume".into(),
             Self::Weather => weather_subtitle(settings),
+            Self::Vpn => vpn_subtitle(settings.vpn_show_timer),
         }
     }
 
@@ -220,6 +223,7 @@ impl WidgetModuleExt for WidgetModule {
             Self::Obsidian => "Obsidian",
             Self::Mixer => "Mixer",
             Self::Weather => "Weather",
+            Self::Vpn => "VPN",
         }
     }
 }
@@ -272,6 +276,11 @@ fn weather_subtitle(settings: &AppSettings) -> SharedString {
         "Open-Meteo".into()
     } else {
         name.to_string().into()
+fn vpn_subtitle(show_timer: bool) -> SharedString {
+    if show_timer {
+        "Session timer".into()
+    } else {
+        "Status".into()
     }
 }
 
@@ -328,6 +337,10 @@ pub(super) struct SettingsView {
     share_a_draft: String,
     share_b_draft: String,
     share_c_draft: String,
+    ignore_focus: FocusHandle,
+    url_draft: String,
+    token_draft: String,
+    ignore_draft: String,
     token_revealed: bool,
     query_draft: String,
     heading_draft: String,
@@ -375,8 +388,10 @@ impl SettingsView {
             share_b_draft: share_field_b(&settings),
             share_c_draft: share_field_c(&settings),
             city_focus: cx.focus_handle(),
+            ignore_focus: cx.focus_handle(),
             url_draft: settings.observe.prometheus_url,
             token_draft: settings.observe.metrics_token,
+            ignore_draft: nook_core::vpn::format_ignore_list(&settings.vpn_ignore_interfaces),
             token_revealed: false,
             query_draft: String::new(),
             heading_draft: settings.obsidian_capture_heading.clone().unwrap_or_default(),
@@ -448,6 +463,15 @@ impl SettingsView {
 
     fn persist_observe(tweak: impl FnOnce(&mut AppSettings)) {
         nook_core::settings::tweak_app_settings(tweak);
+    }
+
+    fn persist_ignore(&self) {
+        let names = nook_core::vpn::parse_ignore_list(&self.ignore_draft);
+        nook_core::settings::tweak_app_settings(|s| {
+            if s.vpn_ignore_interfaces != names {
+                s.vpn_ignore_interfaces = names;
+            }
+        });
     }
 
     fn apply_key(draft: &mut String, event: &KeyDownEvent, cx: &Context<Self>) -> bool {
@@ -613,6 +637,7 @@ impl gpui::Render for SettingsView {
         let share_b_focused = self.share_b_focus.is_focused(window);
         let share_c_focused = self.share_c_focus.is_focused(window);
         let city_focused = self.city_focus.is_focused(window);
+        let ignore_focused = self.ignore_focus.is_focused(window);
 
         div()
             .id("settings-root")
@@ -642,6 +667,7 @@ impl gpui::Render for SettingsView {
                     query_focused,
                     heading_focused,
                     city_focused,
+                    ignore_focused,
                     cx,
                 )
                     .into_any_element()
@@ -1335,6 +1361,7 @@ impl SettingsView {
         query_focused: bool,
         heading_focused: bool,
         city_focused: bool,
+        ignore_focused: bool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let remaining = settings.remaining_cells();
@@ -1379,6 +1406,7 @@ impl SettingsView {
                     query_focused,
                     heading_focused,
                     city_focused,
+                    ignore_focused,
                     cx,
                 )),
         )
@@ -1440,6 +1468,11 @@ impl SettingsView {
                 MouseButton::Left,
                 cx.listener(move |this, _, _, cx| {
                     this.module = module;
+                    if module == WidgetModule::Vpn {
+                        this.ignore_draft = nook_core::vpn::format_ignore_list(
+                            &nook_core::settings::get_app_settings().vpn_ignore_interfaces,
+                        );
+                    }
                     this.persist_nav();
                     cx.notify();
                 }),
@@ -1602,6 +1635,7 @@ impl SettingsView {
         query_focused: bool,
         heading_focused: bool,
         city_focused: bool,
+        ignore_focused: bool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let name = self.module.name();
@@ -1750,6 +1784,38 @@ impl SettingsView {
                                 nook_core::settings::tweak_app_settings(|s| {
                                     s.obsidian_vault = Some(path);
                                 });
+            WidgetModule::Vpn => {
+                rows.push(
+                    toggle_row(
+                        "Timer on compact face",
+                        settings.vpn_show_timer,
+                        cx,
+                        |s| {
+                            s.vpn_show_timer = !s.vpn_show_timer;
+                        },
+                    )
+                    .into_any_element(),
+                );
+                let ignore_placeholder = self.ignore_draft.is_empty();
+                let ignore_text = if ignore_placeholder {
+                    "utun3, ipsec0"
+                } else {
+                    self.ignore_draft.as_str()
+                };
+                rows.push(
+                    field_row(
+                        "vpn-ignore",
+                        "Ignore",
+                        ignore_text,
+                        ignore_placeholder,
+                        ignore_focused,
+                        &self.ignore_focus,
+                        cx,
+                        |this, event, cx| {
+                            let persist = SettingsView::apply_key(&mut this.ignore_draft, event, cx)
+                                || event.keystroke.key == "enter";
+                            if persist {
+                                this.persist_ignore();
                                 cx.notify();
                             }
                         },
@@ -2442,6 +2508,8 @@ fn module_blurb(module: WidgetModule) -> SharedString {
         WidgetModule::Mixer => nook_core::mixer::TCC_PREPROMPT.into(),
         WidgetModule::Weather => {
             "Current conditions and a short hourly strip from Open-Meteo. Manual city by default.".into()
+        WidgetModule::Vpn => {
+            "Live utun/ipsec/ppp status. The compact face flashes on connect and disconnect; the card shows the session clock. Ignore listed interfaces to hide helpers that look like a VPN.".into()
         }
     }
 }
@@ -2912,6 +2980,12 @@ mod tests {
     }
 
     #[test]
+    fn vpn_subtitle_follows_the_timer_toggle() {
+        assert_eq!(vpn_subtitle(true).as_ref(), "Session timer");
+        assert_eq!(vpn_subtitle(false).as_ref(), "Status");
+    }
+
+    #[test]
     fn module_list_is_our_widgets_only() {
         let names: Vec<_> = WidgetModule::ALL.iter().map(|m| m.name()).collect();
         assert_eq!(
@@ -2932,6 +3006,7 @@ mod tests {
                 "Obsidian",
                 "Mixer",
                 "Weather",
+                "VPN",
             ]
         );
         assert!(!names
