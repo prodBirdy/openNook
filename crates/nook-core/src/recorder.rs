@@ -434,16 +434,7 @@ mod macos {
         unsafe { msg_send![cls, authorizationStatusForMediaType: &*media] }
     }
 
-    async fn request_mic() -> Result<(), String> {
-        match mic_status() {
-            3 => return Ok(()),
-            1 | 2 => {
-                return Err(
-                    "Microphone access is denied. Enable it in System Settings › Privacy.".into(),
-                )
-            }
-            _ => {}
-        }
+    fn prompt_mic() -> Result<oneshot::Receiver<bool>, String> {
         let cls = class(c"AVCaptureDevice")?;
         let (tx, rx) = oneshot::channel::<bool>();
         let tx = Mutex::new(Some(tx));
@@ -454,34 +445,37 @@ mod macos {
                 }
             }
         });
-        {
-            let media = ns_string("soun");
-            unsafe {
-                let _: () = msg_send![
-                    cls,
-                    requestAccessForMediaType: &*media,
-                    completionHandler: &*handler
-                ];
-            }
+        let media = ns_string("soun");
+        unsafe {
+            let _: () = msg_send![
+                cls,
+                requestAccessForMediaType: &*media,
+                completionHandler: &*handler
+            ];
         }
-        // RcBlock / Retained<NSString> are !Send — leak the block and drop
-        // the string before the oneshot await so start() stays Send.
         std::mem::forget(handler);
-        match rx.await {
+        Ok(rx)
+    }
+
+    async fn request_mic() -> Result<(), String> {
+        match mic_status() {
+            3 => return Ok(()),
+            1 | 2 => {
+                return Err(
+                    "Microphone access is denied. Enable it in System Settings › Privacy.".into(),
+                )
+            }
+            _ => {}
+        }
+        match prompt_mic()?.await {
             Ok(true) => Ok(()),
             Ok(false) => Err("Microphone access was denied.".into()),
             Err(_) => Err("Microphone prompt was cancelled.".into()),
         }
     }
 
-    async fn request_speech() -> Result<bool, String> {
+    fn prompt_speech() -> Result<oneshot::Receiver<isize>, String> {
         let cls = class(c"SFSpeechRecognizer")?;
-        let status: isize = unsafe { msg_send![cls, authorizationStatus] };
-        match status {
-            3 => return Ok(true),
-            1 | 2 => return Ok(false),
-            _ => {}
-        }
         let (tx, rx) = oneshot::channel::<isize>();
         let tx = Mutex::new(Some(tx));
         let handler = RcBlock::new(move |status: isize| {
@@ -495,7 +489,18 @@ mod macos {
             let _: () = msg_send![cls, requestAuthorization: &*handler];
         }
         std::mem::forget(handler);
-        match rx.await {
+        Ok(rx)
+    }
+
+    async fn request_speech() -> Result<bool, String> {
+        let cls = class(c"SFSpeechRecognizer")?;
+        let status: isize = unsafe { msg_send![cls, authorizationStatus] };
+        match status {
+            3 => return Ok(true),
+            1 | 2 => return Ok(false),
+            _ => {}
+        }
+        match prompt_speech()?.await {
             Ok(3) => Ok(true),
             Ok(_) => Ok(false),
             Err(_) => Ok(false),
