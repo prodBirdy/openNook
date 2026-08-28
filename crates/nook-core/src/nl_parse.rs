@@ -6,7 +6,10 @@
 //! ship tests for. Parsing is keystroke-only: call [`parse`] / [`parse_at`]
 //! from the UI on each edit. No timers, no polling.
 
-use chrono::{DateTime, Datelike, Duration, Local, NaiveDate, NaiveTime, TimeZone, Timelike, Weekday};
+use chrono::{
+    DateTime, Datelike, Duration, FixedOffset, Local, NaiveDate, NaiveTime, TimeZone, Timelike,
+    Weekday,
+};
 
 /// Whether the line should become a calendar event or a reminder.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -65,25 +68,36 @@ fn format_clock(dt: DateTime<Local>) -> String {
     }
 }
 
-/// Parse `input` relative to now.
+/// Parse `input` relative to now in the system timezone.
 pub fn parse(input: &str) -> Option<ParsedEntry> {
     parse_at(input, Local::now())
 }
 
 /// Parse `input` relative to `now`. Prefer this in tests.
-pub fn parse_at(input: &str, now: DateTime<Local>) -> Option<ParsedEntry> {
+///
+/// Weekday and "tomorrow" math use `now`'s timezone, not the process locale.
+pub fn parse_at<Tz: TimeZone>(input: &str, now: DateTime<Tz>) -> Option<ParsedEntry> {
     parse_as(input, now, EntryKind::Event)
 }
 
 /// Parse `input`, using `default_kind` unless the line starts with a
 /// remind / todo / task keyword.
-pub fn parse_as(input: &str, now: DateTime<Local>, default_kind: EntryKind) -> Option<ParsedEntry> {
+pub fn parse_as<Tz: TimeZone>(
+    input: &str,
+    now: DateTime<Tz>,
+    default_kind: EntryKind,
+) -> Option<ParsedEntry> {
+    let now = now.fixed_offset();
     let trimmed = input.trim();
     if trimmed.is_empty() {
         return None;
     }
 
-    #[cfg(target_os = "macos")]
+    // Unit tests pin `now` to a FixedOffset instant. NSDataDetector always
+    // reads the system clock, so skip it under cfg(test) and let the
+    // heuristic honor that instant. Shipping macOS builds still prefer the
+    // detector.
+    #[cfg(all(target_os = "macos", not(test)))]
     if let Some(entry) = macos::parse_with_detector(trimmed, now, default_kind) {
         return Some(entry);
     }
@@ -96,7 +110,11 @@ pub fn has_kind_keyword(input: &str) -> bool {
     kind_prefix(input.trim()).is_some()
 }
 
-fn parse_heuristic(input: &str, now: DateTime<Local>, default_kind: EntryKind) -> Option<ParsedEntry> {
+fn parse_heuristic(
+    input: &str,
+    now: DateTime<FixedOffset>,
+    default_kind: EntryKind,
+) -> Option<ParsedEntry> {
     let (kind, body) = match kind_prefix(input) {
         Some((_, rest)) => (EntryKind::Reminder, rest),
         None => (default_kind, input),
@@ -120,15 +138,15 @@ fn parse_heuristic(input: &str, now: DateTime<Local>, default_kind: EntryKind) -
         .unwrap_or_else(|| now.date_naive());
     let all_day = found.as_ref().is_none_or(|m| m.time.is_none());
     let (start, end) = if all_day {
-        let start = local_on(date, NaiveTime::from_hms_opt(0, 0, 0).unwrap());
+        let start = datetime_on(now.timezone(), date, NaiveTime::from_hms_opt(0, 0, 0).unwrap());
         (start, start + Duration::days(1))
     } else {
         let match_ = found.as_ref().unwrap();
         let time = match_.time.unwrap();
-        let start = local_on(date, time);
+        let start = datetime_on(now.timezone(), date, time);
         let end = match match_.end_time {
             Some(end_time) => {
-                let mut end = local_on(date, end_time);
+                let mut end = datetime_on(now.timezone(), date, end_time);
                 if end <= start {
                     end += Duration::days(1);
                 }
@@ -183,7 +201,7 @@ struct DateMatch {
     span: Span,
 }
 
-fn find_datetime(input: &str, now: DateTime<Local>) -> Option<DateMatch> {
+fn find_datetime(input: &str, now: DateTime<FixedOffset>) -> Option<DateMatch> {
     let lower = input.to_ascii_lowercase();
     let bytes = lower.as_bytes();
     let mut best: Option<DateMatch> = None;
@@ -219,7 +237,7 @@ fn is_token_start(bytes: &[u8], i: usize) -> bool {
     i == 0 || !bytes[i - 1].is_ascii_alphanumeric()
 }
 
-fn match_datetime_at(lower: &str, start: usize, now: DateTime<Local>) -> Option<DateMatch> {
+fn match_datetime_at(lower: &str, start: usize, now: DateTime<FixedOffset>) -> Option<DateMatch> {
     let mut i = start;
     i = skip_prep(lower, i);
     let after_prep = i;
@@ -736,12 +754,11 @@ fn clean_title(title: &str) -> String {
     t
 }
 
-fn local_on(date: NaiveDate, time: NaiveTime) -> DateTime<Local> {
-    date.and_time(time)
-        .and_local_timezone(Local)
+fn datetime_on(tz: FixedOffset, date: NaiveDate, time: NaiveTime) -> DateTime<FixedOffset> {
+    tz.from_local_datetime(&date.and_time(time))
         .single()
-        .or_else(|| date.and_time(time).and_local_timezone(Local).earliest())
-        .unwrap_or_else(|| Local.from_utc_datetime(&date.and_time(time)))
+        .or_else(|| tz.from_local_datetime(&date.and_time(time)).earliest())
+        .unwrap_or_else(|| tz.from_utc_datetime(&date.and_time(time)))
 }
 
 /// Strip a detector (or heuristic) date span plus dangling prepositions.
@@ -786,7 +803,7 @@ mod macos {
 
     pub(super) fn parse_with_detector(
         input: &str,
-        now: DateTime<Local>,
+        now: DateTime<FixedOffset>,
         default_kind: EntryKind,
     ) -> Option<ParsedEntry> {
         let detector = detector()?;
@@ -936,11 +953,18 @@ mod macos {
 mod tests {
     use super::*;
 
-    fn now() -> DateTime<Local> {
-        Local
+    /// Pinned calendar: Friday 2026-08-28 10:00 in UTC. Assertions read
+    /// timestamps back through this offset so macOS CI (often PDT) cannot
+    /// slide "Friday" / "next Tuesday" across a local midnight.
+    fn test_tz() -> FixedOffset {
+        FixedOffset::east_opt(0).expect("UTC")
+    }
+
+    fn now() -> DateTime<FixedOffset> {
+        test_tz()
             .with_ymd_and_hms(2026, 8, 28, 10, 0, 0)
             .single()
-            .expect("fixed local 2026-08-28 10:00")
+            .expect("fixed 2026-08-28 10:00 UTC")
     }
 
     fn parsed(input: &str) -> ParsedEntry {
@@ -948,7 +972,7 @@ mod tests {
     }
 
     fn local_parts(ts: f64) -> (NaiveDate, u32, u32) {
-        let dt = Local.timestamp_opt(ts as i64, 0).single().unwrap();
+        let dt = test_tz().timestamp_opt(ts as i64, 0).single().unwrap();
         (dt.date_naive(), dt.hour(), dt.minute())
     }
 
@@ -1074,8 +1098,12 @@ mod tests {
         let e = parsed("lunch with Sam tomorrow 12:30");
         let label = e.preview_label();
         assert!(label.starts_with("lunch with Sam · "), "{label}");
-        assert!(label.contains("12:30"), "{label}");
-        assert!(label.contains("1:30"), "{label}");
+        // preview_label formats in the process-local TZ; derive the clocks
+        // the same way so this stays valid off UTC.
+        let start = Local.timestamp_opt(e.start as i64, 0).single().unwrap();
+        let end = Local.timestamp_opt(e.end as i64, 0).single().unwrap();
+        assert!(label.contains(&format_clock(start)), "{label}");
+        assert!(label.contains(&format_clock(end)), "{label}");
     }
 
     #[test]
