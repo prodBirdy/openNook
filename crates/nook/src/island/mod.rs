@@ -1852,13 +1852,25 @@ mod tests {
         island.hud_fill.set(event.display_value());
         assert!(island.hud_active());
         let live = island.target_size();
-        assert!(live.0 > idle.0, "HUD should widen the idle sliver");
-        assert!(live.1 > idle.1, "HUD should grow the idle sliver");
+        assert!(live.0 > idle.0, "HUD should widen the idle sliver, {live:?} vs {idle:?}");
+        assert_eq!(live.1, 32.0 + theme::COMPACT_HEIGHT_OVERFLOW);
         assert!((island.hud.unwrap().display_value() - 0.6).abs() < f32::EPSILON);
+
+        island.settings.non_notch_mode = true;
+        island.hud = None;
+        let collapsed = island.target_size();
+        island.hud = Some(HudState {
+            kind: event.kind,
+            value: event.value,
+            shown_at: Instant::now(),
+            gen: 1,
+        });
+        let raised = island.target_size();
+        assert!(raised.1 > collapsed.1, "HUD should lift the 1px non-notch sliver");
 
         island.settings.show_volume_brightness_hud = false;
         assert!(!island.hud_active());
-        assert_eq!(island.target_size(), idle);
+        assert_eq!(island.target_size(), collapsed);
     }
 
     #[test]

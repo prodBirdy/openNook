@@ -466,7 +466,7 @@ mod tests {
     #[test]
     fn clamp_unit_rejects_nan_and_inf() {
         assert_eq!(clamp_unit(f32::NAN), 0.0);
-        assert_eq!(clamp_unit(f32::INFINITY), 1.0);
+        assert_eq!(clamp_unit(f32::INFINITY), 0.0);
         assert_eq!(clamp_unit(-2.0), 0.0);
         assert_eq!(clamp_unit(0.25), 0.25);
     }

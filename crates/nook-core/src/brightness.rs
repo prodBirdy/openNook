@@ -3,7 +3,7 @@
 //! External DDC/CI displays are out of scope. If the private symbols vanish
 //! on a future macOS, [`available`] stays false and the brightness HUD hides.
 
-use crate::sysvol::{self, HudKind};
+use crate::sysvol;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 /// True when get/set symbols resolved and the internal panel answered.
@@ -51,7 +51,7 @@ pub const CORE_SET_SYMBOL: &str = "CoreDisplay_Display_SetUserBrightness";
 #[cfg(target_os = "macos")]
 mod macos {
     use super::*;
-    use crate::sysvol::clamp_unit;
+    use crate::sysvol::{clamp_unit, HudKind};
     use std::ffi::{c_char, c_void, CString};
     use std::sync::Once;
 
