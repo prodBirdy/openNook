@@ -8,8 +8,10 @@ pub mod audio;
 pub mod browser_media;
 pub mod calendar;
 pub mod database;
+pub mod eventtap;
 pub mod files;
 pub mod haptics;
+pub mod keysounds;
 #[cfg(target_os = "macos")]
 mod mediaremote;
 pub mod models;
@@ -18,6 +20,7 @@ pub mod notch;
 pub mod notes;
 pub mod observe;
 pub mod occupancy;
+pub mod scroll;
 pub mod settings;
 pub mod utils;
 pub mod widgets;
@@ -63,5 +66,6 @@ pub fn init() {
         audio::init_audio_state();
         audio::setup_audio_monitoring();
         mouse::start_polling();
+        eventtap::sync();
     });
 }

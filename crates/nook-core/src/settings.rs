@@ -167,6 +167,33 @@ pub struct AppSettings {
     /// Per-widget widths in Nook cells. Missing entries use [`WidgetModule::default_cells`].
     #[serde(default)]
     pub widget_widths: Vec<(WidgetModule, u8)>,
+    /// Mechey: mechanical keyboard sounds. Opt-in; needs Input Monitoring.
+    #[serde(default)]
+    pub keysounds_enabled: bool,
+    /// Builtin pack id (`nook-click` / `nook-thock`) or a user folder name.
+    #[serde(default = "default_keysound_pack")]
+    pub keysound_pack: String,
+    /// 0..=1 playback gain.
+    #[serde(default = "default_keysound_volume")]
+    pub keysound_volume: f32,
+    /// LiquidMouse: smooth pixel scrolling for discrete wheel mice.
+    #[serde(default)]
+    pub smooth_scroll_enabled: bool,
+    /// Pixel multiplier applied to each wheel notch (0.25..=4).
+    #[serde(default = "default_scroll_speed")]
+    pub scroll_speed: f32,
+    /// Exponential-decay time constant in seconds (0.08..=1.2).
+    #[serde(default = "default_scroll_duration")]
+    pub scroll_duration: f32,
+    /// Negate discrete-mouse wheel deltas (Scroll Reverser).
+    #[serde(default)]
+    pub reverse_mouse_scroll: bool,
+    /// Frontmost bundle ids that skip the scroll tap (games, VMs, remotes).
+    #[serde(default)]
+    pub scroll_excluded_apps: Vec<String>,
+    /// Reserved: per-device overrides need private sender IDs (phase 2).
+    #[serde(default)]
+    pub scroll_device_overrides: std::collections::BTreeMap<String, ScrollDeviceOverride>,
     #[serde(default)]
     pub window: WindowSettings,
 }
@@ -217,6 +244,31 @@ fn default_true() -> bool {
     true
 }
 
+fn default_keysound_pack() -> String {
+    "nook-click".into()
+}
+
+fn default_keysound_volume() -> f32 {
+    0.7
+}
+
+fn default_scroll_speed() -> f32 {
+    1.0
+}
+
+fn default_scroll_duration() -> f32 {
+    0.35
+}
+
+/// Best-effort per-device scroll knobs. Unused until sender-ID matching ships.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct ScrollDeviceOverride {
+    #[serde(default)]
+    pub reverse: Option<bool>,
+    #[serde(default)]
+    pub speed: Option<f32>,
+}
+
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
@@ -239,6 +291,15 @@ impl Default for AppSettings {
             hide_when_maximized: false,
             island_color: None,
             widget_widths: Vec::new(),
+            keysounds_enabled: false,
+            keysound_pack: default_keysound_pack(),
+            keysound_volume: default_keysound_volume(),
+            smooth_scroll_enabled: false,
+            scroll_speed: default_scroll_speed(),
+            scroll_duration: default_scroll_duration(),
+            reverse_mouse_scroll: false,
+            scroll_excluded_apps: Vec::new(),
+            scroll_device_overrides: std::collections::BTreeMap::new(),
             window: WindowSettings::default(),
         }
     }
@@ -499,6 +560,8 @@ pub fn update_app_settings(settings: AppSettings) {
     }
     SETTINGS_GEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     persist();
+    crate::eventtap::sync();
+    crate::keysounds::sync();
 }
 
 /// Bumped on every [`update_app_settings`]. Hot loops compare this before
@@ -725,5 +788,19 @@ mod tests {
         let legacy: AppSettings =
             serde_json::from_str(r#"{"observe":{"metrics_token":"legacy-secret"}}"#).unwrap();
         assert_eq!(legacy.observe.metrics_token, "legacy-secret");
+    }
+
+    #[test]
+    fn input_feel_flags_default_off() {
+        let parsed: AppSettings = serde_json::from_str("{}").unwrap();
+        assert!(!parsed.keysounds_enabled);
+        assert!(!parsed.smooth_scroll_enabled);
+        assert!(!parsed.reverse_mouse_scroll);
+        assert_eq!(parsed.keysound_pack, "nook-click");
+        assert!((parsed.keysound_volume - 0.7).abs() < f32::EPSILON);
+        assert!((parsed.scroll_speed - 1.0).abs() < f32::EPSILON);
+        assert!((parsed.scroll_duration - 0.35).abs() < f32::EPSILON);
+        assert!(parsed.scroll_excluded_apps.is_empty());
+        assert!(parsed.scroll_device_overrides.is_empty());
     }
 }
