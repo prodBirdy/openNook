@@ -366,7 +366,9 @@ mod macos {
         if !client.is_null() {
             // SAFETY: `client` is `Box::leak` of a `fn()`; listeners are
             // registered once and never removed or sent across threads.
-            let callback = unsafe { *(client as *const fn()) };
+            // The enclosing `unsafe fn` body is already an unsafe block
+            // (edition 2021).
+            let callback = *(client as *const fn());
             callback();
         }
         0
