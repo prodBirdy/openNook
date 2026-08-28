@@ -33,8 +33,9 @@ pub fn compress(
 #[cfg(target_os = "macos")]
 mod macos {
     use super::*;
+    use crate::notch::CGSize;
     use objc2::runtime::AnyObject;
-    use objc2::*;
+    use objc2::{class, msg_send};
     use std::ffi::CString;
 
     #[link(name = "PDFKit", kind = "framework")]
@@ -228,12 +229,6 @@ mod macos {
             progress.store(100, Ordering::Relaxed);
             Ok(())
         }
-    }
-
-    #[repr(C)]
-    struct CGSize {
-        width: f64,
-        height: f64,
     }
 }
 

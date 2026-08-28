@@ -211,9 +211,10 @@ pub fn within_target_band(actual: u64, target: u64) -> bool {
 #[cfg(target_os = "macos")]
 mod macos {
     use super::*;
+    use crate::notch::CGSize;
     use block2::{Block, RcBlock};
     use objc2::runtime::AnyObject;
-    use objc2::*;
+    use objc2::{class, msg_send, Encode, Encoding};
     use std::ffi::CString;
 
     #[link(name = "AVFoundation", kind = "framework")]
@@ -309,7 +310,9 @@ mod macos {
         Ok(())
     }
 
-    #[repr(C)]
+    /// Apple's `CMTime` (`objc2-core-media` uses the same packed layout).
+    #[repr(C, packed(4))]
+    #[derive(Clone, Copy)]
     struct CMTime {
         value: i64,
         timescale: i32,
@@ -317,10 +320,12 @@ mod macos {
         epoch: i64,
     }
 
-    #[repr(C)]
-    struct CGSize {
-        width: f64,
-        height: f64,
+    // SAFETY: layout matches CoreMedia's CMTime so `msg_send!` can pass it by value.
+    unsafe impl Encode for CMTime {
+        const ENCODING: Encoding = Encoding::Struct(
+            "CMTime",
+            &[i64::ENCODING, i32::ENCODING, u32::ENCODING, i64::ENCODING],
+        );
     }
 
     unsafe fn asset_duration(input: &Path) -> Option<f64> {

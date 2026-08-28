@@ -134,8 +134,9 @@ pub fn persons_only() -> bool {
 #[cfg(target_os = "macos")]
 mod macos {
     use super::*;
+    use crate::notch::CGSize;
     use objc2::runtime::AnyObject;
-    use objc2::*;
+    use objc2::{class, msg_send};
     use std::ffi::CString;
 
     #[link(name = "Vision", kind = "framework")]
@@ -518,12 +519,6 @@ mod macos {
             }
             Some(std::ffi::CStr::from_ptr(utf8).to_string_lossy().into_owned())
         }
-    }
-
-    #[repr(C)]
-    struct CGSize {
-        width: f64,
-        height: f64,
     }
 }
 
