@@ -105,6 +105,18 @@ impl Island {
                 };
                 label(text, theme::BODY, true).into_any_element()
             }
+            CompactMode::Idle if self.settings.search.show_magnifier => div()
+                .id("search-magnifier")
+                .cursor(CursorStyle::PointingHand)
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _: &MouseDownEvent, window, cx| {
+                        cx.stop_propagation();
+                        this.open_search(Some(window), cx);
+                    }),
+                )
+                .child(lucide("search", theme::COMPACT_FACE))
+                .into_any_element(),
             CompactMode::Onboard if hovered => div()
                 .id("github")
                 .cursor(CursorStyle::PointingHand)

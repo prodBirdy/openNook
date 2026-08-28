@@ -7,6 +7,7 @@ pub mod agents;
 pub mod audio;
 pub mod browser_media;
 pub mod calendar;
+pub mod clipboard;
 pub mod database;
 pub mod files;
 pub mod haptics;
@@ -19,6 +20,7 @@ pub mod notes;
 pub mod observe;
 pub mod occupancy;
 pub mod settings;
+pub mod spotlight;
 pub mod utils;
 pub mod widgets;
 

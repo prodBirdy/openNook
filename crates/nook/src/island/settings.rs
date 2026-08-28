@@ -57,12 +57,14 @@ fn desktop_wallpaper_image() -> Option<std::sync::Arc<Image>> {
 enum SettingsCategory {
     General = 0,
     Widgets = 1,
+    Search = 2,
 }
 
 impl SettingsCategory {
     fn from_u8(v: u8) -> Self {
         match v {
             1 => Self::Widgets,
+            2 => Self::Search,
             _ => Self::General,
         }
     }
@@ -71,6 +73,7 @@ impl SettingsCategory {
         match self {
             Self::General => "General",
             Self::Widgets => "Widgets",
+            Self::Search => "Search",
         }
     }
 
@@ -78,6 +81,7 @@ impl SettingsCategory {
         match self {
             Self::General => "settings",
             Self::Widgets => "layout-grid",
+            Self::Search => "search",
         }
     }
 }
@@ -239,6 +243,8 @@ pub(super) struct SettingsView {
     _width_slider_subscription: Subscription,
     placement_drag: bool,
     placement_bounds: Rc<RefCell<Option<Bounds<Pixels>>>>,
+    recording_hotkey: bool,
+    exclude_draft: String,
 }
 
 impl SettingsView {
@@ -266,6 +272,8 @@ impl SettingsView {
             _width_slider_subscription: width_slider_subscription,
             placement_drag: false,
             placement_bounds: Rc::new(RefCell::new(None)),
+            recording_hotkey: false,
+            exclude_draft: settings.search.clipboard_exclude_apps.join(", "),
         }
     }
 
@@ -411,11 +419,12 @@ impl gpui::Render for SettingsView {
             })
             .child(self.sidebar(cx))
             .child(div().w(px(1.)).h_full().bg(hairline()))
-            .child(if self.category == SettingsCategory::Widgets {
-                self.render_widgets(&settings, url_focused, token_focused, query_focused, cx)
-                    .into_any_element()
-            } else {
-                self.render_general(&settings, cx).into_any_element()
+            .child(match self.category {
+                SettingsCategory::Widgets => self
+                    .render_widgets(&settings, url_focused, token_focused, query_focused, cx)
+                    .into_any_element(),
+                SettingsCategory::Search => self.render_search_settings(&settings, cx).into_any_element(),
+                SettingsCategory::General => self.render_general(&settings, cx).into_any_element(),
             })
     }
 }
@@ -435,6 +444,7 @@ impl SettingsView {
             .pb(px(16.))
             .gap(px(2.))
             .child(self.sidebar_item(SettingsCategory::General, cx))
+            .child(self.sidebar_item(SettingsCategory::Search, cx))
             .child(self.sidebar_item(SettingsCategory::Widgets, cx))
     }
 
@@ -571,6 +581,209 @@ impl SettingsView {
                     Some("Hover the island to expand. Settings and Quit are in the menu bar extra."),
                 )),
         )
+    }
+
+    fn render_search_settings(
+        &self,
+        settings: &AppSettings,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let exclude = if self.exclude_draft.is_empty() {
+            "com.apple.Safari, com.1password.1password"
+        } else {
+            self.exclude_draft.as_str()
+        };
+        Self::pane(
+            "Search",
+            div()
+                .id("search-settings-pane")
+                .flex()
+                .flex_col()
+                .gap(px(16.))
+                .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+                    if this.capture_hotkey(event, cx) {
+                        cx.stop_propagation();
+                    }
+                }))
+                .child(section(
+                    "Hotkey",
+                    settings_group(vec![
+                        toggle_row("Enable search hotkey", settings.search.enabled, cx, |s| {
+                            s.search.enabled = !s.search.enabled;
+                        })
+                        .into_any_element(),
+                        self.hotkey_row(settings, cx).into_any_element(),
+                        toggle_row(
+                            "Magnifier on compact island",
+                            settings.search.show_magnifier,
+                            cx,
+                            |s| s.search.show_magnifier = !s.search.show_magnifier,
+                        )
+                        .into_any_element(),
+                    ]),
+                    Some("Carbon hotkey — no Accessibility prompt. Default is Option-Space."),
+                ))
+                .child(section(
+                    "Clipboard history",
+                    settings_group(vec![
+                        toggle_row(
+                            "Save clipboard history",
+                            settings.search.clipboard_history,
+                            cx,
+                            |s| s.search.clipboard_history = !s.search.clipboard_history,
+                        )
+                        .into_any_element(),
+                        self.history_size_row(settings, cx).into_any_element(),
+                        toggle_row(
+                            "Paste automatically (needs Accessibility)",
+                            settings.search.auto_paste,
+                            cx,
+                            |s| s.search.auto_paste = !s.search.auto_paste,
+                        )
+                        .into_any_element(),
+                    ]),
+                    Some("Off by default. Skips password-manager Concealed/Transient items. Auto-paste stays off until you grant Accessibility."),
+                ))
+                .child(section(
+                    "Exclude apps",
+                    settings_group(vec![self.exclude_row(exclude, cx).into_any_element()]),
+                    Some("Comma-separated bundle IDs. Frontmost app at copy time is the heuristic."),
+                )),
+        )
+    }
+
+    fn hotkey_row(&self, settings: &AppSettings, cx: &mut Context<Self>) -> impl IntoElement {
+        let label_text = if self.recording_hotkey {
+            "Press a shortcut…".to_string()
+        } else {
+            settings.search.hotkey.label()
+        };
+        settings_row("search-hotkey")
+            .cursor(CursorStyle::PointingHand)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    this.recording_hotkey = !this.recording_hotkey;
+                    cx.notify();
+                }),
+            )
+            .child(label("Summon shortcut", theme::BODY, true))
+            .child(label(label_text, theme::CALLOUT, true))
+    }
+
+    fn history_size_row(&self, settings: &AppSettings, cx: &mut Context<Self>) -> impl IntoElement {
+        let current = settings.search.clipboard_history_size;
+        let mut chips = div().flex().items_center().gap(px(6.));
+        for size in [100u32, 250, 500] {
+            let on = current == size;
+            chips = chips.child(
+                div()
+                    .id(SharedString::from(format!("clip-cap-{size}")))
+                    .h(px(24.))
+                    .px(px(8.))
+                    .rounded(px(6.))
+                    .bg(if on { theme::FILL_SECONDARY } else { theme::FILL })
+                    .cursor(CursorStyle::PointingHand)
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |_, _, _, cx| {
+                            nook_core::settings::tweak_app_settings(|s| {
+                                s.search.clipboard_history_size = size;
+                            });
+                            cx.notify();
+                        }),
+                    )
+                    .child(label(size.to_string(), theme::CALLOUT, true)),
+            );
+        }
+        settings_row("clipboard-size")
+            .child(label("History size", theme::BODY, true))
+            .child(chips)
+    }
+
+    fn exclude_row(&self, value: &str, cx: &mut Context<Self>) -> impl IntoElement {
+        let placeholder = self.exclude_draft.is_empty();
+        settings_row("clip-exclude")
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(0.))
+                    .flex()
+                    .flex_col()
+                    .gap(px(1.))
+                    .child(label("Excluded bundle IDs", theme::BODY, true))
+                    .child(
+                        div()
+                            .id("clip-exclude-field")
+                            .w_full()
+                            .text_size(px(theme::SUBHEADLINE.size))
+                            .text_color(if placeholder {
+                                theme::TERTIARY_LABEL
+                            } else {
+                                theme::SECONDARY_LABEL
+                            })
+                            .child(SharedString::from(value.to_string())),
+                    ),
+            )
+            .child(push_button(
+                "clip-exclude-save",
+                "Edit",
+                cx,
+                |this, window, cx| {
+                    window.focus(&this.query_focus);
+                    this.recording_hotkey = false;
+                    cx.notify();
+                },
+            ))
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+                if this.recording_hotkey {
+                    return;
+                }
+                if Self::apply_key(&mut this.exclude_draft, event, cx) {
+                    let apps: Vec<String> = this
+                        .exclude_draft
+                        .split(',')
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect();
+                    nook_core::settings::tweak_app_settings(|s| {
+                        s.search.clipboard_exclude_apps = apps;
+                    });
+                    cx.notify();
+                }
+            }))
+    }
+
+    fn capture_hotkey(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) -> bool {
+        if !self.recording_hotkey {
+            return false;
+        }
+        let ks = &event.keystroke;
+        if ks.key == "escape" {
+            self.recording_hotkey = false;
+            cx.notify();
+            return true;
+        }
+        if matches!(
+            ks.key.as_str(),
+            "control" | "shift" | "alt" | "option" | "command" | "cmd" | "super" | "meta"
+        ) {
+            return true;
+        }
+        let hotkey = nook_core::settings::SearchHotkey {
+            alt: ks.modifiers.alt,
+            ctrl: ks.modifiers.control,
+            meta: ks.modifiers.platform,
+            shift: ks.modifiers.shift,
+            key: hotkey_key_name(&ks.key),
+        };
+        if !hotkey.alt && !hotkey.ctrl && !hotkey.meta {
+            return true;
+        }
+        nook_core::settings::tweak_app_settings(|s| s.search.hotkey = hotkey);
+        self.recording_hotkey = false;
+        cx.notify();
+        true
     }
 
     fn color_row(&self, settings: &AppSettings, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1674,6 +1887,17 @@ fn field_row(
         )
 }
 
+fn hotkey_key_name(key: &str) -> String {
+    match key.to_ascii_lowercase().as_str() {
+        "space" => "Space".into(),
+        "tab" => "Tab".into(),
+        "enter" | "return" => "Enter".into(),
+        "escape" | "esc" => "Escape".into(),
+        other if other.len() == 1 => other.to_ascii_uppercase(),
+        other => other.to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1737,6 +1961,7 @@ mod tests {
     #[test]
     fn nav_enums_round_trip() {
         assert_eq!(SettingsCategory::from_u8(1), SettingsCategory::Widgets);
+        assert_eq!(SettingsCategory::from_u8(2), SettingsCategory::Search);
         assert_eq!(SettingsCategory::from_u8(0), SettingsCategory::General);
         assert_eq!(SettingsCategory::from_u8(99), SettingsCategory::General);
         assert_eq!(WidgetModule::from_u8(0), WidgetModule::Calendar);
