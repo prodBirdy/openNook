@@ -37,7 +37,15 @@ impl Island {
                     .items_center()
                     .justify_start()
                     .overflow_hidden()
-                    .child(self.compact_left(mode, cx)),
+                    .child(self.compact_left(mode, cx))
+                    .when(mode != CompactMode::Idle && self.high_alert_active(), |d| {
+                        d.child(
+                            div()
+                                .ml(px(4.))
+                                .flex_shrink_0()
+                                .child(lucide_color("sun", 10.0, theme::SUCCESS)),
+                        )
+                    }),
             )
             .child(div().w(px(notch_w)).flex_shrink_0().h_full())
             .child(
@@ -102,6 +110,13 @@ impl Island {
             CompactMode::Share => lucide("share", theme::COMPACT_FACE).into_any_element(),
             CompactMode::Idle => div().into_any_element(),
             CompactMode::Idle => widgets::compact_weather(self),
+            CompactMode::Idle => {
+                if self.high_alert_active() {
+                    lucide_color("sun", 12.0, theme::SUCCESS).into_any_element()
+                } else {
+                    div().into_any_element()
+                }
+            }
         }
     }
 

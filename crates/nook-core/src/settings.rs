@@ -1,4 +1,5 @@
 use crate::database;
+use crate::high_alert::HighAlertKind;
 use crate::observe::ObserveConfig;
 use crate::share::ShareSettings;
 use crate::weather::WeatherSettings;
@@ -26,6 +27,7 @@ pub enum WidgetModule {
     Mixer = 10,
     Weather = 10,
     Vpn = 10,
+    HighAlert = 10,
 }
 
 impl WidgetModule {
@@ -46,6 +48,7 @@ impl WidgetModule {
         Self::Mixer,
         Self::Weather,
         Self::Vpn,
+        Self::HighAlert,
     ];
 
     pub fn from_u8(value: u8) -> Self {
@@ -69,6 +72,7 @@ impl WidgetModule {
             Self::Timers | Self::Speed | Self::Mirror => 3,
             Self::Timers | Self::Speed | Self::Mirror | Self::Weather => 3,
             Self::Timers | Self::Speed | Self::Mirror | Self::Vpn => 3,
+            Self::Timers | Self::Speed | Self::Mirror | Self::HighAlert => 3,
         }
     }
 
@@ -85,6 +89,7 @@ impl WidgetModule {
             Self::Notes | Self::Timers | Self::Speed | Self::Agents | Self::Obsidian => 2,
             Self::Notes | Self::Timers | Self::Speed | Self::Agents | Self::Weather => 2,
             Self::Notes | Self::Timers | Self::Speed | Self::Agents | Self::Vpn => 2,
+            Self::Notes | Self::Timers | Self::Speed | Self::Agents | Self::HighAlert => 2,
         }
     }
 
@@ -93,6 +98,7 @@ impl WidgetModule {
             Self::Timers | Self::Speed | Self::Agents | Self::Mirror | Self::Battery => 6,
             Self::Timers | Self::Speed | Self::Agents | Self::Mirror | Self::Weather => 6,
             Self::Timers | Self::Speed | Self::Agents | Self::Mirror | Self::Vpn => 6,
+            Self::Timers | Self::Speed | Self::Agents | Self::Mirror | Self::HighAlert => 6,
             _ => 8,
         }
     }
@@ -121,6 +127,7 @@ fn default_widget_order() -> Vec<WidgetModule> {
         WidgetModule::Messages,
         WidgetModule::Weather,
         WidgetModule::Vpn,
+        WidgetModule::HighAlert,
     ]
 }
 
@@ -223,6 +230,31 @@ pub struct AppSettings {
     /// Interface names the classifier must ignore (utun helpers, ZTNA, etc.).
     #[serde(default)]
     pub vpn_ignore_interfaces: Vec<String>,
+    pub show_high_alert: bool,
+    /// Seconds; `0` means until turned off. Default is 30 minutes — never forever.
+    #[serde(default = "default_high_alert_duration")]
+    pub high_alert_default_duration_secs: u32,
+    #[serde(default)]
+    pub high_alert_kind: HighAlertKind,
+    /// Auto-release the assertion at or below this battery percent. `0` disables.
+    #[serde(default = "default_low_battery_pct")]
+    pub low_battery_release_pct: u8,
+    #[serde(default = "default_pomo_work")]
+    pub pomodoro_work_secs: u32,
+    #[serde(default = "default_pomo_break")]
+    pub pomodoro_break_secs: u32,
+    #[serde(default = "default_pomo_long")]
+    pub pomodoro_long_break_secs: u32,
+    #[serde(default = "default_pomo_cycles")]
+    pub pomodoro_cycles_per_long: u8,
+    #[serde(default = "default_true")]
+    pub pomodoro_auto_advance: bool,
+    #[serde(default = "default_true")]
+    pub pomodoro_keep_awake: bool,
+    #[serde(default)]
+    pub focus_shortcut_work: Option<String>,
+    #[serde(default)]
+    pub focus_shortcut_break: Option<String>,
     #[serde(default)]
     pub observe: ObserveConfig,
     #[serde(default)]
@@ -326,6 +358,28 @@ fn default_battery_alert_threshold() -> u8 {
 
 fn default_lpm_shortcut_name() -> Option<String> {
     Some(crate::power::default_lpm_shortcut_name().into())
+fn default_high_alert_duration() -> u32 {
+    30 * 60
+}
+
+fn default_low_battery_pct() -> u8 {
+    10
+}
+
+fn default_pomo_work() -> u32 {
+    25 * 60
+}
+
+fn default_pomo_break() -> u32 {
+    5 * 60
+}
+
+fn default_pomo_long() -> u32 {
+    15 * 60
+}
+
+fn default_pomo_cycles() -> u8 {
+    4
 }
 
 impl Default for AppSettings {
@@ -359,6 +413,18 @@ impl Default for AppSettings {
             show_vpn: true,
             vpn_show_timer: true,
             vpn_ignore_interfaces: Vec::new(),
+            show_high_alert: true,
+            high_alert_default_duration_secs: default_high_alert_duration(),
+            high_alert_kind: HighAlertKind::default(),
+            low_battery_release_pct: default_low_battery_pct(),
+            pomodoro_work_secs: default_pomo_work(),
+            pomodoro_break_secs: default_pomo_break(),
+            pomodoro_long_break_secs: default_pomo_long(),
+            pomodoro_cycles_per_long: default_pomo_cycles(),
+            pomodoro_auto_advance: true,
+            pomodoro_keep_awake: true,
+            focus_shortcut_work: None,
+            focus_shortcut_break: None,
             observe: ObserveConfig::default(),
             liquid_glass_mode: false,
             non_notch_mode: false,
@@ -417,6 +483,7 @@ impl AppSettings {
             WidgetModule::Mixer => self.show_mixer && crate::mixer::is_available(),
             WidgetModule::Weather => self.weather.enabled,
             WidgetModule::Vpn => self.show_vpn,
+            WidgetModule::HighAlert => self.show_high_alert,
         }
     }
 
@@ -441,6 +508,7 @@ impl AppSettings {
             WidgetModule::Mixer => self.show_mixer = !self.show_mixer,
             WidgetModule::Weather => self.weather.enabled = !self.weather.enabled,
             WidgetModule::Vpn => self.show_vpn = !self.show_vpn,
+            WidgetModule::HighAlert => self.show_high_alert = !self.show_high_alert,
         }
     }
 
@@ -857,6 +925,17 @@ mod tests {
         assert!(parsed.show_vpn);
         assert!(parsed.vpn_show_timer);
         assert!(parsed.vpn_ignore_interfaces.is_empty());
+        assert!(parsed.show_high_alert);
+        assert_eq!(parsed.high_alert_default_duration_secs, 30 * 60);
+        assert_eq!(parsed.high_alert_kind, HighAlertKind::Display);
+        assert_eq!(parsed.low_battery_release_pct, 10);
+        assert_eq!(parsed.pomodoro_work_secs, 25 * 60);
+        assert_eq!(parsed.pomodoro_break_secs, 5 * 60);
+        assert_eq!(parsed.pomodoro_long_break_secs, 15 * 60);
+        assert_eq!(parsed.pomodoro_cycles_per_long, 4);
+        assert!(parsed.pomodoro_auto_advance);
+        assert!(parsed.pomodoro_keep_awake);
+        assert_eq!(parsed.focus_shortcut_work, None);
         assert!(parsed.liquid_glass_mode);
         assert!(!parsed.non_notch_mode);
         assert!((parsed.island_x - 0.5).abs() < f32::EPSILON);
@@ -956,6 +1035,7 @@ mod tests {
         settings.show_mixer = false;
         settings.weather.enabled = false;
         settings.show_vpn = false;
+        settings.show_high_alert = false;
         settings.set_cells(WidgetModule::Music, 5);
         assert_eq!(settings.used_cells(), 5);
         assert_eq!(settings.remaining_cells(), AppSettings::TOTAL_CELLS - 5);

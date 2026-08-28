@@ -10,9 +10,11 @@ pub mod browser_media;
 pub mod calendar;
 pub mod database;
 pub mod files;
+pub mod focus;
 pub mod haptics;
 pub mod hotkeys;
 pub mod location;
+pub mod high_alert;
 #[cfg(target_os = "macos")]
 pub mod lyrics;
 #[cfg(any(target_os = "macos", test))]
@@ -29,6 +31,7 @@ pub mod obsidian;
 pub mod observe;
 pub mod occupancy;
 pub mod power;
+pub mod pomodoro;
 pub mod settings;
 pub mod shortcuts;
 pub mod system_timers;

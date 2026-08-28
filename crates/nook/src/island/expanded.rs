@@ -13,6 +13,8 @@ use crate::widgets::{
     agents_card, calendar_card, notes_card, observe_card, reminders_card, speed_card, timer_card,
     weather_card,
     vpn_card,
+    agents_card, calendar_card, high_alert_card, notes_card, observe_card, reminders_card,
+    speed_card, timer_card,
 };
 use gpui::{
     div, img, prelude::*, px, rgba, AnyElement, Context, CursorStyle, FontWeight, MouseButton,
@@ -197,6 +199,12 @@ impl Island {
                 WidgetModule::Vpn if self.settings.show_vpn => add(
                     &mut kids,
                     cell_pane(self.settings.cells_for(module), vpn_card(&self.vpn)),
+                WidgetModule::HighAlert if self.settings.show_high_alert => add(
+                    &mut kids,
+                    cell_pane(
+                        self.settings.cells_for(module),
+                        high_alert_card(self, cx),
+                    ),
                 ),
                 _ => {}
             }
