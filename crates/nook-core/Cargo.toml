@@ -22,6 +22,9 @@ plist = "1"
 walkdir = "2"
 notify = "7"
 notify-debouncer-mini = "0.5"
+sha2 = "0.10"
+hmac = "0.12"
+uuid = { version = "1", features = ["v4"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"

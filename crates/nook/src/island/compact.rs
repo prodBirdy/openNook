@@ -89,6 +89,7 @@ impl Island {
                 .map(widgets::messages_compact_left)
                 .map(|el| el.into_any_element())
                 .unwrap_or_else(|| div().into_any_element()),
+            CompactMode::Share => lucide("share", theme::COMPACT_FACE).into_any_element(),
             CompactMode::Idle => div().into_any_element(),
         }
     }
@@ -149,6 +150,9 @@ impl Island {
                 .map(widgets::messages_compact_right)
                 .map(|el| el.into_any_element())
                 .unwrap_or_else(|| div().into_any_element()),
+            CompactMode::Share => {
+                label(self.share.compact_label(), theme::BODY, true).into_any_element()
+            }
             CompactMode::Onboard if hovered => div()
                 .id("github")
                 .cursor(CursorStyle::PointingHand)
@@ -260,6 +264,7 @@ impl Island {
                 CompactMode::Battery => "battery",
                 CompactMode::Onboard => "onboard",
                 CompactMode::Messages => "messages",
+                CompactMode::Share => "share",
             };
             row = row.child(
                 div()

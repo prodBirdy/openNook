@@ -41,5 +41,7 @@
 	<string>openNook reads and writes notes in the Obsidian vault you choose, which may live in Downloads.</string>
 	<key>NSAudioCaptureUsageDescription</key>
 	<string>openNook adjusts each app's volume by tapping its audio output. It does not save or send what you hear — it only scales the sound in real time. macOS shows a recording indicator while any per-app slider is below 100%.</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>openNook finds nearby LocalSend devices on your network so you can send files from the island tray. Nothing is received unless you turn receive on in Settings.</string>
 </dict>
 </plist>

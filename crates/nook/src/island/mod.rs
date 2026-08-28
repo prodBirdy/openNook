@@ -69,6 +69,7 @@ pub enum CompactMode {
     Battery,
     Onboard,
     Messages,
+    Share,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -245,6 +246,7 @@ pub struct Island {
     pub(super) hud: Option<HudState>,
     hud_fill: SpringValue,
     hud_dragging: bool,
+    pub(crate) share: nook_core::share::ShareSession,
 }
 
 struct PendingFileDrag {
@@ -373,6 +375,7 @@ impl Island {
             hud: None,
             hud_fill: SpringValue::at(0.0),
             hud_dragging: false,
+            share: nook_core::share::ShareSession::default(),
         };
         // Start at the compact idle size so the first paint isn't a jump.
         let (w, h) = this.target_size();
@@ -1665,6 +1668,8 @@ impl Island {
         let mut modes = Vec::new();
         if self.has_battery_alert() {
             modes.push(CompactMode::Battery);
+        if self.share.is_live() {
+            modes.push(CompactMode::Share);
         }
         if self.has_observe_outage() {
             modes.push(CompactMode::Observe);
@@ -1768,7 +1773,8 @@ impl Island {
             let body = if self.tab == Tab::Files {
                 // Tall enough for one full dropzone tile (flush preview + caption)
                 // plus Clear All, so a single file is not clipped behind a scroll.
-                theme::EXPANDED_PAD * 2.0 + files::files_pane_min_height(w)
+                let extra = if self.share.shows_picker() { 88.0 } else { 0.0 };
+                theme::EXPANDED_PAD * 2.0 + files::files_pane_min_height(w) + extra
             } else {
                 theme::NOOK_INSET + theme::NOOK_BODY
             };
@@ -2422,6 +2428,7 @@ mod tests {
             hud: None,
             hud_fill: SpringValue::at(0.0),
             hud_dragging: false,
+            share: nook_core::share::ShareSession::default(),
         }
     }
 
@@ -2792,6 +2799,17 @@ mod tests {
         );
         assert_eq!(island.mode(), CompactMode::Messages);
         island.settings.show_messages = false;
+    fn available_modes_share_while_transfer_is_live() {
+        let mut island = test_island();
+        assert!(!island.available_modes().contains(&CompactMode::Share));
+        island.share.phase = nook_core::share::SharePhase::Transferring;
+        island.share.status = "Sending".into();
+        assert_eq!(island.available_modes()[0], CompactMode::Share);
+        assert_eq!(island.mode(), CompactMode::Share);
+        island.share.phase = nook_core::share::SharePhase::Idle;
+        island.share.hud = Some("Link copied".into());
+        assert_eq!(island.mode(), CompactMode::Share);
+        island.share.hud = None;
         assert_eq!(island.available_modes(), vec![CompactMode::Idle]);
     }
 

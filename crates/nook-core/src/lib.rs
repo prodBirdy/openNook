@@ -33,6 +33,7 @@ pub mod system_timers;
 pub mod osd;
 pub mod settings;
 pub mod sysvol;
+pub mod share;
 pub mod utils;
 pub mod widgets;
 pub mod window_snap;
