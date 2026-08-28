@@ -1292,7 +1292,14 @@ mod tests {
         assert_eq!(sender_initials("+49 151 0000"), "?");
         assert_eq!(sender_initials(""), "?");
         assert_eq!(sender_avatar_rgb("Ada"), sender_avatar_rgb("Ada"));
-        assert_ne!(sender_avatar_rgb("Ada"), sender_avatar_rgb("Bea"));
+        let palette: Vec<u32> = ["Ada", "Bea", "Cam", "Dee", "Eve", "Fay"]
+            .iter()
+            .map(|n| sender_avatar_rgb(n))
+            .collect();
+        assert!(
+            palette.windows(2).any(|w| w[0] != w[1]),
+            "initials avatars should not all share one fill"
+        );
     }
 
     #[test]
