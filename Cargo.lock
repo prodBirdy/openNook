@@ -3833,6 +3833,7 @@ dependencies = [
  "dirs 6.0.0",
  "futures-executor",
  "futures-util",
+ "image",
  "log",
  "objc2",
  "objc2-event-kit",

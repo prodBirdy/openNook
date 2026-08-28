@@ -131,6 +131,7 @@ impl WidgetModuleExt for WidgetModule {
             Self::Speed => "Speed Test",
             Self::Agents => "Agents",
             Self::Mirror => "Mirror",
+            Self::Process => "Process",
         }
     }
 
@@ -146,6 +147,7 @@ impl WidgetModuleExt for WidgetModule {
             Self::Speed => "gauge",
             Self::Agents => "bot",
             Self::Mirror => "webcam",
+            Self::Process => "image",
         }
     }
 
@@ -161,6 +163,7 @@ impl WidgetModuleExt for WidgetModule {
             Self::Speed => "Cloudflare".into(),
             Self::Agents => "Sessions".into(),
             Self::Mirror => "Camera".into(),
+            Self::Process => "Convert / OCR".into(),
         }
     }
 
@@ -184,6 +187,7 @@ impl WidgetModuleExt for WidgetModule {
             Self::Speed => "Speed",
             Self::Agents => "Agents",
             Self::Mirror => "Mirror",
+            Self::Process => "Process",
         }
     }
 }
@@ -569,7 +573,147 @@ impl SettingsView {
                         .into_any_element(),
                     ]),
                     Some("Hover the island to expand. Settings and Quit are in the menu bar extra."),
-                )),
+                ))
+                .child(self.file_actions_section(settings, cx)),
+        )
+    }
+
+    fn file_actions_section(
+        &self,
+        settings: &AppSettings,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let fa = &settings.file_actions;
+        let ffmpeg_present = nook_core::process::ffmpeg::on_path();
+        let ffmpeg_on = fa.use_ffmpeg && ffmpeg_present;
+        let jpeg = fa.jpeg_quality;
+        let preset = fa.pdf_preset;
+        let downloads = fa.output_is_downloads();
+        section(
+            "File Actions",
+            settings_group(vec![
+                toggle_row("Enable file actions", fa.enabled, cx, |s| {
+                    s.file_actions.enabled = !s.file_actions.enabled;
+                })
+                .into_any_element(),
+                settings_row("output-folder")
+                    .child(label("Output folder", theme::BODY, true))
+                    .child(
+                        segmented_group()
+                            .child(segment("Alongside", !downloads, cx, |_, _, cx| {
+                                nook_core::settings::tweak_app_settings(|s| {
+                                    s.file_actions.set_alongside_source();
+                                });
+                                cx.notify();
+                            }))
+                            .child(segment("Downloads", downloads, cx, |_, _, cx| {
+                                nook_core::settings::tweak_app_settings(|s| {
+                                    s.file_actions.set_downloads();
+                                });
+                                cx.notify();
+                            })),
+                    )
+                    .into_any_element(),
+                settings_row("jpeg-quality")
+                    .child(label("JPEG quality", theme::BODY, true))
+                    .child(
+                        segmented_group()
+                            .child(segment("60", jpeg <= 70, cx, |_, _, cx| {
+                                nook_core::settings::tweak_app_settings(|s| {
+                                    s.file_actions.jpeg_quality = 60;
+                                });
+                                cx.notify();
+                            }))
+                            .child(segment("80", jpeg > 70 && jpeg < 90, cx, |_, _, cx| {
+                                nook_core::settings::tweak_app_settings(|s| {
+                                    s.file_actions.jpeg_quality = 80;
+                                });
+                                cx.notify();
+                            }))
+                            .child(segment("95", jpeg >= 90, cx, |_, _, cx| {
+                                nook_core::settings::tweak_app_settings(|s| {
+                                    s.file_actions.jpeg_quality = 95;
+                                });
+                                cx.notify();
+                            })),
+                    )
+                    .into_any_element(),
+                settings_row("pdf-preset")
+                    .child(label("PDF preset", theme::BODY, true))
+                    .child(
+                        segmented_group()
+                            .child(segment(
+                                "Screen",
+                                preset == nook_core::settings::PdfPreset::Screen,
+                                cx,
+                                |_, _, cx| {
+                                    nook_core::settings::tweak_app_settings(|s| {
+                                        s.file_actions.pdf_preset =
+                                            nook_core::settings::PdfPreset::Screen;
+                                    });
+                                    cx.notify();
+                                },
+                            ))
+                            .child(segment(
+                                "Print",
+                                preset == nook_core::settings::PdfPreset::Print,
+                                cx,
+                                |_, _, cx| {
+                                    nook_core::settings::tweak_app_settings(|s| {
+                                        s.file_actions.pdf_preset =
+                                            nook_core::settings::PdfPreset::Print;
+                                    });
+                                    cx.notify();
+                                },
+                            ))
+                            .child(segment(
+                                "Raster",
+                                preset == nook_core::settings::PdfPreset::Raster,
+                                cx,
+                                |_, _, cx| {
+                                    nook_core::settings::tweak_app_settings(|s| {
+                                        s.file_actions.pdf_preset =
+                                            nook_core::settings::PdfPreset::Raster;
+                                    });
+                                    cx.notify();
+                                },
+                            )),
+                    )
+                    .into_any_element(),
+                settings_row("ffmpeg-toggle")
+                    .when(ffmpeg_present, |d| {
+                        d.cursor(CursorStyle::PointingHand).on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|_, _, _, cx| {
+                                nook_core::settings::tweak_app_settings(|s| {
+                                    s.file_actions.use_ffmpeg = !s.file_actions.use_ffmpeg;
+                                });
+                                cx.notify();
+                            }),
+                        )
+                    })
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(1.))
+                            .child(label("Extended formats (ffmpeg)", theme::BODY, true))
+                            .child(label(
+                                if ffmpeg_present {
+                                    "User-installed ffmpeg on PATH"
+                                } else {
+                                    "Install ffmpeg yourself — Nook will not download it"
+                                },
+                                theme::SUBHEADLINE,
+                                false,
+                            )),
+                    )
+                    .child(toggle_knob(ffmpeg_on))
+                    .into_any_element(),
+            ]),
+            Some(
+                "Convert, target-size, PDF compress, background removal, and OCR. No MP3/Opus encode, mkv read, or webm/av1 write without your own ffmpeg. Target-size is ABR ±5%. Background removal is persons-only on macOS 12–13.",
+            ),
         )
     }
 
@@ -1356,6 +1500,9 @@ fn module_blurb(module: WidgetModule) -> SharedString {
             "Working coding-agent sessions on the compact face and expanded card.".into()
         }
         WidgetModule::Mirror => "A live camera preview that opens when you click the Mirror card.".into(),
+        WidgetModule::Process => {
+            "Convert, target-size, PDF compress, background removal, and OCR for files on the tray.".into()
+        }
     }
 }
 
@@ -1727,6 +1874,7 @@ mod tests {
                 "Speed Test",
                 "Agents",
                 "Mirror",
+                "Process",
             ]
         );
         assert!(!names

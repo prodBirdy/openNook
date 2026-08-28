@@ -18,6 +18,7 @@ pub mod notch;
 pub mod notes;
 pub mod observe;
 pub mod occupancy;
+pub mod process;
 pub mod settings;
 pub mod utils;
 pub mod widgets;

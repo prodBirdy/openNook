@@ -17,10 +17,11 @@ pub enum WidgetModule {
     Speed = 7,
     Agents = 8,
     Mirror = 9,
+    Process = 10,
 }
 
 impl WidgetModule {
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 11] = [
         Self::Calendar,
         Self::Music,
         Self::Files,
@@ -31,6 +32,7 @@ impl WidgetModule {
         Self::Speed,
         Self::Agents,
         Self::Mirror,
+        Self::Process,
     ];
 
     pub fn from_u8(value: u8) -> Self {
@@ -45,7 +47,7 @@ impl WidgetModule {
         match self {
             Self::Calendar | Self::Music => 5,
             Self::Files | Self::Notes | Self::Observe | Self::Reminders | Self::Agents => 4,
-            Self::Timers | Self::Speed | Self::Mirror => 3,
+            Self::Timers | Self::Speed | Self::Mirror | Self::Process => 3,
         }
     }
 
@@ -53,13 +55,13 @@ impl WidgetModule {
         match self {
             Self::Calendar => 4,
             Self::Music | Self::Files | Self::Observe | Self::Reminders | Self::Mirror => 3,
-            Self::Notes | Self::Timers | Self::Speed | Self::Agents => 2,
+            Self::Notes | Self::Timers | Self::Speed | Self::Agents | Self::Process => 2,
         }
     }
 
     pub fn max_cells(self) -> u8 {
         match self {
-            Self::Timers | Self::Speed | Self::Agents | Self::Mirror => 6,
+            Self::Timers | Self::Speed | Self::Agents | Self::Mirror | Self::Process => 6,
             _ => 8,
         }
     }
@@ -82,7 +84,101 @@ fn default_widget_order() -> Vec<WidgetModule> {
         WidgetModule::Timers,
         WidgetModule::Notes,
         WidgetModule::Speed,
+        WidgetModule::Process,
     ]
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum PdfPreset {
+    #[default]
+    Screen,
+    Print,
+    Raster,
+}
+
+impl PdfPreset {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Screen => "Screen",
+            Self::Print => "Print",
+            Self::Raster => "Raster",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct FileActionsSettings {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Empty / `None` writes alongside the source.
+    #[serde(default)]
+    pub output_folder: Option<String>,
+    #[serde(default = "default_jpeg_quality")]
+    pub jpeg_quality: u8,
+    #[serde(default)]
+    pub pdf_preset: PdfPreset,
+    /// Only takes effect when a user-installed ffmpeg is on PATH. Never downloads.
+    #[serde(default)]
+    pub use_ffmpeg: bool,
+    #[serde(default = "default_image_format")]
+    pub default_image_format: String,
+    #[serde(default = "default_video_format")]
+    pub default_video_format: String,
+}
+
+fn default_jpeg_quality() -> u8 {
+    80
+}
+
+fn default_image_format() -> String {
+    "jpeg".into()
+}
+
+fn default_video_format() -> String {
+    "mp4".into()
+}
+
+impl Default for FileActionsSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            output_folder: None,
+            jpeg_quality: default_jpeg_quality(),
+            pdf_preset: PdfPreset::Screen,
+            use_ffmpeg: false,
+            default_image_format: default_image_format(),
+            default_video_format: default_video_format(),
+        }
+    }
+}
+
+impl FileActionsSettings {
+    pub fn ffmpeg_enabled(&self) -> bool {
+        self.use_ffmpeg && crate::process::ffmpeg::on_path()
+    }
+
+    pub fn output_is_downloads(&self) -> bool {
+        match self.output_folder.as_deref() {
+            Some(folder) => {
+                dirs::download_dir()
+                    .map(|d| d == std::path::Path::new(folder))
+                    .unwrap_or(false)
+                    || folder.ends_with("Downloads")
+            }
+            None => false,
+        }
+    }
+
+    pub fn set_alongside_source(&mut self) {
+        self.output_folder = None;
+    }
+
+    pub fn set_downloads(&mut self) {
+        self.output_folder = dirs::download_dir()
+            .or_else(dirs::home_dir)
+            .map(|p| p.to_string_lossy().into_owned());
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
@@ -142,6 +238,10 @@ pub struct AppSettings {
     pub show_files: bool,
     #[serde(default = "default_true")]
     pub show_mirror: bool,
+    #[serde(default = "default_true")]
+    pub show_process: bool,
+    #[serde(default)]
+    pub file_actions: FileActionsSettings,
     #[serde(default)]
     pub observe: ObserveConfig,
     #[serde(default)]
@@ -231,6 +331,8 @@ impl Default for AppSettings {
             show_speed: true,
             show_files: true,
             show_mirror: true,
+            show_process: true,
+            file_actions: FileActionsSettings::default(),
             observe: ObserveConfig::default(),
             liquid_glass_mode: false,
             non_notch_mode: false,
@@ -276,6 +378,7 @@ impl AppSettings {
             WidgetModule::Speed => self.show_speed,
             WidgetModule::Agents => self.show_agents,
             WidgetModule::Mirror => self.show_mirror,
+            WidgetModule::Process => self.show_process,
         }
     }
 
@@ -291,6 +394,7 @@ impl AppSettings {
             WidgetModule::Speed => self.show_speed = !self.show_speed,
             WidgetModule::Agents => self.show_agents = !self.show_agents,
             WidgetModule::Mirror => self.show_mirror = !self.show_mirror,
+            WidgetModule::Process => self.show_process = !self.show_process,
         }
     }
 
@@ -611,6 +715,11 @@ mod tests {
         assert!(parsed.show_speed);
         assert!(parsed.show_files);
         assert!(parsed.show_mirror);
+        assert!(parsed.show_process);
+        assert!(parsed.file_actions.enabled);
+        assert_eq!(parsed.file_actions.jpeg_quality, 80);
+        assert_eq!(parsed.file_actions.pdf_preset, PdfPreset::Screen);
+        assert!(!parsed.file_actions.use_ffmpeg);
         assert!(parsed.liquid_glass_mode);
         assert!(!parsed.non_notch_mode);
         assert!((parsed.island_x - 0.5).abs() < f32::EPSILON);
@@ -696,6 +805,7 @@ mod tests {
         settings.show_speed = false;
         settings.show_agents = false;
         settings.show_mirror = false;
+        settings.show_process = false;
         settings.set_cells(WidgetModule::Music, 5);
         assert_eq!(settings.used_cells(), 5);
         assert_eq!(settings.remaining_cells(), AppSettings::TOTAL_CELLS - 5);

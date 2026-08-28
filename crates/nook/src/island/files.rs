@@ -8,7 +8,8 @@ use gpui::{
     div, img, prelude::*, px, rgb, rgba, AnyElement, Context, CursorStyle, FontWeight, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, ObjectFit, ScrollWheelEvent, SharedString,
 };
-use nook_core::files::FileTrayItem;
+use nook_core::files::{self, FileCapabilities, FileTrayItem};
+use nook_core::process::JobKind;
 use std::path::PathBuf;
 
 /// Dashed drop-zone chrome. Tiles are a compact horizontal row, not a grid.
@@ -185,6 +186,45 @@ fn airdrop_target(cx: &mut Context<Island>) -> impl IntoElement {
         )
 }
 
+fn process_drop_chip(
+    id: &'static str,
+    icon: &'static str,
+    caption: &'static str,
+    color: gpui::Rgba,
+    kind: JobKind,
+    cx: &mut Context<Island>,
+) -> impl IntoElement {
+    div()
+        .id(id)
+        .flex_shrink_0()
+        .h_full()
+        .w(px(112.))
+        .rounded(px(TRAY_ZONE_RADIUS))
+        .bg(color)
+        .flex()
+        .flex_col()
+        .items_center()
+        .justify_center()
+        .gap(px(8.))
+        .cursor(CursorStyle::PointingHand)
+        .hover(|s| s.opacity(0.92))
+        .can_drop(|drag: &dyn std::any::Any, _, _| {
+            drag.downcast_ref::<gpui::ExternalPaths>().is_some()
+        })
+        .on_drop(cx.listener(move |this, paths: &gpui::ExternalPaths, _, cx| {
+            cx.stop_propagation();
+            this.process_dropped_paths(paths, kind, cx);
+        }))
+        .child(lucide_color(icon, 22.0, rgb(0xffffff)))
+        .child(
+            div()
+                .text_size(px(13.))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(rgb(0xffffff))
+                .child(caption),
+        )
+}
+
 fn is_pdf(file: &FileTrayItem) -> bool {
     file.mime_type.to_ascii_lowercase().contains("pdf")
         || file.name.to_ascii_lowercase().ends_with(".pdf")
@@ -225,8 +265,15 @@ fn file_preview(file: &FileTrayItem) -> impl IntoElement {
         })
 }
 
-fn file_card(file: &FileTrayItem, cx: &mut Context<Island>) -> impl IntoElement {
+fn file_card(
+    file: &FileTrayItem,
+    open: bool,
+    caps: FileCapabilities,
+    enabled: bool,
+    cx: &mut Context<Island>,
+) -> impl IntoElement {
     let path = file.path.clone();
+    let path_menu = file.path.clone();
     let name = file.name.clone();
 
     div()
@@ -243,6 +290,19 @@ fn file_card(file: &FileTrayItem, cx: &mut Context<Island>) -> impl IntoElement 
             cx.listener(move |this, _: &MouseDownEvent, _, cx| {
                 cx.stop_propagation();
                 this.arm_file_drag(path.clone());
+            }),
+        )
+        .on_mouse_down(
+            MouseButton::Right,
+            cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                cx.stop_propagation();
+                if this.process_menu.as_deref() == Some(path_menu.as_str()) {
+                    this.process_menu = None;
+                } else {
+                    this.process_menu = Some(path_menu.clone());
+                    this.process_focus = Some(path_menu.clone());
+                }
+                cx.notify();
             }),
         )
         .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
@@ -273,6 +333,68 @@ fn file_card(file: &FileTrayItem, cx: &mut Context<Island>) -> impl IntoElement 
                 .truncate()
                 .child(name),
         )
+        .when(open && enabled && caps.any(), |d| {
+            d.child(file_actions(file.path.clone(), caps, cx))
+        })
+}
+
+fn file_actions(
+    path: String,
+    caps: FileCapabilities,
+    cx: &mut Context<Island>,
+) -> impl IntoElement {
+    let mut col = div().flex().flex_col().gap(px(2.)).w_full();
+    if caps.convert {
+        col = col.child(action_chip(&path, "Convert", JobKind::Convert, cx));
+    }
+    if caps.target_size {
+        col = col.child(action_chip(&path, "Target size", JobKind::TargetSize, cx));
+    }
+    if caps.compress_pdf {
+        col = col.child(action_chip(&path, "Compress PDF", JobKind::CompressPdf, cx));
+    }
+    if caps.remove_bg {
+        col = col.child(action_chip(&path, "Remove BG", JobKind::RemoveBg, cx));
+    }
+    if caps.ocr {
+        col = col.child(action_chip(&path, "Copy Text", JobKind::Ocr, cx));
+    }
+    col
+}
+
+fn action_chip(
+    path: &str,
+    caption: &'static str,
+    kind: JobKind,
+    cx: &mut Context<Island>,
+) -> impl IntoElement {
+    let path = path.to_string();
+    div()
+        .id(SharedString::from(format!("act-{caption}-{path}")))
+        .w_full()
+        .h(px(18.))
+        .rounded(px(4.))
+        .bg(rgba(0xffffff1A))
+        .hover(|s| s.bg(rgba(0xffffff33)))
+        .cursor(CursorStyle::PointingHand)
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(
+            div()
+                .text_size(px(9.))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(theme::LABEL)
+                .child(caption),
+        )
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                cx.stop_propagation();
+                this.process_menu = None;
+                this.begin_kind_job(path.clone(), kind, cx);
+            }),
+        )
 }
 
 impl Island {
@@ -290,8 +412,12 @@ impl Island {
             .on_scroll_wheel(cx.listener(|_, _: &ScrollWheelEvent, _, cx| {
                 cx.stop_propagation();
             }));
+        let actions_on = self.settings.file_actions.enabled;
+        let ffmpeg = self.settings.file_actions.ffmpeg_enabled();
         for file in &self.files {
-            row = row.child(file_card(file, cx));
+            let open = self.process_menu.as_deref() == Some(file.path.as_str());
+            let caps = files::item_capabilities(file, ffmpeg);
+            row = row.child(file_card(file, open, caps, actions_on, cx));
         }
         if self.files.is_empty() {
             row = row.child(
@@ -342,9 +468,58 @@ impl Island {
 
         let mut pane = div().flex().size_full().gap(px(12.)).child(zone);
         if hot {
+            if self.settings.file_actions.enabled {
+                pane = pane.child(process_drop_chip(
+                    "convert-target",
+                    "image",
+                    "Convert",
+                    gpui::Rgba {
+                        r: 0.18,
+                        g: 0.55,
+                        b: 0.38,
+                        a: 1.0,
+                    },
+                    JobKind::Convert,
+                    cx,
+                ));
+                pane = pane.child(process_drop_chip(
+                    "ocr-target",
+                    "eye",
+                    "OCR",
+                    gpui::Rgba {
+                        r: 0.45,
+                        g: 0.28,
+                        b: 0.72,
+                        a: 1.0,
+                    },
+                    JobKind::Ocr,
+                    cx,
+                ));
+            }
             pane = pane.child(airdrop_target(cx));
         }
         pane
+    }
+
+    pub(super) fn process_dropped_paths(
+        &mut self,
+        paths: &gpui::ExternalPaths,
+        kind: JobKind,
+        cx: &mut Context<Self>,
+    ) {
+        for path in paths.paths() {
+            let raw = path.to_string_lossy().into_owned();
+            let resolved = nook_core::files::resolve_path(raw.clone()).unwrap_or(raw);
+            if let Ok(item) = nook_core::files::add_dropped_path(&resolved) {
+                if !self.files.iter().any(|f| f.path == item.path) {
+                    self.files.push(item);
+                }
+            }
+            self.begin_kind_job(resolved, kind, cx);
+        }
+        let _ = nook_core::files::save_file_tray(self.files.clone());
+        self.tab = Tab::Files;
+        cx.notify();
     }
 
     pub(super) fn file_layout(&self) -> (u16, f32) {
