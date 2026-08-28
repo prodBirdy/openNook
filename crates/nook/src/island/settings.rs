@@ -9,6 +9,7 @@ use gpui::{
     ObjectFit, Pixels, Rgba, SharedString, Subscription, Window,
 };
 use gpui_component::slider::{Slider, SliderEvent, SliderState};
+use nook_core::high_alert::HighAlertKind;
 use nook_core::settings::{AppSettings, IslandSwatch, WidgetModule, ISLAND_SWATCHES};
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -131,6 +132,7 @@ impl WidgetModuleExt for WidgetModule {
             Self::Speed => "Speed Test",
             Self::Agents => "Agents",
             Self::Mirror => "Mirror",
+            Self::HighAlert => "High Alert",
         }
     }
 
@@ -146,6 +148,7 @@ impl WidgetModuleExt for WidgetModule {
             Self::Speed => "gauge",
             Self::Agents => "bot",
             Self::Mirror => "webcam",
+            Self::HighAlert => "sun",
         }
     }
 
@@ -161,6 +164,7 @@ impl WidgetModuleExt for WidgetModule {
             Self::Speed => "Cloudflare".into(),
             Self::Agents => "Sessions".into(),
             Self::Mirror => "Camera".into(),
+            Self::HighAlert => "Keep awake".into(),
         }
     }
 
@@ -184,6 +188,7 @@ impl WidgetModuleExt for WidgetModule {
             Self::Speed => "Speed",
             Self::Agents => "Agents",
             Self::Mirror => "Mirror",
+            Self::HighAlert => "Alert",
         }
     }
 }
@@ -376,6 +381,26 @@ impl SettingsView {
                     }
                     Err(err) => this.catalog_error = Some(err),
                 }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn fetch_shortcuts(&mut self, cx: &mut Context<Self>) {
+        if self.catalog_loading {
+            return;
+        }
+        self.catalog_loading = true;
+        cx.spawn(async move |this, cx| {
+            let names = cx
+                .background_executor()
+                .spawn(async { nook_core::runtime().block_on(nook_core::focus::list_shortcuts()) })
+                .await;
+            this.update(cx, |this, cx| {
+                this.catalog_loading = false;
+                this.catalog = names;
                 cx.notify();
             })
             .ok();
@@ -795,6 +820,9 @@ impl SettingsView {
                 cx.listener(move |this, _, _, cx| {
                     this.module = module;
                     this.persist_nav();
+                    if module == WidgetModule::Timers {
+                        this.fetch_shortcuts(cx);
+                    }
                     cx.notify();
                 }),
             )
@@ -997,6 +1025,12 @@ impl SettingsView {
                     )
                     .into_any_element(),
                 );
+            }
+            WidgetModule::HighAlert => {
+                rows.extend(high_alert_rows(settings, cx));
+            }
+            WidgetModule::Timers => {
+                rows.extend(pomodoro_rows(settings, &self.catalog, cx));
             }
             _ => {}
         }
@@ -1349,13 +1383,18 @@ fn module_blurb(module: WidgetModule) -> SharedString {
             "Now Playing from MediaRemote on macOS, with an AppleScript fallback.".into()
         }
         WidgetModule::Files => "Drop zone and tray live on the Tray tab of the expanded island.".into(),
-        WidgetModule::Timers => "Countdown presets and a compact ring while a timer is running.".into(),
+        WidgetModule::Timers => {
+            "Countdown presets, a Pomodoro work/break cycle, and an optional Focus shortcut.".into()
+        }
         WidgetModule::Reminders => "Incomplete reminders from EventKit, same store as Calendar.".into(),
         WidgetModule::Speed => "Cloudflare (then OVH) download probe. Runs from the island card.".into(),
         WidgetModule::Agents => {
             "Working coding-agent sessions on the compact face and expanded card.".into()
         }
         WidgetModule::Mirror => "A live camera preview that opens when you click the Mirror card.".into(),
+        WidgetModule::HighAlert => {
+            "IOPM keep-awake. Timed chips expire in powerd — lid-close sleep is not prevented.".into()
+        }
     }
 }
 
@@ -1393,6 +1432,200 @@ fn caption_text(text: impl Into<SharedString>) -> impl IntoElement {
         .child(text.into())
 }
 
+fn high_alert_rows(
+    settings: &AppSettings,
+    cx: &mut Context<SettingsView>,
+) -> Vec<AnyElement> {
+    let duration = settings.high_alert_default_duration_secs;
+    let kind = settings.high_alert_kind;
+    let battery = settings.low_battery_release_pct;
+    vec![
+        chip_row(
+            "Default duration",
+            &[
+                ("15m", duration == 15 * 60),
+                ("30m", duration == 30 * 60),
+                ("1h", duration == 60 * 60),
+                ("On", duration == 0),
+            ],
+            cx,
+            |caption, s| {
+                s.high_alert_default_duration_secs = match caption {
+                    "15m" => 15 * 60,
+                    "1h" => 60 * 60,
+                    "On" => 0,
+                    _ => 30 * 60,
+                };
+            },
+        )
+        .into_any_element(),
+        chip_row(
+            "Keep awake",
+            &[
+                ("Display", kind == HighAlertKind::Display),
+                ("System", kind == HighAlertKind::System),
+            ],
+            cx,
+            |caption, s| {
+                s.high_alert_kind = if caption == "System" {
+                    HighAlertKind::System
+                } else {
+                    HighAlertKind::Display
+                };
+            },
+        )
+        .into_any_element(),
+        chip_row(
+            "Release below",
+            &[
+                ("Off", battery == 0),
+                ("10%", battery == 10),
+                ("20%", battery == 20),
+            ],
+            cx,
+            |caption, s| {
+                s.low_battery_release_pct = match caption {
+                    "Off" => 0,
+                    "20%" => 20,
+                    _ => 10,
+                };
+            },
+        )
+        .into_any_element(),
+    ]
+}
+
+fn pomodoro_rows(
+    settings: &AppSettings,
+    catalog: &[String],
+    cx: &mut Context<SettingsView>,
+) -> Vec<AnyElement> {
+    let work = settings.pomodoro_work_secs;
+    let brk = settings.pomodoro_break_secs;
+    let long = settings.pomodoro_long_break_secs;
+    let cycles = settings.pomodoro_cycles_per_long;
+    let work_name = settings
+        .focus_shortcut_work
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .unwrap_or("None")
+        .to_string();
+    let break_name = settings
+        .focus_shortcut_break
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .unwrap_or("None")
+        .to_string();
+    let listed: Vec<String> = catalog.to_vec();
+    vec![
+        chip_row(
+            "Work",
+            &[("25m", work == 25 * 60), ("50m", work == 50 * 60)],
+            cx,
+            |caption, s| {
+                s.pomodoro_work_secs = if caption == "50m" { 50 * 60 } else { 25 * 60 };
+            },
+        )
+        .into_any_element(),
+        chip_row(
+            "Break",
+            &[("5m", brk == 5 * 60), ("10m", brk == 10 * 60)],
+            cx,
+            |caption, s| {
+                s.pomodoro_break_secs = if caption == "10m" { 10 * 60 } else { 5 * 60 };
+            },
+        )
+        .into_any_element(),
+        chip_row(
+            "Long break",
+            &[("15m", long == 15 * 60), ("20m", long == 20 * 60)],
+            cx,
+            |caption, s| {
+                s.pomodoro_long_break_secs = if caption == "20m" { 20 * 60 } else { 15 * 60 };
+            },
+        )
+        .into_any_element(),
+        chip_row(
+            "Cycles",
+            &[("3", cycles == 3), ("4", cycles == 4)],
+            cx,
+            |caption, s| {
+                s.pomodoro_cycles_per_long = if caption == "3" { 3 } else { 4 };
+            },
+        )
+        .into_any_element(),
+        toggle_row(
+            "Auto-advance phases",
+            settings.pomodoro_auto_advance,
+            cx,
+            |s| s.pomodoro_auto_advance = !s.pomodoro_auto_advance,
+        )
+        .into_any_element(),
+        toggle_row(
+            "Keep awake on work",
+            settings.pomodoro_keep_awake,
+            cx,
+            |s| s.pomodoro_keep_awake = !s.pomodoro_keep_awake,
+        )
+        .into_any_element(),
+        action_row(
+            "focus-work",
+            "Work shortcut",
+            work_name,
+            cx,
+            move |_, _, cx| {
+                let next = nook_core::focus::cycle_shortcut(
+                    nook_core::settings::get_app_settings()
+                        .focus_shortcut_work
+                        .as_deref(),
+                    &listed,
+                );
+                nook_core::settings::tweak_app_settings(|s| s.focus_shortcut_work = next);
+                cx.notify();
+            },
+        )
+        .into_any_element(),
+        action_row(
+            "focus-break",
+            "Break shortcut",
+            break_name,
+            cx,
+            {
+                let listed = catalog.to_vec();
+                move |_, _, cx| {
+                    let next = nook_core::focus::cycle_shortcut(
+                        nook_core::settings::get_app_settings()
+                            .focus_shortcut_break
+                            .as_deref(),
+                        &listed,
+                    );
+                    nook_core::settings::tweak_app_settings(|s| s.focus_shortcut_break = next);
+                    cx.notify();
+                }
+            },
+        )
+        .into_any_element(),
+    ]
+}
+
+fn chip_row(
+    title: &'static str,
+    chips: &[(&'static str, bool)],
+    cx: &mut Context<SettingsView>,
+    tweak: impl Fn(&'static str, &mut AppSettings) + Copy + 'static,
+) -> impl IntoElement {
+    let mut group = segmented_group();
+    for (caption, selected) in chips.iter().copied() {
+        group = group.child(segment(caption, selected, cx, move |_, _, cx| {
+            nook_core::settings::tweak_app_settings(|s| tweak(caption, s));
+            cx.notify();
+        }));
+    }
+    settings_row(title)
+        .child(label(title, theme::BODY, true))
+        .child(group)
+}
+
 fn settings_group(rows: Vec<AnyElement>) -> impl IntoElement {
     let mut group = div()
         .flex()
@@ -1423,7 +1656,7 @@ fn settings_row(id: impl Into<SharedString>) -> gpui::Stateful<gpui::Div> {
 fn action_row(
     id: &'static str,
     title: &'static str,
-    caption: &'static str,
+    caption: impl Into<SharedString>,
     cx: &mut Context<SettingsView>,
     on_click: impl Fn(&mut SettingsView, &mut Window, &mut Context<SettingsView>) + 'static,
 ) -> impl IntoElement {
@@ -1727,6 +1960,7 @@ mod tests {
                 "Speed Test",
                 "Agents",
                 "Mirror",
+                "High Alert",
             ]
         );
         assert!(!names

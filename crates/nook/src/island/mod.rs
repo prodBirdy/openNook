@@ -26,9 +26,11 @@ use nook_core::files::FileTrayItem;
 use nook_core::models::NowPlayingData;
 use nook_core::notch;
 use nook_core::observe::{MetricHistory, ObserveSnapshot};
+use nook_core::high_alert::HighAlertOwner;
+use nook_core::pomodoro::{PomodoroPhase, PomodoroSpec};
 use nook_core::settings::AppSettings;
 use settings::SettingsView;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CompactMode {
@@ -47,6 +49,12 @@ pub enum Tab {
     Files,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TimerKind {
+    Countdown,
+    Pomodoro(PomodoroSpec),
+}
+
 #[derive(Clone)]
 pub struct Timer {
     pub id: u64,
@@ -55,6 +63,10 @@ pub struct Timer {
     pub remaining: u32,
     pub total: u32,
     pub running: bool,
+    pub kind: TimerKind,
+    /// Wall-clock end of a running pomodoro phase. Instant would stall across
+    /// lid-close sleep; powerd-side High Alert does not need this.
+    pub ends_at: Option<SystemTime>,
 }
 
 pub struct Island {
@@ -83,6 +95,10 @@ pub struct Island {
     pub calendar_day: u8,
     /// Preset chips for a new timer, matching the React add dialog.
     pub timer_composer: bool,
+    /// Manual High Alert deadline for the card readout. `None` = until off.
+    /// powerd owns expiry; this is display-only and is not a wakeup source.
+    pub awake_deadline: Option<Instant>,
+    pub awake_active: bool,
     pub observe: ObserveSnapshot,
     observe_history: MetricHistory,
     pub(crate) observe_hover: Option<crate::widgets::ObserveHover>,
@@ -210,6 +226,8 @@ impl Island {
             next_timer_id: 1,
             calendar_day: 3,
             timer_composer: false,
+            awake_deadline: None,
+            awake_active: false,
             observe: ObserveSnapshot::default(),
             observe_history: nook_core::observe::load_history(),
             observe_hover: None,
@@ -329,6 +347,9 @@ impl Island {
                         } else {
                             this.settings = settings;
                         }
+                        nook_core::high_alert::set_low_battery_release_pct(
+                            this.settings.low_battery_release_pct,
+                        );
                         dirty = true;
                     }
                     if this.repositioning {
@@ -448,18 +469,14 @@ impl Island {
                         // Repaint only when a countdown actually moved — an
                         // unconditional dirty here kept the island rendering
                         // (and Metal submitting) once a second forever.
-                        for t in &mut this.timers {
-                            if t.running && t.remaining > 0 {
-                                t.remaining = t.remaining.saturating_sub(elapsed_secs);
-                                dirty = true;
-                                if t.remaining == 0 {
-                                    t.running = false;
-                                    nook_core::haptics::trigger(Some(nook_core::haptics::HapticConfig {
-                                        pattern: nook_core::haptics::HapticPattern::Success,
-                                        intensity: 1.0,
-                                    }));
-                                }
-                            }
+                        if this.apply_timer_tick(SystemTime::now(), elapsed_secs) {
+                            dirty = true;
+                        }
+                        if this.sync_high_alert_ui(Instant::now()) {
+                            dirty = true;
+                        } else if this.expanded && this.awake_active {
+                            // Card readout only; idle face is an on/off glyph.
+                            dirty = true;
                         }
                     }
                     let levels = nook_core::audio::get_audio_levels();
@@ -750,13 +767,193 @@ impl Island {
         if let Some(t) = self.timers.iter_mut().find(|t| t.id == id) {
             t.remaining = t.total;
             t.running = false;
+            t.ends_at = None;
+            if let TimerKind::Pomodoro(spec) = t.kind {
+                t.name = spec.label().to_string();
+            }
         }
+        self.sync_pomodoro_awake();
     }
 
     pub(crate) fn remove_timer(&mut self, id: u64) {
         self.timers.retain(|t| t.id != id);
         if self.timers.is_empty() {
             self.timer_composer = false;
+        }
+        self.sync_pomodoro_awake();
+    }
+
+    pub(crate) fn toggle_timer(&mut self, id: u64) {
+        let now = SystemTime::now();
+        if let Some(t) = self.timers.iter_mut().find(|t| t.id == id) {
+            t.running = !t.running;
+            if t.running {
+                if matches!(t.kind, TimerKind::Pomodoro(_)) {
+                    t.ends_at = Some(now + Duration::from_secs(t.remaining.max(1) as u64));
+                }
+            } else {
+                t.ends_at = None;
+            }
+        }
+        self.sync_pomodoro_awake();
+    }
+
+    /// Advance running timers. Pomodoro remaining is computed from a wall-clock
+    /// deadline so a lid-close does not stall a break. Countdown still uses the
+    /// existing Instant-derived `elapsed_secs`. Returns whether anything moved.
+    pub(crate) fn apply_timer_tick(&mut self, now: SystemTime, elapsed_secs: u32) -> bool {
+        let mut dirty = false;
+        let mut edges: Vec<(bool, PomodoroPhase)> = Vec::new();
+        for t in &mut self.timers {
+            if !t.running {
+                continue;
+            }
+            match t.kind {
+                TimerKind::Countdown => {
+                    if t.remaining == 0 {
+                        continue;
+                    }
+                    t.remaining = t.remaining.saturating_sub(elapsed_secs);
+                    dirty = true;
+                    if t.remaining == 0 {
+                        t.running = false;
+                        nook_core::haptics::trigger(Some(nook_core::haptics::HapticConfig {
+                            pattern: nook_core::haptics::HapticPattern::Success,
+                            intensity: 1.0,
+                        }));
+                    }
+                }
+                TimerKind::Pomodoro(spec) => {
+                    let remaining = nook_core::pomodoro::remaining_until(t.ends_at, now);
+                    if remaining != t.remaining {
+                        t.remaining = remaining;
+                        dirty = true;
+                    }
+                    if remaining > 0 {
+                        continue;
+                    }
+                    nook_core::haptics::trigger(Some(nook_core::haptics::HapticConfig {
+                        pattern: nook_core::haptics::HapticPattern::Success,
+                        intensity: 1.0,
+                    }));
+                    if spec.auto_advance {
+                        let next = spec.advance();
+                        t.kind = TimerKind::Pomodoro(next);
+                        t.total = next.duration_secs();
+                        t.remaining = next.duration_secs();
+                        t.name = next.label().to_string();
+                        t.running = true;
+                        t.ends_at = Some(now + Duration::from_secs(next.duration_secs() as u64));
+                        edges.push((next.phase.is_work(), next.phase));
+                    } else {
+                        t.running = false;
+                        t.ends_at = None;
+                    }
+                    dirty = true;
+                }
+            }
+        }
+        for (is_work, _) in edges {
+            self.on_pomodoro_edge(is_work);
+        }
+        if dirty {
+            self.sync_pomodoro_awake();
+        }
+        dirty
+    }
+
+    fn on_pomodoro_edge(&self, work: bool) {
+        let name = if work {
+            self.settings.focus_shortcut_work.as_deref()
+        } else {
+            self.settings.focus_shortcut_break.as_deref()
+        };
+        nook_core::focus::run_shortcut_detached(name);
+    }
+
+    fn running_pomodoro_work(&self) -> bool {
+        self.timers.iter().any(|t| {
+            t.running
+                && matches!(
+                    t.kind,
+                    TimerKind::Pomodoro(spec) if spec.phase == PomodoroPhase::Work
+                )
+        })
+    }
+
+    fn sync_pomodoro_awake(&mut self) {
+        if self.settings.pomodoro_keep_awake && self.running_pomodoro_work() {
+            nook_core::high_alert::set_low_battery_release_pct(self.settings.low_battery_release_pct);
+            let _ = nook_core::high_alert::acquire(
+                HighAlertOwner::Pomodoro,
+                self.settings.high_alert_kind,
+                None,
+            );
+        } else {
+            nook_core::high_alert::release(HighAlertOwner::Pomodoro);
+        }
+        self.awake_active = nook_core::high_alert::is_active();
+    }
+
+    pub(crate) fn high_alert_active(&self) -> bool {
+        self.awake_active || nook_core::high_alert::is_active()
+    }
+
+    pub(crate) fn high_alert_remaining_secs(&self) -> Option<u32> {
+        let deadline = self.awake_deadline?;
+        Some(
+            deadline
+                .saturating_duration_since(Instant::now())
+                .as_secs()
+                .min(u32::MAX as u64) as u32,
+        )
+    }
+
+    /// Sync UI with powerd / low-battery release. Cheap atomics; no extra loops.
+    pub(crate) fn sync_high_alert_ui(&mut self, now: Instant) -> bool {
+        let stale = nook_core::high_alert::take_ui_stale();
+        let expired = self
+            .awake_deadline
+            .is_some_and(|deadline| now >= deadline);
+        if expired && nook_core::high_alert::is_held_by(HighAlertOwner::Manual) {
+            nook_core::high_alert::release(HighAlertOwner::Manual);
+        }
+        let active = nook_core::high_alert::is_active();
+        let changed = stale || expired || self.awake_active != active;
+        if expired {
+            self.awake_deadline = None;
+        }
+        self.awake_active = active;
+        if !nook_core::high_alert::is_held_by(HighAlertOwner::Manual) {
+            self.awake_deadline = None;
+        }
+        nook_core::high_alert::reap_idle();
+        changed
+    }
+
+    pub(crate) fn set_high_alert(&mut self, on: bool, duration_secs: Option<u32>) {
+        nook_core::high_alert::set_low_battery_release_pct(self.settings.low_battery_release_pct);
+        if on {
+            let secs = duration_secs.unwrap_or(self.settings.high_alert_default_duration_secs);
+            let timeout = if secs == 0 {
+                None
+            } else {
+                Some(Duration::from_secs(secs as u64))
+            };
+            if nook_core::high_alert::acquire(
+                HighAlertOwner::Manual,
+                self.settings.high_alert_kind,
+                timeout,
+            )
+            .is_ok()
+            {
+                self.awake_deadline = timeout.map(|d| Instant::now() + d);
+                self.awake_active = true;
+            }
+        } else {
+            nook_core::high_alert::release(HighAlertOwner::Manual);
+            self.awake_deadline = None;
+            self.awake_active = nook_core::high_alert::is_active();
         }
     }
 
@@ -1331,10 +1528,37 @@ impl Island {
             remaining: seconds,
             total: seconds,
             running: true,
+            kind: TimerKind::Countdown,
+            ends_at: None,
         });
         self.next_timer_id += 1;
         self.timer_composer = false;
         self.preferred = Some(CompactMode::Timer);
+    }
+
+    pub(crate) fn add_pomodoro(&mut self) {
+        let spec = PomodoroSpec::new(
+            self.settings.pomodoro_work_secs,
+            self.settings.pomodoro_break_secs,
+            self.settings.pomodoro_long_break_secs,
+            self.settings.pomodoro_cycles_per_long,
+            self.settings.pomodoro_auto_advance,
+        );
+        let secs = spec.duration_secs();
+        self.timers.push(Timer {
+            id: self.next_timer_id,
+            name: spec.label().to_string(),
+            remaining: secs,
+            total: secs,
+            running: true,
+            kind: TimerKind::Pomodoro(spec),
+            ends_at: Some(SystemTime::now() + Duration::from_secs(secs as u64)),
+        });
+        self.next_timer_id += 1;
+        self.timer_composer = false;
+        self.preferred = Some(CompactMode::Timer);
+        self.on_pomodoro_edge(true);
+        self.sync_pomodoro_awake();
     }
 
     pub(crate) fn arm_file_drag(&mut self, path: String) {
@@ -1449,6 +1673,8 @@ mod tests {
             next_timer_id: 1,
             calendar_day: 3,
             timer_composer: false,
+            awake_deadline: None,
+            awake_active: false,
             observe: ObserveSnapshot::default(),
             observe_history: HashMap::new(),
             observe_hover: None,
@@ -1667,6 +1893,8 @@ mod tests {
             remaining: 30,
             total: 60,
             running: true,
+            kind: TimerKind::Countdown,
+            ends_at: None,
         });
         assert!(island.available_modes().contains(&CompactMode::Files));
         assert!(island.available_modes().contains(&CompactMode::Timer));
@@ -2107,5 +2335,102 @@ mod tests {
         assert!(island.blur > 0.5, "crossfade left the content sharp");
         let (dx, dy) = island.blur_offset().expect("crossfade needs a smear");
         assert!(dx > dy, "a still island should smear along its long axis");
+    }
+
+    fn pomo_timer(remaining: u32, spec: PomodoroSpec, ends_at: SystemTime) -> Timer {
+        Timer {
+            id: 1,
+            name: spec.label().to_string(),
+            remaining,
+            total: spec.duration_secs(),
+            running: true,
+            kind: TimerKind::Pomodoro(spec),
+            ends_at: Some(ends_at),
+        }
+    }
+
+    #[test]
+    fn pomodoro_tick_advances_work_to_short_break() {
+        let mut island = test_island();
+        island.settings.pomodoro_keep_awake = false;
+        let spec = PomodoroSpec::new(25, 5, 15, 4, true);
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000);
+        island.timers.push(pomo_timer(1, spec, now));
+        assert!(island.apply_timer_tick(now, 1));
+        let t = &island.timers[0];
+        assert_eq!(
+            t.kind,
+            TimerKind::Pomodoro(PomodoroSpec {
+                phase: PomodoroPhase::ShortBreak,
+                cycle: 1,
+                ..spec
+            })
+        );
+        assert_eq!(t.remaining, 5);
+        assert_eq!(t.total, 5);
+        assert!(t.running);
+        assert_eq!(t.name, "Break");
+    }
+
+    #[test]
+    fn pomodoro_tick_fourth_work_goes_to_long_break() {
+        let mut island = test_island();
+        island.settings.pomodoro_keep_awake = false;
+        let spec = PomodoroSpec {
+            phase: PomodoroPhase::Work,
+            cycle: 4,
+            work_secs: 25,
+            break_secs: 5,
+            long_break_secs: 15,
+            cycles_per_long: 4,
+            auto_advance: true,
+        };
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(2_000);
+        island.timers.push(pomo_timer(0, spec, now));
+        island.apply_timer_tick(now, 1);
+        match island.timers[0].kind {
+            TimerKind::Pomodoro(next) => {
+                assert_eq!(next.phase, PomodoroPhase::LongBreak);
+                assert_eq!(next.cycle, 4);
+                assert_eq!(island.timers[0].remaining, 15);
+            }
+            TimerKind::Countdown => panic!("expected pomodoro"),
+        }
+    }
+
+    #[test]
+    fn pomodoro_without_auto_advance_stops() {
+        let mut island = test_island();
+        island.settings.pomodoro_keep_awake = false;
+        let spec = PomodoroSpec::new(25, 5, 15, 4, false);
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(3_000);
+        island.timers.push(pomo_timer(0, spec, now));
+        island.apply_timer_tick(now, 1);
+        assert!(!island.timers[0].running);
+        assert_eq!(island.timers[0].remaining, 0);
+        assert!(matches!(
+            island.timers[0].kind,
+            TimerKind::Pomodoro(s) if s.phase == PomodoroPhase::Work
+        ));
+    }
+
+    #[test]
+    fn countdown_tick_still_decrements() {
+        let mut island = test_island();
+        island.timers.push(Timer {
+            id: 1,
+            name: String::new(),
+            remaining: 10,
+            total: 10,
+            running: true,
+            kind: TimerKind::Countdown,
+            ends_at: None,
+        });
+        assert!(island.apply_timer_tick(SystemTime::UNIX_EPOCH, 3));
+        assert_eq!(island.timers[0].remaining, 7);
+        assert!(island.timers[0].running);
+        island.apply_timer_tick(SystemTime::UNIX_EPOCH, 7);
+        assert_eq!(island.timers[0].remaining, 0);
+        assert!(!island.timers[0].running);
     }
 }

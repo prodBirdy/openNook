@@ -9,7 +9,9 @@ pub mod browser_media;
 pub mod calendar;
 pub mod database;
 pub mod files;
+pub mod focus;
 pub mod haptics;
+pub mod high_alert;
 #[cfg(target_os = "macos")]
 mod mediaremote;
 pub mod models;
@@ -18,6 +20,7 @@ pub mod notch;
 pub mod notes;
 pub mod observe;
 pub mod occupancy;
+pub mod pomodoro;
 pub mod settings;
 pub mod utils;
 pub mod widgets;

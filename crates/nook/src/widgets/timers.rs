@@ -2,7 +2,7 @@
 
 use crate::icons::{lucide, lucide_color};
 use crate::island::ui::{format_timer, nook_display, nook_empty, nook_icon_btn, nook_pane};
-use crate::island::{Island, Timer};
+use crate::island::{Island, Timer, TimerKind};
 use crate::theme;
 use gpui::{
     canvas, div, point, prelude::*, px, rgb, rgba, AnyElement, Context, FontWeight, MouseButton,
@@ -38,9 +38,7 @@ pub(crate) fn compact_left(island: &Island, cx: &mut Context<Island>) -> AnyElem
             MouseButton::Left,
             cx.listener(move |this, _: &MouseDownEvent, _, cx| {
                 cx.stop_propagation();
-                if let Some(t) = this.timers.iter_mut().find(|t| t.id == id) {
-                    t.running = !t.running;
-                }
+                this.toggle_timer(id);
                 cx.notify();
             }),
         )
@@ -52,7 +50,7 @@ pub(crate) fn compact_left(island: &Island, cx: &mut Context<Island>) -> AnyElem
             if done {
                 theme::DESTRUCTIVE
             } else {
-                rgb(0xffffff)
+                phase_color(timer)
             },
             rgba(0xffffff40),
         ))
@@ -114,6 +112,7 @@ pub(crate) fn timer_card(
     for (id, unit, num, seconds) in PRESETS {
         week = week.child(preset_col(id, unit, num, seconds, cx));
     }
+    week = week.child(pomodoro_col(cx));
 
     let remaining = timers.first().map(|t| format_timer(t.remaining));
     let body = if timers.is_empty() {
@@ -193,7 +192,7 @@ fn featured_timer(timer: &Timer, cx: &mut Context<Island>) -> impl IntoElement {
     let ring_color = if done {
         theme::DESTRUCTIVE
     } else {
-        theme::accent()
+        phase_color(timer)
     };
     let play_icon = if timer.running {
         "pause-fill"
@@ -246,6 +245,7 @@ fn featured_timer(timer: &Timer, cx: &mut Context<Island>) -> impl IntoElement {
                             timer.name.clone()
                         }),
                 )
+                .when_some(cycle_dots(timer), |d, dots| d.child(dots))
                 .child(
                     div()
                         .flex()
@@ -296,9 +296,7 @@ fn timer_face(
             MouseButton::Left,
             cx.listener(move |this, _: &MouseDownEvent, _, cx| {
                 cx.stop_propagation();
-                if let Some(t) = this.timers.iter_mut().find(|t| t.id == id) {
-                    t.running = !t.running;
-                }
+                this.toggle_timer(id);
                 cx.notify();
             }),
         )
@@ -322,4 +320,67 @@ fn timer_face(
                     .child(lucide_color(play_icon, 16.0, rgb(0xffffff))),
             )
         })
+}
+
+fn pomodoro_col(cx: &mut Context<Island>) -> impl IntoElement {
+    div()
+        .id("timer-preset-pomo")
+        .flex()
+        .flex_col()
+        .items_center()
+        .gap(px(4.))
+        .cursor(gpui::CursorStyle::PointingHand)
+        .hover(|s| s.opacity(0.85))
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                cx.stop_propagation();
+                this.add_pomodoro();
+                cx.notify();
+            }),
+        )
+        .child(
+            div()
+                .text_size(px(9.))
+                .line_height(px(11.))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(theme::SECONDARY_LABEL)
+                .child("P"),
+        )
+        .child(
+            div()
+                .text_size(px(15.))
+                .line_height(px(18.))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(theme::LABEL)
+                .child("omo"),
+        )
+}
+
+fn phase_color(timer: &Timer) -> Rgba {
+    match timer.kind {
+        TimerKind::Pomodoro(spec) if !spec.phase.is_work() => theme::SUCCESS,
+        _ => theme::accent(),
+    }
+}
+
+fn cycle_dots(timer: &Timer) -> Option<impl IntoElement> {
+    let TimerKind::Pomodoro(spec) = timer.kind else {
+        return None;
+    };
+    let filled = spec.filled_cycles();
+    let mut row = div().flex().items_center().gap(px(4.)).mt(px(4.));
+    for i in 1..=spec.cycles_per_long {
+        row = row.child(
+            div()
+                .size(px(5.))
+                .rounded_full()
+                .bg(if i <= filled {
+                    theme::LABEL
+                } else {
+                    theme::TERTIARY_LABEL
+                }),
+        );
+    }
+    Some(row)
 }

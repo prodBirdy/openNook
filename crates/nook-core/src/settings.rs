@@ -1,4 +1,5 @@
 use crate::database;
+use crate::high_alert::HighAlertKind;
 use crate::observe::ObserveConfig;
 use serde::{Deserialize, Serialize};
 use std::sync::RwLock;
@@ -17,10 +18,11 @@ pub enum WidgetModule {
     Speed = 7,
     Agents = 8,
     Mirror = 9,
+    HighAlert = 10,
 }
 
 impl WidgetModule {
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 11] = [
         Self::Calendar,
         Self::Music,
         Self::Files,
@@ -31,6 +33,7 @@ impl WidgetModule {
         Self::Speed,
         Self::Agents,
         Self::Mirror,
+        Self::HighAlert,
     ];
 
     pub fn from_u8(value: u8) -> Self {
@@ -45,7 +48,7 @@ impl WidgetModule {
         match self {
             Self::Calendar | Self::Music => 5,
             Self::Files | Self::Notes | Self::Observe | Self::Reminders | Self::Agents => 4,
-            Self::Timers | Self::Speed | Self::Mirror => 3,
+            Self::Timers | Self::Speed | Self::Mirror | Self::HighAlert => 3,
         }
     }
 
@@ -53,13 +56,13 @@ impl WidgetModule {
         match self {
             Self::Calendar => 4,
             Self::Music | Self::Files | Self::Observe | Self::Reminders | Self::Mirror => 3,
-            Self::Notes | Self::Timers | Self::Speed | Self::Agents => 2,
+            Self::Notes | Self::Timers | Self::Speed | Self::Agents | Self::HighAlert => 2,
         }
     }
 
     pub fn max_cells(self) -> u8 {
         match self {
-            Self::Timers | Self::Speed | Self::Agents | Self::Mirror => 6,
+            Self::Timers | Self::Speed | Self::Agents | Self::Mirror | Self::HighAlert => 6,
             _ => 8,
         }
     }
@@ -82,6 +85,7 @@ fn default_widget_order() -> Vec<WidgetModule> {
         WidgetModule::Timers,
         WidgetModule::Notes,
         WidgetModule::Speed,
+        WidgetModule::HighAlert,
     ]
 }
 
@@ -142,6 +146,32 @@ pub struct AppSettings {
     pub show_files: bool,
     #[serde(default = "default_true")]
     pub show_mirror: bool,
+    #[serde(default = "default_true")]
+    pub show_high_alert: bool,
+    /// Seconds; `0` means until turned off. Default is 30 minutes — never forever.
+    #[serde(default = "default_high_alert_duration")]
+    pub high_alert_default_duration_secs: u32,
+    #[serde(default)]
+    pub high_alert_kind: HighAlertKind,
+    /// Auto-release the assertion at or below this battery percent. `0` disables.
+    #[serde(default = "default_low_battery_pct")]
+    pub low_battery_release_pct: u8,
+    #[serde(default = "default_pomo_work")]
+    pub pomodoro_work_secs: u32,
+    #[serde(default = "default_pomo_break")]
+    pub pomodoro_break_secs: u32,
+    #[serde(default = "default_pomo_long")]
+    pub pomodoro_long_break_secs: u32,
+    #[serde(default = "default_pomo_cycles")]
+    pub pomodoro_cycles_per_long: u8,
+    #[serde(default = "default_true")]
+    pub pomodoro_auto_advance: bool,
+    #[serde(default = "default_true")]
+    pub pomodoro_keep_awake: bool,
+    #[serde(default)]
+    pub focus_shortcut_work: Option<String>,
+    #[serde(default)]
+    pub focus_shortcut_break: Option<String>,
     #[serde(default)]
     pub observe: ObserveConfig,
     #[serde(default)]
@@ -217,6 +247,30 @@ fn default_true() -> bool {
     true
 }
 
+fn default_high_alert_duration() -> u32 {
+    30 * 60
+}
+
+fn default_low_battery_pct() -> u8 {
+    10
+}
+
+fn default_pomo_work() -> u32 {
+    25 * 60
+}
+
+fn default_pomo_break() -> u32 {
+    5 * 60
+}
+
+fn default_pomo_long() -> u32 {
+    15 * 60
+}
+
+fn default_pomo_cycles() -> u8 {
+    4
+}
+
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
@@ -231,6 +285,18 @@ impl Default for AppSettings {
             show_speed: true,
             show_files: true,
             show_mirror: true,
+            show_high_alert: true,
+            high_alert_default_duration_secs: default_high_alert_duration(),
+            high_alert_kind: HighAlertKind::default(),
+            low_battery_release_pct: default_low_battery_pct(),
+            pomodoro_work_secs: default_pomo_work(),
+            pomodoro_break_secs: default_pomo_break(),
+            pomodoro_long_break_secs: default_pomo_long(),
+            pomodoro_cycles_per_long: default_pomo_cycles(),
+            pomodoro_auto_advance: true,
+            pomodoro_keep_awake: true,
+            focus_shortcut_work: None,
+            focus_shortcut_break: None,
             observe: ObserveConfig::default(),
             liquid_glass_mode: false,
             non_notch_mode: false,
@@ -276,6 +342,7 @@ impl AppSettings {
             WidgetModule::Speed => self.show_speed,
             WidgetModule::Agents => self.show_agents,
             WidgetModule::Mirror => self.show_mirror,
+            WidgetModule::HighAlert => self.show_high_alert,
         }
     }
 
@@ -291,6 +358,7 @@ impl AppSettings {
             WidgetModule::Speed => self.show_speed = !self.show_speed,
             WidgetModule::Agents => self.show_agents = !self.show_agents,
             WidgetModule::Mirror => self.show_mirror = !self.show_mirror,
+            WidgetModule::HighAlert => self.show_high_alert = !self.show_high_alert,
         }
     }
 
@@ -611,6 +679,17 @@ mod tests {
         assert!(parsed.show_speed);
         assert!(parsed.show_files);
         assert!(parsed.show_mirror);
+        assert!(parsed.show_high_alert);
+        assert_eq!(parsed.high_alert_default_duration_secs, 30 * 60);
+        assert_eq!(parsed.high_alert_kind, HighAlertKind::Display);
+        assert_eq!(parsed.low_battery_release_pct, 10);
+        assert_eq!(parsed.pomodoro_work_secs, 25 * 60);
+        assert_eq!(parsed.pomodoro_break_secs, 5 * 60);
+        assert_eq!(parsed.pomodoro_long_break_secs, 15 * 60);
+        assert_eq!(parsed.pomodoro_cycles_per_long, 4);
+        assert!(parsed.pomodoro_auto_advance);
+        assert!(parsed.pomodoro_keep_awake);
+        assert_eq!(parsed.focus_shortcut_work, None);
         assert!(parsed.liquid_glass_mode);
         assert!(!parsed.non_notch_mode);
         assert!((parsed.island_x - 0.5).abs() < f32::EPSILON);
@@ -696,6 +775,7 @@ mod tests {
         settings.show_speed = false;
         settings.show_agents = false;
         settings.show_mirror = false;
+        settings.show_high_alert = false;
         settings.set_cells(WidgetModule::Music, 5);
         assert_eq!(settings.used_cells(), 5);
         assert_eq!(settings.remaining_cells(), AppSettings::TOTAL_CELLS - 5);

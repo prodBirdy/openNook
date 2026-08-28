@@ -21,7 +21,10 @@ fn main() {
             nook_core::init();
             platform::install();
             platform::install_status_item();
-            cx.on_action(|_: &Quit, cx| cx.quit());
+            cx.on_action(|_: &Quit, cx| {
+                nook_core::high_alert::release_all();
+                cx.quit();
+            });
             cx.bind_keys([KeyBinding::new("cmd-q", Quit, None)]);
             open_island(cx);
             cx.activate(false);
