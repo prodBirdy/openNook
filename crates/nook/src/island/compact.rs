@@ -67,6 +67,8 @@ impl Island {
         if self.hud_active() {
             return lucide(hud_icon(self.hud.unwrap().kind), theme::COMPACT_FACE)
                 .into_any_element();
+        if let Some(hud) = self.shell_hud.as_ref() {
+            return label(hud.clone(), theme::BODY, true).into_any_element();
         }
         match mode {
             CompactMode::Media => {
@@ -99,6 +101,7 @@ impl Island {
                 },
             )
             .into_any_element(),
+            CompactMode::Shell => lucide("terminal", theme::COMPACT_FACE).into_any_element(),
             CompactMode::Onboard => label("openNook", theme::BODY, true).into_any_element(),
             CompactMode::Messages => self
                 .messages
@@ -187,6 +190,10 @@ impl Island {
                     .min_w(px(40.))
                     .text_right()
                     .into_any_element()
+            CompactMode::Shell => {
+                let frame = ((self.pixel_t * 8.0) as usize) % 4;
+                let spin = ["⠋", "⠙", "⠹", "⠸"][frame];
+                label(spin, theme::BODY, true).into_any_element()
             }
             CompactMode::Onboard if hovered => div()
                 .id("github")
@@ -301,6 +308,7 @@ impl Island {
                 CompactMode::Onboard => "onboard",
                 CompactMode::Messages => "messages",
                 CompactMode::Share => "share",
+                CompactMode::Shell => "shell",
             };
             row = row.child(
                 div()

@@ -6,6 +6,7 @@
 pub mod agents;
 pub mod audio;
 pub mod brightness;
+pub mod automation;
 pub mod browser_media;
 pub mod calendar;
 pub mod database;
@@ -39,6 +40,7 @@ pub mod osd;
 pub mod settings;
 pub mod sysvol;
 pub mod share;
+pub mod shell;
 pub mod utils;
 pub mod weather;
 pub mod vpn;
@@ -94,6 +96,7 @@ pub fn init() {
         brightness::start();
         osd::install();
         vpn::start();
+        shell::reap_orphaned_jobs();
     });
 }
 

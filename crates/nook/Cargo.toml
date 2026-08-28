@@ -9,6 +9,10 @@ description = "openNook — Dynamic Island client, native GPUI frontend"
 name = "nook"
 path = "src/main.rs"
 
+[[bin]]
+name = "nook-cli"
+path = "src/bin/nook.rs"
+
 [dependencies]
 nook-core.workspace = true
 gpui.workspace = true

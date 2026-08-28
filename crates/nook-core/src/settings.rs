@@ -302,8 +302,25 @@ pub struct AppSettings {
     pub snap_drag_to_edge: bool,
     #[serde(default)]
     pub share: ShareSettings,
+    /// Termi-Notch one-shot shell card. Off until the user opts in — this is
+    /// an arbitrary-code-execution surface and must stay unreachable from
+    /// `opennook://` URLs, the CLI, and Finder Services.
+    #[serde(default)]
+    pub terminal_enabled: bool,
+    /// Login shell used for `-lc`. Empty means `$SHELL`.
+    #[serde(default)]
+    pub terminal_shell: String,
+    #[serde(default = "default_terminal_timeout")]
+    pub terminal_timeout_secs: u32,
+    /// Persist typed commands in the settings DB. Off by default.
+    #[serde(default)]
+    pub terminal_history: bool,
     #[serde(default)]
     pub window: WindowSettings,
+}
+
+fn default_terminal_timeout() -> u32 {
+    30
 }
 
 fn default_island_x() -> f32 {
@@ -440,6 +457,10 @@ impl Default for AppSettings {
             thaw_hidden: false,
             snap_drag_to_edge: false,
             share: ShareSettings::default(),
+            terminal_enabled: false,
+            terminal_shell: String::new(),
+            terminal_timeout_secs: default_terminal_timeout(),
+            terminal_history: false,
             window: WindowSettings::default(),
         }
     }
@@ -950,6 +971,10 @@ mod tests {
             parsed.share.link_backend,
             crate::share::LinkBackendKind::ZeroXZero
         );
+        assert!(!parsed.terminal_enabled);
+        assert!(parsed.terminal_shell.is_empty());
+        assert_eq!(parsed.terminal_timeout_secs, 30);
+        assert!(!parsed.terminal_history);
     }
 
     #[test]
