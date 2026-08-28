@@ -63,6 +63,7 @@ impl Island {
             CompactMode::Observe => {
                 lucide("triangle-alert", theme::COMPACT_FACE).into_any_element()
             }
+            CompactMode::Meeting => widgets::meeting_compact_left(&self.meeting),
             CompactMode::Onboard => label("openNook", theme::BODY, true).into_any_element(),
             CompactMode::Idle => div().into_any_element(),
         }
@@ -104,6 +105,9 @@ impl Island {
                     _ => self.observe.firing_count().to_string(),
                 };
                 label(text, theme::BODY, true).into_any_element()
+            }
+            CompactMode::Meeting => {
+                widgets::meeting_compact_right(&self.meeting, self.overlay_fade.value)
             }
             CompactMode::Onboard if hovered => div()
                 .id("github")
@@ -147,6 +151,7 @@ impl Island {
                 CompactMode::Files => "files",
                 CompactMode::Timer => "timer",
                 CompactMode::Observe => "observe",
+                CompactMode::Meeting => "meeting",
                 CompactMode::Onboard => "onboard",
             };
             row = row.child(

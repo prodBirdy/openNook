@@ -122,6 +122,13 @@ pub const DESTRUCTIVE: Rgba = Rgba {
     b: 0.227,
     a: 1.0,
 };
+/// systemOrange — muted meeting (Zoom verified).
+pub const WARNING: Rgba = Rgba {
+    r: 1.0,
+    g: 0.624,
+    b: 0.039,
+    a: 1.0,
+};
 #[allow(dead_code)]
 pub const SUCCESS: Rgba = Rgba {
     r: 0.188,

@@ -1132,6 +1132,8 @@ fn known_bundle_id(app_name: &str) -> Option<&'static str> {
         "VLC" => "org.videolan.vlc",
         "TIDAL" => "com.tidal.desktop",
         "Arc" => "company.thebrowser.Browser",
+        "zoom.us" | "Zoom" => "us.zoom.xos",
+        "Microsoft Teams" | "Teams" => "com.microsoft.teams2",
         _ => return None,
     })
 }
@@ -1395,6 +1397,31 @@ pub fn reduce_motion() -> bool {
 /// battery cost that matters. Safari/YouTube posts nothing and rides the slow
 /// poll. Blocks only flip an atomic, so the posting thread is fine. Observer
 /// tokens are intentionally leaked — they live for the process.
+/// Accessibility (kTCCServiceAccessibility). Required for AX menu clicks and
+/// `CGEventPostToPid`. Off-macOS this is always false.
+pub fn ax_is_process_trusted() -> bool {
+    nook_core::meetings::accessibility_trusted()
+}
+
+/// Prompt via `AXIsProcessTrustedWithOptions` + `kAXTrustedCheckOptionPrompt`.
+pub fn ax_prompt_accessibility() -> bool {
+    nook_core::meetings::prompt_accessibility()
+}
+
+/// Focus-free keystrokes to another process. Needs Accessibility.
+pub fn post_keys_to_pid(pid: i32, keycode: u16, flags: u64) {
+    nook_core::meetings::post_keys_to_pid(pid, keycode, flags);
+}
+
+pub fn open_accessibility_settings() {
+    nook_core::meetings::open_accessibility_settings();
+}
+
+/// NSWorkspace launch/terminate + CoreAudio mic listeners for WP19.
+pub fn install_meeting_observers() {
+    nook_core::meetings::start();
+}
+
 pub fn install_media_observers() {
     #[cfg(target_os = "macos")]
     unsafe {

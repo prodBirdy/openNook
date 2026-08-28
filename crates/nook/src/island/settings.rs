@@ -131,6 +131,7 @@ impl WidgetModuleExt for WidgetModule {
             Self::Speed => "Speed Test",
             Self::Agents => "Agents",
             Self::Mirror => "Mirror",
+            Self::Meeting => "Meetings",
         }
     }
 
@@ -146,6 +147,7 @@ impl WidgetModuleExt for WidgetModule {
             Self::Speed => "gauge",
             Self::Agents => "bot",
             Self::Mirror => "webcam",
+            Self::Meeting => "video",
         }
     }
 
@@ -161,6 +163,7 @@ impl WidgetModuleExt for WidgetModule {
             Self::Speed => "Cloudflare".into(),
             Self::Agents => "Sessions".into(),
             Self::Mirror => "Camera".into(),
+            Self::Meeting => "Zoom / Teams / Meet".into(),
         }
     }
 
@@ -184,6 +187,7 @@ impl WidgetModuleExt for WidgetModule {
             Self::Speed => "Speed",
             Self::Agents => "Agents",
             Self::Mirror => "Mirror",
+            Self::Meeting => "Meetings",
         }
     }
 }
@@ -998,6 +1002,54 @@ impl SettingsView {
                     .into_any_element(),
                 );
             }
+            WidgetModule::Meeting => {
+                rows.push(
+                    toggle_row("Zoom", settings.meetings.zoom, cx, |s| {
+                        s.meetings.zoom = !s.meetings.zoom;
+                    })
+                    .into_any_element(),
+                );
+                rows.push(
+                    toggle_row("Microsoft Teams", settings.meetings.teams, cx, |s| {
+                        s.meetings.teams = !s.meetings.teams;
+                    })
+                    .into_any_element(),
+                );
+                rows.push(
+                    toggle_row("Google Meet", settings.meetings.meet, cx, |s| {
+                        s.meetings.meet = !s.meetings.meet;
+                    })
+                    .into_any_element(),
+                );
+                rows.push(
+                    action_row(
+                        "meet-mode",
+                        "Meet control",
+                        settings.meetings.meet_mode.caption(),
+                        cx,
+                        |_, _, _| {
+                            nook_core::settings::tweak_app_settings(|s| {
+                                s.meetings.meet_mode = s.meetings.meet_mode.cycle();
+                            });
+                        },
+                    )
+                    .into_any_element(),
+                );
+                let trusted = crate::platform::ax_is_process_trusted();
+                rows.push(
+                    action_row(
+                        "ax-status",
+                        "Accessibility",
+                        if trusted { "Granted" } else { "Denied" },
+                        cx,
+                        |_, _, _| {
+                            crate::platform::ax_prompt_accessibility();
+                            crate::platform::open_accessibility_settings();
+                        },
+                    )
+                    .into_any_element(),
+                );
+            }
             _ => {}
         }
 
@@ -1356,6 +1408,9 @@ fn module_blurb(module: WidgetModule) -> SharedString {
             "Working coding-agent sessions on the compact face and expanded card.".into()
         }
         WidgetModule::Mirror => "A live camera preview that opens when you click the Mirror card.".into(),
+        WidgetModule::Meeting => {
+            "Mute and leave from the island. Zoom reads mute from the Meeting menu. Teams is a blind shortcut (the localhost API is gone). Meet focuses the tab unless you enable Apple Events JS.".into()
+        }
     }
 }
 
@@ -1727,6 +1782,7 @@ mod tests {
                 "Speed Test",
                 "Agents",
                 "Mirror",
+                "Meetings",
             ]
         );
         assert!(!names

@@ -17,10 +17,11 @@ pub enum WidgetModule {
     Speed = 7,
     Agents = 8,
     Mirror = 9,
+    Meeting = 10,
 }
 
 impl WidgetModule {
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 11] = [
         Self::Calendar,
         Self::Music,
         Self::Files,
@@ -31,6 +32,7 @@ impl WidgetModule {
         Self::Speed,
         Self::Agents,
         Self::Mirror,
+        Self::Meeting,
     ];
 
     pub fn from_u8(value: u8) -> Self {
@@ -45,7 +47,7 @@ impl WidgetModule {
         match self {
             Self::Calendar | Self::Music => 5,
             Self::Files | Self::Notes | Self::Observe | Self::Reminders | Self::Agents => 4,
-            Self::Timers | Self::Speed | Self::Mirror => 3,
+            Self::Timers | Self::Speed | Self::Mirror | Self::Meeting => 3,
         }
     }
 
@@ -53,13 +55,13 @@ impl WidgetModule {
         match self {
             Self::Calendar => 4,
             Self::Music | Self::Files | Self::Observe | Self::Reminders | Self::Mirror => 3,
-            Self::Notes | Self::Timers | Self::Speed | Self::Agents => 2,
+            Self::Notes | Self::Timers | Self::Speed | Self::Agents | Self::Meeting => 2,
         }
     }
 
     pub fn max_cells(self) -> u8 {
         match self {
-            Self::Timers | Self::Speed | Self::Agents | Self::Mirror => 6,
+            Self::Timers | Self::Speed | Self::Agents | Self::Mirror | Self::Meeting => 6,
             _ => 8,
         }
     }
@@ -77,6 +79,7 @@ fn default_widget_order() -> Vec<WidgetModule> {
         WidgetModule::Mirror,
         WidgetModule::Files,
         WidgetModule::Agents,
+        WidgetModule::Meeting,
         WidgetModule::Observe,
         WidgetModule::Reminders,
         WidgetModule::Timers,
@@ -142,6 +145,10 @@ pub struct AppSettings {
     pub show_files: bool,
     #[serde(default = "default_true")]
     pub show_mirror: bool,
+    #[serde(default = "default_true")]
+    pub show_meetings: bool,
+    #[serde(default)]
+    pub meetings: MeetingsConfig,
     #[serde(default)]
     pub observe: ObserveConfig,
     #[serde(default)]
@@ -213,6 +220,55 @@ pub const ISLAND_SWATCHES: [IslandSwatch; 7] = [
     },
 ];
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum MeetControlMode {
+    /// Activate the Meet tab then send Cmd+D / Cmd+E (focus-stealing).
+    #[default]
+    FocusTab,
+    /// Chrome/Safari `execute javascript` — needs "Allow JavaScript from Apple Events".
+    AppleEventsJs,
+}
+
+impl MeetControlMode {
+    pub fn caption(self) -> &'static str {
+        match self {
+            Self::FocusTab => "Focus tab",
+            Self::AppleEventsJs => "Apple Events JS",
+        }
+    }
+
+    pub fn cycle(self) -> Self {
+        match self {
+            Self::FocusTab => Self::AppleEventsJs,
+            Self::AppleEventsJs => Self::FocusTab,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MeetingsConfig {
+    #[serde(default = "default_true")]
+    pub zoom: bool,
+    #[serde(default = "default_true")]
+    pub teams: bool,
+    #[serde(default = "default_true")]
+    pub meet: bool,
+    #[serde(default)]
+    pub meet_mode: MeetControlMode,
+}
+
+impl Default for MeetingsConfig {
+    fn default() -> Self {
+        Self {
+            zoom: true,
+            teams: true,
+            meet: true,
+            meet_mode: MeetControlMode::FocusTab,
+        }
+    }
+}
+
 fn default_true() -> bool {
     true
 }
@@ -231,6 +287,8 @@ impl Default for AppSettings {
             show_speed: true,
             show_files: true,
             show_mirror: true,
+            show_meetings: true,
+            meetings: MeetingsConfig::default(),
             observe: ObserveConfig::default(),
             liquid_glass_mode: false,
             non_notch_mode: false,
@@ -276,6 +334,7 @@ impl AppSettings {
             WidgetModule::Speed => self.show_speed,
             WidgetModule::Agents => self.show_agents,
             WidgetModule::Mirror => self.show_mirror,
+            WidgetModule::Meeting => self.show_meetings,
         }
     }
 
@@ -291,6 +350,7 @@ impl AppSettings {
             WidgetModule::Speed => self.show_speed = !self.show_speed,
             WidgetModule::Agents => self.show_agents = !self.show_agents,
             WidgetModule::Mirror => self.show_mirror = !self.show_mirror,
+            WidgetModule::Meeting => self.show_meetings = !self.show_meetings,
         }
     }
 
@@ -611,6 +671,11 @@ mod tests {
         assert!(parsed.show_speed);
         assert!(parsed.show_files);
         assert!(parsed.show_mirror);
+        assert!(parsed.show_meetings);
+        assert!(parsed.meetings.zoom);
+        assert!(parsed.meetings.teams);
+        assert!(parsed.meetings.meet);
+        assert_eq!(parsed.meetings.meet_mode, MeetControlMode::FocusTab);
         assert!(parsed.liquid_glass_mode);
         assert!(!parsed.non_notch_mode);
         assert!((parsed.island_x - 0.5).abs() < f32::EPSILON);
@@ -696,6 +761,7 @@ mod tests {
         settings.show_speed = false;
         settings.show_agents = false;
         settings.show_mirror = false;
+        settings.show_meetings = false;
         settings.set_cells(WidgetModule::Music, 5);
         assert_eq!(settings.used_cells(), 5);
         assert_eq!(settings.remaining_cells(), AppSettings::TOTAL_CELLS - 5);

@@ -12,6 +12,7 @@ pub mod files;
 pub mod haptics;
 #[cfg(target_os = "macos")]
 mod mediaremote;
+pub mod meetings;
 pub mod models;
 pub mod mouse;
 pub mod notch;
