@@ -193,6 +193,13 @@ pub struct AppSettings {
     /// the display.
     #[serde(default)]
     pub hide_when_maximized: bool,
+    /// Transient volume/brightness HUD on the compact island face.
+    #[serde(default = "default_true")]
+    pub show_volume_brightness_hud: bool,
+    /// SIGSTOP `OSDUIHelper` so the system bezel does not draw on top.
+    /// Default off — suppression also hides caps-lock and keyboard-backlight bezels.
+    #[serde(default)]
+    pub replace_system_hud: bool,
     /// Island fill as `0xRRGGBB`. `None` uses the default black Live Activity
     /// fill.
     #[serde(default)]
@@ -298,6 +305,8 @@ impl Default for AppSettings {
             island_x: default_island_x(),
             island_y: 0.0,
             hide_when_maximized: false,
+            show_volume_brightness_hud: true,
+            replace_system_hud: false,
             island_color: None,
             widget_widths: Vec::new(),
             window_snap_enabled: false,
@@ -700,6 +709,8 @@ mod tests {
         assert!((parsed.island_x - 0.5).abs() < f32::EPSILON);
         assert_eq!(parsed.island_y, 0.0);
         assert!(!parsed.hide_when_maximized);
+        assert!(parsed.show_volume_brightness_hud);
+        assert!(!parsed.replace_system_hud);
         assert_eq!(parsed.island_color, None);
     }
 

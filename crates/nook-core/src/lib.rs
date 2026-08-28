@@ -5,6 +5,7 @@
 
 pub mod agents;
 pub mod audio;
+pub mod brightness;
 pub mod browser_media;
 pub mod calendar;
 pub mod database;
@@ -27,6 +28,9 @@ pub mod power;
 pub mod settings;
 pub mod shortcuts;
 pub mod system_timers;
+pub mod osd;
+pub mod settings;
+pub mod sysvol;
 pub mod utils;
 pub mod widgets;
 pub mod window_snap;
@@ -75,6 +79,9 @@ pub fn init() {
         power::start();
         messages::start_watchers();
         system_timers::start_watcher();
+        sysvol::start();
+        brightness::start();
+        osd::install();
     });
 }
 
