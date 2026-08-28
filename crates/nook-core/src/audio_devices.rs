@@ -190,6 +190,7 @@ fn lock_mutex<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+#[cfg(target_os = "macos")]
 fn publish(devices: Vec<OutputDevice>) {
     let slot = DEVICES.get_or_init(|| Mutex::new(Vec::new()));
     *lock_mutex(slot) = devices;
