@@ -41,4 +41,7 @@ pub struct NowPlayingData {
     /// Bundle identifier of that app, used to load its icon.
     #[serde(default)]
     pub bundle_id: Option<String>,
+    /// Apple Music editorialVideo HLS loop, when the catalog has one.
+    #[serde(default)]
+    pub motion_artwork_url: Option<String>,
 }

@@ -74,6 +74,17 @@ fn migrate(conn: &Connection) -> Result<()> {
         [],
     )?;
 
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS motion_artwork (
+            cache_key TEXT PRIMARY KEY,
+            m3u8 TEXT,
+            preview TEXT,
+            hit INTEGER NOT NULL DEFAULT 0,
+            fetched_at INTEGER NOT NULL
+        )",
+        [],
+    )?;
+
     Ok(())
 }
 

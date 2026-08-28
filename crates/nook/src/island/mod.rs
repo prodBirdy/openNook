@@ -68,6 +68,16 @@ pub struct Island {
     pub tab: Tab,
     pub now_playing: NowPlayingData,
     pub visualizer_color: Option<gpui::Rgba>,
+    /// 2–3 dominant artwork colors for the ambient media glow.
+    pub aura_palette: Option<[gpui::Rgba; 3]>,
+    /// Seconds of aura drift, only advanced while the glow is on screen.
+    aura_t: f32,
+    last_aura_frame: Instant,
+    /// Album we last asked the catalog about (`artist`, `album`).
+    motion_art_key: Option<(String, String)>,
+    motion_art_bounds: Option<(f32, f32, f32, f32)>,
+    motion_art_bounds_gen: u64,
+    last_motion_spec: Option<platform::MotionArtSpec>,
     pub files: Vec<FileTrayItem>,
     pub events: Vec<CalendarEvent>,
     pub reminders: Vec<Reminder>,
@@ -198,6 +208,13 @@ impl Island {
             tab: Tab::Widgets,
             now_playing: NowPlayingData::default(),
             visualizer_color: None,
+            aura_palette: None,
+            aura_t: 0.0,
+            last_aura_frame: Instant::now(),
+            motion_art_key: None,
+            motion_art_bounds: None,
+            motion_art_bounds_gen: 0,
+            last_motion_spec: None,
             files,
             events: Vec::new(),
             reminders: Vec::new(),
@@ -339,6 +356,7 @@ impl Island {
                         } else {
                             this.settings = settings;
                         }
+                        this.sync_motion_art_from_settings(cx);
                         dirty = true;
                     }
                     if this.repositioning {
@@ -489,6 +507,19 @@ impl Island {
                         this.pixel_t = now.duration_since(this.pixel_origin).as_secs_f32();
                         dirty = true;
                     }
+                    if this.aura_should_animate()
+                        && now.duration_since(this.last_aura_frame)
+                            >= Duration::from_millis(33)
+                    {
+                        this.last_aura_frame = now;
+                        this.aura_t = now.duration_since(this.pixel_origin).as_secs_f32();
+                        dirty = true;
+                    }
+                    if let Some(rect) = media::take_art_bounds(&mut this.motion_art_bounds_gen)
+                    {
+                        this.motion_art_bounds = Some(rect);
+                    }
+                    this.apply_motion_art_layer();
                     if this.mirror_on {
                         if let Some((gen, bgra)) = platform::mirror_frame(this.mirror_gen) {
                             this.mirror_gen = gen;
@@ -551,6 +582,9 @@ impl Island {
                         || this.now_playing.elapsed_time != playing.elapsed_time
                         || this.now_playing.app_name != playing.app_name
                         || this.now_playing.bundle_id != playing.bundle_id;
+                    let album_changed = this.now_playing.artist != playing.artist
+                        || this.now_playing.album != playing.album;
+                    let art_changed = this.now_playing.artwork_base64 != playing.artwork_base64;
                     this.now_playing.title = playing.title;
                     this.now_playing.artist = playing.artist;
                     this.now_playing.album = playing.album;
@@ -563,10 +597,21 @@ impl Island {
                     this.visualizer_color = media::visualizer_color_from_art(
                         this.now_playing.artwork_base64.as_deref(),
                     );
+                    if art_changed || this.aura_palette.is_none() {
+                        this.aura_palette = media::art_palette(
+                            this.now_playing.artwork_base64.as_deref(),
+                        );
+                    }
+                    if album_changed {
+                        this.motion_art_key = None;
+                        this.now_playing.motion_artwork_url = None;
+                        this.request_motion_art(cx);
+                    }
+                    this.apply_motion_art_layer();
                     if !was_media && this.has_media() {
                         this.preferred = Some(CompactMode::Media);
                     }
-                    if changed {
+                    if changed || album_changed {
                         cx.notify();
                     }
                     this.has_media() && this.now_playing.is_playing
@@ -737,6 +782,116 @@ impl Island {
             && (self.now_playing.is_playing
                 || self.now_playing.title.is_some()
                 || self.now_playing.artist.is_some())
+    }
+
+    fn motion_art_album_key(&self) -> (String, String) {
+        (
+            self.now_playing.artist.clone().unwrap_or_default(),
+            self.now_playing.album.clone().unwrap_or_default(),
+        )
+    }
+
+    fn aura_should_animate(&self) -> bool {
+        self.expanded
+            && self.tab == Tab::Widgets
+            && self.settings.show_media
+            && self.settings.ambient_art_glow
+            && self.now_playing.is_playing
+            && !self.reduce_motion
+            && self.aura_palette.is_some()
+            && !self.suppressed
+    }
+
+    fn sync_motion_art_from_settings(&mut self, cx: &mut Context<Self>) {
+        if !self.settings.animated_album_art || !self.settings.show_media {
+            self.motion_art_key = None;
+            self.now_playing.motion_artwork_url = None;
+            self.apply_motion_art_layer();
+            return;
+        }
+        if self.motion_art_key.is_none() {
+            self.request_motion_art(cx);
+        }
+        self.apply_motion_art_layer();
+    }
+
+    fn request_motion_art(&mut self, cx: &mut Context<Self>) {
+        if !self.settings.animated_album_art || !self.settings.show_media {
+            return;
+        }
+        let key = self.motion_art_album_key();
+        if key.0.trim().is_empty() || key.1.trim().is_empty() {
+            self.now_playing.motion_artwork_url = None;
+            return;
+        }
+        if self.motion_art_key.as_ref() == Some(&key) {
+            return;
+        }
+        self.motion_art_key = Some(key.clone());
+        self.now_playing.motion_artwork_url = None;
+        let lookup_key = key.clone();
+        cx.spawn(async move |this, cx| {
+            let fetched = cx
+                .background_executor()
+                .spawn({
+                    let lookup_key = lookup_key.clone();
+                    async move {
+                        nook_core::runtime().block_on(nook_core::motion_artwork::lookup(
+                            &lookup_key.0,
+                            &lookup_key.1,
+                            None,
+                        ))
+                    }
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if this.motion_art_key.as_ref() != Some(&lookup_key) {
+                    return;
+                }
+                this.now_playing.motion_artwork_url = fetched.map(|art| art.m3u8_url);
+                this.apply_motion_art_layer();
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn apply_motion_art_layer(&mut self) {
+        let spec = self.motion_art_spec();
+        if spec == self.last_motion_spec {
+            return;
+        }
+        self.last_motion_spec = spec.clone();
+        match spec.as_ref() {
+            Some(spec) => platform::sync_motion_art(Some(spec)),
+            None => platform::hide_motion_art(),
+        }
+    }
+
+    fn motion_art_spec(&self) -> Option<platform::MotionArtSpec> {
+        if self.reduce_motion
+            || !self.expanded
+            || self.tab != Tab::Widgets
+            || self.suppressed
+            || !self.settings.animated_album_art
+            || !self.settings.show_media
+        {
+            return None;
+        }
+        let url = self.now_playing.motion_artwork_url.clone()?;
+        let (x, y, w, h) = self.motion_art_bounds?;
+        if w < 8.0 || h < 8.0 {
+            return None;
+        }
+        Some(platform::MotionArtSpec {
+            url,
+            x: x as f64,
+            y: y as f64,
+            w: w as f64,
+            h: h as f64,
+            radius: media::NOOK_ART_RADIUS as f64,
+            playing: self.now_playing.is_playing,
+        })
     }
 
     pub(crate) fn running_timer(&self) -> Option<&Timer> {
@@ -1443,6 +1598,13 @@ mod tests {
             tab: Tab::Widgets,
             now_playing: NowPlayingData::default(),
             visualizer_color: None,
+            aura_palette: None,
+            aura_t: 0.0,
+            last_aura_frame: Instant::now(),
+            motion_art_key: None,
+            motion_art_bounds: None,
+            motion_art_bounds_gen: 0,
+            last_motion_spec: None,
             files: Vec::new(),
             events: Vec::new(),
             reminders: Vec::new(),
@@ -2113,5 +2275,74 @@ mod tests {
         assert!(island.blur > 0.5, "crossfade left the content sharp");
         let (dx, dy) = island.blur_offset().expect("crossfade needs a smear");
         assert!(dx > dy, "a still island should smear along its long axis");
+    }
+
+    #[test]
+    fn motion_art_layer_stays_off_when_collapsed_or_paused() {
+        let mut island = test_island();
+        island.settings.animated_album_art = true;
+        island.now_playing.artist = Some("Taylor Swift".into());
+        island.now_playing.album = Some("Folklore".into());
+        island.now_playing.is_playing = true;
+        island.now_playing.motion_artwork_url = Some("https://example.com/a.m3u8".into());
+        island.motion_art_bounds = Some((40.0, 20.0, 84.0, 84.0));
+        assert!(island.motion_art_spec().is_none(), "collapsed hides the layer");
+
+        island.expanded = true;
+        let spec = island.motion_art_spec().expect("expanded playing");
+        assert_eq!(spec.url, "https://example.com/a.m3u8");
+        assert!(spec.playing);
+        assert_eq!(spec.radius, media::NOOK_ART_RADIUS as f64);
+
+        island.now_playing.is_playing = false;
+        assert!(
+            !island.motion_art_spec().expect("paused still has a spec").playing,
+            "pause hides via playing=false"
+        );
+
+        island.now_playing.is_playing = true;
+        island.reduce_motion = true;
+        assert!(island.motion_art_spec().is_none());
+        island.reduce_motion = false;
+        island.suppressed = true;
+        assert!(island.motion_art_spec().is_none());
+    }
+
+    #[test]
+    fn aura_only_animates_while_expanded_and_playing() {
+        let mut island = test_island();
+        island.settings.ambient_art_glow = true;
+        island.aura_palette = Some([
+            gpui::Rgba {
+                r: 0.2,
+                g: 0.3,
+                b: 0.8,
+                a: 1.0,
+            },
+            gpui::Rgba {
+                r: 0.8,
+                g: 0.2,
+                b: 0.2,
+                a: 1.0,
+            },
+            gpui::Rgba {
+                r: 0.2,
+                g: 0.7,
+                b: 0.3,
+                a: 1.0,
+            },
+        ]);
+        island.now_playing.is_playing = true;
+        assert!(!island.aura_should_animate());
+        island.expanded = true;
+        assert!(island.aura_should_animate());
+        island.now_playing.is_playing = false;
+        assert!(!island.aura_should_animate());
+        island.now_playing.is_playing = true;
+        island.reduce_motion = true;
+        assert!(!island.aura_should_animate());
+        island.reduce_motion = false;
+        island.settings.ambient_art_glow = false;
+        assert!(!island.aura_should_animate());
     }
 }

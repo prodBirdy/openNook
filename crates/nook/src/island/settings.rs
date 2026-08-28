@@ -960,6 +960,23 @@ impl SettingsView {
         let enabled = self.module.enabled(settings);
         let mut rows = vec![self.width_slider(settings, cx).into_any_element()];
         match self.module {
+            WidgetModule::Music => {
+                rows.push(
+                    toggle_row(
+                        "Animated album art (Apple Music)",
+                        settings.animated_album_art,
+                        cx,
+                        |s| s.animated_album_art = !s.animated_album_art,
+                    )
+                    .into_any_element(),
+                );
+                rows.push(
+                    toggle_row("Ambient art glow", settings.ambient_art_glow, cx, |s| {
+                        s.ambient_art_glow = !s.ambient_art_glow
+                    })
+                    .into_any_element(),
+                );
+            }
             WidgetModule::Calendar => {
                 rows.push(
                     action_row(
@@ -1346,7 +1363,7 @@ fn module_blurb(module: WidgetModule) -> SharedString {
             "Pinned metrics on the compact island and the expanded card.".into()
         }
         WidgetModule::Music => {
-            "Now Playing from MediaRemote on macOS, with an AppleScript fallback.".into()
+            "Now Playing from MediaRemote. Optional Apple Music motion art is opt-in and fails silent to static covers; the glow uses local artwork colors.".into()
         }
         WidgetModule::Files => "Drop zone and tray live on the Tray tab of the expanded island.".into(),
         WidgetModule::Timers => "Countdown presets and a compact ring while a timer is running.".into(),

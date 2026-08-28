@@ -2519,6 +2519,250 @@ fn stop_mirror_macos() {
     }));
 }
 
+/// GPUI top-left artwork rect plus the HLS URL to play over it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MotionArtSpec {
+    pub url: String,
+    pub x: f64,
+    pub y: f64,
+    pub w: f64,
+    pub h: f64,
+    pub radius: f64,
+    pub playing: bool,
+}
+
+/// Attach or update the looping AVPlayerLayer. `None` hides and pauses.
+/// Created once per URL; later calls only move the frame or pause.
+pub fn sync_motion_art(spec: Option<&MotionArtSpec>) {
+    #[cfg(target_os = "macos")]
+    unsafe {
+        sync_motion_art_macos(spec);
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = spec;
+}
+
+pub fn hide_motion_art() {
+    sync_motion_art(None);
+}
+
+#[cfg(target_os = "macos")]
+struct MotionArtCap {
+    url: String,
+    layer: *mut objc2::runtime::AnyObject,
+    player: *mut objc2::runtime::AnyObject,
+    looper: *mut objc2::runtime::AnyObject,
+    last: Option<(f64, f64, f64, f64, f64)>,
+    hidden: bool,
+    paused: bool,
+}
+
+#[cfg(target_os = "macos")]
+fn motion_art_cap() -> &'static std::sync::Mutex<MotionArtCap> {
+    static CAP: std::sync::OnceLock<std::sync::Mutex<MotionArtCap>> = std::sync::OnceLock::new();
+    CAP.get_or_init(|| {
+        std::sync::Mutex::new(MotionArtCap {
+            url: String::new(),
+            layer: std::ptr::null_mut(),
+            player: std::ptr::null_mut(),
+            looper: std::ptr::null_mut(),
+            last: None,
+            hidden: true,
+            paused: true,
+        })
+    })
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn sync_motion_art_macos(spec: Option<&MotionArtSpec>) {
+    use objc2::runtime::AnyObject;
+    use objc2::*;
+
+    let Some(spec) = spec.filter(|s| !s.url.is_empty() && s.w > 1.0 && s.h > 1.0) else {
+        hide_motion_art_macos();
+        return;
+    };
+
+    let mut ns_win = std::ptr::null_mut();
+    for_each_island_window(|w| {
+        if ns_win.is_null() {
+            ns_win = w;
+        }
+    });
+    if ns_win.is_null() {
+        return;
+    }
+    let content: *mut AnyObject = msg_send![ns_win, contentView];
+    if content.is_null() {
+        return;
+    }
+    let _: () = msg_send![content, setWantsLayer: true];
+    let host: *mut AnyObject = msg_send![content, layer];
+    if host.is_null() {
+        return;
+    }
+    let view_frame: CGRect = msg_send![content, bounds];
+    let view_h = view_frame.size.height;
+    let (cx, cy, cw, ch) = cocoa_rect_from_gpui(spec.x, spec.y, spec.w, spec.h, view_h);
+    let rect = CGRect {
+        origin: CGPoint { x: cx, y: cy },
+        size: CGSize {
+            width: cw,
+            height: ch,
+        },
+    };
+
+    let mut cap = motion_art_cap().lock().unwrap_or_else(|e| e.into_inner());
+    if cap.url != spec.url || cap.layer.is_null() {
+        teardown_motion_art_locked(&mut cap);
+        let Some((layer, player, looper)) = create_motion_art_layer(&spec.url, rect, spec.radius)
+        else {
+            return;
+        };
+        let _: () = msg_send![host, addSublayer: layer];
+        cap.url = spec.url.clone();
+        cap.layer = layer;
+        cap.player = player;
+        cap.looper = looper;
+        cap.last = None;
+        cap.hidden = false;
+        cap.paused = true;
+    }
+
+    let frame_key = (cx, cy, cw, ch, spec.radius);
+    if cap.last != Some(frame_key) && !cap.layer.is_null() {
+        let _: () = msg_send![cap.layer, setFrame: rect];
+        let _: () = msg_send![cap.layer, setCornerRadius: spec.radius];
+        cap.last = Some(frame_key);
+    }
+
+    let hide = !spec.playing;
+    if cap.hidden != hide && !cap.layer.is_null() {
+        let _: () = msg_send![cap.layer, setHidden: hide];
+        cap.hidden = hide;
+    }
+    if cap.paused != hide && !cap.player.is_null() {
+        if hide {
+            let _: () = msg_send![cap.player, pause];
+        } else {
+            let _: () = msg_send![cap.player, play];
+        }
+        cap.paused = hide;
+    }
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn hide_motion_art_macos() {
+    use objc2::*;
+    let mut cap = motion_art_cap().lock().unwrap_or_else(|e| e.into_inner());
+    if !cap.layer.is_null() && !cap.hidden {
+        let _: () = msg_send![cap.layer, setHidden: true];
+        cap.hidden = true;
+    }
+    if !cap.player.is_null() && !cap.paused {
+        let _: () = msg_send![cap.player, pause];
+        cap.paused = true;
+    }
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn teardown_motion_art_locked(cap: &mut MotionArtCap) {
+    use objc2::*;
+    if !cap.player.is_null() {
+        let _: () = msg_send![cap.player, pause];
+        let _: () = msg_send![cap.player, release];
+        cap.player = std::ptr::null_mut();
+    }
+    if !cap.looper.is_null() {
+        let _: () = msg_send![cap.looper, release];
+        cap.looper = std::ptr::null_mut();
+    }
+    if !cap.layer.is_null() {
+        let _: () = msg_send![cap.layer, removeFromSuperlayer];
+        let _: () = msg_send![cap.layer, release];
+        cap.layer = std::ptr::null_mut();
+    }
+    cap.url.clear();
+    cap.last = None;
+    cap.hidden = true;
+    cap.paused = true;
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn create_motion_art_layer(
+    url: &str,
+    rect: CGRect,
+    radius: f64,
+) -> Option<(
+    *mut objc2::runtime::AnyObject,
+    *mut objc2::runtime::AnyObject,
+    *mut objc2::runtime::AnyObject,
+)> {
+    use objc2::runtime::AnyObject;
+    use objc2::*;
+
+    load_avfoundation();
+    let item_cls = av_class(c"AVPlayerItem")?;
+    let player_cls = av_class(c"AVQueuePlayer")?;
+    let layer_cls = av_class(c"AVPlayerLayer")?;
+    let ns_url_cls = class!(NSURL);
+    let url_str = ns_string(url);
+    if url_str.is_null() {
+        return None;
+    }
+    let ns_url: *mut AnyObject = msg_send![ns_url_cls, URLWithString: url_str];
+    if ns_url.is_null() {
+        return None;
+    }
+    let item: *mut AnyObject = msg_send![item_cls, playerItemWithURL: ns_url];
+    if item.is_null() {
+        return None;
+    }
+    let items: *mut AnyObject = msg_send![class!(NSArray), arrayWithObject: item];
+    let player: *mut AnyObject = msg_send![player_cls, queuePlayerWithItems: items];
+    if player.is_null() {
+        return None;
+    }
+    let _: *mut AnyObject = msg_send![player, retain];
+    let _: () = msg_send![player, setMuted: true];
+    let sel = sel!(setPreventsDisplaySleepDuringVideoPlayback:);
+    let can_sleep: bool = msg_send![player, respondsToSelector: sel];
+    if can_sleep {
+        let _: () = msg_send![player, setPreventsDisplaySleepDuringVideoPlayback: false];
+    }
+
+    let looper = if let Some(looper_cls) = av_class(c"AVPlayerLooper") {
+        let looper: *mut AnyObject =
+            msg_send![looper_cls, playerLooperWithPlayer: player, templateItem: item];
+        if looper.is_null() {
+            std::ptr::null_mut()
+        } else {
+            let _: *mut AnyObject = msg_send![looper, retain];
+            looper
+        }
+    } else {
+        std::ptr::null_mut()
+    };
+
+    let layer: *mut AnyObject = msg_send![layer_cls, playerLayerWithPlayer: player];
+    if layer.is_null() {
+        let _: () = msg_send![player, release];
+        if !looper.is_null() {
+            let _: () = msg_send![looper, release];
+        }
+        return None;
+    }
+    let _: *mut AnyObject = msg_send![layer, retain];
+    let gravity = ns_string("AVLayerVideoGravityResizeAspectFill");
+    if !gravity.is_null() {
+        let _: () = msg_send![layer, setVideoGravity: gravity];
+    }
+    let _: () = msg_send![layer, setFrame: rect];
+    let _: () = msg_send![layer, setCornerRadius: radius];
+    let _: () = msg_send![layer, setMasksToBounds: true];
+    Some((layer, player, looper))
+}
+
 #[cfg(all(test, target_os = "macos"))]
 mod tests {
     use super::*;

@@ -13,6 +13,7 @@ pub mod haptics;
 #[cfg(any(target_os = "macos", test))]
 mod mediaremote;
 pub mod models;
+pub mod motion_artwork;
 pub mod mouse;
 pub mod notch;
 pub mod notes;

@@ -167,6 +167,12 @@ pub struct AppSettings {
     /// Per-widget widths in Nook cells. Missing entries use [`WidgetModule::default_cells`].
     #[serde(default)]
     pub widget_widths: Vec<(WidgetModule, u8)>,
+    /// Network lookup for Apple Music editorialVideo loops. Opt-in; ToS-gray.
+    #[serde(default)]
+    pub animated_album_art: bool,
+    /// Local dominant-color glow behind the expanded media card.
+    #[serde(default = "default_true")]
+    pub ambient_art_glow: bool,
     #[serde(default)]
     pub window: WindowSettings,
 }
@@ -239,6 +245,8 @@ impl Default for AppSettings {
             hide_when_maximized: false,
             island_color: None,
             widget_widths: Vec::new(),
+            animated_album_art: false,
+            ambient_art_glow: true,
             window: WindowSettings::default(),
         }
     }
@@ -617,6 +625,17 @@ mod tests {
         assert_eq!(parsed.island_y, 0.0);
         assert!(!parsed.hide_when_maximized);
         assert_eq!(parsed.island_color, None);
+        assert!(!parsed.animated_album_art);
+        assert!(parsed.ambient_art_glow);
+    }
+
+    #[test]
+    fn motion_art_toggles_default_network_off_aura_on() {
+        let parsed: AppSettings = serde_json::from_str("{}").unwrap();
+        assert!(!parsed.animated_album_art);
+        assert!(parsed.ambient_art_glow);
+        assert_eq!(parsed.animated_album_art, AppSettings::default().animated_album_art);
+        assert_eq!(parsed.ambient_art_glow, AppSettings::default().ambient_art_glow);
     }
 
     #[test]
