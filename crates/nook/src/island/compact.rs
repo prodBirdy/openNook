@@ -91,6 +91,7 @@ impl Island {
                 .unwrap_or_else(|| div().into_any_element()),
             CompactMode::Share => lucide("share", theme::COMPACT_FACE).into_any_element(),
             CompactMode::Idle => div().into_any_element(),
+            CompactMode::Idle => widgets::compact_weather(self),
         }
     }
 

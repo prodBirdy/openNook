@@ -136,6 +136,7 @@ impl WidgetModuleExt for WidgetModule {
             Self::Messages => "Messages",
             Self::Obsidian => "Obsidian",
             Self::Mixer => "Mixer",
+            Self::Weather => "Weather",
         }
     }
 
@@ -155,6 +156,7 @@ impl WidgetModuleExt for WidgetModule {
             Self::Messages => "message-circle",
             Self::Obsidian => "book",
             Self::Mixer => "volume-2",
+            Self::Weather => "cloud-sun",
         }
     }
 
@@ -189,6 +191,7 @@ impl WidgetModuleExt for WidgetModule {
                 .map(|name| SharedString::from(name.to_string_lossy().into_owned()))
                 .unwrap_or_else(|| "No vault".into()),
             Self::Mixer => "Per-app volume".into(),
+            Self::Weather => weather_subtitle(settings),
         }
     }
 
@@ -216,6 +219,7 @@ impl WidgetModuleExt for WidgetModule {
             Self::Messages => "Messages",
             Self::Obsidian => "Obsidian",
             Self::Mixer => "Mixer",
+            Self::Weather => "Weather",
         }
     }
 }
@@ -262,6 +266,12 @@ fn share_blurb(backend: LinkBackendKind, receive: bool) -> SharedString {
     } else {
         format!("{host} LocalSend is send-only until you turn receive on (listener ships later).")
             .into()
+fn weather_subtitle(settings: &AppSettings) -> SharedString {
+    let name = settings.weather.location.name();
+    if name.is_empty() {
+        "Open-Meteo".into()
+    } else {
+        name.to_string().into()
     }
 }
 
@@ -310,6 +320,7 @@ pub(super) struct SettingsView {
     share_a_focus: FocusHandle,
     share_b_focus: FocusHandle,
     share_c_focus: FocusHandle,
+    city_focus: FocusHandle,
     url_draft: String,
     token_draft: String,
     alias_draft: String,
@@ -320,6 +331,12 @@ pub(super) struct SettingsView {
     token_revealed: bool,
     query_draft: String,
     heading_draft: String,
+    city_draft: String,
+    geo_results: Vec<nook_core::weather::GeoPlace>,
+    geo_error: Option<String>,
+    geo_loading: bool,
+    location_status: Option<String>,
+    location_busy: bool,
     catalog: Vec<String>,
     catalog_error: Option<String>,
     catalog_loading: bool,
@@ -357,11 +374,18 @@ impl SettingsView {
             share_a_draft: share_field_a(&settings),
             share_b_draft: share_field_b(&settings),
             share_c_draft: share_field_c(&settings),
+            city_focus: cx.focus_handle(),
             url_draft: settings.observe.prometheus_url,
             token_draft: settings.observe.metrics_token,
             token_revealed: false,
             query_draft: String::new(),
             heading_draft: settings.obsidian_capture_heading.clone().unwrap_or_default(),
+            city_draft: settings.weather.location.name().to_string(),
+            geo_results: Vec::new(),
+            geo_error: None,
+            geo_loading: false,
+            location_status: None,
+            location_busy: false,
             catalog: Vec::new(),
             catalog_error: None,
             catalog_loading: false,
@@ -486,6 +510,94 @@ impl SettingsView {
         })
         .detach();
     }
+
+    fn search_city(&mut self, cx: &mut Context<Self>) {
+        let query = self.city_draft.trim().to_string();
+        if query.is_empty() || self.geo_loading {
+            return;
+        }
+        self.geo_loading = true;
+        self.geo_error = None;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    nook_core::runtime().block_on(nook_core::weather::search_places(&query, 5))
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                this.geo_loading = false;
+                match result {
+                    Ok(places) => {
+                        this.geo_results = places;
+                        this.geo_error = if this.geo_results.is_empty() {
+                            Some("No matching cities.".into())
+                        } else {
+                            None
+                        };
+                    }
+                    Err(err) => this.geo_error = Some(err),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn pick_place(&mut self, place: nook_core::weather::GeoPlace, cx: &mut Context<Self>) {
+        let name = place.display_name();
+        nook_core::settings::tweak_app_settings(|s| {
+            s.weather.location = nook_core::weather::WeatherLocationMode::Manual {
+                name: name.clone(),
+                lat: place.latitude,
+                lon: place.longitude,
+            };
+        });
+        nook_core::weather::invalidate();
+        self.city_draft = name;
+        self.geo_results.clear();
+        self.location_status = None;
+        cx.notify();
+    }
+
+    fn use_system_location(&mut self, cx: &mut Context<Self>) {
+        if self.location_busy {
+            return;
+        }
+        self.location_busy = true;
+        self.location_status = Some("Locating…".into());
+        cx.notify();
+        let rx = nook_core::location::begin_request();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { rx.await.unwrap_or_else(|_| Err("Location request ended.".into())) })
+                .await;
+            this.update(cx, |this, cx| {
+                this.location_busy = false;
+                match result {
+                    Ok((lat, lon)) => {
+                        nook_core::settings::tweak_app_settings(|s| {
+                            s.weather.location = nook_core::weather::WeatherLocationMode::System {
+                                name: "Current location".into(),
+                                lat,
+                                lon,
+                            };
+                        });
+                        nook_core::weather::invalidate();
+                        this.city_draft = "Current location".into();
+                        this.location_status = None;
+                    }
+                    Err(err) => this.location_status = Some(err),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
 }
 
 impl gpui::Render for SettingsView {
@@ -500,6 +612,7 @@ impl gpui::Render for SettingsView {
         let share_a_focused = self.share_a_focus.is_focused(window);
         let share_b_focused = self.share_b_focus.is_focused(window);
         let share_c_focused = self.share_c_focus.is_focused(window);
+        let city_focused = self.city_focus.is_focused(window);
 
         div()
             .id("settings-root")
@@ -528,6 +641,7 @@ impl gpui::Render for SettingsView {
                     token_focused,
                     query_focused,
                     heading_focused,
+                    city_focused,
                     cx,
                 )
                     .into_any_element()
@@ -1220,6 +1334,7 @@ impl SettingsView {
         token_focused: bool,
         query_focused: bool,
         heading_focused: bool,
+        city_focused: bool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let remaining = settings.remaining_cells();
@@ -1263,6 +1378,7 @@ impl SettingsView {
                     token_focused,
                     query_focused,
                     heading_focused,
+                    city_focused,
                     cx,
                 )),
         )
@@ -1485,6 +1601,7 @@ impl SettingsView {
         token_focused: bool,
         query_focused: bool,
         heading_focused: bool,
+        city_focused: bool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let name = self.module.name();
@@ -1689,6 +1806,158 @@ impl SettingsView {
             .when(self.module == WidgetModule::Obsidian, |d| {
                 d.child(self.render_obsidian_settings(settings, heading_focused, cx))
             })
+            .when(self.module == WidgetModule::Weather, |d| {
+                d.child(self.render_weather_settings(settings, city_focused, cx))
+            })
+    }
+
+    fn render_weather_settings(
+        &self,
+        settings: &AppSettings,
+        city_focused: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        use nook_core::weather::{WeatherLocationMode, WeatherUnits};
+
+        let units = settings.weather.units;
+        let mut unit_row = segmented_group();
+        for (caption, value) in [("°C", WeatherUnits::Celsius), ("°F", WeatherUnits::Fahrenheit)] {
+            unit_row = unit_row.child(segment(caption, units == value, cx, move |_, _, cx| {
+                nook_core::settings::tweak_app_settings(|s| s.weather.units = value);
+                nook_core::weather::invalidate();
+                cx.notify();
+            }));
+        }
+
+        let city_text = if self.city_draft.is_empty() {
+            "City name"
+        } else {
+            self.city_draft.as_str()
+        };
+        let mut location_rows = vec![
+            field_row(
+                "weather-city",
+                "City",
+                city_text,
+                self.city_draft.is_empty(),
+                city_focused,
+                &self.city_focus,
+                cx,
+                |this, event, cx| {
+                    if event.keystroke.key == "enter" {
+                        this.search_city(cx);
+                    } else if SettingsView::apply_key(&mut this.city_draft, event, cx) {
+                        cx.notify();
+                    }
+                },
+            )
+            .into_any_element(),
+            settings_row("weather-city-actions")
+                .child(div().flex_1())
+                .child(
+                    div()
+                        .flex()
+                        .gap(px(6.))
+                        .child(push_button(
+                            "weather-search",
+                            if self.geo_loading {
+                                "Searching…"
+                            } else {
+                                "Search"
+                            },
+                            cx,
+                            |this, _, cx| this.search_city(cx),
+                        ))
+                        .child(push_button(
+                            "weather-system",
+                            if self.location_busy {
+                                "Locating…"
+                            } else {
+                                "Use system location"
+                            },
+                            cx,
+                            |this, _, cx| this.use_system_location(cx),
+                        )),
+                )
+                .into_any_element(),
+        ];
+        if let Some(status) = &self.location_status {
+            location_rows.push(
+                settings_row("weather-loc-status")
+                    .child(label(status.clone(), theme::BODY, false))
+                    .into_any_element(),
+            );
+        }
+        if let Some(err) = &self.geo_error {
+            location_rows.push(
+                settings_row("weather-geo-err")
+                    .child(label(err.clone(), theme::BODY, false))
+                    .into_any_element(),
+            );
+        }
+        for (i, place) in self.geo_results.iter().enumerate() {
+            let caption = place.display_name();
+            let picked = place.clone();
+            location_rows.push(
+                settings_row(SharedString::from(format!("weather-hit-{i}")))
+                    .child(label(caption, theme::BODY, true))
+                    .child(push_button(
+                        SharedString::from(format!("weather-pick-{i}")),
+                        "Use",
+                        cx,
+                        move |this, _, cx| this.pick_place(picked.clone(), cx),
+                    ))
+                    .into_any_element(),
+            );
+        }
+
+        let location_note = match &settings.weather.location {
+            WeatherLocationMode::System { .. } => {
+                "Using a one-shot system fix (city-level). The Location Services grant is keyed to this build's signature and resets after an ad-hoc re-sign."
+            }
+            WeatherLocationMode::Manual { name, .. } if !name.is_empty() => {
+                "Manual city. System location is opt-in and optional."
+            }
+            _ => "Enter a city (no permission prompt). System location is opt-in and resets on re-sign.",
+        };
+
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(16.))
+            .child(section(
+                "Units",
+                settings_group(vec![settings_row("weather-units")
+                    .child(label("Temperature", theme::BODY, true))
+                    .child(unit_row)
+                    .into_any_element()]),
+                None::<SharedString>,
+            ))
+            .child(section(
+                "Location",
+                settings_group(location_rows),
+                Some(location_note),
+            ))
+            .child(section(
+                "Compact face",
+                settings_group(vec![toggle_row(
+                    "Show on idle face",
+                    settings.weather.show_on_compact_face,
+                    cx,
+                    |s| {
+                        s.weather.show_on_compact_face = !s.weather.show_on_compact_face;
+                    },
+                )
+                .into_any_element()]),
+                Some("Temp and condition next to the notch while the island is idle."),
+            ))
+            .child(section(
+                "Attribution",
+                settings_group(vec![settings_row("weather-attr")
+                    .child(label(nook_core::weather::ATTRIBUTION, theme::BODY, false))
+                    .into_any_element()]),
+                Some("Required by Open-Meteo's CC-BY 4.0 license."),
+            ))
     }
 
     fn render_observe_settings(
@@ -2155,6 +2424,9 @@ fn module_blurb(module: WidgetModule) -> SharedString {
             "Vault notes on the shelf. FSEvents keeps the list current; capture appends to today's daily note.".into()
         }
         WidgetModule::Mixer => nook_core::mixer::TCC_PREPROMPT.into(),
+        WidgetModule::Weather => {
+            "Current conditions and a short hourly strip from Open-Meteo. Manual city by default.".into()
+        }
     }
 }
 
@@ -2569,6 +2841,21 @@ mod tests {
     }
 
     #[test]
+    fn weather_subtitle_uses_the_saved_city() {
+        let mut settings = AppSettings::default();
+        assert_eq!(
+            WidgetModule::Weather.subtitle(&settings).as_ref(),
+            "Open-Meteo"
+        );
+        settings.weather.location = nook_core::weather::WeatherLocationMode::Manual {
+            name: "Oslo".into(),
+            lat: 59.91,
+            lon: 10.75,
+        };
+        assert_eq!(WidgetModule::Weather.subtitle(&settings).as_ref(), "Oslo");
+    }
+
+    #[test]
     fn calendar_subtitle_uses_the_week_strip_count() {
         let settings = AppSettings::default();
         assert_eq!(
@@ -2628,6 +2915,7 @@ mod tests {
                 "Messages",
                 "Obsidian",
                 "Mixer",
+                "Weather",
             ]
         );
         assert!(!names

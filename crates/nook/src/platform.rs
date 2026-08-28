@@ -1825,6 +1825,10 @@ pub fn install_media_observers() {
 
 /// Re-assert OSDUIHelper suppression after sleep — launchd can respawn it.
 pub fn install_osd_wake_observer() {
+/// Refresh weather after sleep without polling through it. The weather loop
+/// consumes [`nook_core::weather::take_wake`] and only hits the network when
+/// the 30 min cache is stale.
+pub fn install_weather_observers() {
     #[cfg(target_os = "macos")]
     unsafe {
         use block2::RcBlock;
@@ -1842,6 +1846,7 @@ pub fn install_osd_wake_observer() {
                 return;
             }
             let name: *mut AnyObject = msg_send![
+            let ns_name: *mut AnyObject = msg_send![
                 class!(NSString),
                 stringWithUTF8String: c"NSWorkspaceDidWakeNotification".as_ptr()
             ];
@@ -1851,6 +1856,11 @@ pub fn install_osd_wake_observer() {
             let token: *mut AnyObject = msg_send![
                 center,
                 addObserverForName: name,
+                nook_core::weather::note_wake();
+            });
+            let token: *mut AnyObject = msg_send![
+                center,
+                addObserverForName: ns_name,
                 object: std::ptr::null_mut::<AnyObject>(),
                 queue: std::ptr::null_mut::<AnyObject>(),
                 usingBlock: &*block

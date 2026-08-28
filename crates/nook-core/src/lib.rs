@@ -12,6 +12,7 @@ pub mod database;
 pub mod files;
 pub mod haptics;
 pub mod hotkeys;
+pub mod location;
 #[cfg(target_os = "macos")]
 pub mod lyrics;
 #[cfg(any(target_os = "macos", test))]
@@ -35,6 +36,7 @@ pub mod settings;
 pub mod sysvol;
 pub mod share;
 pub mod utils;
+pub mod weather;
 pub mod widgets;
 pub mod window_snap;
 

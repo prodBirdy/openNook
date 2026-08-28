@@ -1,6 +1,7 @@
 use crate::database;
 use crate::observe::ObserveConfig;
 use crate::share::ShareSettings;
+use crate::weather::WeatherSettings;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::RwLock;
@@ -23,6 +24,7 @@ pub enum WidgetModule {
     Messages = 10,
     Obsidian = 10,
     Mixer = 10,
+    Weather = 10,
 }
 
 impl WidgetModule {
@@ -41,6 +43,7 @@ impl WidgetModule {
         Self::Messages,
         Self::Obsidian,
         Self::Mixer,
+        Self::Weather,
     ];
 
     pub fn from_u8(value: u8) -> Self {
@@ -62,6 +65,7 @@ impl WidgetModule {
                 4
             }
             Self::Timers | Self::Speed | Self::Mirror => 3,
+            Self::Timers | Self::Speed | Self::Mirror | Self::Weather => 3,
         }
     }
 
@@ -76,12 +80,14 @@ impl WidgetModule {
             }
             Self::Notes | Self::Timers | Self::Speed | Self::Agents => 2,
             Self::Notes | Self::Timers | Self::Speed | Self::Agents | Self::Obsidian => 2,
+            Self::Notes | Self::Timers | Self::Speed | Self::Agents | Self::Weather => 2,
         }
     }
 
     pub fn max_cells(self) -> u8 {
         match self {
             Self::Timers | Self::Speed | Self::Agents | Self::Mirror | Self::Battery => 6,
+            Self::Timers | Self::Speed | Self::Agents | Self::Mirror | Self::Weather => 6,
             _ => 8,
         }
     }
@@ -108,6 +114,7 @@ fn default_widget_order() -> Vec<WidgetModule> {
         WidgetModule::Speed,
         WidgetModule::Battery,
         WidgetModule::Messages,
+        WidgetModule::Weather,
     ]
 }
 
@@ -198,6 +205,8 @@ pub struct AppSettings {
     #[serde(default)]
     pub obsidian_uri_capture: bool,
     pub show_mixer: bool,
+    #[serde(default)]
+    pub weather: WeatherSettings,
     #[serde(default)]
     pub observe: ObserveConfig,
     #[serde(default)]
@@ -329,6 +338,7 @@ impl Default for AppSettings {
             obsidian_capture_heading: None,
             obsidian_uri_capture: false,
             show_mixer: true,
+            weather: WeatherSettings::default(),
             observe: ObserveConfig::default(),
             liquid_glass_mode: false,
             non_notch_mode: false,
@@ -385,6 +395,7 @@ impl AppSettings {
             WidgetModule::Messages => self.show_messages,
             WidgetModule::Obsidian => self.show_obsidian,
             WidgetModule::Mixer => self.show_mixer && crate::mixer::is_available(),
+            WidgetModule::Weather => self.weather.enabled,
         }
     }
 
@@ -407,6 +418,7 @@ impl AppSettings {
             }
             WidgetModule::Obsidian => self.show_obsidian = !self.show_obsidian,
             WidgetModule::Mixer => self.show_mixer = !self.show_mixer,
+            WidgetModule::Weather => self.weather.enabled = !self.weather.enabled,
         }
     }
 
@@ -817,6 +829,8 @@ mod tests {
         assert_eq!(parsed.obsidian_capture_heading, None);
         assert!(!parsed.obsidian_uri_capture);
         assert!(parsed.show_mixer);
+        assert!(parsed.weather.enabled);
+        assert!(parsed.weather.show_on_compact_face);
         assert!(parsed.liquid_glass_mode);
         assert!(!parsed.non_notch_mode);
         assert!((parsed.island_x - 0.5).abs() < f32::EPSILON);
@@ -914,6 +928,7 @@ mod tests {
         settings.show_messages = false;
         settings.show_obsidian = false;
         settings.show_mixer = false;
+        settings.weather.enabled = false;
         settings.set_cells(WidgetModule::Music, 5);
         assert_eq!(settings.used_cells(), 5);
         assert_eq!(settings.remaining_cells(), AppSettings::TOTAL_CELLS - 5);

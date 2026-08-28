@@ -12,6 +12,7 @@ mod obsidian;
 mod reminders;
 mod speed;
 mod timers;
+mod weather;
 
 pub(crate) use agents::{
     agents_card, compact_left as agents_compact_left, compact_right as agents_compact_right,
@@ -29,3 +30,4 @@ pub(crate) use obsidian::obsidian_card;
 pub(crate) use reminders::reminders_card;
 pub(crate) use speed::speed_card;
 pub(crate) use timers::{compact_left as timer_compact_left, timer_card};
+pub(crate) use weather::{compact_weather, weather_card};
