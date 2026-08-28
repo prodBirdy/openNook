@@ -308,12 +308,75 @@ fn safari_artwork_url<'a>(page_url: &str, artwork_url: &'a str) -> Option<&'a st
 /// waiting out its idle cadence.
 static MEDIA_EVENT: AtomicBool = AtomicBool::new(false);
 
+/// Launch Services snapshot of the AppleScript fallback players, refreshed
+/// from `NSWorkspace` launch/terminate notifications instead of walking the
+/// process table. Bit0 = primed, bit1 = Spotify, bit2 = Music, bit3 = Safari.
+static MEDIA_APPS: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+const MEDIA_APPS_PRIMED: u8 = 1 << 0;
+const MEDIA_APP_SPOTIFY: u8 = 1 << 1;
+const MEDIA_APP_MUSIC: u8 = 1 << 2;
+const MEDIA_APP_SAFARI: u8 = 1 << 3;
+
 pub fn note_media_event() {
     MEDIA_EVENT.store(true, Ordering::Relaxed);
 }
 
 pub fn take_media_event() -> bool {
     MEDIA_EVENT.swap(false, Ordering::Relaxed)
+}
+
+/// Record that a media-capable app launched or quit. Unknown bundle ids are
+/// ignored so the workspace observers can be wired to every app event.
+pub fn note_media_app_running(bundle_id: &str, running: bool) {
+    let bit = match bundle_id {
+        "com.spotify.client" => MEDIA_APP_SPOTIFY,
+        "com.apple.Music" => MEDIA_APP_MUSIC,
+        "com.apple.Safari" => MEDIA_APP_SAFARI,
+        _ => return,
+    };
+    let mut packed = MEDIA_APPS.load(Ordering::Relaxed) | MEDIA_APPS_PRIMED;
+    if running {
+        packed |= bit;
+    } else {
+        packed &= !bit;
+    }
+    MEDIA_APPS.store(packed, Ordering::Relaxed);
+}
+
+/// `(spotify, music, safari)` from the launch/terminate cache, priming via
+/// `NSRunningApplication` once if no observer has run yet.
+#[cfg(target_os = "macos")]
+fn media_players_running() -> (bool, bool, bool) {
+    let packed = MEDIA_APPS.load(Ordering::Relaxed);
+    if packed & MEDIA_APPS_PRIMED == 0 {
+        return prime_media_apps();
+    }
+    (
+        packed & MEDIA_APP_SPOTIFY != 0,
+        packed & MEDIA_APP_MUSIC != 0,
+        packed & MEDIA_APP_SAFARI != 0,
+    )
+}
+
+/// Seed the media-app bits from Launch Services. Called from
+/// `install_media_observers` so the first AppleScript poll does not race.
+#[cfg(target_os = "macos")]
+pub fn prime_media_apps() -> (bool, bool, bool) {
+    let spotify = app_running(c"com.spotify.client");
+    let music = app_running(c"com.apple.Music");
+    let safari = app_running(c"com.apple.Safari");
+    let mut packed = MEDIA_APPS_PRIMED;
+    if spotify {
+        packed |= MEDIA_APP_SPOTIFY;
+    }
+    if music {
+        packed |= MEDIA_APP_MUSIC;
+    }
+    if safari {
+        packed |= MEDIA_APP_SAFARI;
+    }
+    MEDIA_APPS.store(packed, Ordering::Relaxed);
+    (spotify, music, safari)
 }
 
 /// Whether an app with this bundle id is running, via Launch Services.
@@ -365,11 +428,7 @@ pub async fn get_now_playing() -> NowPlayingData {
         // Services' in-process app list — no walk of the whole process table
         // (the sysinfo refresh this replaces enumerated every pid on the
         // system each poll, a measurable slice of idle CPU).
-        let (spotify_running, music_running, safari_running) = (
-            app_running(c"com.spotify.client"),
-            app_running(c"com.apple.Music"),
-            app_running(c"com.apple.Safari"),
-        );
+        let (spotify_running, music_running, safari_running) = media_players_running();
 
         // If no relevant apps are running, return early with no overhead
         if !spotify_running && !music_running && !safari_running {
@@ -1402,6 +1461,22 @@ mod tests {
             ),
             None
         );
+    }
+
+    #[test]
+    fn media_app_running_cache_ignores_unrelated_bundles() {
+        note_media_app_running("com.apple.finder", true);
+        note_media_app_running("com.spotify.client", true);
+        note_media_app_running("com.apple.Music", false);
+        note_media_app_running("com.apple.Safari", true);
+        let packed = MEDIA_APPS.load(Ordering::Relaxed);
+        assert_ne!(packed & MEDIA_APPS_PRIMED, 0);
+        assert_ne!(packed & MEDIA_APP_SPOTIFY, 0);
+        assert_eq!(packed & MEDIA_APP_MUSIC, 0);
+        assert_ne!(packed & MEDIA_APP_SAFARI, 0);
+        note_media_app_running("com.spotify.client", false);
+        let packed = MEDIA_APPS.load(Ordering::Relaxed);
+        assert_eq!(packed & MEDIA_APP_SPOTIFY, 0);
     }
 
     #[test]

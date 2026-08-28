@@ -10,6 +10,8 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
+#[cfg(target_os = "macos")]
+use sysinfo::Pid;
 use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
 
 /// CPU % above which a descendant process counts as doing real work. The
@@ -153,6 +155,45 @@ fn process_system() -> &'static Mutex<System> {
 }
 
 fn scan_processes() -> HashMap<u32, ProcInfo> {
+    #[cfg(target_os = "macos")]
+    {
+        scan_processes_macos()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        scan_processes_all()
+    }
+}
+
+fn proc_from_sysinfo(pid_u32: u32, proc_: &sysinfo::Process) -> Option<ProcInfo> {
+    let name = proc_.name().to_string_lossy().into_owned();
+    let argv: Vec<String> = if proc_.cmd().is_empty() {
+        if name.is_empty() {
+            return None;
+        }
+        vec![name.clone()]
+    } else {
+        proc_
+            .cmd()
+            .iter()
+            .map(|s| s.to_string_lossy().into_owned())
+            .collect()
+    };
+    Some(ProcInfo {
+        pid: pid_u32,
+        ppid: proc_.parent().map(|p| p.as_u32()).unwrap_or(0),
+        cpu_pct: proc_.cpu_usage(),
+        name,
+        argv,
+        cwd: proc_.cwd().map(PathBuf::from),
+        exe: proc_.exe().map(PathBuf::from),
+        start_time: proc_.start_time(),
+    })
+}
+
+/// Full-table refresh. Used off macOS, where the process list is small and
+/// there is no `proc_pidpath` two-stage split.
+fn scan_processes_all() -> HashMap<u32, ProcInfo> {
     let mut sys = process_system().lock().unwrap_or_else(|e| e.into_inner());
     // argv (KERN_PROCARGS2 sysctl) and the exe path are fixed at exec time, so
     // OnlyIfNotSet fetches them once per new pid instead of re-reading them
@@ -172,35 +213,119 @@ fn scan_processes() -> HashMap<u32, ProcInfo> {
 
     let mut map = HashMap::new();
     for (pid, proc_) in sys.processes() {
-        let pid_u32 = pid.as_u32();
-        let name = proc_.name().to_string_lossy().into_owned();
-        let argv: Vec<String> = if proc_.cmd().is_empty() {
-            if name.is_empty() {
-                continue;
-            }
-            vec![name.clone()]
-        } else {
-            proc_
-                .cmd()
-                .iter()
-                .map(|s| s.to_string_lossy().into_owned())
-                .collect()
-        };
-        map.insert(
-            pid_u32,
-            ProcInfo {
-                pid: pid_u32,
-                ppid: proc_.parent().map(|p| p.as_u32()).unwrap_or(0),
-                cpu_pct: proc_.cpu_usage(),
-                name,
-                argv,
-                cwd: proc_.cwd().map(PathBuf::from),
-                exe: proc_.exe().map(PathBuf::from),
-                start_time: proc_.start_time(),
-            },
-        );
+        if let Some(info) = proc_from_sysinfo(pid.as_u32(), proc_) {
+            map.insert(info.pid, info);
+        }
     }
     map
+}
+
+/// macOS two-stage scan: list every pid with a cheap `proc_pidpath` (exe
+/// OnlyIfNotSet), then fetch argv / cwd / cpu only for agent candidates and
+/// their descendants. Avoids KERN_PROCARGS2 on hundreds of unrelated pids.
+#[cfg(target_os = "macos")]
+fn scan_processes_macos() -> HashMap<u32, ProcInfo> {
+    let mut sys = process_system().lock().unwrap_or_else(|e| e.into_inner());
+    sys.refresh_processes_specifics(
+        ProcessesToUpdate::All,
+        true,
+        ProcessRefreshKind::nothing()
+            .without_tasks()
+            .with_exe(UpdateKind::OnlyIfNotSet),
+    );
+
+    let sidecar: HashSet<u32> = grok_sessions()
+        .keys()
+        .chain(claude_sessions().keys())
+        .copied()
+        .collect();
+
+    let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
+    let mut seeds = Vec::new();
+    for (pid, proc_) in sys.processes() {
+        let pid_u32 = pid.as_u32();
+        let ppid = proc_.parent().map(|p| p.as_u32()).unwrap_or(0);
+        children.entry(ppid).or_default().push(pid_u32);
+        let name = proc_.name().to_string_lossy();
+        let exe = proc_
+            .exe()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        if is_scan_seed(&exe, &name) || sidecar.contains(&pid_u32) {
+            seeds.push(pid_u32);
+        }
+    }
+
+    let mut detail = HashSet::new();
+    let mut stack = seeds;
+    while let Some(pid) = stack.pop() {
+        if detail.insert(pid) {
+            if let Some(kids) = children.get(&pid) {
+                stack.extend(kids.iter().copied());
+            }
+        }
+    }
+    if detail.is_empty() {
+        return HashMap::new();
+    }
+
+    let pids: Vec<Pid> = detail.iter().copied().map(Pid::from_u32).collect();
+    sys.refresh_processes_specifics(
+        ProcessesToUpdate::Some(&pids),
+        true,
+        ProcessRefreshKind::nothing()
+            .without_tasks()
+            .with_cpu()
+            .with_cmd(UpdateKind::OnlyIfNotSet)
+            .with_cwd(UpdateKind::Always)
+            .with_exe(UpdateKind::OnlyIfNotSet),
+    );
+
+    let mut map = HashMap::new();
+    for pid in detail {
+        let Some(proc_) = sys.process(Pid::from_u32(pid)) else {
+            continue;
+        };
+        if let Some(info) = proc_from_sysinfo(pid, proc_) {
+            map.insert(info.pid, info);
+        }
+    }
+    map
+}
+
+/// Stage-1 filter: exe path or `comm` looks like an agent or a wrapper that
+/// may hide the real binary in argv (`node …/claude`).
+fn is_scan_seed(path: &str, comm: &str) -> bool {
+    if grok_install_path(path) {
+        return true;
+    }
+    if is_wrapper_comm(comm) || is_wrapper_comm(path.rsplit('/').next().unwrap_or(path)) {
+        return true;
+    }
+    [
+        AgentKind::Cursor,
+        AgentKind::OpenCode,
+        AgentKind::Claude,
+        AgentKind::Codex,
+        AgentKind::Fx,
+        AgentKind::Grok,
+        AgentKind::Aider,
+        AgentKind::Gemini,
+    ]
+    .into_iter()
+    .any(|kind| {
+        kind.binaries()
+            .iter()
+            .any(|bin| token_has_binary(path, bin) || token_has_binary(comm, bin))
+    })
+}
+
+fn is_wrapper_comm(name: &str) -> bool {
+    const WRAPPERS: &[&str] = &["node", "bun", "deno", "ruby", "perl", "npx", "python", "python3"];
+    let base = name.rsplit(['/', '\\']).next().unwrap_or(name);
+    let base = base.strip_suffix(".exe").unwrap_or(base);
+    let lower = base.to_ascii_lowercase();
+    WRAPPERS.iter().any(|w| lower == *w) || lower.starts_with("python")
 }
 
 fn assemble(procs: &HashMap<u32, ProcInfo>) -> Vec<AgentSession> {
@@ -1086,6 +1211,22 @@ mod tests {
             ),
             Some(AgentKind::Cursor)
         );
+    }
+
+    #[test]
+    fn scan_seed_matches_agent_paths_and_wrappers() {
+        assert!(is_scan_seed("/usr/local/bin/claude", "claude"));
+        assert!(is_scan_seed(
+            "/Users/a/.local/share/claude/versions/2.1.121",
+            "claude"
+        ));
+        assert!(is_scan_seed("/bin/cursor-agent", "cursor-agent"));
+        assert!(is_scan_seed("/opt/homebrew/bin/node", "node"));
+        assert!(is_scan_seed("/usr/bin/python3.12", "Python"));
+        assert!(is_scan_seed("/Users/a/.grok/bin/agent", "agent"));
+        assert!(!is_scan_seed("/usr/bin/grep", "grep"));
+        assert!(!is_scan_seed("/Applications/Safari.app/Contents/MacOS/Safari", "Safari"));
+        assert!(!is_scan_seed("/usr/sbin/syslogd", "syslogd"));
     }
 
     #[test]

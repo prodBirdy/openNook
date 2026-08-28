@@ -806,6 +806,16 @@ fn install_app_target() {
         extern "C" fn app_activated(_this: *mut AnyObject, _cmd: Sel, _note: *mut AnyObject) {
             nook_core::occupancy::invalidate();
         }
+        extern "C" fn accessibility_changed(
+            _this: *mut AnyObject,
+            _cmd: Sel,
+            _note: *mut AnyObject,
+        ) {
+            invalidate_accessibility_flags();
+        }
+        extern "C" fn colors_changed(_this: *mut AnyObject, _cmd: Sel, _note: *mut AnyObject) {
+            invalidate_accent_color();
+        }
 
         let super_cls = class!(NSObject) as *const AnyClass as *mut AnyClass;
         let cls = objc_allocateClassPair(super_cls, c"NookAppTarget".as_ptr(), 0);
@@ -826,10 +836,18 @@ fn install_app_target() {
         let imp_app: Imp = std::mem::transmute(
             app_activated as extern "C" fn(*mut AnyObject, Sel, *mut AnyObject),
         );
+        let imp_a11y: Imp = std::mem::transmute(
+            accessibility_changed as extern "C" fn(*mut AnyObject, Sel, *mut AnyObject),
+        );
+        let imp_colors: Imp = std::mem::transmute(
+            colors_changed as extern "C" fn(*mut AnyObject, Sel, *mut AnyObject),
+        );
         let _ = class_addMethod(cls, sel!(openSettings:), imp_settings, types.as_ptr());
         let _ = class_addMethod(cls, sel!(screenChanged:), imp_screen, types.as_ptr());
         let _ = class_addMethod(cls, sel!(spaceChanged:), imp_space, types.as_ptr());
         let _ = class_addMethod(cls, sel!(appActivated:), imp_app, types.as_ptr());
+        let _ = class_addMethod(cls, sel!(accessibilityChanged:), imp_a11y, types.as_ptr());
+        let _ = class_addMethod(cls, sel!(colorsChanged:), imp_colors, types.as_ptr());
         objc_registerClassPair(cls);
         observe_screen_changes();
     }
@@ -857,6 +875,18 @@ unsafe fn observe_screen_changes() {
         addObserver: target,
         selector: sel!(screenChanged:),
         name: name,
+        object: std::ptr::null_mut::<AnyObject>()
+    ];
+
+    let colors_name: *mut AnyObject = msg_send![
+        class!(NSString),
+        stringWithUTF8String: c"NSSystemColorsDidChangeNotification".as_ptr()
+    ];
+    let _: () = msg_send![
+        center,
+        addObserver: target,
+        selector: sel!(colorsChanged:),
+        name: colors_name,
         object: std::ptr::null_mut::<AnyObject>()
     ];
 
@@ -888,6 +918,18 @@ unsafe fn observe_screen_changes() {
         addObserver: target,
         selector: sel!(appActivated:),
         name: app_name,
+        object: std::ptr::null_mut::<AnyObject>()
+    ];
+    let a11y_name: *mut AnyObject = msg_send![
+        class!(NSString),
+        stringWithUTF8String: c"NSWorkspaceAccessibilityDisplayOptionsDidChangeNotification"
+            .as_ptr()
+    ];
+    let _: () = msg_send![
+        wsnc,
+        addObserver: target,
+        selector: sel!(accessibilityChanged:),
+        name: a11y_name,
         object: std::ptr::null_mut::<AnyObject>()
     ];
 }
@@ -1380,16 +1422,43 @@ pub fn open_calendar() {
     }
 }
 
+#[cfg(target_os = "macos")]
+static ACCENT_VALID: AtomicBool = AtomicBool::new(false);
+#[cfg(target_os = "macos")]
+static ACCENT_R: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+#[cfg(target_os = "macos")]
+static ACCENT_G: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+#[cfg(target_os = "macos")]
+static ACCENT_B: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+#[cfg(target_os = "macos")]
+fn invalidate_accent_color() {
+    ACCENT_VALID.store(false, Ordering::Relaxed);
+}
+
 /// System Settings → Appearance → *Accent color* (`NSColor.controlAccentColor`),
 /// as sRGB components in 0..=1. `None` when there is no AppKit to ask or the
 /// color cannot be converted to an RGB space — callers fall back to systemBlue.
 ///
-/// Read live rather than cached so switching the accent in System Settings
-/// shows up on the next frame. Must be called on the main thread.
+/// Cached until `NSSystemColorsDidChangeNotification` so idle frames do not
+/// walk CoreUI catalog colors. Must be called on the main thread for the
+/// first resolve.
 pub fn accent_color() -> Option<(f32, f32, f32)> {
     #[cfg(target_os = "macos")]
     {
-        accent_color_macos()
+        if ACCENT_VALID.load(Ordering::Relaxed) {
+            return Some((
+                f32::from_bits(ACCENT_R.load(Ordering::Relaxed)),
+                f32::from_bits(ACCENT_G.load(Ordering::Relaxed)),
+                f32::from_bits(ACCENT_B.load(Ordering::Relaxed)),
+            ));
+        }
+        let color = accent_color_macos()?;
+        ACCENT_R.store(color.0.to_bits(), Ordering::Relaxed);
+        ACCENT_G.store(color.1.to_bits(), Ordering::Relaxed);
+        ACCENT_B.store(color.2.to_bits(), Ordering::Relaxed);
+        ACCENT_VALID.store(true, Ordering::Relaxed);
+        Some(color)
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -1432,10 +1501,23 @@ fn accent_color_macos() -> Option<(f32, f32, f32)> {
     })
 }
 
+#[cfg(target_os = "macos")]
+static REDUCE_TRANSPARENCY_CACHE: AtomicU64 = AtomicU64::new(0);
+#[cfg(target_os = "macos")]
+static REDUCE_MOTION_CACHE: AtomicU64 = AtomicU64::new(0);
+
+#[cfg(target_os = "macos")]
+fn invalidate_accessibility_flags() {
+    REDUCE_TRANSPARENCY_CACHE.store(0, Ordering::Relaxed);
+    REDUCE_MOTION_CACHE.store(0, Ordering::Relaxed);
+}
+
 /// 1s-TTL cache for an AppKit accessibility flag. Both flags below are read
 /// from the 20ms island tick; two ObjC round-trips per tick is pointless for
-/// settings a human toggles at most a few times a day. Layout: bit0 = value,
-/// bit1 = valid, upper bits = last-read unix ms.
+/// settings a human toggles at most a few times a day. The workspace
+/// accessibility-display observer also invalidates these so a toggle applies
+/// on the next tick. Layout: bit0 = value, bit1 = valid, upper bits = last-read
+/// unix ms.
 #[cfg(target_os = "macos")]
 fn cached_accessibility_flag(cache: &AtomicU64, read: unsafe fn() -> bool) -> bool {
     let now_ms = std::time::SystemTime::now()
@@ -1457,7 +1539,6 @@ fn cached_accessibility_flag(cache: &AtomicU64, read: unsafe fn() -> bool) -> bo
 pub fn reduce_transparency() -> bool {
     #[cfg(target_os = "macos")]
     {
-        static CACHE: AtomicU64 = AtomicU64::new(0);
         unsafe fn read() -> bool {
             use objc2::runtime::AnyObject;
             use objc2::*;
@@ -1467,7 +1548,7 @@ pub fn reduce_transparency() -> bool {
             }
             msg_send![workspace, accessibilityDisplayShouldReduceTransparency]
         }
-        cached_accessibility_flag(&CACHE, read)
+        cached_accessibility_flag(&REDUCE_TRANSPARENCY_CACHE, read)
     }
     #[cfg(not(target_os = "macos"))]
     false
@@ -1480,7 +1561,6 @@ pub fn reduce_transparency() -> bool {
 pub fn reduce_motion() -> bool {
     #[cfg(target_os = "macos")]
     {
-        static CACHE: AtomicU64 = AtomicU64::new(0);
         unsafe fn read() -> bool {
             use objc2::runtime::AnyObject;
             use objc2::*;
@@ -1490,10 +1570,44 @@ pub fn reduce_motion() -> bool {
             }
             msg_send![workspace, accessibilityDisplayShouldReduceMotion]
         }
-        cached_accessibility_flag(&CACHE, read)
+        cached_accessibility_flag(&REDUCE_MOTION_CACHE, read)
     }
     #[cfg(not(target_os = "macos"))]
     false
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn workspace_note_bundle_id(note: *mut objc2::runtime::AnyObject) -> Option<String> {
+    use objc2::runtime::AnyObject;
+    use objc2::*;
+    if note.is_null() {
+        return None;
+    }
+    let info: *mut AnyObject = msg_send![note, userInfo];
+    if info.is_null() {
+        return None;
+    }
+    let key: *mut AnyObject = msg_send![
+        class!(NSString),
+        stringWithUTF8String: c"NSWorkspaceApplicationKey".as_ptr()
+    ];
+    let app: *mut AnyObject = msg_send![info, objectForKey: key];
+    if app.is_null() {
+        return None;
+    }
+    let ident: *mut AnyObject = msg_send![app, bundleIdentifier];
+    if ident.is_null() {
+        return None;
+    }
+    let utf8: *const std::ffi::c_char = msg_send![ident, UTF8String];
+    if utf8.is_null() {
+        return None;
+    }
+    Some(
+        std::ffi::CStr::from_ptr(utf8)
+            .to_string_lossy()
+            .into_owned(),
+    )
 }
 
 /// Subscribe to Spotify's and Music's public playback-change broadcasts.
@@ -1514,23 +1628,60 @@ pub fn install_media_observers() {
 
         static INSTALLED: Once = Once::new();
         INSTALLED.call_once(|| {
+            let _ = nook_core::audio::prime_media_apps();
+
             let center: *mut AnyObject =
                 msg_send![class!(NSDistributedNotificationCenter), defaultCenter];
-            if center.is_null() {
+            if !center.is_null() {
+                for name in [
+                    c"com.spotify.client.PlaybackStateChanged",
+                    c"com.apple.Music.playerInfo",
+                    c"com.apple.iTunes.playerInfo",
+                ] {
+                    let ns_name: *mut AnyObject =
+                        msg_send![class!(NSString), stringWithUTF8String: name.as_ptr()];
+                    let block = RcBlock::new(move |_note: *mut AnyObject| {
+                        nook_core::audio::note_media_event();
+                    });
+                    let token: *mut AnyObject = msg_send![
+                        center,
+                        addObserverForName: ns_name,
+                        object: std::ptr::null_mut::<AnyObject>(),
+                        queue: std::ptr::null_mut::<AnyObject>(),
+                        usingBlock: &*block
+                    ];
+                    std::mem::forget(block);
+                    let _ = token;
+                }
+            }
+
+            let workspace: *mut AnyObject = msg_send![class!(NSWorkspace), sharedWorkspace];
+            if workspace.is_null() {
                 return;
             }
-            for name in [
-                c"com.spotify.client.PlaybackStateChanged",
-                c"com.apple.Music.playerInfo",
-                c"com.apple.iTunes.playerInfo",
+            let wsnc: *mut AnyObject = msg_send![workspace, notificationCenter];
+            if wsnc.is_null() {
+                return;
+            }
+            for (name, running) in [
+                (c"NSWorkspaceDidLaunchApplicationNotification", true),
+                (c"NSWorkspaceDidTerminateApplicationNotification", false),
             ] {
                 let ns_name: *mut AnyObject =
                     msg_send![class!(NSString), stringWithUTF8String: name.as_ptr()];
-                let block = RcBlock::new(move |_note: *mut AnyObject| {
-                    nook_core::audio::note_media_event();
+                let block = RcBlock::new(move |note: *mut AnyObject| {
+                    if let Some(id) = workspace_note_bundle_id(note) {
+                        nook_core::audio::note_media_app_running(&id, running);
+                        if matches!(
+                            id.as_str(),
+                            "com.spotify.client" | "com.apple.Music" | "com.apple.Safari"
+                        ) {
+                            nook_core::audio::note_media_event();
+                        }
+                    }
                 });
                 let token: *mut AnyObject = msg_send![
-                    center,
+                    wsnc,
                     addObserverForName: ns_name,
                     object: std::ptr::null_mut::<AnyObject>(),
                     queue: std::ptr::null_mut::<AnyObject>(),
