@@ -22,6 +22,7 @@ pub mod messages;
 pub mod mixer;
 pub mod models;
 pub mod mouse;
+pub mod nl_parse;
 pub mod notch;
 pub mod notes;
 pub mod obsidian;

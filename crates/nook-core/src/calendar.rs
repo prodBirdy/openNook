@@ -148,12 +148,7 @@ mod macos {
                 );
 
                 unsafe {
-                    let block_ref = &*handler;
-                    let block_ptr = block_ref as *const block2::Block<_> as *mut block2::Block<_>;
-                    #[allow(deprecated)]
-                    store
-                        .0
-                        .requestAccessToEntityType_completion(EKEntityType::Event, block_ptr);
+                    request_entity_access(&store.0, EKEntityType::Event, &*handler);
                 }
             }
 
@@ -184,12 +179,7 @@ mod macos {
                 );
 
                 unsafe {
-                    let block_ref = &*handler;
-                    let block_ptr = block_ref as *const block2::Block<_> as *mut block2::Block<_>;
-                    #[allow(deprecated)]
-                    store
-                        .0
-                        .requestAccessToEntityType_completion(EKEntityType::Reminder, block_ptr);
+                    request_entity_access(&store.0, EKEntityType::Reminder, &*handler);
                 }
             }
             match rx.await {
@@ -204,6 +194,34 @@ mod macos {
         }
 
         Ok(true)
+    }
+
+    /// macOS 14+ `requestFullAccessTo*`; falls back to the deprecated
+    /// `requestAccessToEntityType:completion:` on older systems.
+    unsafe fn request_entity_access(
+        store: &EKEventStore,
+        entity: EKEntityType,
+        handler: &block2::Block<dyn Fn(objc2::runtime::Bool, *mut objc2_foundation::NSError)>,
+    ) {
+        use objc2::{msg_send, sel};
+
+        let block_ptr = handler as *const block2::Block<_> as *mut block2::Block<_>;
+        let modern = if entity == EKEntityType::Event {
+            sel!(requestFullAccessToEventsWithCompletion:)
+        } else {
+            sel!(requestFullAccessToRemindersWithCompletion:)
+        };
+        let responds: bool = msg_send![store, respondsToSelector: modern];
+        if responds {
+            if entity == EKEntityType::Event {
+                let _: () = msg_send![store, requestFullAccessToEventsWithCompletion: block_ptr];
+            } else {
+                let _: () = msg_send![store, requestFullAccessToRemindersWithCompletion: block_ptr];
+            }
+        } else {
+            #[allow(deprecated)]
+            store.requestAccessToEntityType_completion(entity, block_ptr);
+        }
     }
 
     pub fn get_events(days_ahead: i64, force_refresh: bool) -> Vec<CalendarEvent> {
@@ -767,6 +785,17 @@ pub async fn open_privacy_settings() -> Result<(), String> {
         open::that("help:privacy").map_err(|e| e.to_string())?;
     }
     Ok(())
+}
+
+/// Alias used by the quick-add UI.
+pub async fn create_event(
+    title: String,
+    start_date: f64,
+    end_date: f64,
+    is_all_day: bool,
+    location: Option<String>,
+) -> Result<bool, String> {
+    create_calendar_event(title, start_date, end_date, is_all_day, location).await
 }
 
 pub async fn create_calendar_event(

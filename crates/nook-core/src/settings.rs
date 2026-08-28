@@ -164,6 +164,9 @@ pub struct AppSettings {
     pub show_calendar: bool,
     #[serde(default = "default_true")]
     pub show_reminders: bool,
+    /// Natural-language quick-add row on the Calendar and Reminders cards.
+    #[serde(default = "default_true")]
+    pub quick_add: bool,
     #[serde(default = "default_true")]
     pub show_agents: bool,
     #[serde(default = "default_true")]
@@ -320,6 +323,7 @@ impl Default for AppSettings {
             show_lyrics: false,
             show_calendar: true,
             show_reminders: true,
+            quick_add: true,
             show_agents: true,
             show_observe: true,
             show_timers: true,
@@ -808,6 +812,7 @@ mod tests {
         assert!(!parsed.show_lyrics);
         assert!(parsed.show_calendar);
         assert!(parsed.show_reminders);
+        assert!(parsed.quick_add);
         assert!(parsed.show_agents);
         assert!(parsed.show_observe);
         assert!(parsed.show_timers);

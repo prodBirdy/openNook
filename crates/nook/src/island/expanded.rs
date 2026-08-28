@@ -91,6 +91,17 @@ impl Island {
     }
 
     fn render_nook(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        let show_qa = self.settings.quick_add;
+        let calendar_qa = if show_qa && self.settings.show_calendar {
+            Some(self.ensure_calendar_quick_add(cx))
+        } else {
+            None
+        };
+        let reminders_qa = if show_qa && self.settings.show_reminders {
+            Some(self.ensure_reminders_quick_add(cx))
+        } else {
+            None
+        };
         let mut kids: Vec<AnyElement> = Vec::new();
         let add = |kids: &mut Vec<AnyElement>, child: AnyElement| {
             if !kids.is_empty() {
@@ -112,7 +123,7 @@ impl Island {
                     &mut kids,
                     cell_pane(
                         self.settings.cells_for(module),
-                        calendar_card(&self.events, self.calendar_day, cx),
+                        calendar_card(&self.events, self.calendar_day, calendar_qa.clone(), cx),
                     ),
                 ),
                 WidgetModule::Mirror if self.settings.show_mirror => add(
@@ -142,7 +153,7 @@ impl Island {
                     &mut kids,
                     cell_pane(
                         self.settings.cells_for(module),
-                        reminders_card(&self.reminders, cx),
+                        reminders_card(&self.reminders, reminders_qa.clone(), cx),
                     ),
                 ),
                 WidgetModule::Timers if self.settings.show_timers => add(

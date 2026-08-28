@@ -1618,6 +1618,12 @@ impl SettingsView {
             }
             WidgetModule::Calendar => {
                 rows.push(
+                    toggle_row("Quick add", settings.quick_add, cx, |s| {
+                        s.quick_add = !s.quick_add;
+                    })
+                    .into_any_element(),
+                );
+                rows.push(
                     action_row(
                         "calendar-app",
                         "Calendar app",
@@ -1627,6 +1633,14 @@ impl SettingsView {
                             crate::platform::open_calendar();
                         },
                     )
+                    .into_any_element(),
+                );
+            }
+            WidgetModule::Reminders => {
+                rows.push(
+                    toggle_row("Quick add", settings.quick_add, cx, |s| {
+                        s.quick_add = !s.quick_add;
+                    })
                     .into_any_element(),
                 );
             }
@@ -2393,7 +2407,7 @@ fn hud_caption(settings: &AppSettings) -> SharedString {
 fn module_blurb(module: WidgetModule) -> SharedString {
     match module {
         WidgetModule::Calendar => {
-            "Week strip is today ± 3 days. EventKit includes every calendar the system allows — there is no per-calendar filter yet.".into()
+            "Week strip is today ± 3 days. Type a line like “lunch tomorrow 12:30” to add an event.".into()
         }
         WidgetModule::Notes => "Scratchpad on the island. Edit here or in the expanded card.".into(),
         WidgetModule::Observe => {
@@ -2410,7 +2424,9 @@ fn module_blurb(module: WidgetModule) -> SharedString {
             "Drop zone and tray live on the Tray tab. Drag onto LocalSend or Get a link.".into()
         }
         WidgetModule::Timers => "Countdown presets and a compact ring while a timer is running.".into(),
-        WidgetModule::Reminders => "Incomplete reminders from EventKit, same store as Calendar.".into(),
+        WidgetModule::Reminders => {
+            "Incomplete reminders from EventKit. Type “remind me to …” to add one.".into()
+        }
         WidgetModule::Speed => "Cloudflare (then OVH) download probe. Runs from the island card.".into(),
         WidgetModule::Agents => {
             "Working coding-agent sessions on the compact face and expanded card.".into()

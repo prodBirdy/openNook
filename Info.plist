@@ -24,8 +24,12 @@
 	<true/>
 	<key>NSCalendarsUsageDescription</key>
 	<string>openNook shows upcoming events in the island so you can glance at the next thing on your calendar.</string>
+	<key>NSCalendarsFullAccessUsageDescription</key>
+	<string>openNook shows upcoming events in the island and lets you add events from a quick-add line.</string>
 	<key>NSRemindersUsageDescription</key>
 	<string>openNook shows reminders in the island and lets you mark them complete from there.</string>
+	<key>NSRemindersFullAccessUsageDescription</key>
+	<string>openNook shows reminders in the island and lets you add them from a quick-add line.</string>
 	<key>NSCameraUsageDescription</key>
 	<string>openNook shows a live camera preview in the Mirror control so you can check yourself before a call.</string>
 	<key>NSLocationUsageDescription</key>

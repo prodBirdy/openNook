@@ -13,6 +13,7 @@ dirs.workspace = true
 rusqlite.workspace = true
 base64.workspace = true
 log.workspace = true
+chrono.workspace = true
 reqwest.workspace = true
 futures-util.workspace = true
 open.workspace = true
@@ -30,6 +31,10 @@ uuid = { version = "1", features = ["v4"] }
 objc2 = "0.6"
 objc2-foundation = "0.3"
 libc = "0.2"
+objc2-foundation = { version = "0.3", features = [
+    "NSRegularExpression",
+    "NSTextCheckingResult",
+] }
 objc2-event-kit = { version = "0.3", features = ["EKEventStore", "EKEvent", "EKReminder", "EKCalendar"] }
 objc2-core-audio = { version = "0.3.2", features = ["AudioHardware", "objc2", "objc2-foundation", "block2"] }
 objc2-core-audio-types = "0.3.2"
