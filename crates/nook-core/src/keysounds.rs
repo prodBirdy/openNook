@@ -543,6 +543,9 @@ fn decode_audio_macos(path: &Path) -> Result<Vec<f32>, String> {
         .map_err(|err| err.to_string())?;
     let mut out = Vec::new();
     let mut sample_buf = None;
+    // SampleBuffer in symphonia 0.5 has no spec(); channels live on the
+    // decoded AudioBufferRef (and codec params), captured before the copy.
+    let mut channels = 1usize;
     loop {
         let packet = match format.next_packet() {
             Ok(p) => p,
@@ -556,14 +559,14 @@ fn decode_audio_macos(path: &Path) -> Result<Vec<f32>, String> {
         };
         if sample_buf.is_none() {
             let spec = *decoded.spec();
+            channels = spec.channels.count().max(1);
             sample_buf = Some(SampleBuffer::<f32>::new(decoded.capacity() as u64, spec));
         }
         if let Some(buf) = sample_buf.as_mut() {
             buf.copy_interleaved_ref(decoded);
-            let spec_channels = buf.spec().channels.count().max(1);
             let samples = buf.samples();
-            for frame in samples.chunks(spec_channels) {
-                let mono = frame.iter().sum::<f32>() / spec_channels as f32;
+            for frame in samples.chunks(channels) {
+                let mono = frame.iter().sum::<f32>() / channels as f32;
                 out.push(mono);
             }
         }

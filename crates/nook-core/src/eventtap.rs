@@ -249,24 +249,37 @@ unsafe fn prompt_accessibility_macos() -> bool {
         stringWithUTF8String: c"AXTrustedCheckOptionPrompt".as_ptr()
     ];
     let yes: *mut AnyObject = msg_send![class!(NSNumber), numberWithBool: true];
+    // `use objc2::*` shadows this module's `ffi` with `objc2::ffi`, which
+    // omits Accessibility. Call the local ApplicationServices declarations.
     if key.is_null() || yes.is_null() {
-        return ffi::AXIsProcessTrusted();
+        return self::ffi::AXIsProcessTrusted();
     }
     let options: *mut AnyObject =
         msg_send![class!(NSDictionary), dictionaryWithObject: yes, forKey: key];
     if options.is_null() {
-        return ffi::AXIsProcessTrusted();
+        return self::ffi::AXIsProcessTrusted();
     }
-    ffi::AXIsProcessTrustedWithOptions(options as *const std::ffi::c_void)
+    self::ffi::AXIsProcessTrustedWithOptions(options as *const std::ffi::c_void)
 }
 
+/// Opaque CFRunLoop pointer. `CFRunLoopStop` is documented as safe to call
+/// from another thread; the runloop thread owns the object lifetime.
 #[cfg(target_os = "macos")]
-static RUNLOOP: Mutex<Option<ffi::CFRunLoopRef>> = Mutex::new(None);
+#[derive(Clone, Copy)]
+struct SendCfPtr(ffi::CFRunLoopRef);
+
+// SAFETY: stored only as an identity for CFRunLoopStop / clear. Never
+// dereferenced as Rust data; the runloop thread creates and tears it down.
+#[cfg(target_os = "macos")]
+unsafe impl Send for SendCfPtr {}
+
+#[cfg(target_os = "macos")]
+static RUNLOOP: Mutex<Option<SendCfPtr>> = Mutex::new(None);
 
 #[cfg(target_os = "macos")]
 unsafe fn stop_runloop() {
     if let Ok(slot) = RUNLOOP.lock() {
-        if let Some(rl) = *slot {
+        if let Some(SendCfPtr(rl)) = *slot {
             ffi::CFRunLoopStop(rl);
         }
     }
@@ -276,7 +289,7 @@ unsafe fn stop_runloop() {
 unsafe fn runloop_thread(want_keys: bool, want_scroll: bool) {
     let rl = ffi::CFRunLoopGetCurrent();
     if let Ok(mut slot) = RUNLOOP.lock() {
-        *slot = Some(rl);
+        *slot = Some(SendCfPtr(rl));
     }
 
     let mut ports = Vec::new();
@@ -325,18 +338,16 @@ unsafe fn runloop_thread(want_keys: bool, want_scroll: bool) {
 
 #[cfg(target_os = "macos")]
 fn key_mask() -> u64 {
+    // Disabled-by-timeout / user-input are delivered to the callback
+    // regardless of mask; their type codes are not valid bit positions.
     (1u64 << ffi::kCGEventKeyDown)
         | (1u64 << ffi::kCGEventKeyUp)
         | (1u64 << ffi::kCGEventFlagsChanged)
-        | (1u64 << ffi::kCGEventTapDisabledByTimeout)
-        | (1u64 << ffi::kCGEventTapDisabledByUserInput)
 }
 
 #[cfg(target_os = "macos")]
 fn scroll_mask() -> u64 {
-    (1u64 << ffi::kCGEventScrollWheel)
-        | (1u64 << ffi::kCGEventTapDisabledByTimeout)
-        | (1u64 << ffi::kCGEventTapDisabledByUserInput)
+    1u64 << ffi::kCGEventScrollWheel
 }
 
 #[cfg(target_os = "macos")]
