@@ -122,6 +122,10 @@ impl gpui::Render for Island {
                     this.apply_reposition(event.position.x.into(), event.position.y.into());
                     cx.notify();
                 }
+                if this.scrubber_drag.is_some() {
+                    this.update_scrubber_from_x(event.position.x.into());
+                    cx.notify();
+                }
                 if this.poll_pending_file_drag(Some(window)) {
                     cx.notify();
                 }
@@ -131,7 +135,8 @@ impl gpui::Render for Island {
                 cx.listener(|this, _: &MouseUpEvent, _, cx| {
                     let moved = this.finish_reposition();
                     let file = this.finish_file_press();
-                    if moved || file {
+                    let seek = this.finish_scrubber();
+                    if moved || file || seek {
                         cx.notify();
                     }
                 }),

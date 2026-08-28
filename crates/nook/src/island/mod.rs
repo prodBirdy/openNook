@@ -23,11 +23,13 @@ use gpui::{
 use nook_core::agents::AgentSession;
 use nook_core::calendar::{CalendarEvent, Reminder};
 use nook_core::files::FileTrayItem;
-use nook_core::models::NowPlayingData;
+use nook_core::models::{NowPlayingData, PlaybackQueue};
 use nook_core::notch;
 use nook_core::observe::{MetricHistory, ObserveSnapshot};
 use nook_core::settings::AppSettings;
 use settings::SettingsView;
+use std::cell::RefCell;
+use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -68,6 +70,14 @@ pub struct Island {
     pub tab: Tab,
     pub now_playing: NowPlayingData,
     pub visualizer_color: Option<gpui::Rgba>,
+    pub queue: PlaybackQueue,
+    queue_key: Option<(Option<String>, Option<String>, Option<String>)>,
+    queue_inflight: bool,
+    /// Local scrubber drag 0..1. `None` when the thumb is not held.
+    pub(crate) scrubber_drag: Option<f32>,
+    pub(crate) scrubber_bounds: Rc<RefCell<Option<(f32, f32)>>>,
+    elapsed_base: Option<f64>,
+    elapsed_at: Instant,
     pub files: Vec<FileTrayItem>,
     pub events: Vec<CalendarEvent>,
     pub reminders: Vec<Reminder>,
@@ -198,6 +208,13 @@ impl Island {
             tab: Tab::Widgets,
             now_playing: NowPlayingData::default(),
             visualizer_color: None,
+            queue: PlaybackQueue::default(),
+            queue_key: None,
+            queue_inflight: false,
+            scrubber_drag: None,
+            scrubber_bounds: Rc::new(RefCell::new(None)),
+            elapsed_base: None,
+            elapsed_at: Instant::now(),
             files,
             events: Vec::new(),
             reminders: Vec::new(),
@@ -477,6 +494,12 @@ impl Island {
                         this.now_playing.audio_levels = Some(levels);
                         dirty = true;
                     }
+                    if this.interpolate_elapsed() {
+                        dirty = true;
+                    }
+                    if this.expanded && nook_core::queue::take_artwork_ready() {
+                        dirty = true;
+                    }
                     if this.step_spring(dt) {
                         dirty = true;
                     }
@@ -556,7 +579,11 @@ impl Island {
                     this.now_playing.album = playing.album;
                     this.now_playing.artwork_base64 = playing.artwork_base64;
                     this.now_playing.duration = playing.duration;
-                    this.now_playing.elapsed_time = playing.elapsed_time;
+                    if this.scrubber_drag.is_none() {
+                        this.now_playing.elapsed_time = playing.elapsed_time;
+                        this.elapsed_base = playing.elapsed_time;
+                        this.elapsed_at = Instant::now();
+                    }
                     this.now_playing.is_playing = playing.is_playing;
                     this.now_playing.app_name = playing.app_name;
                     this.now_playing.bundle_id = playing.bundle_id;
@@ -566,14 +593,38 @@ impl Island {
                     if !was_media && this.has_media() {
                         this.preferred = Some(CompactMode::Media);
                     }
+                    let fetch = this.maybe_start_queue_fetch();
                     if changed {
                         cx.notify();
                     }
-                    this.has_media() && this.now_playing.is_playing
+                    (
+                        this.has_media() && this.now_playing.is_playing,
+                        fetch,
+                        this.now_playing.clone(),
+                    )
                 });
-                let Ok(is_playing) = alive else {
+                let Ok((is_playing, fetch_now, np)) = alive else {
                     break;
                 };
+                if fetch_now {
+                    let queue = cx
+                        .background_executor()
+                        .spawn(async move {
+                            nook_core::runtime()
+                                .block_on(nook_core::queue::fetch_playback_queue(&np))
+                        })
+                        .await;
+                    if this
+                        .update(cx, |this, cx| {
+                            this.queue = queue;
+                            this.queue_inflight = false;
+                            cx.notify();
+                        })
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
                 // Stream-backed adapter reads are a cheap lock; cadence is
                 // for interpolated elapsed (1s while playing) and the
                 // AppleScript fallback (5s idle). Distributed-notification
@@ -739,6 +790,99 @@ impl Island {
                 || self.now_playing.artist.is_some())
     }
 
+    pub(crate) fn queue_visible(&self) -> bool {
+        self.settings.show_media
+            && self.settings.show_media_queue
+            && self.expanded
+            && self.tab == Tab::Widgets
+            && self.has_media()
+    }
+
+    /// Extra island height once upcoming rows are in hand. Header + up to 4
+    /// 40px rows; empty/hidden queues add nothing.
+    pub(crate) fn queue_extra_height(&self) -> f32 {
+        if !self.settings.show_media || !self.settings.show_media_queue {
+            return 0.0;
+        }
+        queue_list_height(self.queue.items.len())
+    }
+
+    /// Overlay-strip reserve so a queue arrival does not resize the NSWindow
+    /// mid-animation.
+    fn queue_reserve_height(settings: &AppSettings) -> f32 {
+        if settings.show_media && settings.show_media_queue {
+            queue_list_height(4)
+        } else {
+            0.0
+        }
+    }
+
+    fn maybe_start_queue_fetch(&mut self) -> bool {
+        if !self.queue_visible() {
+            return false;
+        }
+        let key = nook_core::queue::queue_identity(&self.now_playing);
+        if self.queue_inflight {
+            return false;
+        }
+        if self.queue_key.as_ref() == Some(&key) {
+            return false;
+        }
+        self.queue_key = Some(key);
+        self.queue_inflight = true;
+        true
+    }
+
+    fn interpolate_elapsed(&mut self) -> bool {
+        if self.scrubber_drag.is_some() || !self.now_playing.is_playing {
+            return false;
+        }
+        let Some(base) = self.elapsed_base else {
+            return false;
+        };
+        let Some(duration) = self.now_playing.duration.filter(|d| *d > 0.0) else {
+            return false;
+        };
+        let elapsed = (base + self.elapsed_at.elapsed().as_secs_f64()).min(duration);
+        let prev = self.now_playing.elapsed_time.unwrap_or(-1.0);
+        if (elapsed - prev).abs() < 0.04 {
+            return false;
+        }
+        self.now_playing.elapsed_time = Some(elapsed);
+        true
+    }
+
+    pub(crate) fn update_scrubber_from_x(&mut self, x: f32) {
+        let Some((origin, width)) = *self.scrubber_bounds.borrow() else {
+            return;
+        };
+        let ratio = media::scrubber_ratio(x, origin, width);
+        self.scrubber_drag = Some(ratio);
+        if let Some(duration) = self.now_playing.duration.filter(|d| *d > 0.0) {
+            let position = duration * ratio as f64;
+            self.now_playing.elapsed_time = Some(position);
+            self.elapsed_base = Some(position);
+            self.elapsed_at = Instant::now();
+        }
+    }
+
+    pub(crate) fn finish_scrubber(&mut self) -> bool {
+        let Some(ratio) = self.scrubber_drag.take() else {
+            return false;
+        };
+        let Some(duration) = self.now_playing.duration.filter(|d| *d > 0.0) else {
+            return true;
+        };
+        let position = duration * ratio as f64;
+        self.now_playing.elapsed_time = Some(position);
+        self.elapsed_base = Some(position);
+        self.elapsed_at = Instant::now();
+        nook_core::runtime().spawn(async move {
+            let _ = nook_core::audio::media_seek(position).await;
+        });
+        true
+    }
+
     pub(crate) fn running_timer(&self) -> Option<&Timer> {
         self.timers.iter().find(|t| t.running)
     }
@@ -794,6 +938,7 @@ impl Island {
         } else if platform::start_mirror() {
             self.mirror_on = true;
             self.expanded = true;
+            nook_core::audio::note_media_event();
         }
         cx.notify();
     }
@@ -900,7 +1045,7 @@ impl Island {
                 // plus Clear All, so a single file is not clipped behind a scroll.
                 theme::EXPANDED_PAD * 2.0 + files::files_pane_min_height(w)
             } else {
-                theme::NOOK_INSET + theme::NOOK_BODY
+                theme::NOOK_INSET + theme::NOOK_BODY + self.queue_extra_height()
             };
             return (w, self.notch_height.max(32.0) + body);
         }
@@ -928,7 +1073,7 @@ impl Island {
     /// stuttering inside the animation.
     pub(super) fn expanded_bottom(&self) -> f32 {
         let w = self.expanded_width();
-        let mut body = theme::NOOK_INSET + theme::NOOK_BODY;
+        let mut body = theme::NOOK_INSET + theme::NOOK_BODY + Self::queue_reserve_height(&self.settings);
         if self.settings.show_files {
             body = body.max(theme::EXPANDED_PAD * 2.0 + files::files_pane_min_height(w));
         }
@@ -1075,6 +1220,7 @@ impl Island {
     fn toggle_expanded(&mut self, cx: &mut Context<Self>) {
         self.expanded = !self.expanded;
         if self.expanded {
+            nook_core::audio::note_media_event();
             self.tab = if self.mode() == CompactMode::Files {
                 Tab::Files
             } else {
@@ -1161,6 +1307,7 @@ impl Island {
         } else if !self.expanded && ay > 0.0 {
             // AppKit scrollingDeltaY: two-finger swipe *down* is positive.
             self.expanded = true;
+            nook_core::audio::note_media_event();
             nook_core::haptics::trigger(None);
             true
         } else if self.expanded && ay < 0.0 {
@@ -1325,6 +1472,7 @@ impl Island {
             self.preferred = Some(CompactMode::Files);
             self.tab = Tab::Files;
             self.expanded = true;
+            nook_core::audio::note_media_event();
             nook_core::haptics::trigger(None);
             cx.notify();
         }
@@ -1399,6 +1547,17 @@ impl Island {
     }
 }
 
+pub(crate) const QUEUE_ROW_H: f32 = 40.0;
+const QUEUE_HEADER_H: f32 = 18.0;
+const QUEUE_LIST_PAD: f32 = 8.0;
+
+pub(crate) fn queue_list_height(item_count: usize) -> f32 {
+    if item_count == 0 {
+        return 0.0;
+    }
+    QUEUE_HEADER_H + item_count.min(4) as f32 * QUEUE_ROW_H + QUEUE_LIST_PAD
+}
+
 /// Paint camera pixels immediately. `img(Image)` goes through GPUI's async
 /// decoder (200ms placeholder), so a new JPEG every tick looks like a reinit.
 fn mirror_render_image(bgra: Vec<u8>) -> Option<std::sync::Arc<gpui::RenderImage>> {
@@ -1421,6 +1580,7 @@ mod tests {
     use crate::island::ui::format_timer;
     use nook_core::agents::{AgentKind, AgentStatus};
     use std::collections::HashMap;
+    use std::rc::Rc;
     use std::sync::{Mutex, MutexGuard};
 
     /// `outbound_drag_active` is process-global; overlay tests that toggle it
@@ -1443,6 +1603,13 @@ mod tests {
             tab: Tab::Widgets,
             now_playing: NowPlayingData::default(),
             visualizer_color: None,
+            queue: PlaybackQueue::default(),
+            queue_key: None,
+            queue_inflight: false,
+            scrubber_drag: None,
+            scrubber_bounds: Rc::new(RefCell::new(None)),
+            elapsed_base: None,
+            elapsed_at: Instant::now(),
             files: Vec::new(),
             events: Vec::new(),
             reminders: Vec::new(),
@@ -1639,6 +1806,35 @@ mod tests {
         assert!(island.speed_mbps.is_none());
         assert!(!island.speed_running);
         assert_eq!(island.speed_gen, 3);
+    }
+
+    #[test]
+    fn queue_list_height_is_zero_when_empty_and_caps_visible_rows() {
+        assert_eq!(queue_list_height(0), 0.0);
+        assert_eq!(queue_list_height(1), QUEUE_HEADER_H + QUEUE_ROW_H + QUEUE_LIST_PAD);
+        assert_eq!(queue_list_height(4), queue_list_height(12));
+    }
+
+    #[test]
+    fn queue_fetch_only_when_expanded_media_card_is_visible() {
+        let mut island = test_island();
+        island.now_playing.title = Some("Track".into());
+        island.now_playing.app_name = Some("Music".into());
+        island.settings.show_media = true;
+        island.settings.show_media_queue = true;
+        assert!(!island.queue_visible());
+        assert!(!island.maybe_start_queue_fetch());
+
+        island.expanded = true;
+        island.tab = Tab::Widgets;
+        assert!(island.queue_visible());
+        assert!(island.maybe_start_queue_fetch());
+        assert!(island.queue_inflight);
+        assert!(!island.maybe_start_queue_fetch());
+
+        island.queue_inflight = false;
+        island.expanded = false;
+        assert!(!island.maybe_start_queue_fetch());
     }
 
     #[test]

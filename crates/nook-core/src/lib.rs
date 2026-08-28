@@ -18,11 +18,13 @@ pub mod notch;
 pub mod notes;
 pub mod observe;
 pub mod occupancy;
+pub mod queue;
 pub mod settings;
+pub mod spotify;
 pub mod utils;
 pub mod widgets;
 
-pub use models::{NotchInfo, NowPlayingData};
+pub use models::{NotchInfo, NowPlayingData, PlaybackQueue, QueueItem};
 pub use settings::{AppSettings, WindowSettings};
 
 use std::sync::{Once, OnceLock};
@@ -62,6 +64,7 @@ pub fn init() {
         }
         audio::init_audio_state();
         audio::setup_audio_monitoring();
+        crate::spotify::hydrate_status();
         mouse::start_polling();
     });
 }

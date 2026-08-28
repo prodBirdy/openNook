@@ -124,6 +124,13 @@ pub struct AppSettings {
     pub widget_order: Vec<WidgetModule>,
     #[serde(default = "default_true")]
     pub show_media: bool,
+    /// Upcoming list on the expanded Music pane. Off hides Music/Spotify queue
+    /// fetch entirely (no extra osascript / HTTPS when the card is open).
+    #[serde(default = "default_true")]
+    pub show_media_queue: bool,
+    /// Spotify developer-app client ID for PKCE. No client secret is stored.
+    #[serde(default)]
+    pub spotify_client_id: String,
     #[serde(default = "default_true")]
     pub show_calendar: bool,
     #[serde(default = "default_true")]
@@ -222,6 +229,8 @@ impl Default for AppSettings {
         Self {
             widget_order: default_widget_order(),
             show_media: true,
+            show_media_queue: true,
+            spotify_client_id: String::new(),
             show_calendar: true,
             show_reminders: true,
             show_agents: true,
@@ -602,6 +611,8 @@ mod tests {
         let parsed: AppSettings = serde_json::from_str(r#"{"liquid_glass_mode":true}"#).unwrap();
         assert_eq!(parsed.widget_order, default_widget_order());
         assert!(parsed.show_media);
+        assert!(parsed.show_media_queue);
+        assert!(parsed.spotify_client_id.is_empty());
         assert!(parsed.show_calendar);
         assert!(parsed.show_reminders);
         assert!(parsed.show_agents);

@@ -1,4 +1,4 @@
-use crate::models::NowPlayingData;
+use crate::models::{NowPlayingData, QueueItem};
 use crate::utils::fetch_artwork_from_url;
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -765,6 +765,16 @@ pub async fn get_now_playing() -> NowPlayingData {
 
         get_last_played_or_default(get_audio_levels())
     }
+}
+
+/// Jump to an Up Next row. Music uses `play track i of current playlist`;
+/// Spotify uses context+offset or N sequential nexts.
+pub async fn media_jump_to_queue_item(
+    item: QueueItem,
+    context_uri: Option<String>,
+) -> Result<(), String> {
+    note_media_event();
+    crate::queue::jump_to_item(&item, context_uri.as_deref()).await
 }
 
 #[cfg(target_os = "macos")]
