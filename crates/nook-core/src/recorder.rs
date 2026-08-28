@@ -445,7 +445,6 @@ mod macos {
             _ => {}
         }
         let cls = class(c"AVCaptureDevice")?;
-        let media = ns_string("soun");
         let (tx, rx) = oneshot::channel::<bool>();
         let tx = Mutex::new(Some(tx));
         let handler = RcBlock::new(move |granted: Bool| {
@@ -455,13 +454,19 @@ mod macos {
                 }
             }
         });
-        unsafe {
-            let _: () = msg_send![
-                cls,
-                requestAccessForMediaType: &*media,
-                completionHandler: &*handler
-            ];
+        {
+            let media = ns_string("soun");
+            unsafe {
+                let _: () = msg_send![
+                    cls,
+                    requestAccessForMediaType: &*media,
+                    completionHandler: &*handler
+                ];
+            }
         }
+        // RcBlock / Retained<NSString> are !Send — leak the block and drop
+        // the string before the oneshot await so start() stays Send.
+        std::mem::forget(handler);
         match rx.await {
             Ok(true) => Ok(()),
             Ok(false) => Err("Microphone access was denied.".into()),
@@ -489,6 +494,7 @@ mod macos {
         unsafe {
             let _: () = msg_send![cls, requestAuthorization: &*handler];
         }
+        std::mem::forget(handler);
         match rx.await {
             Ok(3) => Ok(true),
             Ok(_) => Ok(false),
