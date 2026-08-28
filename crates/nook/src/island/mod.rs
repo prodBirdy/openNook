@@ -16,9 +16,9 @@ use crate::motion::{self, SpringValue};
 use crate::platform;
 use crate::theme;
 use gpui::{
-    prelude::*, px, size, Context, Entity, ExternalPaths, Focusable, MouseDownEvent, Subscription,
-    TouchPhase, Window, WindowBackgroundAppearance, WindowBounds, WindowHandle, WindowKind,
-    WindowOptions,
+    prelude::*, px, size, Context, Entity, ExternalPaths, FocusHandle, Focusable, MouseDownEvent,
+    Subscription, TouchPhase, Window, WindowBackgroundAppearance, WindowBounds, WindowHandle,
+    WindowKind, WindowOptions,
 };
 use nook_core::agents::AgentSession;
 use nook_core::calendar::{CalendarEvent, Reminder};
@@ -26,8 +26,11 @@ use nook_core::files::FileTrayItem;
 use nook_core::models::NowPlayingData;
 use nook_core::notch;
 use nook_core::observe::{MetricHistory, ObserveSnapshot};
+use nook_core::automation::ExternalAction;
 use nook_core::settings::AppSettings;
+use nook_core::shell::JobHandle;
 use settings::SettingsView;
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -39,12 +42,15 @@ pub enum CompactMode {
     Timer,
     Observe,
     Onboard,
+    /// Compact spinner / HUD while a Termi-Notch command is live.
+    Shell,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tab {
     Widgets,
     Files,
+    Terminal,
 }
 
 #[derive(Clone)]
@@ -158,6 +164,15 @@ pub struct Island {
     pub(crate) mirror_on: bool,
     mirror_gen: u64,
     pub(crate) mirror_frame: Option<std::sync::Arc<gpui::RenderImage>>,
+    pub shell_input: String,
+    pub shell_output: String,
+    pub shell_running: bool,
+    pub shell_exit: Option<i32>,
+    pub shell_hud: Option<String>,
+    pub shell_focused: bool,
+    pub(crate) shell_focus: Option<FocusHandle>,
+    pub(crate) shell_history_idx: Option<usize>,
+    shell_job: Option<JobHandle>,
 }
 
 struct PendingFileDrag {
@@ -256,6 +271,15 @@ impl Island {
             mirror_on: false,
             mirror_gen: 0,
             mirror_frame: None,
+            shell_input: String::new(),
+            shell_output: String::new(),
+            shell_running: false,
+            shell_exit: None,
+            shell_hud: None,
+            shell_focused: false,
+            shell_focus: Some(cx.focus_handle()),
+            shell_history_idx: None,
+            shell_job: None,
         };
         // Start at the compact idle size so the first paint isn't a jump.
         let (w, h) = this.target_size();
@@ -271,6 +295,7 @@ impl Island {
         let _ = window;
         this.spawn_loops(cx);
         Self::spawn_pin(cx);
+        Self::spawn_external_actions(cx);
         this
     }
 
@@ -421,6 +446,7 @@ impl Island {
                         } else if this.expanded
                             && !this.settings_open
                             && !this.notes_editing
+                            && !this.shell_focused
                             && !this.mirror_on
                             && !this.file_drag
                             && !nook_core::files::outbound_drag_active()
@@ -471,11 +497,12 @@ impl Island {
                         dirty = true;
                     }
                     let any_working = this.agents.iter().any(|a| a.status.is_working());
-                    if any_working {
+                    if any_working || this.shell_running {
                         // Full-rate on purpose: this repaints the island every
                         // tick while an agent runs, which costs real battery,
                         // but the Dot Matrix loader is the app's signature
-                        // animation and smoothness wins here.
+                        // animation and smoothness wins here. A live shell
+                        // command is the same class of "something is working".
                         this.pixel_t = now.duration_since(this.pixel_origin).as_secs_f32();
                         dirty = true;
                     }
@@ -501,7 +528,8 @@ impl Island {
                         || this.pending_file_drag.is_some()
                         || this.mirror_on
                         || this.settings_open
-                        || any_working;
+                        || any_working
+                        || this.shell_running;
                     // Media playing promotes itself through `dirty` (the
                     // visualizer levels change every frame), so it needs no
                     // term of its own here.
@@ -871,6 +899,9 @@ impl Island {
         if self.has_agents() {
             modes.push(CompactMode::Agents);
         }
+        if self.settings.terminal_enabled && (self.shell_running || self.shell_hud.is_some()) {
+            modes.push(CompactMode::Shell);
+        }
         if self.settings.show_timers && self.running_timer().is_some() {
             modes.push(CompactMode::Timer);
         }
@@ -948,14 +979,20 @@ impl Island {
             return (0.0, if self.expanded { -VERTICAL } else { VERTICAL });
         }
         if self.expanded && self.tab != self.last_tab {
-            return (
-                if self.tab == Tab::Files {
-                    HORIZONTAL
-                } else {
-                    -HORIZONTAL
-                },
-                0.0,
-            );
+            let tabs = self.shown_tabs();
+            let from = tabs.iter().position(|tab| *tab == self.last_tab);
+            let to = tabs.iter().position(|tab| *tab == self.tab);
+            let delta = match (from, to) {
+                (Some(from), Some(to)) => to as isize - from as isize,
+                _ => {
+                    if self.tab == Tab::Files {
+                        1
+                    } else {
+                        -1
+                    }
+                }
+            };
+            return (HORIZONTAL * delta.signum() as f32, 0.0);
         }
         if !self.expanded && mode != self.last_mode {
             let modes = self.available_modes();
@@ -1069,10 +1106,10 @@ impl Island {
     fn toggle_expanded(&mut self, cx: &mut Context<Self>) {
         self.expanded = !self.expanded;
         if self.expanded {
-            self.tab = if self.mode() == CompactMode::Files {
-                Tab::Files
-            } else {
-                Tab::Widgets
+            self.tab = match self.mode() {
+                CompactMode::Files => Tab::Files,
+                CompactMode::Shell if self.settings.terminal_enabled => Tab::Terminal,
+                _ => Tab::Widgets,
             };
             if self.first_run {
                 self.first_run = false;
@@ -1141,11 +1178,7 @@ impl Island {
             if ax.abs() <= THRESHOLD {
                 false
             } else if self.expanded {
-                self.tab = if ax > 0.0 && self.settings.show_files {
-                    Tab::Files
-                } else {
-                    Tab::Widgets
-                };
+                self.cycle_tab(ax > 0.0);
                 true
             } else {
                 self.cycle_mode(ax > 0.0)
@@ -1302,10 +1335,17 @@ impl Island {
     }
 
     fn ingest_paths(&mut self, paths: &ExternalPaths, cx: &mut Context<Self>) {
+        self.ingest_external_paths(paths.paths().iter().cloned().collect(), cx);
+    }
+
+    /// Shared by drag-drop, `opennook://tray/add`, and Finder Services.
+    pub(crate) fn ingest_external_paths(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
         let mut added = false;
-        for path in paths.paths() {
+        for path in paths {
             let raw = path.to_string_lossy().into_owned();
-            let resolved = nook_core::files::resolve_path(raw.clone()).unwrap_or(raw);
+            let Ok(resolved) = nook_core::automation::validate_tray_path(&raw) else {
+                continue;
+            };
             if self.files.iter().any(|f| f.path == resolved) {
                 continue;
             }
@@ -1322,6 +1362,173 @@ impl Island {
             nook_core::haptics::trigger(None);
             cx.notify();
         }
+    }
+
+    pub(crate) fn apply_external_action(&mut self, action: ExternalAction, cx: &mut Context<Self>) {
+        match action {
+            ExternalAction::TrayAdd(paths) => self.ingest_external_paths(paths, cx),
+            ExternalAction::TrayClear => {
+                self.files.clear();
+                let _ = nook_core::files::save_file_tray(self.files.clone());
+                cx.notify();
+            }
+            ExternalAction::TimerStart { seconds } => {
+                self.add_timer(seconds);
+                self.expanded = true;
+                self.tab = Tab::Widgets;
+                cx.notify();
+            }
+            ExternalAction::Expand => {
+                self.expanded = true;
+                cx.notify();
+            }
+        }
+    }
+
+    fn spawn_external_actions(cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| loop {
+            let action = cx
+                .background_executor()
+                .spawn(async { nook_core::automation::recv_action().await })
+                .await;
+            if this
+                .update(cx, |this, cx| this.apply_external_action(action, cx))
+                .is_err()
+            {
+                break;
+            }
+        })
+        .detach();
+    }
+
+    pub(crate) fn shown_tabs(&self) -> Vec<Tab> {
+        let mut tabs = vec![Tab::Widgets];
+        if self.settings.show_files {
+            tabs.push(Tab::Files);
+        }
+        if self.settings.terminal_enabled {
+            tabs.push(Tab::Terminal);
+        }
+        tabs
+    }
+
+    fn cycle_tab(&mut self, next: bool) {
+        let tabs = self.shown_tabs();
+        if tabs.is_empty() {
+            self.tab = Tab::Widgets;
+            return;
+        }
+        let idx = tabs.iter().position(|tab| *tab == self.tab).unwrap_or(0);
+        let new_idx = if next {
+            (idx + 1) % tabs.len()
+        } else {
+            (idx + tabs.len() - 1) % tabs.len()
+        };
+        self.tab = tabs[new_idx];
+    }
+
+    /// User-typed command only. Callers must not wire this to a URL.
+    pub(crate) fn run_typed_shell(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        if !self.settings.terminal_enabled {
+            return;
+        }
+        let command = self.shell_input.trim().to_string();
+        if command.is_empty() || command.len() > 8192 {
+            return;
+        }
+        if self.shell_running {
+            self.cancel_shell();
+        }
+        self.shell_output.clear();
+        self.shell_exit = None;
+        self.shell_hud = None;
+        self.shell_running = true;
+        self.shell_history_idx = None;
+        self.preferred = Some(CompactMode::Shell);
+        self.tab = Tab::Terminal;
+        self.expanded = true;
+        nook_core::shell::push_history(&command);
+        let shell = nook_core::shell::resolved_shell(&self.settings.terminal_shell);
+        let timeout = Duration::from_secs(self.settings.terminal_timeout_secs.max(1) as u64);
+        let handle = nook_core::shell::spawn_login_command(&shell, &command, timeout);
+        self.shell_job = Some(handle.clone());
+        nook_core::haptics::trigger(None);
+        cx.notify();
+        Self::spawn_shell_watch(handle, cx);
+    }
+
+    fn spawn_shell_watch(handle: JobHandle, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            loop {
+                let snap = cx
+                    .background_executor()
+                    .spawn({
+                        let handle = handle.clone();
+                        async move { handle.wait_update().await }
+                    })
+                    .await;
+                let done = this
+                    .update(cx, |this, cx| {
+                        this.shell_output = snap.output.clone();
+                        this.shell_running = !snap.done;
+                        this.shell_exit = snap.exit;
+                        if snap.done {
+                            this.shell_job = None;
+                            this.shell_hud = Some(if snap.timed_out {
+                                "timeout".into()
+                            } else {
+                                format!("exit {}", snap.exit.unwrap_or(-1))
+                            });
+                            this.preferred = Some(CompactMode::Shell);
+                        }
+                        cx.notify();
+                        snap.done
+                    })
+                    .unwrap_or(true);
+                if done {
+                    break;
+                }
+            }
+            cx.background_executor()
+                .timer(Duration::from_secs(2))
+                .await;
+            this.update(cx, |this, cx| {
+                this.shell_hud = None;
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    pub(crate) fn cancel_shell(&mut self) {
+        if let Some(job) = self.shell_job.take() {
+            job.cancel();
+        }
+        self.shell_running = false;
+    }
+
+    pub(crate) fn history_step(&mut self, delta: isize) {
+        if !self.settings.terminal_history {
+            return;
+        }
+        let history = nook_core::shell::load_history();
+        if history.is_empty() {
+            return;
+        }
+        let next = match self.shell_history_idx {
+            Some(idx) => idx as isize + delta,
+            None if delta < 0 => history.len() as isize - 1,
+            None => return,
+        };
+        if next < 0 {
+            self.shell_history_idx = None;
+            self.shell_input.clear();
+            return;
+        }
+        let next = (next as usize).min(history.len().saturating_sub(1));
+        self.shell_history_idx = Some(next);
+        self.shell_input = history[next].clone();
     }
 
     pub(crate) fn add_timer(&mut self, seconds: u32) {
@@ -1494,6 +1701,15 @@ mod tests {
             mirror_on: false,
             mirror_gen: 0,
             mirror_frame: None,
+            shell_input: String::new(),
+            shell_output: String::new(),
+            shell_running: false,
+            shell_exit: None,
+            shell_hud: None,
+            shell_focused: false,
+            shell_focus: None,
+            shell_history_idx: None,
+            shell_job: None,
         }
     }
 
@@ -2107,5 +2323,27 @@ mod tests {
         assert!(island.blur > 0.5, "crossfade left the content sharp");
         let (dx, dy) = island.blur_offset().expect("crossfade needs a smear");
         assert!(dx > dy, "a still island should smear along its long axis");
+    }
+
+    #[test]
+    fn terminal_tab_is_opt_in() {
+        let mut island = test_island();
+        assert_eq!(island.shown_tabs(), vec![Tab::Widgets, Tab::Files]);
+        island.settings.terminal_enabled = true;
+        assert_eq!(
+            island.shown_tabs(),
+            vec![Tab::Widgets, Tab::Files, Tab::Terminal]
+        );
+        island.settings.show_files = false;
+        assert_eq!(island.shown_tabs(), vec![Tab::Widgets, Tab::Terminal]);
+    }
+
+    #[test]
+    fn shell_mode_stays_off_until_enabled() {
+        let mut island = test_island();
+        island.shell_running = true;
+        assert!(!island.available_modes().contains(&CompactMode::Shell));
+        island.settings.terminal_enabled = true;
+        assert!(island.available_modes().contains(&CompactMode::Shell));
     }
 }

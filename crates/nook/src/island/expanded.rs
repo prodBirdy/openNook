@@ -5,7 +5,8 @@ use super::{Island, Tab};
 use crate::icons::lucide_color;
 use crate::theme;
 use crate::widgets::{
-    agents_card, calendar_card, notes_card, observe_card, reminders_card, speed_card, timer_card,
+    agents_card, calendar_card, notes_card, observe_card, reminders_card, speed_card, terminal_card,
+    timer_card,
 };
 use gpui::{
     div, img, prelude::*, px, rgba, AnyElement, Context, CursorStyle, FontWeight, MouseButton,
@@ -19,10 +20,10 @@ impl Island {
         notch_w: f32,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let tab = if self.tab == Tab::Files && !self.settings.show_files {
-            Tab::Widgets
-        } else {
-            self.tab
+        let tab = match self.tab {
+            Tab::Files if !self.settings.show_files => Tab::Widgets,
+            Tab::Terminal if !self.settings.terminal_enabled => Tab::Widgets,
+            other => other,
         };
         div()
             .flex()
@@ -35,21 +36,25 @@ impl Island {
                     .flex_1()
                     .w_full()
                     .overflow_hidden()
-                    .child(if tab == Tab::Widgets {
-                        self.render_nook(cx).into_any_element()
-                    } else {
-                        div()
+                    .child(match tab {
+                        Tab::Widgets => self.render_nook(cx).into_any_element(),
+                        Tab::Files => div()
                             .size_full()
                             .px(px(theme::EXPANDED_PAD))
                             .pb(px(theme::EXPANDED_PAD))
                             .child(self.render_files(cx))
-                            .into_any_element()
+                            .into_any_element(),
+                        Tab::Terminal => div()
+                            .size_full()
+                            .px(px(theme::EXPANDED_PAD))
+                            .pb(px(theme::EXPANDED_PAD))
+                            .child(terminal_card(self, cx))
+                            .into_any_element(),
                     }),
             )
     }
 
     fn render_topbar(&self, notch_w: f32, cx: &mut Context<Self>) -> impl IntoElement {
-        let widgets_active = self.tab == Tab::Widgets;
         div()
             .w_full()
             .flex_shrink_0()
@@ -61,7 +66,7 @@ impl Island {
             .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _, cx| {
                 this.on_wheel(event, cx);
             }))
-            .child(tab_switch(widgets_active, self.settings.show_files, cx))
+            .child(tab_switch(self, cx))
             .child(div().w(px(notch_w)))
             .child(
                 div()
@@ -198,27 +203,34 @@ fn pane_divider() -> impl IntoElement {
         .flex_shrink_0()
 }
 
-fn tab_switch(
-    widgets_active: bool,
-    show_files: bool,
-    cx: &mut Context<Island>,
-) -> impl IntoElement {
+fn tab_switch(island: &Island, cx: &mut Context<Island>) -> impl IntoElement {
+    let current = island.tab;
     let mut row = div().flex().items_center().gap(px(4.)).child(labeled_tab(
         "tab-nook",
         "map-pin",
         "Nook",
-        widgets_active || !show_files,
+        current == Tab::Widgets,
         cx,
         Tab::Widgets,
     ));
-    if show_files {
+    if island.settings.show_files {
         row = row.child(labeled_tab(
             "tab-tray",
             "files",
             "Tray",
-            !widgets_active,
+            current == Tab::Files,
             cx,
             Tab::Files,
+        ));
+    }
+    if island.settings.terminal_enabled {
+        row = row.child(labeled_tab(
+            "tab-term",
+            "terminal",
+            "Term",
+            current == Tab::Terminal,
+            cx,
+            Tab::Terminal,
         ));
     }
     row

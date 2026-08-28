@@ -227,10 +227,14 @@ pub(super) struct SettingsView {
     url_focus: FocusHandle,
     token_focus: FocusHandle,
     query_focus: FocusHandle,
+    shell_focus: FocusHandle,
+    timeout_focus: FocusHandle,
     url_draft: String,
     token_draft: String,
     token_revealed: bool,
     query_draft: String,
+    shell_draft: String,
+    timeout_draft: String,
     catalog: Vec<String>,
     catalog_error: Option<String>,
     catalog_loading: bool,
@@ -254,10 +258,14 @@ impl SettingsView {
             url_focus: cx.focus_handle(),
             token_focus: cx.focus_handle(),
             query_focus: cx.focus_handle(),
+            shell_focus: cx.focus_handle(),
+            timeout_focus: cx.focus_handle(),
             url_draft: settings.observe.prometheus_url,
             token_draft: settings.observe.metrics_token,
             token_revealed: false,
             query_draft: String::new(),
+            shell_draft: settings.terminal_shell.clone(),
+            timeout_draft: settings.terminal_timeout_secs.to_string(),
             catalog: Vec::new(),
             catalog_error: None,
             catalog_loading: false,
@@ -415,7 +423,7 @@ impl gpui::Render for SettingsView {
                 self.render_widgets(&settings, url_focused, token_focused, query_focused, cx)
                     .into_any_element()
             } else {
-                self.render_general(&settings, cx).into_any_element()
+                self.render_general(&settings, window, cx).into_any_element()
             })
     }
 }
@@ -518,7 +526,12 @@ impl SettingsView {
             )
     }
 
-    fn render_general(&self, settings: &AppSettings, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_general(
+        &self,
+        settings: &AppSettings,
+        window: &gpui::Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         Self::pane(
             "General",
             div()
@@ -569,6 +582,70 @@ impl SettingsView {
                         .into_any_element(),
                     ]),
                     Some("Hover the island to expand. Settings and Quit are in the menu bar extra."),
+                ))
+                .child(section(
+                    "Termi-Notch",
+                    settings_group(vec![
+                        toggle_row(
+                            "Enable one-shot shell",
+                            settings.terminal_enabled,
+                            cx,
+                            |s| s.terminal_enabled = !s.terminal_enabled,
+                        )
+                        .into_any_element(),
+                        field_row(
+                            "term-shell",
+                            "Shell",
+                            if self.shell_draft.is_empty() {
+                                "$SHELL"
+                            } else {
+                                self.shell_draft.as_str()
+                            },
+                            self.shell_draft.is_empty(),
+                            self.shell_focus.is_focused(window),
+                            &self.shell_focus,
+                            cx,
+                            |this, event, cx| {
+                                if SettingsView::apply_key(&mut this.shell_draft, event, cx) {
+                                    nook_core::settings::tweak_app_settings(|s| {
+                                        s.terminal_shell = this.shell_draft.trim().to_string();
+                                    });
+                                    cx.notify();
+                                }
+                            },
+                        )
+                        .into_any_element(),
+                        field_row(
+                            "term-timeout",
+                            "Timeout",
+                            &self.timeout_draft,
+                            false,
+                            self.timeout_focus.is_focused(window),
+                            &self.timeout_focus,
+                            cx,
+                            |this, event, cx| {
+                                if SettingsView::apply_key(&mut this.timeout_draft, event, cx) {
+                                    this.timeout_draft
+                                        .retain(|ch| ch.is_ascii_digit());
+                                    if let Ok(secs) = this.timeout_draft.parse::<u32>() {
+                                        nook_core::settings::tweak_app_settings(|s| {
+                                            s.terminal_timeout_secs = secs.clamp(1, 600);
+                                        });
+                                    }
+                                    cx.notify();
+                                }
+                            },
+                        )
+                        .into_any_element(),
+                        toggle_row(
+                            "Remember command history",
+                            settings.terminal_history,
+                            cx,
+                            |s| s.terminal_history = !s.terminal_history,
+                        )
+                        .into_any_element(),
+                    ]),
+                    Some("Typed in the island only. opennook://, the CLI, and Finder Services never run commands. Default off."),
                 )),
         )
     }

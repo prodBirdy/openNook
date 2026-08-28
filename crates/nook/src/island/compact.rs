@@ -53,6 +53,9 @@ impl Island {
     }
 
     fn compact_left(&self, mode: CompactMode, cx: &mut Context<Self>) -> AnyElement {
+        if let Some(hud) = self.shell_hud.as_ref() {
+            return label(hud.clone(), theme::BODY, true).into_any_element();
+        }
         match mode {
             CompactMode::Media => {
                 album_chip(&self.now_playing, self.overlay_fade.value, cx).into_any_element()
@@ -63,6 +66,7 @@ impl Island {
             CompactMode::Observe => {
                 lucide("triangle-alert", theme::COMPACT_FACE).into_any_element()
             }
+            CompactMode::Shell => lucide("terminal", theme::COMPACT_FACE).into_any_element(),
             CompactMode::Onboard => label("openNook", theme::BODY, true).into_any_element(),
             CompactMode::Idle => div().into_any_element(),
         }
@@ -104,6 +108,11 @@ impl Island {
                     _ => self.observe.firing_count().to_string(),
                 };
                 label(text, theme::BODY, true).into_any_element()
+            }
+            CompactMode::Shell => {
+                let frame = ((self.pixel_t * 8.0) as usize) % 4;
+                let spin = ["⠋", "⠙", "⠹", "⠸"][frame];
+                label(spin, theme::BODY, true).into_any_element()
             }
             CompactMode::Onboard if hovered => div()
                 .id("github")
@@ -148,6 +157,7 @@ impl Island {
                 CompactMode::Timer => "timer",
                 CompactMode::Observe => "observe",
                 CompactMode::Onboard => "onboard",
+                CompactMode::Shell => "shell",
             };
             row = row.child(
                 div()

@@ -33,6 +33,21 @@ fi
 cp "$BIN" "$APP/Contents/MacOS/openNook"
 chmod +x "$APP/Contents/MacOS/openNook"
 
+# CLI shim: same crate, separate bin. LaunchServices only sees the .app.
+CLI_SRC="$ROOT/target/${PROFILE}/nook-cli"
+if [[ -f "$CLI_SRC" ]]; then
+  cp "$CLI_SRC" "$APP/Contents/MacOS/nook"
+  chmod +x "$APP/Contents/MacOS/nook"
+else
+  echo "warning: nook-cli not built; skip Contents/MacOS/nook" >&2
+fi
+
+# Dev `cargo run` never receives opennook:// — register the bundle.
+LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
+if [[ -x "$LSREGISTER" ]]; then
+  "$LSREGISTER" -f "$APP" || true
+fi
+
 # Bundle mediaremote-adapter (not linked; /usr/bin/perl loads the framework).
 if "$ROOT/scripts/build-mediaremote-adapter.sh"; then
   ditto "$ROOT/third_party/mediaremote-adapter/build/MediaRemoteAdapter.framework" \

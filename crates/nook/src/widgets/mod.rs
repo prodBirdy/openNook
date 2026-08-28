@@ -7,6 +7,7 @@ mod notes_editor;
 mod observe;
 mod reminders;
 mod speed;
+mod terminal;
 mod timers;
 
 pub(crate) use agents::{
@@ -18,4 +19,5 @@ pub(crate) use notes_editor::{NotesEditor, NotesEditorEvent};
 pub(crate) use observe::{observe_card, ObserveHover};
 pub(crate) use reminders::reminders_card;
 pub(crate) use speed::speed_card;
+pub(crate) use terminal::terminal_card;
 pub(crate) use timers::{compact_left as timer_compact_left, timer_card};

@@ -74,7 +74,106 @@ fn install_macos() {
         }
         log::info!("notch constrainFrameRect installed on GPUIPanel");
         install_app_target();
+        install_services_provider();
     });
+}
+
+#[cfg(target_os = "macos")]
+static SERVICES_PROVIDER: std::sync::atomic::AtomicPtr<objc2::runtime::AnyObject> =
+    std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
+
+/// Finder "Send to openNook" — same path bus as `opennook://tray/add`. Never shell.
+#[cfg(target_os = "macos")]
+fn install_services_provider() {
+    use objc2::runtime::{AnyClass, AnyObject, ClassBuilder, NSObject, Sel};
+    use objc2::{class, msg_send, sel, ClassType};
+    use std::sync::OnceLock;
+
+    static CLASS: OnceLock<&'static AnyClass> = OnceLock::new();
+    let cls = CLASS.get_or_init(|| {
+        if let Some(existing) = AnyClass::get(c"NookServicesProvider") {
+            return existing;
+        }
+        let mut builder = ClassBuilder::new(c"NookServicesProvider", NSObject::class())
+            .expect("NookServicesProvider");
+
+        extern "C-unwind" fn send_to_opennook(
+            _this: &NSObject,
+            _cmd: Sel,
+            pboard: *mut AnyObject,
+            _user_data: *mut AnyObject,
+            _error: *mut *mut AnyObject,
+        ) {
+            let paths = unsafe { read_service_paths(pboard) };
+            if !paths.is_empty() {
+                nook_core::automation::ingest_service_paths(paths);
+            }
+        }
+        unsafe {
+            builder.add_method(
+                sel!(sendToOpenNook:userData:error:),
+                send_to_opennook as extern "C-unwind" fn(_, _, _, _, _),
+            );
+        }
+        builder.register()
+    });
+
+    unsafe {
+        let provider: *mut AnyObject = msg_send![*cls, new];
+        if provider.is_null() {
+            log::error!("services provider alloc failed");
+            return;
+        }
+        let _: *mut AnyObject = msg_send![provider, retain];
+        SERVICES_PROVIDER.store(provider, Ordering::Relaxed);
+        let ns_app: *mut AnyObject = msg_send![class!(NSApplication), sharedApplication];
+        let _: () = msg_send![ns_app, setServicesProvider: provider];
+        ns_update_dynamic_services();
+        log::info!("NSServices provider installed (Send to openNook)");
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[link(name = "AppKit", kind = "framework")]
+extern "C" {
+    fn NSUpdateDynamicServices();
+}
+
+#[cfg(target_os = "macos")]
+fn ns_update_dynamic_services() {
+    unsafe { NSUpdateDynamicServices() }
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn read_service_paths(pboard: *mut objc2::runtime::AnyObject) -> Vec<std::path::PathBuf> {
+    use objc2::runtime::AnyObject;
+    use objc2::*;
+    if pboard.is_null() {
+        return Vec::new();
+    }
+    let type_name: *mut AnyObject = msg_send![
+        class!(NSString),
+        stringWithUTF8String: c"NSFilenamesPboardType".as_ptr()
+    ];
+    let list: *mut AnyObject = msg_send![pboard, propertyListForType: type_name];
+    if list.is_null() {
+        return Vec::new();
+    }
+    let count: usize = msg_send![list, count];
+    let mut paths = Vec::new();
+    for i in 0..count {
+        let item: *mut AnyObject = msg_send![list, objectAtIndex: i];
+        if item.is_null() {
+            continue;
+        }
+        let utf8: *const i8 = msg_send![item, UTF8String];
+        if utf8.is_null() {
+            continue;
+        }
+        let raw = std::ffi::CStr::from_ptr(utf8).to_string_lossy().into_owned();
+        paths.push(std::path::PathBuf::from(raw));
+    }
+    paths
 }
 
 /// Style + pin every GPUI island panel. Does not touch GPUI `Window`.

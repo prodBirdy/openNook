@@ -167,8 +167,25 @@ pub struct AppSettings {
     /// Per-widget widths in Nook cells. Missing entries use [`WidgetModule::default_cells`].
     #[serde(default)]
     pub widget_widths: Vec<(WidgetModule, u8)>,
+    /// Termi-Notch one-shot shell card. Off until the user opts in — this is
+    /// an arbitrary-code-execution surface and must stay unreachable from
+    /// `opennook://` URLs, the CLI, and Finder Services.
+    #[serde(default)]
+    pub terminal_enabled: bool,
+    /// Login shell used for `-lc`. Empty means `$SHELL`.
+    #[serde(default)]
+    pub terminal_shell: String,
+    #[serde(default = "default_terminal_timeout")]
+    pub terminal_timeout_secs: u32,
+    /// Persist typed commands in the settings DB. Off by default.
+    #[serde(default)]
+    pub terminal_history: bool,
     #[serde(default)]
     pub window: WindowSettings,
+}
+
+fn default_terminal_timeout() -> u32 {
+    30
 }
 
 fn default_island_x() -> f32 {
@@ -239,6 +256,10 @@ impl Default for AppSettings {
             hide_when_maximized: false,
             island_color: None,
             widget_widths: Vec::new(),
+            terminal_enabled: false,
+            terminal_shell: String::new(),
+            terminal_timeout_secs: default_terminal_timeout(),
+            terminal_history: false,
             window: WindowSettings::default(),
         }
     }
@@ -617,6 +638,10 @@ mod tests {
         assert_eq!(parsed.island_y, 0.0);
         assert!(!parsed.hide_when_maximized);
         assert_eq!(parsed.island_color, None);
+        assert!(!parsed.terminal_enabled);
+        assert!(parsed.terminal_shell.is_empty());
+        assert_eq!(parsed.terminal_timeout_secs, 30);
+        assert!(!parsed.terminal_history);
     }
 
     #[test]

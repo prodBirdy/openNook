@@ -5,6 +5,7 @@
 
 pub mod agents;
 pub mod audio;
+pub mod automation;
 pub mod browser_media;
 pub mod calendar;
 pub mod database;
@@ -19,6 +20,7 @@ pub mod notes;
 pub mod observe;
 pub mod occupancy;
 pub mod settings;
+pub mod shell;
 pub mod utils;
 pub mod widgets;
 
@@ -63,5 +65,6 @@ pub fn init() {
         audio::init_audio_state();
         audio::setup_audio_monitoring();
         mouse::start_polling();
+        shell::reap_orphaned_jobs();
     });
 }
