@@ -31,6 +31,7 @@ pub enum WidgetModule {
     HighAlert = 10,
     SysStats = 10,
     Recorder = 10,
+    Meeting = 10,
 }
 
 impl WidgetModule {
@@ -54,6 +55,7 @@ impl WidgetModule {
         Self::HighAlert,
         Self::SysStats,
         Self::Recorder,
+        Self::Meeting,
     ];
 
     pub fn from_u8(value: u8) -> Self {
@@ -85,6 +87,7 @@ impl WidgetModule {
             Self::Timers | Self::Speed | Self::Mirror | Self::Weather => 3,
             Self::Timers | Self::Speed | Self::Mirror | Self::Vpn => 3,
             Self::Timers | Self::Speed | Self::Mirror | Self::HighAlert => 3,
+            Self::Timers | Self::Speed | Self::Mirror | Self::Meeting => 3,
         }
     }
 
@@ -109,6 +112,7 @@ impl WidgetModule {
             Self::Notes | Self::Timers | Self::Speed | Self::Agents | Self::Vpn => 2,
             Self::Notes | Self::Timers | Self::Speed | Self::Agents | Self::HighAlert => 2,
             Self::Notes | Self::Timers | Self::Speed | Self::Agents | Self::Recorder => 2,
+            Self::Notes | Self::Timers | Self::Speed | Self::Agents | Self::Meeting => 2,
         }
     }
 
@@ -118,6 +122,7 @@ impl WidgetModule {
             Self::Timers | Self::Speed | Self::Agents | Self::Mirror | Self::Weather => 6,
             Self::Timers | Self::Speed | Self::Agents | Self::Mirror | Self::Vpn => 6,
             Self::Timers | Self::Speed | Self::Agents | Self::Mirror | Self::HighAlert => 6,
+            Self::Timers | Self::Speed | Self::Agents | Self::Mirror | Self::Meeting => 6,
             _ => 8,
         }
     }
@@ -136,6 +141,7 @@ fn default_widget_order() -> Vec<WidgetModule> {
         WidgetModule::Mirror,
         WidgetModule::Files,
         WidgetModule::Agents,
+        WidgetModule::Meeting,
         WidgetModule::Observe,
         WidgetModule::Reminders,
         WidgetModule::Timers,
@@ -290,6 +296,9 @@ pub struct AppSettings {
     /// On-device Speech while recording. Off = record-only (cheaper).
     #[serde(default = "default_true")]
     pub recorder_transcribe: bool,
+    pub show_meetings: bool,
+    #[serde(default)]
+    pub meetings: MeetingsConfig,
     #[serde(default)]
     pub observe: ObserveConfig,
     #[serde(default)]
@@ -437,6 +446,55 @@ pub const ISLAND_SWATCHES: [IslandSwatch; 7] = [
     },
 ];
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum MeetControlMode {
+    /// Activate the Meet tab then send Cmd+D / Cmd+E (focus-stealing).
+    #[default]
+    FocusTab,
+    /// Chrome/Safari `execute javascript` — needs "Allow JavaScript from Apple Events".
+    AppleEventsJs,
+}
+
+impl MeetControlMode {
+    pub fn caption(self) -> &'static str {
+        match self {
+            Self::FocusTab => "Focus tab",
+            Self::AppleEventsJs => "Apple Events JS",
+        }
+    }
+
+    pub fn cycle(self) -> Self {
+        match self {
+            Self::FocusTab => Self::AppleEventsJs,
+            Self::AppleEventsJs => Self::FocusTab,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MeetingsConfig {
+    #[serde(default = "default_true")]
+    pub zoom: bool,
+    #[serde(default = "default_true")]
+    pub teams: bool,
+    #[serde(default = "default_true")]
+    pub meet: bool,
+    #[serde(default)]
+    pub meet_mode: MeetControlMode,
+}
+
+impl Default for MeetingsConfig {
+    fn default() -> Self {
+        Self {
+            zoom: true,
+            teams: true,
+            meet: true,
+            meet_mode: MeetControlMode::FocusTab,
+        }
+    }
+}
+
 fn default_true() -> bool {
     true
 }
@@ -543,6 +601,8 @@ impl Default for AppSettings {
             sysstats: SysStatsSettings::default(),
             show_recorder: true,
             recorder_transcribe: true,
+            show_meetings: true,
+            meetings: MeetingsConfig::default(),
             observe: ObserveConfig::default(),
             liquid_glass_mode: false,
             non_notch_mode: false,
@@ -620,6 +680,7 @@ impl AppSettings {
             WidgetModule::HighAlert => self.show_high_alert,
             WidgetModule::SysStats => self.show_sysstats,
             WidgetModule::Recorder => self.show_recorder,
+            WidgetModule::Meeting => self.show_meetings,
         }
     }
 
@@ -647,6 +708,7 @@ impl AppSettings {
             WidgetModule::HighAlert => self.show_high_alert = !self.show_high_alert,
             WidgetModule::SysStats => self.show_sysstats = !self.show_sysstats,
             WidgetModule::Recorder => self.show_recorder = !self.show_recorder,
+            WidgetModule::Meeting => self.show_meetings = !self.show_meetings,
         }
     }
 
@@ -1082,6 +1144,11 @@ mod tests {
         assert_eq!(parsed.sysstats, SysStatsSettings::default());
         assert!(parsed.show_recorder);
         assert!(parsed.recorder_transcribe);
+        assert!(parsed.show_meetings);
+        assert!(parsed.meetings.zoom);
+        assert!(parsed.meetings.teams);
+        assert!(parsed.meetings.meet);
+        assert_eq!(parsed.meetings.meet_mode, MeetControlMode::FocusTab);
         assert!(parsed.liquid_glass_mode);
         assert!(!parsed.non_notch_mode);
         assert!((parsed.island_x - 0.5).abs() < f32::EPSILON);
@@ -1199,6 +1266,7 @@ mod tests {
         settings.show_high_alert = false;
         settings.show_sysstats = false;
         settings.show_recorder = false;
+        settings.show_meetings = false;
         settings.set_cells(WidgetModule::Music, 5);
         assert_eq!(settings.used_cells(), 5);
         assert_eq!(settings.remaining_cells(), AppSettings::TOTAL_CELLS - 5);

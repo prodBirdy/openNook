@@ -105,6 +105,7 @@ impl Island {
             .into_any_element(),
             CompactMode::Shell => lucide("terminal", theme::COMPACT_FACE).into_any_element(),
             CompactMode::Recording => rec_dot().into_any_element(),
+            CompactMode::Meeting => widgets::meeting_compact_left(&self.meeting),
             CompactMode::Onboard => label("openNook", theme::BODY, true).into_any_element(),
             CompactMode::Messages => self
                 .messages
@@ -199,6 +200,8 @@ impl Island {
                 let frame = ((self.pixel_t * 8.0) as usize) % 4;
                 let spin = ["⠋", "⠙", "⠹", "⠸"][frame];
                 label(spin, theme::BODY, true).into_any_element()
+            CompactMode::Meeting => {
+                widgets::meeting_compact_right(&self.meeting, self.overlay_fade.value)
             }
             CompactMode::Onboard if hovered => div()
                 .id("github")
@@ -311,6 +314,7 @@ impl Island {
                 CompactMode::Battery => "battery",
                 CompactMode::Vpn => "vpn",
                 CompactMode::Recording => "recording",
+                CompactMode::Meeting => "meeting",
                 CompactMode::Onboard => "onboard",
                 CompactMode::Messages => "messages",
                 CompactMode::Share => "share",

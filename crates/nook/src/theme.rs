@@ -129,6 +129,14 @@ pub const SYSTEM_ORANGE: Rgba = Rgba {
     b: 0.0,
     a: 1.0,
 };
+/// systemOrange — muted meeting (Zoom verified).
+pub const WARNING: Rgba = Rgba {
+    r: 1.0,
+    g: 0.624,
+    b: 0.039,
+    a: 1.0,
+};
+#[allow(dead_code)]
 pub const SUCCESS: Rgba = Rgba {
     r: 0.188,
     g: 0.820,

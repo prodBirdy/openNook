@@ -150,6 +150,7 @@ impl WidgetModuleExt for WidgetModule {
             Self::HighAlert => "High Alert",
             Self::SysStats => "Stats",
             Self::Recorder => "Voice",
+            Self::Meeting => "Meetings",
         }
     }
 
@@ -174,6 +175,7 @@ impl WidgetModuleExt for WidgetModule {
             Self::HighAlert => "sun",
             Self::SysStats => "activity",
             Self::Recorder => "mic",
+            Self::Meeting => "video",
         }
     }
 
@@ -225,6 +227,7 @@ impl WidgetModuleExt for WidgetModule {
                     "Record only".into()
                 }
             }
+            Self::Meeting => "Zoom / Teams / Meet".into(),
         }
     }
 
@@ -257,6 +260,7 @@ impl WidgetModuleExt for WidgetModule {
             Self::HighAlert => "Alert",
             Self::SysStats => "Stats",
             Self::Recorder => "Voice",
+            Self::Meeting => "Meetings",
         }
     }
 }
@@ -2304,6 +2308,23 @@ impl SettingsView {
                         cx,
                         |s| s.sync_clock_timers = !s.sync_clock_timers,
                     )
+            WidgetModule::Meeting => {
+                rows.push(
+                    toggle_row("Zoom", settings.meetings.zoom, cx, |s| {
+                        s.meetings.zoom = !s.meetings.zoom;
+                    })
+                    .into_any_element(),
+                );
+                rows.push(
+                    toggle_row("Microsoft Teams", settings.meetings.teams, cx, |s| {
+                        s.meetings.teams = !s.meetings.teams;
+                    })
+                    .into_any_element(),
+                );
+                rows.push(
+                    toggle_row("Google Meet", settings.meetings.meet, cx, |s| {
+                        s.meetings.meet = !s.meetings.meet;
+                    })
                     .into_any_element(),
                 );
                 rows.push(
@@ -2395,6 +2416,14 @@ impl SettingsView {
                             nook_core::mixer::reset_all();
                             nook_core::mixer::pump();
                             cx.notify();
+                        "meet-mode",
+                        "Meet control",
+                        settings.meetings.meet_mode.caption(),
+                        cx,
+                        |_, _, _| {
+                            nook_core::settings::tweak_app_settings(|s| {
+                                s.meetings.meet_mode = s.meetings.meet_mode.cycle();
+                            });
                         },
                     )
                     .into_any_element(),
@@ -2411,6 +2440,17 @@ impl SettingsView {
                         settings.recorder_transcribe,
                         cx,
                         |s| s.recorder_transcribe = !s.recorder_transcribe,
+                let trusted = crate::platform::ax_is_process_trusted();
+                rows.push(
+                    action_row(
+                        "ax-status",
+                        "Accessibility",
+                        if trusted { "Granted" } else { "Denied" },
+                        cx,
+                        |_, _, _| {
+                            crate::platform::ax_prompt_accessibility();
+                            crate::platform::open_accessibility_settings();
+                        },
                     )
                     .into_any_element(),
                 );
@@ -3243,6 +3283,8 @@ fn module_blurb(module: WidgetModule) -> SharedString {
             "Live CPU, memory, network, and disk capacity. Idle cost is zero — sampling starts on expand and stops on collapse.".into()
         WidgetModule::Recorder => {
             "Record from the island. Transcription uses Apple's on-device Speech model when available; turn it off for long recordings.".into()
+        WidgetModule::Meeting => {
+            "Mute and leave from the island. Zoom reads mute from the Meeting menu. Teams is a blind shortcut (the localhost API is gone). Meet focuses the tab unless you enable Apple Events JS.".into()
         }
     }
 }
@@ -3975,6 +4017,7 @@ mod tests {
                 "High Alert",
                 "Stats",
                 "Voice",
+                "Meetings",
             ]
         );
         assert!(!names

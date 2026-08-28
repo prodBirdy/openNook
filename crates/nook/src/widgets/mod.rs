@@ -6,6 +6,7 @@ mod calendar;
 mod messages;
 mod mixer;
 mod high_alert;
+mod meeting;
 mod notes;
 mod notes_editor;
 mod observe;
@@ -30,6 +31,9 @@ pub(crate) use messages::{
 };
 pub(crate) use mixer::mixer_card;
 pub(crate) use high_alert::high_alert_card;
+pub(crate) use meeting::{
+    compact_left as meeting_compact_left, compact_right as meeting_compact_right, meeting_card,
+};
 pub(crate) use notes::notes_card;
 pub(crate) use notes_editor::{NotesEditor, NotesEditorEvent};
 pub(crate) use observe::{observe_card, ObserveHover};

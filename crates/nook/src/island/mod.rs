@@ -27,6 +27,7 @@ use nook_core::models::{NowPlayingData, SyncedLyrics};
 use nook_core::models::{NowPlayingData, PlaybackQueue};
 use nook_core::notch;
 use nook_core::messages::MessagesSnapshot;
+use nook_core::meetings::MeetingSnapshot;
 use nook_core::observe::{MetricHistory, ObserveSnapshot};
 use nook_core::power::PowerSnapshot;
 use nook_core::obsidian::{NoteEntry, VaultWatch};
@@ -81,6 +82,7 @@ pub enum CompactMode {
     Battery,
     Vpn,
     Recording,
+    Meeting,
     Onboard,
     Messages,
     Share,
@@ -222,6 +224,7 @@ pub struct Island {
     vpn_reveal_until: Option<Instant>,
     pub sysstats: nook_core::sysstats::SysSnapshot,
     pub(crate) sysstats_sampling: bool,
+    pub meeting: MeetingSnapshot,
     pub settings: AppSettings,
     pub first_run: bool,
     pub speed_mbps: Option<f64>,
@@ -264,6 +267,8 @@ pub struct Island {
     content_y: SpringValue,
     /// Play/pause scrim over the compact album art, 0..1 on `motion::REVEAL`.
     overlay_fade: SpringValue,
+    /// Mute HUD flash on the meeting face; overlay springs to 1 while this is live.
+    meeting_flash_until: Option<Instant>,
     /// Mirrors Accessibility › Display › "Reduce motion"; refreshed by the
     /// poll loop so springs collapse to a dissolve while it is on.
     reduce_motion: bool,
@@ -431,6 +436,7 @@ impl Island {
             vpn_reveal_until: None,
             sysstats: nook_core::sysstats::SysSnapshot::default(),
             sysstats_sampling: false,
+            meeting: MeetingSnapshot::default(),
             settings,
             first_run,
             speed_mbps: None,
@@ -457,6 +463,7 @@ impl Island {
             content_x: SpringValue::at(0.0),
             content_y: SpringValue::at(0.0),
             overlay_fade: SpringValue::at(0.0),
+            meeting_flash_until: None,
             reduce_motion: platform::reduce_motion(),
             blur: 0.0,
             last_expanded: false,
@@ -516,6 +523,7 @@ impl Island {
         platform::install_mouse_monitors();
         platform::install_osd_wake_observer();
         platform::install_weather_observers();
+        platform::install_meeting_observers();
         nook_core::runtime().spawn(async {
             let _ = nook_core::calendar::request_calendar_access().await;
         });
@@ -1347,6 +1355,62 @@ impl Island {
             && self.settings.vpn_show_timer;
         let card = self.expanded && self.tab == Tab::Widgets;
         compact || card
+        // Meetings: wait on hardware events. The only timed work is a 1–2s
+        // Zoom menu-title readback, and only while the meeting face is shown.
+        cx.spawn(async move |this, cx| loop {
+            let face = this
+                .update(cx, |this, _| this.meeting_face_shown())
+                .unwrap_or(false);
+            let cadence = if face {
+                Duration::from_millis(1500)
+            } else {
+                Duration::from_secs(30)
+            };
+            let slice = Duration::from_millis(250);
+            let mut waited = Duration::ZERO;
+            loop {
+                cx.background_executor().timer(slice).await;
+                waited += slice;
+                if nook_core::meetings::take_meeting_event() || waited >= cadence {
+                    break;
+                }
+            }
+            let zoom_readback = this
+                .update(cx, |this, _| {
+                    this.meeting_face_shown()
+                        && this.meeting.app() == Some(nook_core::meetings::MeetingApp::Zoom)
+                })
+                .unwrap_or(false);
+            let snap = cx
+                .background_executor()
+                .spawn(async move {
+                    if zoom_readback {
+                        if let Some(muted) = nook_core::meetings::read_zoom_mute() {
+                            nook_core::meetings::apply_zoom_mute(Some(muted));
+                        }
+                    }
+                    nook_core::meetings::refresh()
+                })
+                .await;
+            if this
+                .update(cx, |this, cx| {
+                    let was = this.meeting.in_meeting();
+                    let changed = this.meeting != snap;
+                    this.meeting = snap;
+                    if !was && this.meeting.in_meeting() {
+                        this.preferred = Some(CompactMode::Meeting);
+                        nook_core::haptics::trigger(None);
+                    }
+                    if changed {
+                        cx.notify();
+                    }
+                })
+                .is_err()
+            {
+                break;
+            }
+        })
+        .detach();
     }
 
     /// Merge a fresh poll into the island: extend the local sample history and
@@ -2490,6 +2554,57 @@ impl Island {
 
     fn has_incoming_message(&self) -> bool {
         self.settings.show_messages && self.messages.incoming.is_some()
+    fn has_meeting(&self) -> bool {
+        self.settings.show_meetings && self.meeting.in_meeting()
+    }
+
+    fn meeting_face_shown(&self) -> bool {
+        self.has_meeting()
+            && (self.mode() == CompactMode::Meeting
+                || (self.expanded && self.settings.show_meetings))
+    }
+
+    pub(crate) fn flash_meeting_mute(&mut self) {
+        self.overlay_fade.set(1.0);
+        self.meeting_flash_until = Some(Instant::now() + Duration::from_millis(450));
+    }
+
+    pub(crate) fn toggle_meeting_mute(&mut self, cx: &mut Context<Self>) {
+        nook_core::meetings::toggle_mute();
+        self.flash_meeting_mute();
+        nook_core::haptics::trigger(None);
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let snap = cx
+                .background_executor()
+                .spawn(async { nook_core::meetings::refresh() })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.meeting = snap;
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    pub(crate) fn leave_meeting(&mut self, cx: &mut Context<Self>) {
+        nook_core::meetings::leave_meeting();
+        nook_core::haptics::trigger(None);
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(400))
+                .await;
+            let snap = cx
+                .background_executor()
+                .spawn(async { nook_core::meetings::refresh() })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.meeting = snap;
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     fn available_modes(&self) -> Vec<CompactMode> {
@@ -2500,6 +2615,8 @@ impl Island {
             modes.push(CompactMode::Share);
         if self.settings.show_recorder && self.recording {
             modes.push(CompactMode::Recording);
+        if self.has_meeting() {
+            modes.push(CompactMode::Meeting);
         }
         if self.has_observe_outage() {
             modes.push(CompactMode::Observe);
@@ -2742,7 +2859,19 @@ impl Island {
         moving |= self
             .content_fade
             .step(motion::CROSSFADE, 1.0, dt, motion::REST_ALPHA);
-        let overlay = media::album_overlay_target(self.hovered);
+        let overlay = if self.mode() == CompactMode::Meeting {
+            if self
+                .meeting_flash_until
+                .is_some_and(|until| Instant::now() < until)
+            {
+                1.0
+            } else {
+                self.meeting_flash_until = None;
+                0.0
+            }
+        } else {
+            media::album_overlay_target(self.hovered)
+        };
         moving |= self
             .overlay_fade
             .step(motion::REVEAL, overlay, dt, motion::REST_ALPHA);
@@ -3461,6 +3590,7 @@ mod tests {
             vpn_reveal_until: None,
             sysstats: nook_core::sysstats::SysSnapshot::default(),
             sysstats_sampling: false,
+            meeting: MeetingSnapshot::default(),
             settings: AppSettings::default(),
             first_run: false,
             speed_mbps: None,
@@ -3487,6 +3617,7 @@ mod tests {
             content_x: SpringValue::at(0.0),
             content_y: SpringValue::at(0.0),
             overlay_fade: SpringValue::at(0.0),
+            meeting_flash_until: None,
             reduce_motion: false,
             blur: 0.0,
             last_expanded: false,
@@ -3970,6 +4101,21 @@ mod tests {
         );
         assert_eq!(island.mode(), CompactMode::Recording);
         island.settings.show_recorder = false;
+    fn available_modes_includes_meeting() {
+        use nook_core::meetings::{MeetingApp, MeetingState};
+        let mut island = test_island();
+        island.meeting.state = MeetingState::InMeeting {
+            app: MeetingApp::Zoom,
+            pid: 7,
+            muted: Some(false),
+            started: Instant::now(),
+        };
+        assert_eq!(
+            island.available_modes(),
+            vec![CompactMode::Meeting, CompactMode::Idle]
+        );
+        assert_eq!(island.mode(), CompactMode::Meeting);
+        island.settings.show_meetings = false;
         assert_eq!(island.available_modes(), vec![CompactMode::Idle]);
     }
 

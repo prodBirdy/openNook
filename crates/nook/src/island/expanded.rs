@@ -20,6 +20,7 @@ use crate::widgets::{
     agents_card, calendar_card, notes_card, observe_card, reminders_card, speed_card,
     sysstats_card, timer_card,
     agents_card, calendar_card, notes_card, observe_card, recorder_card, reminders_card, speed_card,
+    agents_card, calendar_card, meeting_card, notes_card, observe_card, reminders_card, speed_card,
     timer_card,
 };
 use gpui::{
@@ -149,6 +150,13 @@ impl Island {
                     cell_pane(
                         self.settings.cells_for(module),
                         agents_card(&self.agents, self.pixel_t, cx),
+                    ),
+                ),
+                WidgetModule::Meeting if self.settings.show_meetings => add(
+                    &mut kids,
+                    cell_pane(
+                        self.settings.cells_for(module),
+                        meeting_card(&self.meeting, cx),
                     ),
                 ),
                 WidgetModule::Observe if self.settings.show_observe => add(

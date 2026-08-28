@@ -26,6 +26,7 @@ mod mediaremote;
 pub mod menubar;
 pub mod messages;
 pub mod mixer;
+pub mod meetings;
 pub mod models;
 pub mod motion_artwork;
 pub mod mouse;
