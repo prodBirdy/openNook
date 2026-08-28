@@ -39,10 +39,6 @@ impl Island {
         notch_w: f32,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let tab = match self.tab {
-            Tab::Files if !self.settings.show_files => Tab::Widgets,
-            Tab::Terminal if !self.settings.terminal_enabled => Tab::Widgets,
-            other => other,
         if self.search_open {
             return self.render_search(cx).into_any_element();
         }
@@ -215,35 +211,44 @@ impl Island {
                 WidgetModule::Battery if self.settings.show_battery => add(
                     &mut kids,
                     cell_pane(self.settings.cells_for(module), battery_card(self, cx)),
+                ),
                 WidgetModule::Messages if self.settings.show_messages => add(
                     &mut kids,
                     cell_pane(
                         self.settings.cells_for(module),
                         messages_card(self, cx),
                     ),
+                ),
                 WidgetModule::Mixer if self.settings.is_enabled(WidgetModule::Mixer) => add(
                     &mut kids,
                     cell_pane(self.settings.cells_for(module), mixer_card(self, cx)),
+                ),
                 WidgetModule::Weather if self.settings.weather.enabled => add(
                     &mut kids,
                     cell_pane(self.settings.cells_for(module), weather_card(self, cx)),
+                ),
                 WidgetModule::Vpn if self.settings.show_vpn => add(
                     &mut kids,
                     cell_pane(self.settings.cells_for(module), vpn_card(&self.vpn)),
+                ),
                 WidgetModule::HighAlert if self.settings.show_high_alert => add(
                     &mut kids,
                     cell_pane(
                         self.settings.cells_for(module),
                         high_alert_card(self, cx),
                     ),
+                ),
                 WidgetModule::SysStats if self.settings.show_sysstats => add(
                     &mut kids,
                     cell_pane(self.settings.cells_for(module), sysstats_card(self, cx)),
+                ),
                 WidgetModule::Recorder if self.settings.show_recorder => add(
                     &mut kids,
                     cell_pane(
                         self.settings.cells_for(module),
                         recorder_card(self, cx),
+                    ),
+                ),
                 WidgetModule::Notifications if self.settings.show_notifications => add(
                     &mut kids,
                     cell_pane(

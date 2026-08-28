@@ -265,14 +265,8 @@ impl WidgetModuleExt for WidgetModule {
             Self::Messages => "Messages",
             Self::Obsidian => "Obsidian",
             Self::Mixer => "Mixer",
-            Self::Weather => "Weather",
-            Self::Vpn => "VPN",
             Self::HighAlert => "Alert",
-            Self::SysStats => "Stats",
-            Self::Recorder => "Voice",
             Self::Meeting => "Meetings",
-            Self::Notifications => "Notify",
-            Self::Process => "Process",
         }
     }
 }
@@ -314,22 +308,30 @@ fn share_blurb(backend: LinkBackendKind, receive: bool) -> SharedString {
         }
     };
     if receive {
-        format!("{host} Receive is saved but this release does not open a listener.")
-            .into()
+        format!("{host} Receive is saved but this release does not open a listener.").into()
     } else {
         format!("{host} LocalSend is send-only until you turn receive on (listener ships later).")
             .into()
+    }
+}
+
 fn weather_subtitle(settings: &AppSettings) -> SharedString {
     let name = settings.weather.location.name();
     if name.is_empty() {
         "Open-Meteo".into()
     } else {
         name.to_string().into()
+    }
+}
+
 fn vpn_subtitle(show_timer: bool) -> SharedString {
     if show_timer {
         "Session timer".into()
     } else {
         "Status".into()
+    }
+}
+
 fn sysstats_subtitle(settings: &AppSettings) -> SharedString {
     let n = [
         settings.sysstats.show_cpu,
@@ -344,6 +346,9 @@ fn sysstats_subtitle(settings: &AppSettings) -> SharedString {
         0 => "Hidden".into(),
         1 => "1 readout".into(),
         n => format!("{n} readouts").into(),
+    }
+}
+
 fn notification_permission_rows(cx: &mut Context<SettingsView>) -> Vec<AnyElement> {
     use nook_core::notifications::PermissionState;
     let ax = crate::platform::ax_process_trusted(false);
@@ -454,8 +459,6 @@ pub(super) struct SettingsView {
     share_b_focus: FocusHandle,
     share_c_focus: FocusHandle,
     city_focus: FocusHandle,
-    shell_focus: FocusHandle,
-    timeout_focus: FocusHandle,
     url_draft: String,
     token_draft: String,
     alias_draft: String,
@@ -464,6 +467,8 @@ pub(super) struct SettingsView {
     share_b_draft: String,
     share_c_draft: String,
     ignore_focus: FocusHandle,
+    shell_focus: FocusHandle,
+    timeout_focus: FocusHandle,
     url_draft: String,
     token_draft: String,
     ignore_draft: String,
@@ -812,6 +817,12 @@ impl SettingsView {
                     }
                     Err(err) => this.location_status = Some(err),
                 }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
     fn fetch_shortcuts(&mut self, cx: &mut Context<Self>) {
         if self.catalog_loading {
             return;
@@ -870,41 +881,39 @@ impl gpui::Render for SettingsView {
             })
             .child(self.sidebar(cx))
             .child(div().w(px(1.)).h_full().bg(hairline()))
-            .child(if self.category == SettingsCategory::Widgets {
-                self.render_widgets(
-                    &settings,
-                    url_focused,
-                    token_focused,
-                    query_focused,
-                    heading_focused,
-                    city_focused,
-                    ignore_focused,
-                    client_id_focused,
-                    cx,
-                )
-                    .into_any_element()
-            } else {
-                self.render_general(
-                    &settings,
-                    alias_focused,
-                    pin_focused,
-                    share_a_focused,
-                    share_b_focused,
-                    share_c_focused,
-                    cx,
-                )
-                .into_any_element()
-                self.render_general(&settings, window, cx).into_any_element()
             .child(match self.category {
                 SettingsCategory::Widgets => self
-                    .render_widgets(&settings, url_focused, token_focused, query_focused, cx)
+                    .render_widgets(
+                        &settings,
+                        url_focused,
+                        token_focused,
+                        query_focused,
+                        heading_focused,
+                        city_focused,
+                        ignore_focused,
+                        client_id_focused,
+                        cx,
+                    )
                     .into_any_element(),
                 SettingsCategory::Keyboard => self.render_keyboard(&settings, cx).into_any_element(),
                 SettingsCategory::Scrolling => self
                     .render_scrolling(&settings, exclude_focused, cx)
                     .into_any_element(),
-                SettingsCategory::Search => self.render_search_settings(&settings, cx).into_any_element(),
-                SettingsCategory::General => self.render_general(&settings, cx).into_any_element(),
+                SettingsCategory::Search => {
+                    self.render_search_settings(&settings, cx).into_any_element()
+                }
+                SettingsCategory::General => self
+                    .render_general(
+                        &settings,
+                        window,
+                        alias_focused,
+                        pin_focused,
+                        share_a_focused,
+                        share_b_focused,
+                        share_c_focused,
+                        cx,
+                    )
+                    .into_any_element(),
             })
     }
 }
@@ -1047,15 +1056,12 @@ impl SettingsView {
     fn render_general(
         &self,
         settings: &AppSettings,
+        window: &gpui::Window,
         alias_focused: bool,
         pin_focused: bool,
         share_a_focused: bool,
         share_b_focused: bool,
         share_c_focused: bool,
-    fn render_general(
-        &self,
-        settings: &AppSettings,
-        window: &gpui::Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         Self::pane(
@@ -1189,6 +1195,7 @@ impl SettingsView {
                             cx,
                             |s| {
                                 s.show_volume_brightness_hud = !s.show_volume_brightness_hud;
+                }
                     "Termi-Notch",
                     settings_group(vec![
                         toggle_row(
@@ -1254,6 +1261,7 @@ impl SettingsView {
                         .into_any_element(),
                     ]),
                     Some(hud_caption(settings)),
+                )
                 .child(self.render_sharing(
                     settings,
                     alias_focused,
@@ -1262,24 +1270,7 @@ impl SettingsView {
                     share_b_focused,
                     share_c_focused,
                     cx,
-                            "Remember command history",
-                            settings.terminal_history,
-                            cx,
-                            |s| s.terminal_history = !s.terminal_history,
-                        )
-                        .into_any_element(),
-                    ]),
-                    Some("Typed in the island only. opennook://, the CLI, and Finder Services never run commands. Default off."),
-                    "Sound",
-                    settings_group(vec![toggle_row(
-                        "Output picker on the media card",
-                        settings.audio_output_picker,
-                        cx,
-                        |s| s.audio_output_picker = !s.audio_output_picker,
-                    )
-                    .into_any_element()]),
-                    Some(nook_core::audio_devices::AIRPLAY_INITIATE_NOTE),
-                )),
+                ))
                 .child(self.file_actions_section(settings, cx)),
         )
     }
@@ -1451,234 +1442,6 @@ impl SettingsView {
                     if Self::apply_key(&mut this.alias_draft, event, cx) {
                         this.persist_share_alias();
                         cx.notify();
-    fn render_keyboard(&self, settings: &AppSettings, cx: &mut Context<Self>) -> impl IntoElement {
-        let listen = nook_core::eventtap::input_monitoring_status();
-        let packs = nook_core::keysounds::list_packs();
-        let mut pack_rows = Vec::new();
-        for pack in packs {
-            let selected = settings.keysound_pack == pack.id;
-            let id = pack.id.clone();
-            pack_rows.push(
-                settings_row(SharedString::from(format!("pack-{}", pack.id)))
-    fn render_search_settings(
-        &self,
-        settings: &AppSettings,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let exclude = if self.exclude_draft.is_empty() {
-            "com.apple.Safari, com.1password.1password"
-        } else {
-            self.exclude_draft.as_str()
-        };
-        Self::pane(
-            "Search",
-            div()
-                .id("search-settings-pane")
-                .flex()
-                .flex_col()
-                .gap(px(16.))
-                .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
-                    if this.capture_hotkey(event, cx) {
-                        cx.stop_propagation();
-                    }
-                }))
-                .child(section(
-                    "Hotkey",
-                    settings_group(vec![
-                        toggle_row("Enable search hotkey", settings.search.enabled, cx, |s| {
-                            s.search.enabled = !s.search.enabled;
-                        })
-                        .into_any_element(),
-                        self.hotkey_row(settings, cx).into_any_element(),
-                        toggle_row(
-                            "Magnifier on compact island",
-                            settings.search.show_magnifier,
-                            cx,
-                            |s| s.search.show_magnifier = !s.search.show_magnifier,
-                        )
-                        .into_any_element(),
-                    ]),
-                    Some("Carbon hotkey — no Accessibility prompt. Default is Option-Space."),
-                ))
-                .child(section(
-                    "Clipboard history",
-                    settings_group(vec![
-                        toggle_row(
-                            "Save clipboard history",
-                            settings.search.clipboard_history,
-                            cx,
-                            |s| s.search.clipboard_history = !s.search.clipboard_history,
-                        )
-                        .into_any_element(),
-                        self.history_size_row(settings, cx).into_any_element(),
-                        toggle_row(
-                            "Paste automatically (needs Accessibility)",
-                            settings.search.auto_paste,
-                            cx,
-                            |s| s.search.auto_paste = !s.search.auto_paste,
-                        )
-                        .into_any_element(),
-                    ]),
-                    Some("Off by default. Skips password-manager Concealed/Transient items. Auto-paste stays off until you grant Accessibility."),
-                ))
-                .child(section(
-                    "Exclude apps",
-                    settings_group(vec![self.exclude_row(exclude, cx).into_any_element()]),
-                    Some("Comma-separated bundle IDs. Frontmost app at copy time is the heuristic."),
-                    Some(if cfg!(target_os = "macos") {
-                        "Hover the island to expand. Settings and Quit are in the menu bar extra."
-                    } else {
-                        "Click or scroll the island to expand. Ctrl+, opens Settings; Ctrl+Q quits."
-                    }),
-                )),
-        )
-    }
-
-    fn hotkey_row(&self, settings: &AppSettings, cx: &mut Context<Self>) -> impl IntoElement {
-        let label_text = if self.recording_hotkey {
-            "Press a shortcut…".to_string()
-        } else {
-            settings.search.hotkey.label()
-        };
-        settings_row("search-hotkey")
-            .cursor(CursorStyle::PointingHand)
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, _, _, cx| {
-                    this.recording_hotkey = !this.recording_hotkey;
-                    cx.notify();
-                }),
-            )
-            .child(label("Summon shortcut", theme::BODY, true))
-            .child(label(label_text, theme::CALLOUT, true))
-    }
-
-    fn history_size_row(&self, settings: &AppSettings, cx: &mut Context<Self>) -> impl IntoElement {
-        let current = settings.search.clipboard_history_size;
-        let mut chips = div().flex().items_center().gap(px(6.));
-        for size in [100u32, 250, 500] {
-            let on = current == size;
-            chips = chips.child(
-                div()
-                    .id(SharedString::from(format!("clip-cap-{size}")))
-                    .h(px(24.))
-                    .px(px(8.))
-                    .rounded(px(6.))
-                    .bg(if on { theme::FILL_SECONDARY } else { theme::FILL })
-                    .cursor(CursorStyle::PointingHand)
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |_, _, _, cx| {
-                            let id = id.clone();
-                            nook_core::settings::tweak_app_settings(|s| s.keysound_pack = id);
-                            cx.notify();
-                        }),
-                    )
-                    .child(label(pack.name, theme::BODY, true))
-                    .child(label(
-                        if selected { "Selected" } else { " " },
-                        theme::SUBHEADLINE,
-                        false,
-                    ))
-                    .into_any_element(),
-            );
-        }
-        Self::pane(
-            "Keyboard Sounds",
-            div()
-                .id("keyboard-pane")
-                .flex()
-                .flex_col()
-                .gap(px(16.))
-                .child(section(
-                    "Mechey",
-                    settings_group(vec![
-                        toggle_row(
-                            "Play sounds while typing",
-                            settings.keysounds_enabled,
-                            cx,
-                            |s| {
-                                s.keysounds_enabled = !s.keysounds_enabled;
-                                if s.keysounds_enabled
-                                    && !nook_core::eventtap::input_monitoring_status().granted()
-                                {
-                                    nook_core::eventtap::request_input_monitoring();
-                                }
-                            },
-                        )
-                        .into_any_element(),
-                        permission_row("Input Monitoring", listen).into_any_element(),
-                        action_row(
-                            "listen-prompt",
-                            "Request Input Monitoring",
-                            "Prompt",
-                            cx,
-                            |_, _, cx| {
-                                nook_core::eventtap::request_input_monitoring();
-                                cx.notify();
-                            },
-                        )
-                        .into_any_element(),
-                        action_row(
-                            "listen-open",
-                            "Privacy settings",
-                            "Open",
-                            cx,
-                            |_, _, _| {
-                                nook_core::eventtap::open_input_monitoring_settings();
-                            },
-                        )
-                        .into_any_element(),
-                    ]),
-                    Some("Opt-in. The key tap is created only while this is on. Password fields stay silent (secure input). Ad-hoc signing can drop the grant after each rebuild."),
-                ))
-                .child(section(
-                    "Pack",
-                    settings_group({
-                        let mut rows = pack_rows;
-                        rows.push(
-                            self.float_slider_row(
-                                "keysound-volume",
-                                "Volume",
-                                settings.keysound_volume,
-                                &self.volume_slider,
-                                format!("{:.0}%", settings.keysound_volume * 100.0),
-                            )
-                            .into_any_element(),
-                        );
-                        rows.push(
-                            action_row("keysound-test", "Preview this pack", "Test", cx, |_, _, cx| {
-                                nook_core::keysounds::play_test();
-                                cx.notify();
-                            })
-                            .into_any_element(),
-                        );
-                        rows
-                    }),
-                    Some("Drop Mechvibes packs (config.json + OGG) into Application Support/openNook-gpui/soundpacks. Builtin clicks are original CC0 tones, not switch recordings."),
-                )),
-        )
-    }
-
-    fn render_scrolling(
-        &self,
-        settings: &AppSettings,
-        exclude_focused: bool,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let ax = nook_core::eventtap::accessibility_status();
-        let conflicts = nook_core::eventtap::running_conflict_ids();
-        let mut rows = vec![
-            toggle_row(
-                "Smooth scrolling for mice",
-                settings.smooth_scroll_enabled,
-                cx,
-                |s| {
-                    s.smooth_scroll_enabled = !s.smooth_scroll_enabled;
-                    if s.smooth_scroll_enabled
-                        && !nook_core::eventtap::accessibility_status().granted()
-                    {
-                        nook_core::eventtap::request_accessibility();
                     }
                 },
             )
@@ -1706,15 +1469,6 @@ impl SettingsView {
                     if Self::apply_key(&mut this.pin_draft, event, cx) {
                         this.persist_share_pin();
                         cx.notify();
-                "Reverse mouse wheel",
-                settings.reverse_mouse_scroll,
-                cx,
-                |s| {
-                    s.reverse_mouse_scroll = !s.reverse_mouse_scroll;
-                    if s.reverse_mouse_scroll
-                        && !nook_core::eventtap::accessibility_status().granted()
-                    {
-                        nook_core::eventtap::request_accessibility();
                     }
                 },
             )
@@ -1910,6 +1664,150 @@ impl SettingsView {
             on_key,
         )
         .into_any_element()
+    }
+
+
+    fn render_keyboard(&self, settings: &AppSettings, cx: &mut Context<Self>) -> impl IntoElement {
+        let listen = nook_core::eventtap::input_monitoring_status();
+        let packs = nook_core::keysounds::list_packs();
+        let mut pack_rows = Vec::new();
+        for pack in packs {
+            let selected = settings.keysound_pack == pack.id;
+            let id = pack.id.clone();
+            pack_rows.push(
+                settings_row(SharedString::from(format!("pack-{}", pack.id)))
+                    .cursor(CursorStyle::PointingHand)
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |_, _, _, cx| {
+                            let id = id.clone();
+                            nook_core::settings::tweak_app_settings(|s| s.keysound_pack = id);
+                            cx.notify();
+                        }),
+                    )
+                    .child(label(pack.name, theme::BODY, true))
+                    .child(label(
+                        if selected { "Selected" } else { " " },
+                        theme::SUBHEADLINE,
+                        false,
+                    ))
+                    .into_any_element(),
+            );
+        }
+        Self::pane(
+            "Keyboard Sounds",
+            div()
+                .id("keyboard-pane")
+                .flex()
+                .flex_col()
+                .gap(px(16.))
+                .child(section(
+                    "Mechey",
+                    settings_group(vec![
+                        toggle_row(
+                            "Play sounds while typing",
+                            settings.keysounds_enabled,
+                            cx,
+                            |s| {
+                                s.keysounds_enabled = !s.keysounds_enabled;
+                                if s.keysounds_enabled
+                                    && !nook_core::eventtap::input_monitoring_status().granted()
+                                {
+                                    nook_core::eventtap::request_input_monitoring();
+                                }
+                            },
+                        )
+                        .into_any_element(),
+                        permission_row("Input Monitoring", listen).into_any_element(),
+                        action_row(
+                            "listen-prompt",
+                            "Request Input Monitoring",
+                            "Prompt",
+                            cx,
+                            |_, _, cx| {
+                                nook_core::eventtap::request_input_monitoring();
+                                cx.notify();
+                            },
+                        )
+                        .into_any_element(),
+                        action_row(
+                            "listen-open",
+                            "Privacy settings",
+                            "Open",
+                            cx,
+                            |_, _, _| {
+                                nook_core::eventtap::open_input_monitoring_settings();
+                            },
+                        )
+                        .into_any_element(),
+                    ]),
+                    Some("Opt-in. The key tap is created only while this is on. Password fields stay silent (secure input). Ad-hoc signing can drop the grant after each rebuild."),
+                ))
+                .child(section(
+                    "Pack",
+                    settings_group({
+                        let mut rows = pack_rows;
+                        rows.push(
+                            self.float_slider_row(
+                                "keysound-volume",
+                                "Volume",
+                                settings.keysound_volume,
+                                &self.volume_slider,
+                                format!("{:.0}%", settings.keysound_volume * 100.0),
+                            )
+                            .into_any_element(),
+                        );
+                        rows.push(
+                            action_row("keysound-test", "Preview this pack", "Test", cx, |_, _, cx| {
+                                nook_core::keysounds::play_test();
+                                cx.notify();
+                            })
+                            .into_any_element(),
+                        );
+                        rows
+                    }),
+                    Some("Drop Mechvibes packs (config.json + OGG) into Application Support/openNook-gpui/soundpacks. Builtin clicks are original CC0 tones, not switch recordings."),
+                )),
+        )
+    }
+
+    fn render_scrolling(
+        &self,
+        settings: &AppSettings,
+        exclude_focused: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let ax = nook_core::eventtap::accessibility_status();
+        let conflicts = nook_core::eventtap::running_conflict_ids();
+        let mut rows = vec![
+            toggle_row(
+                "Smooth scrolling for mice",
+                settings.smooth_scroll_enabled,
+                cx,
+                |s| {
+                    s.smooth_scroll_enabled = !s.smooth_scroll_enabled;
+                    if s.smooth_scroll_enabled
+                        && !nook_core::eventtap::accessibility_status().granted()
+                    {
+                        nook_core::eventtap::request_accessibility();
+                    }
+                },
+            )
+            .into_any_element(),
+            toggle_row(
+                "Reverse mouse wheel",
+                settings.reverse_mouse_scroll,
+                cx,
+                |s| {
+                    s.reverse_mouse_scroll = !s.reverse_mouse_scroll;
+                    if s.reverse_mouse_scroll
+                        && !nook_core::eventtap::accessibility_status().granted()
+                    {
+                        nook_core::eventtap::request_accessibility();
+                    }
+                },
+            )
+            .into_any_element(),
             permission_row("Accessibility", ax).into_any_element(),
             action_row(
                 "scroll-ax-prompt",
@@ -2064,6 +1962,113 @@ impl SettingsView {
                         .child(caption),
                 ),
             )
+    }
+
+
+    fn render_search_settings(
+        &self,
+        settings: &AppSettings,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let exclude = if self.exclude_draft.is_empty() {
+            "com.apple.Safari, com.1password.1password"
+        } else {
+            self.exclude_draft.as_str()
+        };
+        Self::pane(
+            "Search",
+            div()
+                .id("search-settings-pane")
+                .flex()
+                .flex_col()
+                .gap(px(16.))
+                .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+                    if this.capture_hotkey(event, cx) {
+                        cx.stop_propagation();
+                    }
+                }))
+                .child(section(
+                    "Hotkey",
+                    settings_group(vec![
+                        toggle_row("Enable search hotkey", settings.search.enabled, cx, |s| {
+                            s.search.enabled = !s.search.enabled;
+                        })
+                        .into_any_element(),
+                        self.hotkey_row(settings, cx).into_any_element(),
+                        toggle_row(
+                            "Magnifier on compact island",
+                            settings.search.show_magnifier,
+                            cx,
+                            |s| s.search.show_magnifier = !s.search.show_magnifier,
+                        )
+                        .into_any_element(),
+                    ]),
+                    Some("Carbon hotkey — no Accessibility prompt. Default is Option-Space."),
+                ))
+                .child(section(
+                    "Clipboard history",
+                    settings_group(vec![
+                        toggle_row(
+                            "Save clipboard history",
+                            settings.search.clipboard_history,
+                            cx,
+                            |s| s.search.clipboard_history = !s.search.clipboard_history,
+                        )
+                        .into_any_element(),
+                        self.history_size_row(settings, cx).into_any_element(),
+                        toggle_row(
+                            "Paste automatically (needs Accessibility)",
+                            settings.search.auto_paste,
+                            cx,
+                            |s| s.search.auto_paste = !s.search.auto_paste,
+                        )
+                        .into_any_element(),
+                    ]),
+                    Some("Off by default. Skips password-manager Concealed/Transient items. Auto-paste stays off until you grant Accessibility."),
+                ))
+                .child(section(
+                    "Exclude apps",
+                    settings_group(vec![self.exclude_row(exclude, cx).into_any_element()]),
+                    Some("Comma-separated bundle IDs. Frontmost app at copy time is the heuristic."),
+                )),
+        )
+    }
+
+    fn hotkey_row(&self, settings: &AppSettings, cx: &mut Context<Self>) -> impl IntoElement {
+        let label_text = if self.recording_hotkey {
+            "Press a shortcut…".to_string()
+        } else {
+            settings.search.hotkey.label()
+        };
+        settings_row("search-hotkey")
+            .cursor(CursorStyle::PointingHand)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    this.recording_hotkey = !this.recording_hotkey;
+                    cx.notify();
+                }),
+            )
+            .child(label("Summon shortcut", theme::BODY, true))
+            .child(label(label_text, theme::CALLOUT, true))
+    }
+
+    fn history_size_row(&self, settings: &AppSettings, cx: &mut Context<Self>) -> impl IntoElement {
+        let current = settings.search.clipboard_history_size;
+        let mut chips = div().flex().items_center().gap(px(6.));
+        for size in [100u32, 250, 500] {
+            let on = current == size;
+            chips = chips.child(
+                div()
+                    .id(SharedString::from(format!("clip-cap-{size}")))
+                    .h(px(24.))
+                    .px(px(8.))
+                    .rounded(px(6.))
+                    .bg(if on { theme::FILL_SECONDARY } else { theme::FILL })
+                    .cursor(CursorStyle::PointingHand)
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |_, _, _, cx| {
                             nook_core::settings::tweak_app_settings(|s| {
                                 s.search.clipboard_history_size = size;
                             });
@@ -2577,6 +2582,7 @@ impl SettingsView {
                 rows.push(
                     toggle_row("Show lyrics", settings.show_lyrics, cx, |s| {
                         s.show_lyrics = !s.show_lyrics;
+                }
                     toggle_row(
                         "Animated album art (Apple Music)",
                         settings.animated_album_art,
@@ -2655,6 +2661,9 @@ impl SettingsView {
                         |_, _, _| {
                             if let Err(err) = nook_core::power::install_lpm_shortcut() {
                                 log::warn!("install LPM shortcut: {err}");
+        }
+    }
+}
             WidgetModule::Messages => {
                 let fda = nook_core::messages::fda_status();
                 let status = match fda {
@@ -2666,6 +2675,7 @@ impl SettingsView {
                     settings_row("msg-fda-status")
                         .child(label("Full Disk Access", theme::BODY, true))
                         .child(label(status, theme::BODY, false))
+        }
             WidgetModule::Obsidian => {
                 let vault_label = settings
                     .obsidian_vault
@@ -2676,6 +2686,7 @@ impl SettingsView {
                     settings_row("obsidian-path")
                         .child(label("Vault", theme::BODY, true))
                         .child(label(vault_label, theme::SUBHEADLINE, false))
+        }
             WidgetModule::Mixer => {
                 rows.push(
                     settings_row("mixer-permission")
@@ -2698,6 +2709,9 @@ impl SettingsView {
                         |_, _, _| {
                             if let Err(err) = nook_core::messages::open_fda_settings() {
                                 log::warn!("open FDA settings: {err}");
+        }
+    }
+}
             WidgetModule::Timers => {
                 rows.push(
                     toggle_row(
@@ -2706,23 +2720,6 @@ impl SettingsView {
                         cx,
                         |s| s.sync_clock_timers = !s.sync_clock_timers,
                     )
-            WidgetModule::Meeting => {
-                rows.push(
-                    toggle_row("Zoom", settings.meetings.zoom, cx, |s| {
-                        s.meetings.zoom = !s.meetings.zoom;
-                    })
-                    .into_any_element(),
-                );
-                rows.push(
-                    toggle_row("Microsoft Teams", settings.meetings.teams, cx, |s| {
-                        s.meetings.teams = !s.meetings.teams;
-                    })
-                    .into_any_element(),
-                );
-                rows.push(
-                    toggle_row("Google Meet", settings.meetings.meet, cx, |s| {
-                        s.meetings.meet = !s.meetings.meet;
-                    })
                     .into_any_element(),
                 );
                 rows.push(
@@ -2734,6 +2731,8 @@ impl SettingsView {
                         |_, _, _| {
                             if let Err(err) = nook_core::shortcuts::import_bundled_shortcuts() {
                                 log::info!("clock shortcuts: {err}");
+                    }
+                }
                         "obsidian-folder",
                         "Folder",
                         "Choose Folder…",
@@ -2743,6 +2742,9 @@ impl SettingsView {
                                 nook_core::settings::tweak_app_settings(|s| {
                                     s.obsidian_vault = Some(path);
                                 });
+        }
+    }
+}
             WidgetModule::Vpn => {
                 rows.push(
                     toggle_row(
@@ -2814,6 +2816,29 @@ impl SettingsView {
                             nook_core::mixer::reset_all();
                             nook_core::mixer::pump();
                             cx.notify();
+        }
+    }
+            WidgetModule::Meeting => {
+                rows.push(
+                    toggle_row("Zoom", settings.meetings.zoom, cx, |s| {
+                        s.meetings.zoom = !s.meetings.zoom;
+                    })
+                    .into_any_element(),
+                );
+                rows.push(
+                    toggle_row("Microsoft Teams", settings.meetings.teams, cx, |s| {
+                        s.meetings.teams = !s.meetings.teams;
+                    })
+                    .into_any_element(),
+                );
+                rows.push(
+                    toggle_row("Google Meet", settings.meetings.meet, cx, |s| {
+                        s.meetings.meet = !s.meetings.meet;
+                    })
+                    .into_any_element(),
+                );
+                rows.push(
+                    action_row(
                         "meet-mode",
                         "Meet control",
                         settings.meetings.meet_mode.caption(),
@@ -2826,34 +2851,12 @@ impl SettingsView {
                     )
                     .into_any_element(),
                 );
+        }
             WidgetModule::HighAlert => {
                 rows.extend(high_alert_rows(settings, cx));
             }
             WidgetModule::Timers => {
                 rows.extend(pomodoro_rows(settings, &self.catalog, cx));
-            WidgetModule::Recorder => {
-                rows.push(
-                    toggle_row(
-                        "Live transcription",
-                        settings.recorder_transcribe,
-                        cx,
-                        |s| s.recorder_transcribe = !s.recorder_transcribe,
-                let trusted = crate::platform::ax_is_process_trusted();
-                rows.push(
-                    action_row(
-                        "ax-status",
-                        "Accessibility",
-                        if trusted { "Granted" } else { "Denied" },
-                        cx,
-                        |_, _, _| {
-                            crate::platform::ax_prompt_accessibility();
-                            crate::platform::open_accessibility_settings();
-                        },
-                    )
-                    .into_any_element(),
-                );
-            WidgetModule::Notifications => {
-                rows.extend(notification_permission_rows(cx));
             }
             _ => {}
         }
@@ -2922,6 +2925,144 @@ impl SettingsView {
                     if event.keystroke.key == "enter" {
                         this.search_city(cx);
                     } else if SettingsView::apply_key(&mut this.city_draft, event, cx) {
+                        cx.notify();
+                    }
+                },
+            )
+            .into_any_element(),
+            settings_row("weather-city-actions")
+                .child(div().flex_1())
+                .child(
+                    div()
+                        .flex()
+                        .gap(px(6.))
+                        .child(push_button(
+                            "weather-search",
+                            if self.geo_loading {
+                                "Searching…"
+                            } else {
+                                "Search"
+                            },
+                            cx,
+                            |this, _, cx| this.search_city(cx),
+                        ))
+                        .child(push_button(
+                            "weather-system",
+                            if self.location_busy {
+                                "Locating…"
+                            } else {
+                                "Use system location"
+                            },
+                            cx,
+                            |this, _, cx| this.use_system_location(cx),
+                        )),
+                )
+                .into_any_element(),
+        ];
+        if let Some(status) = &self.location_status {
+            location_rows.push(
+                settings_row("weather-loc-status")
+                    .child(label(status.clone(), theme::BODY, false))
+                    .into_any_element(),
+            );
+        }
+        if let Some(err) = &self.geo_error {
+            location_rows.push(
+                settings_row("weather-geo-err")
+                    .child(label(err.clone(), theme::BODY, false))
+                    .into_any_element(),
+            );
+        }
+        for (i, place) in self.geo_results.iter().enumerate() {
+            let caption = place.display_name();
+            let picked = place.clone();
+            location_rows.push(
+                settings_row(SharedString::from(format!("weather-hit-{i}")))
+                    .child(label(caption, theme::BODY, true))
+                    .child(push_button(
+                        SharedString::from(format!("weather-pick-{i}")),
+                        "Use",
+                        cx,
+                        move |this, _, cx| this.pick_place(picked.clone(), cx),
+                    ))
+                    .into_any_element(),
+                );
+            }
+            WidgetModule::Recorder => {
+                rows.push(
+                    toggle_row(
+                        "Live transcription",
+                        settings.recorder_transcribe,
+                        cx,
+                        |s| s.recorder_transcribe = !s.recorder_transcribe,
+                let trusted = crate::platform::ax_is_process_trusted();
+                rows.push(
+                    action_row(
+                        "ax-status",
+                        "Accessibility",
+                        if trusted { "Granted" } else { "Denied" },
+                        cx,
+                        |_, _, _| {
+                            crate::platform::ax_prompt_accessibility();
+                            crate::platform::open_accessibility_settings();
+                        },
+                    )
+                    .into_any_element(),
+                );
+            }
+            _ => {}
+        }
+
+        let location_note = match &settings.weather.location {
+            WeatherLocationMode::System { .. } => {
+                "Using a one-shot system fix (city-level). The Location Services grant is keyed to this build's signature and resets after an ad-hoc re-sign."
+            }
+            WeatherLocationMode::Manual { name, .. } if !name.is_empty() => {
+                "Manual city. System location is opt-in and optional."
+            }
+            _ => "Enter a city (no permission prompt). System location is opt-in and resets on re-sign.",
+        };
+
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(16.))
+            .child(section(
+                "Units",
+                settings_group(vec![settings_row("weather-units")
+                    .child(label("Temperature", theme::BODY, true))
+                    .child(unit_row)
+                    .into_any_element()]),
+                None::<SharedString>,
+            ))
+            .child(section(
+                "Location",
+                settings_group(location_rows),
+                Some(location_note),
+            ))
+            .child(section(
+                "Compact face",
+                settings_group(vec![toggle_row(
+                    "Show on idle face",
+                    settings.weather.show_on_compact_face,
+                    cx,
+                    |s| {
+                        s.weather.show_on_compact_face = !s.weather.show_on_compact_face;
+                    },
+                )
+                .into_any_element()]),
+                Some("Temp and condition next to the notch while the island is idle."),
+            ))
+            .child(section(
+                "Attribution",
+                settings_group(vec![settings_row("weather-attr")
+                    .child(label(nook_core::weather::ATTRIBUTION, theme::BODY, false))
+                    .into_any_element()]),
+                Some("Required by Open-Meteo's CC-BY 4.0 license."),
+            ))
+            .when(self.module == WidgetModule::SysStats, |d| {
+                d.child(self.render_sysstats_settings(settings, cx))
+            })
             .when(self.module == WidgetModule::Music, |d| {
                 d.child(self.render_music_settings(settings, client_id_focused, cx))
             })
@@ -2989,60 +3130,6 @@ impl SettingsView {
                 },
             )
             .into_any_element(),
-            settings_row("weather-city-actions")
-                .child(div().flex_1())
-                .child(
-                    div()
-                        .flex()
-                        .gap(px(6.))
-                        .child(push_button(
-                            "weather-search",
-                            if self.geo_loading {
-                                "Searching…"
-                            } else {
-                                "Search"
-                            },
-                            cx,
-                            |this, _, cx| this.search_city(cx),
-                        ))
-                        .child(push_button(
-                            "weather-system",
-                            if self.location_busy {
-                                "Locating…"
-                            } else {
-                                "Use system location"
-                            },
-                            cx,
-                            |this, _, cx| this.use_system_location(cx),
-                        )),
-                )
-                .into_any_element(),
-        ];
-        if let Some(status) = &self.location_status {
-            location_rows.push(
-                settings_row("weather-loc-status")
-                    .child(label(status.clone(), theme::BODY, false))
-                    .into_any_element(),
-            );
-        }
-        if let Some(err) = &self.geo_error {
-            location_rows.push(
-                settings_row("weather-geo-err")
-                    .child(label(err.clone(), theme::BODY, false))
-                    .into_any_element(),
-            );
-        }
-        for (i, place) in self.geo_results.iter().enumerate() {
-            let caption = place.display_name();
-            let picked = place.clone();
-            location_rows.push(
-                settings_row(SharedString::from(format!("weather-hit-{i}")))
-                    .child(label(caption, theme::BODY, true))
-                    .child(push_button(
-                        SharedString::from(format!("weather-pick-{i}")),
-                        "Use",
-                        cx,
-                        move |this, _, cx| this.pick_place(picked.clone(), cx),
             settings_row("spotify-status")
                 .child(label("Spotify", theme::BODY, true))
                 .child(label(status_text, theme::SUBHEADLINE, false))
@@ -3099,6 +3186,62 @@ impl SettingsView {
                     .child(label(
                         "Music Automation was denied. Grant it in System Settings → Privacy & Security → Automation to show Up Next in playlist.",
                         theme::SUBHEADLINE,
+                        false,
+                    ))
+                    .into_any_element(),
+            );
+            WidgetModule::Notifications => {
+                rows.extend(notification_permission_rows(cx));
+            }
+            _ => {}
+        }
+
+        section(
+            "Playing Next",
+            settings_group(rows),
+            Some(format!(
+                "Register redirect URI {} on your Spotify developer app. No client secret is used. Apple Music shows upcoming tracks from the current playlist — not the real Playing Next queue — and hides the list when shuffle or radio is on.",
+                nook_core::spotify::REDIRECT_URI
+            )),
+        )
+    }
+
+    fn render_sysstats_settings(
+        &self,
+        settings: &AppSettings,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        section(
+            "Readouts",
+            settings_group(vec![
+                toggle_row("CPU", settings.sysstats.show_cpu, cx, |s| {
+                    s.sysstats.show_cpu = !s.sysstats.show_cpu;
+                })
+                .into_any_element(),
+                toggle_row("Memory", settings.sysstats.show_mem, cx, |s| {
+                    s.sysstats.show_mem = !s.sysstats.show_mem;
+                })
+                .into_any_element(),
+                toggle_row("Network", settings.sysstats.show_net, cx, |s| {
+                    s.sysstats.show_net = !s.sysstats.show_net;
+                })
+                .into_any_element(),
+                toggle_row("Disk", settings.sysstats.show_disk, cx, |s| {
+                    s.sysstats.show_disk = !s.sysstats.show_disk;
+                })
+                .into_any_element(),
+                toggle_row(
+                    "Physical interfaces only",
+                    settings.sysstats.physical_nics,
+                    cx,
+                    |s| s.sysstats.physical_nics = !s.sysstats.physical_nics,
+                )
+                .into_any_element(),
+            ]),
+            Some("Samples only while the expanded card is visible. CPU and network need two ticks; a collapse longer than a few minutes resets the rates."),
+        )
+                ))
+            })
             .when(self.module == WidgetModule::Notifications, |d| {
                 d.child(self.render_notification_settings(settings, cx))
             })
@@ -3121,17 +3264,6 @@ impl SettingsView {
                     ))
                     .into_any_element(),
             );
-        }
-
-        let location_note = match &settings.weather.location {
-            WeatherLocationMode::System { .. } => {
-                "Using a one-shot system fix (city-level). The Location Services grant is keyed to this build's signature and resets after an ad-hoc re-sign."
-            }
-            WeatherLocationMode::Manual { name, .. } if !name.is_empty() => {
-                "Manual city. System location is opt-in and optional."
-            }
-            _ => "Enter a city (no permission prompt). System location is opt-in and resets on re-sign.",
-        };
         } else {
             for (id, name) in apps {
                 let blocked = settings.notification_app_blocked(&id);
@@ -3169,89 +3301,12 @@ impl SettingsView {
                 );
             }
         }
+
         div()
             .flex()
             .flex_col()
             .gap(px(16.))
             .child(section(
-                "Units",
-                settings_group(vec![settings_row("weather-units")
-                    .child(label("Temperature", theme::BODY, true))
-                    .child(unit_row)
-                    .into_any_element()]),
-                None::<SharedString>,
-            ))
-            .child(section(
-                "Location",
-                settings_group(location_rows),
-                Some(location_note),
-            ))
-            .child(section(
-                "Compact face",
-                settings_group(vec![toggle_row(
-                    "Show on idle face",
-                    settings.weather.show_on_compact_face,
-                    cx,
-                    |s| {
-                        s.weather.show_on_compact_face = !s.weather.show_on_compact_face;
-                    },
-                )
-                .into_any_element()]),
-                Some("Temp and condition next to the notch while the island is idle."),
-            ))
-            .child(section(
-                "Attribution",
-                settings_group(vec![settings_row("weather-attr")
-                    .child(label(nook_core::weather::ATTRIBUTION, theme::BODY, false))
-                    .into_any_element()]),
-                Some("Required by Open-Meteo's CC-BY 4.0 license."),
-            ))
-            .when(self.module == WidgetModule::SysStats, |d| {
-                d.child(self.render_sysstats_settings(settings, cx))
-            })
-    }
-
-    fn render_sysstats_settings(
-        &self,
-        settings: &AppSettings,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        section(
-            "Readouts",
-            settings_group(vec![
-                toggle_row("CPU", settings.sysstats.show_cpu, cx, |s| {
-                    s.sysstats.show_cpu = !s.sysstats.show_cpu;
-                })
-                .into_any_element(),
-                toggle_row("Memory", settings.sysstats.show_mem, cx, |s| {
-                    s.sysstats.show_mem = !s.sysstats.show_mem;
-                })
-                .into_any_element(),
-                toggle_row("Network", settings.sysstats.show_net, cx, |s| {
-                    s.sysstats.show_net = !s.sysstats.show_net;
-                })
-                .into_any_element(),
-                toggle_row("Disk", settings.sysstats.show_disk, cx, |s| {
-                    s.sysstats.show_disk = !s.sysstats.show_disk;
-                })
-                .into_any_element(),
-                toggle_row(
-                    "Physical interfaces only",
-                    settings.sysstats.physical_nics,
-                    cx,
-                    |s| s.sysstats.physical_nics = !s.sysstats.physical_nics,
-                )
-                .into_any_element(),
-            ]),
-            Some("Samples only while the expanded card is visible. CPU and network need two ticks; a collapse longer than a few minutes resets the rates."),
-        section(
-            "Playing Next",
-            settings_group(rows),
-            Some(format!(
-                "Register redirect URI {} on your Spotify developer app. No client secret is used. Apple Music shows upcoming tracks from the current playlist — not the real Playing Next queue — and hides the list when shuffle or radio is on.",
-                nook_core::spotify::REDIRECT_URI
-            )),
-        )
                 "Full Disk Access",
                 settings_group(vec![toggle_row(
                     "Read notification history",
@@ -3710,6 +3765,7 @@ fn module_blurb(module: WidgetModule) -> SharedString {
         }
             WidgetModule::Music => {
             "Now Playing from MediaRemote. Optional time-synced lyrics from LRCLIB — opt-in, fetched at runtime, never bundled.".into()
+        }
         WidgetModule::Music => {
             "Now Playing from MediaRemote on macOS. The output picker lists CoreAudio devices; it cannot start AirPlay to a HomePod or Apple TV.".into()
             "Now Playing from MediaRemote. Optional Apple Music motion art is opt-in and fails silent to static covers; the glow uses local artwork colors.".into()
@@ -3736,26 +3792,35 @@ fn module_blurb(module: WidgetModule) -> SharedString {
         WidgetModule::Mirror => "A live camera preview that opens when you click the Mirror card.".into(),
         WidgetModule::Battery => {
             "Low-battery takeover on the compact face. Low Power Mode uses a one-time Shortcuts import, then falls back to an admin prompt.".into()
+    }
         WidgetModule::Messages => {
             "iMessage read + send from chat.db. WhatsApp is notify + prefill only — the Mac app cannot auto-send. Full Disk Access is required to read messages.".into()
+    }
         WidgetModule::Obsidian => {
             "Vault notes on the shelf. FSEvents keeps the list current; capture appends to today's daily note.".into()
         }
         WidgetModule::Mixer => nook_core::mixer::TCC_PREPROMPT.into(),
         WidgetModule::Weather => {
             "Current conditions and a short hourly strip from Open-Meteo. Manual city by default.".into()
+    }
         WidgetModule::Vpn => {
             "Live utun/ipsec/ppp status. The compact face flashes on connect and disconnect; the card shows the session clock. Ignore listed interfaces to hide helpers that look like a VPN.".into()
+    }
         WidgetModule::HighAlert => {
             "IOPM keep-awake. Timed chips expire in powerd — lid-close sleep is not prevented.".into()
+    }
         WidgetModule::SysStats => {
             "Live CPU, memory, network, and disk capacity. Idle cost is zero — sampling starts on expand and stops on collapse.".into()
+    }
         WidgetModule::Recorder => {
             "Record from the island. Transcription uses Apple's on-device Speech model when available; turn it off for long recordings.".into()
+    }
         WidgetModule::Meeting => {
             "Mute and leave from the island. Zoom reads mute from the Meeting menu. Teams is a blind shortcut (the localhost API is gone). Meet focuses the tab unless you enable Apple Events JS.".into()
+    }
         WidgetModule::Notifications => {
             "Captures other apps' banners via Accessibility. Optional usernoted backfill needs a manual Full Disk Access grant. Misses Focus / Do Not Disturb / 'None' styles.".into()
+    }
         WidgetModule::Process => {
             "Convert, target-size, PDF compress, background removal, and OCR for files on the tray.".into()
         }
@@ -4096,6 +4161,7 @@ fn stepper_btn(
                 on_click(this, window, cx);
             }),
         )
+}
 fn status_row(title: &'static str, value: &'static str) -> impl IntoElement {
     settings_row(title)
         .child(label(title, theme::BODY, true))
@@ -4106,6 +4172,7 @@ fn shortcut_row(title: &'static str, keys: String) -> impl IntoElement {
     settings_row(SharedString::from(title))
         .child(label(title, theme::BODY, true))
         .child(label(keys, theme::SUBHEADLINE, false))
+}
 fn permission_row(title: &'static str, status: nook_core::eventtap::PermissionStatus) -> impl IntoElement {
     let (text, color) = match status {
         nook_core::eventtap::PermissionStatus::Granted => ("Granted", theme::SUCCESS),
@@ -4433,6 +4500,7 @@ mod tests {
         assert_eq!(
             WidgetModule::Battery.subtitle(&settings).as_ref(),
             "Alert at 5%"
+}
     fn timers_subtitle_mentions_clock_when_sync_is_on() {
         let mut settings = AppSettings::default();
         assert_eq!(
@@ -4443,6 +4511,7 @@ mod tests {
         assert_eq!(
             WidgetModule::Timers.subtitle(&settings).as_ref(),
             "Countdown"
+}
     fn sysstats_subtitle_counts_enabled_readouts() {
         let mut settings = AppSettings::default();
         assert_eq!(
@@ -4460,6 +4529,7 @@ mod tests {
         assert_eq!(
             WidgetModule::SysStats.subtitle(&settings).as_ref(),
             "Hidden"
+}
     fn notifications_subtitle_is_honest_when_off() {
         let settings = AppSettings::default();
         assert!(!settings.show_notifications);

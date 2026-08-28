@@ -239,6 +239,8 @@ fn get_link_target(cx: &mut Context<Island>) -> impl IntoElement {
         cx,
         |this, paths, cx| this.get_link_paths(paths, cx),
     )
+}
+
 fn process_drop_chip(
     id: &'static str,
     icon: &'static str,
@@ -648,6 +650,8 @@ impl Island {
                     ),
             )
             .child(list)
+    }
+
     pub(super) fn process_dropped_paths(
         &mut self,
         paths: &gpui::ExternalPaths,

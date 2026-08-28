@@ -92,15 +92,32 @@ fn migrate(conn: &Connection) -> Result<()> {
         "CREATE TABLE IF NOT EXISTS message_watermarks (
             conversation_id TEXT PRIMARY KEY,
             last_rowid INTEGER NOT NULL
+        )",
+        [],
+    )?;
+
+    conn.execute(
         "CREATE TABLE IF NOT EXISTS lyrics (
             cache_key TEXT PRIMARY KEY,
             payload TEXT,
+            hit INTEGER NOT NULL DEFAULT 0,
+            fetched_at INTEGER NOT NULL
+        )",
+        [],
+    )?;
+
+    conn.execute(
         "CREATE TABLE IF NOT EXISTS motion_artwork (
             cache_key TEXT PRIMARY KEY,
             m3u8 TEXT,
             preview TEXT,
             hit INTEGER NOT NULL DEFAULT 0,
             fetched_at INTEGER NOT NULL
+        )",
+        [],
+    )?;
+
+    conn.execute(
         "CREATE TABLE IF NOT EXISTS recordings (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             path TEXT NOT NULL,
@@ -110,6 +127,8 @@ fn migrate(conn: &Connection) -> Result<()> {
         )",
         [],
     )?;
+
+    conn.execute(
         "CREATE TABLE IF NOT EXISTS clipboard_items (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             kind TEXT NOT NULL,
@@ -126,6 +145,8 @@ fn migrate(conn: &Connection) -> Result<()> {
          ON clipboard_items (copied_at)",
         [],
     )?;
+
+    conn.execute(
         "CREATE TABLE IF NOT EXISTS notification_shelf (
             id TEXT PRIMARY KEY,
             bundle_id TEXT NOT NULL,

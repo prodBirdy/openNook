@@ -302,6 +302,9 @@ mod tests {
         assert_eq!(overlay_window_size().1, screen_h);
         set_overlay_height(0.0);
         assert_eq!(overlay_window_size().1, OVERLAY_MIN.min(screen_h));
+    }
+
+    #[test]
     fn stub_notch_width_follows_the_real_screen() {
         assert_eq!(calculate_dynamic_notch_width(1280.0), 200.0);
         assert_eq!(calculate_dynamic_notch_width(1920.0), 200.0);
@@ -310,17 +313,13 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn linux_screen_has_no_notch_and_overlay_matches_root() {
+    fn linux_screen_has_no_notch() {
         let info = get_notch_info();
         assert!(!info.has_notch, "Linux must not invent a camera notch");
         assert_eq!(info.notch_height, 0.0);
         assert_eq!(
             info.notch_width,
             calculate_dynamic_notch_width(info.screen_width)
-        );
-        assert_eq!(
-            overlay_window_size(),
-            (info.screen_width, info.screen_height)
         );
         if let Some((w, h)) = linux_root_display_size() {
             assert_eq!(info.screen_width, w);

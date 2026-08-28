@@ -64,11 +64,14 @@ impl Island {
     fn compact_left(&self, mode: CompactMode, cx: &mut Context<Self>) -> AnyElement {
         if let Some(text) = nook_core::window_snap::flash_label() {
             return label(text, theme::BODY, true).into_any_element();
+    }
         if self.hud_active() {
             return lucide(hud_icon(self.hud.unwrap().kind), theme::COMPACT_FACE)
                 .into_any_element();
+    }
         if let Some(hud) = self.shell_hud.as_ref() {
             return label(hud.clone(), theme::BODY, true).into_any_element();
+    }
         if let Some(name) = self.output_hud_label() {
             return label(name.to_string(), theme::BODY, true).into_any_element();
         }
@@ -119,27 +122,21 @@ impl Island {
                 .map(|el| el.into_any_element())
                 .unwrap_or_else(|| div().into_any_element()),
             CompactMode::Share => lucide("share", theme::COMPACT_FACE).into_any_element(),
-            CompactMode::Idle => div().into_any_element(),
-            CompactMode::Idle => widgets::compact_weather(self),
             CompactMode::Idle => {
                 if self.high_alert_active() {
                     lucide_color("sun", 12.0, theme::SUCCESS).into_any_element()
                 } else {
-                    div().into_any_element()
+                    widgets::compact_weather(self)
                 }
             }
-            // Onboard is not a titled compact face (Mac 0.3.0 has no app-name
-            // pill). Keep the arm empty so a leftover preferred mode cannot
-            // paint "openNook" / clip to "openNc".
-            CompactMode::Onboard | CompactMode::Idle => div().into_any_element(),
         }
     }
 
     fn compact_right(
         &self,
         mode: CompactMode,
-        _hovered: bool,
-        _cx: &mut Context<Self>,
+        hovered: bool,
+        cx: &mut Context<Self>,
     ) -> AnyElement {
         if self.hud_active() {
             return self.hud_slider(cx);
@@ -199,16 +196,23 @@ impl Island {
                 let text = self
                     .vpn
                     .compact_right(self.settings.vpn_show_timer, std::time::SystemTime::now());
+                timer_text(text, theme::BODY)
+                    .min_w(px(40.))
+                    .text_right()
+                    .into_any_element()
+            }
             CompactMode::Recording => {
                 let text = super::ui::format_timer_compact(self.recording_elapsed_secs());
                 timer_text(text, theme::BODY)
                     .min_w(px(40.))
                     .text_right()
                     .into_any_element()
+            }
             CompactMode::Shell => {
                 let frame = ((self.pixel_t * 8.0) as usize) % 4;
                 let spin = ["⠋", "⠙", "⠹", "⠸"][frame];
                 label(spin, theme::BODY, true).into_any_element()
+            }
             CompactMode::Meeting => {
                 widgets::meeting_compact_right(&self.meeting, self.overlay_fade.value)
             }
@@ -415,6 +419,7 @@ mod tests {
         assert_eq!(hud_icon(HudKind::Mute), "volume-x");
         assert_eq!(hud_icon(HudKind::Brightness), "sun");
     }
+}
 fn rec_dot() -> gpui::Div {
     div()
         .size(px(8.))

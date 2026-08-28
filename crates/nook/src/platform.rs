@@ -12,9 +12,7 @@
 //!      (not `visibleFrame`), without touching GPUI's `Window` (that RefCell-panics).
 
 use gpui::Window;
-#[cfg(target_os = "macos")]
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-use std::sync::atomic::{AtomicBool, Ordering};
 
 #[cfg(target_os = "macos")]
 use nook_core::notch::{CGPoint, CGRect, CGSize};
@@ -30,6 +28,7 @@ use std::time::Duration;
 static INSTALL: Once = Once::new();
 #[cfg(target_os = "macos")]
 static LOGGED_PIN: AtomicBool = AtomicBool::new(false);
+#[cfg(target_os = "macos")]
 static OPEN_SETTINGS: AtomicBool = AtomicBool::new(false);
 #[cfg(target_os = "macos")]
 static PIN_NEEDED: AtomicBool = AtomicBool::new(false);
@@ -819,8 +818,6 @@ unsafe fn begin_file_drag(ns_win: *mut objc2::runtime::AnyObject, path: &str) {
 }
 
 pub fn set_accessory(accessory: bool) {
-    #[cfg(not(target_os = "macos"))]
-    let _ = accessory;
     #[cfg(target_os = "macos")]
     unsafe {
         use objc2::runtime::AnyObject;
@@ -850,14 +847,14 @@ fn ns_window(window: &Window) -> Option<*mut objc2::runtime::AnyObject> {
     }
 }
 
-/// True once if Settings was requested (menu-bar extra or a keybinding).
+/// True once if the status item asked to open Settings.
 pub fn take_open_settings() -> bool {
-    OPEN_SETTINGS.swap(false, Ordering::SeqCst)
-}
-
-/// Ask the island poll loop to open Settings. Works without a status item.
-pub fn request_open_settings() {
-    OPEN_SETTINGS.store(true, Ordering::SeqCst);
+    #[cfg(target_os = "macos")]
+    {
+        OPEN_SETTINGS.swap(false, Ordering::SeqCst)
+    }
+    #[cfg(not(target_os = "macos"))]
+    false
 }
 
 /// Menu-bar extra with Settings and Quit. Accessory apps have no Dock/menu otherwise.
@@ -1658,6 +1655,7 @@ static ACCENT_B: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::ne
 #[cfg(target_os = "macos")]
 fn invalidate_accent_color() {
     ACCENT_VALID.store(false, Ordering::Relaxed);
+}
 /// Accessibility TCC via `AXIsProcessTrustedWithOptions`. `prompt` shows the
 /// system dialog (and deep-links if the user agrees).
 pub fn ax_process_trusted(prompt: bool) -> bool {
@@ -1838,6 +1836,7 @@ pub fn accessibility_trusted() -> bool {
 /// Show the system Accessibility prompt. Call from a user gesture.
 pub fn prompt_accessibility() -> bool {
     nook_core::window_snap::prompt_trust()
+}
 #[cfg(target_os = "macos")]
 unsafe fn workspace_note_bundle_id(note: *mut objc2::runtime::AnyObject) -> Option<String> {
     use objc2::runtime::AnyObject;
@@ -1983,6 +1982,7 @@ pub fn install_media_observers() {
 
 /// Re-assert OSDUIHelper suppression after sleep — launchd can respawn it.
 pub fn install_osd_wake_observer() {
+}
 /// Refresh weather after sleep without polling through it. The weather loop
 /// consumes [`nook_core::weather::take_wake`] and only hits the network when
 /// the 30 min cache is stale.
@@ -2003,17 +2003,12 @@ pub fn install_weather_observers() {
             if center.is_null() {
                 return;
             }
-            let name: *mut AnyObject = msg_send![
             let ns_name: *mut AnyObject = msg_send![
                 class!(NSString),
                 stringWithUTF8String: c"NSWorkspaceDidWakeNotification".as_ptr()
             ];
             let block = RcBlock::new(move |_note: *mut AnyObject| {
                 nook_core::osd::apply_from_settings();
-            });
-            let token: *mut AnyObject = msg_send![
-                center,
-                addObserverForName: name,
                 nook_core::weather::note_wake();
             });
             let token: *mut AnyObject = msg_send![
@@ -2838,6 +2833,86 @@ fn motion_art_cap() -> &'static std::sync::Mutex<MotionArtCap> {
             hidden: true,
             paused: true,
         })
+    })
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn sync_motion_art_macos(spec: Option<&MotionArtSpec>) {
+    use objc2::runtime::AnyObject;
+    use objc2::*;
+
+    let Some(spec) = spec.filter(|s| !s.url.is_empty() && s.w > 1.0 && s.h > 1.0) else {
+        hide_motion_art_macos();
+        return;
+    };
+
+    let mut ns_win = std::ptr::null_mut();
+    for_each_island_window(|w| {
+        if ns_win.is_null() {
+            ns_win = w;
+        }
+    });
+    if ns_win.is_null() {
+        return;
+    }
+    let content: *mut AnyObject = msg_send![ns_win, contentView];
+    if content.is_null() {
+        return;
+    }
+    let _: () = msg_send![content, setWantsLayer: true];
+    let host: *mut AnyObject = msg_send![content, layer];
+    if host.is_null() {
+        return;
+    }
+    let view_frame: CGRect = msg_send![content, bounds];
+    let view_h = view_frame.size.height;
+    let (cx, cy, cw, ch) = cocoa_rect_from_gpui(spec.x, spec.y, spec.w, spec.h, view_h);
+    let rect = CGRect {
+        origin: CGPoint { x: cx, y: cy },
+        size: CGSize {
+            width: cw,
+            height: ch,
+        },
+    };
+
+    let mut cap = motion_art_cap().lock().unwrap_or_else(|e| e.into_inner());
+    if cap.url != spec.url || cap.layer.is_null() {
+        teardown_motion_art_locked(&mut cap);
+        let Some((layer, player, looper)) = create_motion_art_layer(&spec.url, rect, spec.radius)
+        else {
+            return;
+        };
+        let _: () = msg_send![host, addSublayer: layer];
+        cap.url = spec.url.clone();
+        cap.layer = layer;
+        cap.player = player;
+        cap.looper = looper;
+        cap.last = None;
+        cap.hidden = false;
+        cap.paused = true;
+    }
+
+    let frame_key = (cx, cy, cw, ch, spec.radius);
+    if cap.last != Some(frame_key) && !cap.layer.is_null() {
+        let _: () = msg_send![cap.layer, setFrame: rect];
+        let _: () = msg_send![cap.layer, setCornerRadius: spec.radius];
+        cap.last = Some(frame_key);
+    }
+
+    let hide = !spec.playing;
+    if cap.hidden != hide && !cap.layer.is_null() {
+        let _: () = msg_send![cap.layer, setHidden: hide];
+        cap.hidden = hide;
+    }
+    if cap.paused != hide && !cap.player.is_null() {
+        if hide {
+            let _: () = msg_send![cap.player, pause];
+        } else {
+            let _: () = msg_send![cap.player, play];
+        }
+        cap.paused = hide;
+}
+}
 // WP21 — Carbon global hotkey, frontmost restore, Spotlight launch, auto-paste.
 
 use std::sync::atomic::AtomicBool as SearchAtomicBool;
@@ -3066,80 +3141,23 @@ fn hotkey_code(key: &str) -> Option<global_hotkey::hotkey::Code> {
 }
 
 #[cfg(target_os = "macos")]
-unsafe fn sync_motion_art_macos(spec: Option<&MotionArtSpec>) {
+fn remember_frontmost_macos() {
     use objc2::runtime::AnyObject;
     use objc2::*;
-
-    let Some(spec) = spec.filter(|s| !s.url.is_empty() && s.w > 1.0 && s.h > 1.0) else {
-        hide_motion_art_macos();
-        return;
-    };
-
-    let mut ns_win = std::ptr::null_mut();
-    for_each_island_window(|w| {
-        if ns_win.is_null() {
-            ns_win = w;
-        }
-    });
-    if ns_win.is_null() {
-        return;
-    }
-    let content: *mut AnyObject = msg_send![ns_win, contentView];
-    if content.is_null() {
-        return;
-    }
-    let _: () = msg_send![content, setWantsLayer: true];
-    let host: *mut AnyObject = msg_send![content, layer];
-    if host.is_null() {
-        return;
-    }
-    let view_frame: CGRect = msg_send![content, bounds];
-    let view_h = view_frame.size.height;
-    let (cx, cy, cw, ch) = cocoa_rect_from_gpui(spec.x, spec.y, spec.w, spec.h, view_h);
-    let rect = CGRect {
-        origin: CGPoint { x: cx, y: cy },
-        size: CGSize {
-            width: cw,
-            height: ch,
-        },
-    };
-
-    let mut cap = motion_art_cap().lock().unwrap_or_else(|e| e.into_inner());
-    if cap.url != spec.url || cap.layer.is_null() {
-        teardown_motion_art_locked(&mut cap);
-        let Some((layer, player, looper)) = create_motion_art_layer(&spec.url, rect, spec.radius)
-        else {
+    unsafe {
+        let ws: *mut AnyObject = msg_send![class!(NSWorkspace), sharedWorkspace];
+        if ws.is_null() {
             return;
-        };
-        let _: () = msg_send![host, addSublayer: layer];
-        cap.url = spec.url.clone();
-        cap.layer = layer;
-        cap.player = player;
-        cap.looper = looper;
-        cap.last = None;
-        cap.hidden = false;
-        cap.paused = true;
-    }
-
-    let frame_key = (cx, cy, cw, ch, spec.radius);
-    if cap.last != Some(frame_key) && !cap.layer.is_null() {
-        let _: () = msg_send![cap.layer, setFrame: rect];
-        let _: () = msg_send![cap.layer, setCornerRadius: spec.radius];
-        cap.last = Some(frame_key);
-    }
-
-    let hide = !spec.playing;
-    if cap.hidden != hide && !cap.layer.is_null() {
-        let _: () = msg_send![cap.layer, setHidden: hide];
-        cap.hidden = hide;
-    }
-    if cap.paused != hide && !cap.player.is_null() {
-        if hide {
-            let _: () = msg_send![cap.player, pause];
-        } else {
-            let _: () = msg_send![cap.player, play];
         }
-        cap.paused = hide;
+        let app: *mut AnyObject = msg_send![ws, frontmostApplication];
+        if app.is_null() {
+            return;
+        }
+        let pid: i32 = msg_send![app, processIdentifier];
+        if pid as u32 == std::process::id() {
+            return;
+        }
+        *frontmost_pid() = Some(pid);
     }
 }
 
@@ -3154,6 +3172,24 @@ unsafe fn hide_motion_art_macos() {
     if !cap.player.is_null() && !cap.paused {
         let _: () = msg_send![cap.player, pause];
         cap.paused = true;
+}
+}
+fn restore_frontmost_macos() {
+    use objc2::runtime::AnyObject;
+    use objc2::*;
+    let Some(pid) = frontmost_pid().take() else {
+        return;
+    };
+    unsafe {
+        let app: *mut AnyObject = msg_send![
+            class!(NSRunningApplication),
+            runningApplicationWithProcessIdentifier: pid
+        ];
+        if app.is_null() {
+            return;
+        }
+        // NSApplicationActivateIgnoringOtherApps
+        let _: bool = msg_send![app, activateWithOptions: 2u64];
     }
 }
 
@@ -3253,47 +3289,7 @@ unsafe fn create_motion_art_layer(
     let _: () = msg_send![layer, setCornerRadius: radius];
     let _: () = msg_send![layer, setMasksToBounds: true];
     Some((layer, player, looper))
-fn remember_frontmost_macos() {
-    use objc2::runtime::AnyObject;
-    use objc2::*;
-    unsafe {
-        let ws: *mut AnyObject = msg_send![class!(NSWorkspace), sharedWorkspace];
-        if ws.is_null() {
-            return;
-        }
-        let app: *mut AnyObject = msg_send![ws, frontmostApplication];
-        if app.is_null() {
-            return;
-        }
-        let pid: i32 = msg_send![app, processIdentifier];
-        if pid as u32 == std::process::id() {
-            return;
-        }
-        *frontmost_pid() = Some(pid);
-    }
 }
-
-#[cfg(target_os = "macos")]
-fn restore_frontmost_macos() {
-    use objc2::runtime::AnyObject;
-    use objc2::*;
-    let Some(pid) = frontmost_pid().take() else {
-        return;
-    };
-    unsafe {
-        let app: *mut AnyObject = msg_send![
-            class!(NSRunningApplication),
-            runningApplicationWithProcessIdentifier: pid
-        ];
-        if app.is_null() {
-            return;
-        }
-        // NSApplicationActivateIgnoringOtherApps
-        let _: bool = msg_send![app, activateWithOptions: 2u64];
-    }
-}
-
-#[cfg(target_os = "macos")]
 fn frontmost_pid() -> std::sync::MutexGuard<'static, Option<i32>> {
     static PID: std::sync::OnceLock<std::sync::Mutex<Option<i32>>> = std::sync::OnceLock::new();
     PID.get_or_init(|| std::sync::Mutex::new(None))

@@ -374,6 +374,19 @@ pub(crate) fn nook_media_pane(island: &Island, cx: &mut Context<Island>) -> impl
                 )
                 .child(nook_progress(progress, elapsed, duration, seekable, cx))
                 .into_any_element()
+        });
+    let queue = island.queue.clone();
+    let show_queue = island.settings.show_media_queue && !queue.items.is_empty();
+    div()
+        .id("nook-media-col")
+        .w_full()
+        .h_full()
+        .overflow_hidden()
+        .flex()
+        .flex_col()
+        .child(player)
+        .when(show_queue, |d| {
+            d.child(up_next_list(&queue, queue_list_height(queue.items.len()), cx))
         })
 }
 
@@ -533,28 +546,6 @@ fn output_picker_list(island: &Island, cx: &mut Context<Island>) -> impl IntoEle
             .line_height(px(11.))
             .child(nook_core::audio_devices::AIRPLAY_INITIATE_NOTE),
     )
-                .child(nook_progress(
-                    island,
-                    progress,
-                    elapsed,
-                    duration,
-                    seekable,
-                    cx,
-                )),
-        );
-    let queue = island.queue.clone();
-    let show_queue = island.settings.show_media_queue && !queue.items.is_empty();
-    div()
-        .id("nook-media-col")
-        .w_full()
-        .h_full()
-        .overflow_hidden()
-        .flex()
-        .flex_col()
-        .child(player)
-        .when(show_queue, |d| {
-            d.child(up_next_list(&queue, queue_list_height(queue.items.len()), cx))
-        })
 }
 
 fn app_badge(bundle_id: Option<&str>, app_name: Option<&str>) -> AnyElement {
@@ -993,10 +984,6 @@ fn up_next_list(
                         });
                     }),
                 ),
-                .text_size(px(theme::FOOTNOTE.size))
-                .font_weight(theme::FOOTNOTE.emphasized)
-                .text_color(rgba(0xffffff88))
-                .child(label),
         );
     let mut rows = div()
         .id("up-next-rows")

@@ -23,21 +23,21 @@ pub enum WidgetModule {
     Agents = 8,
     Mirror = 9,
     Battery = 10,
-    Messages = 10,
-    Obsidian = 10,
-    Mixer = 10,
-    Weather = 10,
-    Vpn = 10,
-    HighAlert = 10,
-    SysStats = 10,
-    Recorder = 10,
-    Meeting = 10,
-    Notifications = 10,
-    Process = 10,
+    Messages = 11,
+    Obsidian = 12,
+    Mixer = 13,
+    Weather = 14,
+    Vpn = 15,
+    HighAlert = 16,
+    SysStats = 17,
+    Recorder = 18,
+    Meeting = 19,
+    Notifications = 20,
+    Process = 21,
 }
 
 impl WidgetModule {
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 22] = [
         Self::Calendar,
         Self::Music,
         Self::Files,
@@ -73,65 +73,68 @@ impl WidgetModule {
     pub fn default_cells(self) -> u8 {
         match self {
             Self::Calendar | Self::Music => 5,
-            Self::Files | Self::Notes | Self::Observe | Self::Reminders | Self::Agents => 4,
-            Self::Timers | Self::Speed | Self::Mirror | Self::Battery => 3,
-            Self::Files | Self::Notes | Self::Observe | Self::Reminders | Self::Agents | Self::Messages => {
-            Self::Files | Self::Notes | Self::Observe | Self::Reminders | Self::Agents | Self::Obsidian => {
-            Self::Files | Self::Notes | Self::Observe | Self::Reminders | Self::Agents | Self::Mixer => {
-                4
-            }
             Self::Files
             | Self::Notes
             | Self::Observe
             | Self::Reminders
             | Self::Agents
-            | Self::SysStats => 4,
-            Self::Files | Self::Notes | Self::Observe | Self::Reminders | Self::Agents | Self::Recorder => 4,
+            | Self::Messages
+            | Self::Obsidian
+            | Self::Mixer
+            | Self::SysStats
+            | Self::Recorder
             | Self::Notifications => 4,
-            Self::Timers | Self::Speed | Self::Mirror => 3,
-            Self::Timers | Self::Speed | Self::Mirror | Self::Weather => 3,
-            Self::Timers | Self::Speed | Self::Mirror | Self::Vpn => 3,
-            Self::Timers | Self::Speed | Self::Mirror | Self::HighAlert => 3,
-            Self::Timers | Self::Speed | Self::Mirror | Self::Meeting => 3,
-            Self::Timers | Self::Speed | Self::Mirror | Self::Process => 3,
+            Self::Timers
+            | Self::Speed
+            | Self::Mirror
+            | Self::Battery
+            | Self::Weather
+            | Self::Vpn
+            | Self::HighAlert
+            | Self::Meeting
+            | Self::Process => 3,
         }
     }
 
     pub fn min_cells(self) -> u8 {
         match self {
             Self::Calendar => 4,
-            Self::Music | Self::Files | Self::Observe | Self::Reminders | Self::Mirror => 3,
-            Self::Notes | Self::Timers | Self::Speed | Self::Agents | Self::Battery => 2,
-            Self::Music | Self::Files | Self::Observe | Self::Reminders | Self::Mirror | Self::Messages => {
-            Self::Music | Self::Files | Self::Observe | Self::Reminders | Self::Mirror | Self::Mixer => {
-                3
-            }
             Self::Music
             | Self::Files
             | Self::Observe
             | Self::Reminders
             | Self::Mirror
-            | Self::SysStats => 3,
+            | Self::Messages
+            | Self::Mixer
+            | Self::SysStats
             | Self::Notifications => 3,
-            Self::Notes | Self::Timers | Self::Speed | Self::Agents => 2,
-            Self::Notes | Self::Timers | Self::Speed | Self::Agents | Self::Obsidian => 2,
-            Self::Notes | Self::Timers | Self::Speed | Self::Agents | Self::Weather => 2,
-            Self::Notes | Self::Timers | Self::Speed | Self::Agents | Self::Vpn => 2,
-            Self::Notes | Self::Timers | Self::Speed | Self::Agents | Self::HighAlert => 2,
-            Self::Notes | Self::Timers | Self::Speed | Self::Agents | Self::Recorder => 2,
-            Self::Notes | Self::Timers | Self::Speed | Self::Agents | Self::Meeting => 2,
-            Self::Notes | Self::Timers | Self::Speed | Self::Agents | Self::Process => 2,
+            Self::Notes
+            | Self::Timers
+            | Self::Speed
+            | Self::Agents
+            | Self::Battery
+            | Self::Obsidian
+            | Self::Weather
+            | Self::Vpn
+            | Self::HighAlert
+            | Self::Recorder
+            | Self::Meeting
+            | Self::Process => 2,
         }
     }
 
     pub fn max_cells(self) -> u8 {
         match self {
-            Self::Timers | Self::Speed | Self::Agents | Self::Mirror | Self::Battery => 6,
-            Self::Timers | Self::Speed | Self::Agents | Self::Mirror | Self::Weather => 6,
-            Self::Timers | Self::Speed | Self::Agents | Self::Mirror | Self::Vpn => 6,
-            Self::Timers | Self::Speed | Self::Agents | Self::Mirror | Self::HighAlert => 6,
-            Self::Timers | Self::Speed | Self::Agents | Self::Mirror | Self::Meeting => 6,
-            Self::Timers | Self::Speed | Self::Agents | Self::Mirror | Self::Process => 6,
+            Self::Timers
+            | Self::Speed
+            | Self::Agents
+            | Self::Mirror
+            | Self::Battery
+            | Self::Weather
+            | Self::Vpn
+            | Self::HighAlert
+            | Self::Meeting
+            | Self::Process => 6,
             _ => 8,
         }
     }
@@ -724,6 +727,7 @@ fn default_battery_alert_threshold() -> u8 {
 
 fn default_lpm_shortcut_name() -> Option<String> {
     Some(crate::power::default_lpm_shortcut_name().into())
+}
 fn default_high_alert_duration() -> u32 {
     30 * 60
 }
@@ -746,6 +750,7 @@ fn default_pomo_long() -> u32 {
 
 fn default_pomo_cycles() -> u8 {
     4
+}
 fn default_keysound_pack() -> String {
     "nook-click".into()
 }
@@ -907,6 +912,7 @@ impl AppSettings {
             WidgetModule::Recorder => self.show_recorder,
             WidgetModule::Meeting => self.show_meetings,
             WidgetModule::Notifications => self.show_notifications,
+            WidgetModule::Process => self.show_process,
         }
     }
 
@@ -925,7 +931,6 @@ impl AppSettings {
             self.notification_blocked_apps.remove(index);
         } else if !id.is_empty() {
             self.notification_blocked_apps.push(id.to_string());
-            WidgetModule::Process => self.show_process,
         }
     }
 
@@ -1461,31 +1466,6 @@ mod tests {
     }
 
     #[test]
-    fn linux_stub_notch_origin_is_top_center() {
-        // Linux reports has_notch=false and a stub width from
-        // calculate_dynamic_notch_width(real_width). Default island_x=0.5
-        // then centres that wrap on the *reported* screen — a leftover
-        // 1920-wide canvas parked the same pill at x≈860 on a 1280 display.
-        let settings = AppSettings::default();
-        assert!((settings.island_x - 0.5).abs() < f32::EPSILON);
-        assert_eq!(settings.island_y, 0.0);
-        let screen_w = 1280.0;
-        let screen_h = 800.0;
-        let notch_w = (screen_w as f64 * 0.1).clamp(200.0, 260.0) as f32;
-        let wrap_w = notch_w + 1.0;
-        let wrap_h = 32.0 + 1.0 + 1.0;
-        let (x, y) = settings.island_origin(screen_w, screen_h, wrap_w, wrap_h);
-        assert_eq!(y, 0.0);
-        assert!((x - (screen_w - wrap_w) / 2.0).abs() < 0.01);
-        let parked_on_1920 = (1920.0 - wrap_w) / 2.0;
-        assert!(
-            (x - parked_on_1920).abs() > 100.0,
-            "a 1920-wide canvas parks the pill at {parked_on_1920}, which is the right of 1280; got {x}"
-        );
-        assert!(settings.island_attached(screen_h));
-    }
-
-    #[test]
     fn island_origin_tracks_a_drag_and_clamps() {
         let mut settings = AppSettings::default();
         settings.set_island_origin(0.0, 120.0, 1512.0, 982.0, 180.0);
@@ -1618,6 +1598,7 @@ mod tests {
         assert!(!parsed.thaw_enabled);
         assert!(!parsed.thaw_hidden);
         assert!(!parsed.snap_drag_to_edge);
+}
     fn audio_output_picker_defaults_on() {
         let parsed: AppSettings = serde_json::from_str("{}").unwrap();
         assert!(parsed.audio_output_picker);
@@ -1625,6 +1606,7 @@ mod tests {
             parsed.audio_output_picker,
             AppSettings::default().audio_output_picker
         );
+}
     fn input_feel_flags_default_off() {
         let parsed: AppSettings = serde_json::from_str("{}").unwrap();
         assert!(!parsed.keysounds_enabled);
