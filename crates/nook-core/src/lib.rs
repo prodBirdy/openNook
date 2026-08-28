@@ -45,6 +45,7 @@ pub mod settings;
 pub mod sysvol;
 pub mod share;
 pub mod shell;
+pub mod sysstats;
 pub mod utils;
 pub mod weather;
 pub mod vpn;

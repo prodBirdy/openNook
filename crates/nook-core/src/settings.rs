@@ -3,6 +3,7 @@ use crate::high_alert::HighAlertKind;
 use crate::observe::ObserveConfig;
 use crate::share::ShareSettings;
 use crate::weather::WeatherSettings;
+use crate::sysstats::SysStatsSettings;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::RwLock;
@@ -28,6 +29,7 @@ pub enum WidgetModule {
     Weather = 10,
     Vpn = 10,
     HighAlert = 10,
+    SysStats = 10,
 }
 
 impl WidgetModule {
@@ -49,6 +51,7 @@ impl WidgetModule {
         Self::Weather,
         Self::Vpn,
         Self::HighAlert,
+        Self::SysStats,
     ];
 
     pub fn from_u8(value: u8) -> Self {
@@ -69,6 +72,12 @@ impl WidgetModule {
             Self::Files | Self::Notes | Self::Observe | Self::Reminders | Self::Agents | Self::Mixer => {
                 4
             }
+            Self::Files
+            | Self::Notes
+            | Self::Observe
+            | Self::Reminders
+            | Self::Agents
+            | Self::SysStats => 4,
             Self::Timers | Self::Speed | Self::Mirror => 3,
             Self::Timers | Self::Speed | Self::Mirror | Self::Weather => 3,
             Self::Timers | Self::Speed | Self::Mirror | Self::Vpn => 3,
@@ -85,6 +94,12 @@ impl WidgetModule {
             Self::Music | Self::Files | Self::Observe | Self::Reminders | Self::Mirror | Self::Mixer => {
                 3
             }
+            Self::Music
+            | Self::Files
+            | Self::Observe
+            | Self::Reminders
+            | Self::Mirror
+            | Self::SysStats => 3,
             Self::Notes | Self::Timers | Self::Speed | Self::Agents => 2,
             Self::Notes | Self::Timers | Self::Speed | Self::Agents | Self::Obsidian => 2,
             Self::Notes | Self::Timers | Self::Speed | Self::Agents | Self::Weather => 2,
@@ -128,6 +143,7 @@ fn default_widget_order() -> Vec<WidgetModule> {
         WidgetModule::Weather,
         WidgetModule::Vpn,
         WidgetModule::HighAlert,
+        WidgetModule::SysStats,
     ]
 }
 
@@ -255,6 +271,9 @@ pub struct AppSettings {
     pub focus_shortcut_work: Option<String>,
     #[serde(default)]
     pub focus_shortcut_break: Option<String>,
+    pub show_sysstats: bool,
+    #[serde(default)]
+    pub sysstats: SysStatsSettings,
     #[serde(default)]
     pub observe: ObserveConfig,
     #[serde(default)]
@@ -496,6 +515,8 @@ impl Default for AppSettings {
             pomodoro_keep_awake: true,
             focus_shortcut_work: None,
             focus_shortcut_break: None,
+            show_sysstats: true,
+            sysstats: SysStatsSettings::default(),
             observe: ObserveConfig::default(),
             liquid_glass_mode: false,
             non_notch_mode: false,
@@ -569,6 +590,7 @@ impl AppSettings {
             WidgetModule::Weather => self.weather.enabled,
             WidgetModule::Vpn => self.show_vpn,
             WidgetModule::HighAlert => self.show_high_alert,
+            WidgetModule::SysStats => self.show_sysstats,
         }
     }
 
@@ -594,6 +616,7 @@ impl AppSettings {
             WidgetModule::Weather => self.weather.enabled = !self.weather.enabled,
             WidgetModule::Vpn => self.show_vpn = !self.show_vpn,
             WidgetModule::HighAlert => self.show_high_alert = !self.show_high_alert,
+            WidgetModule::SysStats => self.show_sysstats = !self.show_sysstats,
         }
     }
 
@@ -1023,6 +1046,8 @@ mod tests {
         assert!(parsed.pomodoro_auto_advance);
         assert!(parsed.pomodoro_keep_awake);
         assert_eq!(parsed.focus_shortcut_work, None);
+        assert!(parsed.show_sysstats);
+        assert_eq!(parsed.sysstats, SysStatsSettings::default());
         assert!(parsed.liquid_glass_mode);
         assert!(!parsed.non_notch_mode);
         assert!((parsed.island_x - 0.5).abs() < f32::EPSILON);
@@ -1127,6 +1152,7 @@ mod tests {
         settings.weather.enabled = false;
         settings.show_vpn = false;
         settings.show_high_alert = false;
+        settings.show_sysstats = false;
         settings.set_cells(WidgetModule::Music, 5);
         assert_eq!(settings.used_cells(), 5);
         assert_eq!(settings.remaining_cells(), AppSettings::TOTAL_CELLS - 5);

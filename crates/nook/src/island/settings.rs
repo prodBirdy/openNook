@@ -148,6 +148,7 @@ impl WidgetModuleExt for WidgetModule {
             Self::Weather => "Weather",
             Self::Vpn => "VPN",
             Self::HighAlert => "High Alert",
+            Self::SysStats => "Stats",
         }
     }
 
@@ -170,6 +171,7 @@ impl WidgetModuleExt for WidgetModule {
             Self::Weather => "cloud-sun",
             Self::Vpn => "shield",
             Self::HighAlert => "sun",
+            Self::SysStats => "activity",
         }
     }
 
@@ -207,6 +209,7 @@ impl WidgetModuleExt for WidgetModule {
             Self::Weather => weather_subtitle(settings),
             Self::Vpn => vpn_subtitle(settings.vpn_show_timer),
             Self::HighAlert => "Keep awake".into(),
+            Self::SysStats => sysstats_subtitle(settings),
         }
     }
 
@@ -237,6 +240,7 @@ impl WidgetModuleExt for WidgetModule {
             Self::Weather => "Weather",
             Self::Vpn => "VPN",
             Self::HighAlert => "Alert",
+            Self::SysStats => "Stats",
         }
     }
 }
@@ -294,6 +298,20 @@ fn vpn_subtitle(show_timer: bool) -> SharedString {
         "Session timer".into()
     } else {
         "Status".into()
+fn sysstats_subtitle(settings: &AppSettings) -> SharedString {
+    let n = [
+        settings.sysstats.show_cpu,
+        settings.sysstats.show_mem,
+        settings.sysstats.show_net,
+        settings.sysstats.show_disk,
+    ]
+    .into_iter()
+    .filter(|on| *on)
+    .count();
+    match n {
+        0 => "Hidden".into(),
+        1 => "1 readout".into(),
+        n => format!("{n} readouts").into(),
     }
 }
 
@@ -2525,6 +2543,45 @@ impl SettingsView {
                     .into_any_element()]),
                 Some("Required by Open-Meteo's CC-BY 4.0 license."),
             ))
+            .when(self.module == WidgetModule::SysStats, |d| {
+                d.child(self.render_sysstats_settings(settings, cx))
+            })
+    }
+
+    fn render_sysstats_settings(
+        &self,
+        settings: &AppSettings,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        section(
+            "Readouts",
+            settings_group(vec![
+                toggle_row("CPU", settings.sysstats.show_cpu, cx, |s| {
+                    s.sysstats.show_cpu = !s.sysstats.show_cpu;
+                })
+                .into_any_element(),
+                toggle_row("Memory", settings.sysstats.show_mem, cx, |s| {
+                    s.sysstats.show_mem = !s.sysstats.show_mem;
+                })
+                .into_any_element(),
+                toggle_row("Network", settings.sysstats.show_net, cx, |s| {
+                    s.sysstats.show_net = !s.sysstats.show_net;
+                })
+                .into_any_element(),
+                toggle_row("Disk", settings.sysstats.show_disk, cx, |s| {
+                    s.sysstats.show_disk = !s.sysstats.show_disk;
+                })
+                .into_any_element(),
+                toggle_row(
+                    "Physical interfaces only",
+                    settings.sysstats.physical_nics,
+                    cx,
+                    |s| s.sysstats.physical_nics = !s.sysstats.physical_nics,
+                )
+                .into_any_element(),
+            ]),
+            Some("Samples only while the expanded card is visible. CPU and network need two ticks; a collapse longer than a few minutes resets the rates."),
+        )
     }
 
     fn render_observe_settings(
@@ -3004,6 +3061,8 @@ fn module_blurb(module: WidgetModule) -> SharedString {
             "Live utun/ipsec/ppp status. The compact face flashes on connect and disconnect; the card shows the session clock. Ignore listed interfaces to hide helpers that look like a VPN.".into()
         WidgetModule::HighAlert => {
             "IOPM keep-awake. Timed chips expire in powerd — lid-close sleep is not prevented.".into()
+        WidgetModule::SysStats => {
+            "Live CPU, memory, network, and disk capacity. Idle cost is zero — sampling starts on expand and stops on collapse.".into()
         }
     }
 }
@@ -3678,6 +3737,23 @@ mod tests {
         assert_eq!(
             WidgetModule::Timers.subtitle(&settings).as_ref(),
             "Countdown"
+    fn sysstats_subtitle_counts_enabled_readouts() {
+        let mut settings = AppSettings::default();
+        assert_eq!(
+            WidgetModule::SysStats.subtitle(&settings).as_ref(),
+            "4 readouts"
+        );
+        settings.sysstats.show_disk = false;
+        settings.sysstats.show_net = false;
+        settings.sysstats.show_mem = false;
+        assert_eq!(
+            WidgetModule::SysStats.subtitle(&settings).as_ref(),
+            "1 readout"
+        );
+        settings.sysstats.show_cpu = false;
+        assert_eq!(
+            WidgetModule::SysStats.subtitle(&settings).as_ref(),
+            "Hidden"
         );
     }
 
@@ -3717,6 +3793,7 @@ mod tests {
                 "Weather",
                 "VPN",
                 "High Alert",
+                "Stats",
             ]
         );
         assert!(!names
