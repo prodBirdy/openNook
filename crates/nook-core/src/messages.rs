@@ -163,27 +163,23 @@ pub fn e164_digits(handle: &str) -> Option<String> {
         .or_else(|| trimmed.strip_prefix("tel:"))
         .unwrap_or(trimmed);
     let mut digits = String::new();
-    let mut saw_digit = false;
-    let mut prefix = String::new();
+    let mut had_plus = false;
     for c in rest.chars() {
-        if c.is_ascii_digit() {
-            saw_digit = true;
+        if c == '+' && digits.is_empty() && !had_plus {
+            had_plus = true;
+        } else if c.is_ascii_digit() {
             digits.push(c);
-        } else if !saw_digit && (c == '+' || c == '0') && prefix.len() < 3 {
-            prefix.push(c);
-        } else if c == ' ' || c == '-' || c == '(' || c == ')' || c == '.' {
+        } else if matches!(c, ' ' | '-' | '(' | ')' | '.') {
             continue;
         } else if !c.is_ascii_whitespace() {
             return None;
         }
     }
-    if prefix == "00" && digits.len() >= 7 {
-        // already international, keep digits
-    } else if prefix == "+" || prefix.is_empty() || prefix == "0" {
-        // national `0…` is not a usable WhatsApp prefill without a country code
-        if prefix == "0" && !digits.starts_with("00") {
-            return None;
-        }
+    if let Some(stripped) = digits.strip_prefix("00") {
+        digits = stripped.to_string();
+    } else if digits.starts_with('0') && !had_plus {
+        // National trunk prefix without a country code cannot prefill WhatsApp.
+        return None;
     }
     if (7..=15).contains(&digits.len()) {
         Some(digits)
@@ -316,16 +312,11 @@ fn looks_like_message_text(text: &str) -> bool {
     if text.is_empty() || text.len() > 8 * 1024 {
         return false;
     }
-    let classish = matches!(
-        text,
-        "NSString"
-            | "NSMutableString"
-            | "NSAttributedString"
-            | "NSMutableAttributedString"
-            | "NSDictionary"
-            | "NSObject"
-            | "streamtyped"
-    );
+    let classish = text.contains("NSString")
+        || text.contains("NSAttributedString")
+        || text.contains("NSDictionary")
+        || text.contains("NSObject")
+        || text.contains("streamtyped");
     !classish && text.chars().any(|c| !c.is_ascii_control())
 }
 
