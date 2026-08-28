@@ -32,6 +32,7 @@ pub enum WidgetModule {
     SysStats = 10,
     Recorder = 10,
     Meeting = 10,
+    Notifications = 10,
 }
 
 impl WidgetModule {
@@ -56,6 +57,7 @@ impl WidgetModule {
         Self::SysStats,
         Self::Recorder,
         Self::Meeting,
+        Self::Notifications,
     ];
 
     pub fn from_u8(value: u8) -> Self {
@@ -83,6 +85,7 @@ impl WidgetModule {
             | Self::Agents
             | Self::SysStats => 4,
             Self::Files | Self::Notes | Self::Observe | Self::Reminders | Self::Agents | Self::Recorder => 4,
+            | Self::Notifications => 4,
             Self::Timers | Self::Speed | Self::Mirror => 3,
             Self::Timers | Self::Speed | Self::Mirror | Self::Weather => 3,
             Self::Timers | Self::Speed | Self::Mirror | Self::Vpn => 3,
@@ -106,6 +109,7 @@ impl WidgetModule {
             | Self::Reminders
             | Self::Mirror
             | Self::SysStats => 3,
+            | Self::Notifications => 3,
             Self::Notes | Self::Timers | Self::Speed | Self::Agents => 2,
             Self::Notes | Self::Timers | Self::Speed | Self::Agents | Self::Obsidian => 2,
             Self::Notes | Self::Timers | Self::Speed | Self::Agents | Self::Weather => 2,
@@ -155,6 +159,7 @@ fn default_widget_order() -> Vec<WidgetModule> {
         WidgetModule::HighAlert,
         WidgetModule::SysStats,
         WidgetModule::Recorder,
+        WidgetModule::Notifications,
     ]
 }
 
@@ -299,6 +304,17 @@ pub struct AppSettings {
     pub show_meetings: bool,
     #[serde(default)]
     pub meetings: MeetingsConfig,
+    /// Off by default: Accessibility (and optional Full Disk Access) must be
+    /// granted before the shelf can see other apps' notifications.
+    #[serde(default)]
+    pub show_notifications: bool,
+    /// User opted into reading the usernoted SQLite store. Still requires a
+    /// manual Full Disk Access grant — there is no programmatic prompt.
+    #[serde(default)]
+    pub notification_fda_opt_in: bool,
+    /// Bundle IDs (or app names) hidden from the shelf.
+    #[serde(default)]
+    pub notification_blocked_apps: Vec<String>,
     #[serde(default)]
     pub observe: ObserveConfig,
     #[serde(default)]
@@ -704,6 +720,9 @@ impl Default for AppSettings {
             recorder_transcribe: true,
             show_meetings: true,
             meetings: MeetingsConfig::default(),
+            show_notifications: false,
+            notification_fda_opt_in: false,
+            notification_blocked_apps: Vec::new(),
             observe: ObserveConfig::default(),
             liquid_glass_mode: false,
             non_notch_mode: false,
@@ -783,6 +802,25 @@ impl AppSettings {
             WidgetModule::SysStats => self.show_sysstats,
             WidgetModule::Recorder => self.show_recorder,
             WidgetModule::Meeting => self.show_meetings,
+            WidgetModule::Notifications => self.show_notifications,
+        }
+    }
+
+    pub fn notification_app_blocked(&self, id: &str) -> bool {
+        self.notification_blocked_apps
+            .iter()
+            .any(|entry| entry.eq_ignore_ascii_case(id))
+    }
+
+    pub fn toggle_notification_app(&mut self, id: &str) {
+        if let Some(index) = self
+            .notification_blocked_apps
+            .iter()
+            .position(|entry| entry.eq_ignore_ascii_case(id))
+        {
+            self.notification_blocked_apps.remove(index);
+        } else if !id.is_empty() {
+            self.notification_blocked_apps.push(id.to_string());
         }
     }
 
@@ -811,6 +849,7 @@ impl AppSettings {
             WidgetModule::SysStats => self.show_sysstats = !self.show_sysstats,
             WidgetModule::Recorder => self.show_recorder = !self.show_recorder,
             WidgetModule::Meeting => self.show_meetings = !self.show_meetings,
+            WidgetModule::Notifications => self.show_notifications = !self.show_notifications,
         }
     }
 
@@ -1262,6 +1301,9 @@ mod tests {
         assert!(parsed.meetings.teams);
         assert!(parsed.meetings.meet);
         assert_eq!(parsed.meetings.meet_mode, MeetControlMode::FocusTab);
+        assert!(!parsed.show_notifications);
+        assert!(!parsed.notification_fda_opt_in);
+        assert!(parsed.notification_blocked_apps.is_empty());
         assert!(parsed.liquid_glass_mode);
         assert!(!parsed.non_notch_mode);
         assert!((parsed.island_x - 0.5).abs() < f32::EPSILON);
@@ -1385,6 +1427,7 @@ mod tests {
         settings.show_sysstats = false;
         settings.show_recorder = false;
         settings.show_meetings = false;
+        settings.show_notifications = false;
         settings.set_cells(WidgetModule::Music, 5);
         assert_eq!(settings.used_cells(), 5);
         assert_eq!(settings.remaining_cells(), AppSettings::TOTAL_CELLS - 5);
@@ -1400,6 +1443,21 @@ mod tests {
             settings.max_cells_for(WidgetModule::Music),
             WidgetModule::Music.max_cells()
         );
+    }
+
+    #[test]
+    fn notifications_default_off_and_filter_toggles() {
+        let parsed: AppSettings = serde_json::from_str("{}").unwrap();
+        assert!(!parsed.show_notifications);
+        assert!(!parsed.notification_fda_opt_in);
+        assert!(!parsed.is_enabled(WidgetModule::Notifications));
+        let mut settings = AppSettings::default();
+        settings.toggle_enabled(WidgetModule::Notifications);
+        assert!(settings.show_notifications);
+        settings.toggle_notification_app("com.apple.mail");
+        assert!(settings.notification_app_blocked("com.apple.mail"));
+        settings.toggle_notification_app("com.apple.mail");
+        assert!(!settings.notification_app_blocked("com.apple.mail"));
     }
 
     #[cfg(target_os = "macos")]

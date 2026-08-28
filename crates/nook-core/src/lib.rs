@@ -35,6 +35,7 @@ pub mod nl_parse;
 pub mod notch;
 pub mod notes;
 pub mod obsidian;
+pub mod notifications;
 pub mod observe;
 pub mod occupancy;
 pub mod power;
@@ -114,6 +115,7 @@ pub fn init() {
         vpn::start();
         shell::reap_orphaned_jobs();
         eventtap::sync();
+        notifications::load_persisted();
     });
 }
 

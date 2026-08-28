@@ -126,6 +126,18 @@ fn migrate(conn: &Connection) -> Result<()> {
          ON clipboard_items (copied_at)",
         [],
     )?;
+        "CREATE TABLE IF NOT EXISTS notification_shelf (
+            id TEXT PRIMARY KEY,
+            bundle_id TEXT NOT NULL,
+            app_name TEXT NOT NULL,
+            title TEXT NOT NULL,
+            subtitle TEXT NOT NULL,
+            body TEXT NOT NULL,
+            delivered_at INTEGER NOT NULL,
+            unread INTEGER NOT NULL DEFAULT 1
+        )",
+        [],
+    )?;
 
     Ok(())
 }

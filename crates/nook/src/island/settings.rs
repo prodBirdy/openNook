@@ -155,6 +155,7 @@ impl WidgetModuleExt for WidgetModule {
             Self::SysStats => "Stats",
             Self::Recorder => "Voice",
             Self::Meeting => "Meetings",
+            Self::Notifications => "Notifications",
         }
     }
 
@@ -180,6 +181,7 @@ impl WidgetModuleExt for WidgetModule {
             Self::SysStats => "activity",
             Self::Recorder => "mic",
             Self::Meeting => "video",
+            Self::Notifications => "bell",
         }
     }
 
@@ -232,6 +234,7 @@ impl WidgetModuleExt for WidgetModule {
                 }
             }
             Self::Meeting => "Zoom / Teams / Meet".into(),
+            Self::Notifications => notify_subtitle(settings),
         }
     }
 
@@ -265,6 +268,7 @@ impl WidgetModuleExt for WidgetModule {
             Self::SysStats => "Stats",
             Self::Recorder => "Voice",
             Self::Meeting => "Meetings",
+            Self::Notifications => "Notify",
         }
     }
 }
@@ -336,6 +340,44 @@ fn sysstats_subtitle(settings: &AppSettings) -> SharedString {
         0 => "Hidden".into(),
         1 => "1 readout".into(),
         n => format!("{n} readouts").into(),
+fn notification_permission_rows(cx: &mut Context<SettingsView>) -> Vec<AnyElement> {
+    use nook_core::notifications::PermissionState;
+    let ax = crate::platform::ax_process_trusted(false);
+    let fda = crate::platform::full_disk_access();
+    let ax_label = if ax { "Granted" } else { "Not granted" };
+    let fda_label = match fda {
+        PermissionState::Granted => "Granted",
+        PermissionState::Denied => "Not granted",
+        PermissionState::Unavailable => "Unavailable",
+    };
+    vec![
+        action_row("notify-ax", "Accessibility", ax_label, cx, |_, _, _| {
+            if !crate::platform::ax_process_trusted(true) {
+                crate::platform::open_privacy_accessibility();
+            }
+        })
+        .into_any_element(),
+        action_row(
+            "notify-fda",
+            "Full Disk Access",
+            fda_label,
+            cx,
+            |_, _, _| {
+                crate::platform::open_privacy_full_disk_access();
+            },
+        )
+        .into_any_element(),
+    ]
+}
+
+fn notify_subtitle(settings: &AppSettings) -> SharedString {
+    if !settings.show_notifications {
+        return "Off".into();
+    }
+    if crate::platform::ax_process_trusted(false) {
+        "Accessibility".into()
+    } else {
+        "Needs Accessibility".into()
     }
 }
 
@@ -2661,6 +2703,8 @@ impl SettingsView {
                     )
                     .into_any_element(),
                 );
+            WidgetModule::Notifications => {
+                rows.extend(notification_permission_rows(cx));
             }
             _ => {}
         }
@@ -2906,6 +2950,24 @@ impl SettingsView {
                     .child(label(
                         "Music Automation was denied. Grant it in System Settings → Privacy & Security → Automation to show Up Next in playlist.",
                         theme::SUBHEADLINE,
+            .when(self.module == WidgetModule::Notifications, |d| {
+                d.child(self.render_notification_settings(settings, cx))
+            })
+    }
+
+    fn render_notification_settings(
+        &self,
+        settings: &AppSettings,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let mut filter_rows = Vec::new();
+        let apps = nook_core::notifications::known_apps();
+        if apps.is_empty() {
+            filter_rows.push(
+                settings_row("notify-apps-empty")
+                    .child(label(
+                        "Apps appear here after a notification is captured.",
+                        theme::BODY,
                         false,
                     ))
                     .into_any_element(),
@@ -2921,7 +2983,43 @@ impl SettingsView {
             }
             _ => "Enter a city (no permission prompt). System location is opt-in and resets on re-sign.",
         };
-
+        } else {
+            for (id, name) in apps {
+                let blocked = settings.notification_app_blocked(&id);
+                let toggle_id = id.clone();
+                filter_rows.push(
+                    settings_row(SharedString::from(format!("notify-app-{id}")))
+                        .cursor(CursorStyle::PointingHand)
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |_, _, _, cx| {
+                                cx.stop_propagation();
+                                nook_core::settings::tweak_app_settings(|s| {
+                                    s.toggle_notification_app(&toggle_id);
+                                });
+                                cx.notify();
+                            }),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w(px(0.))
+                                .flex()
+                                .flex_col()
+                                .gap(px(1.))
+                                .child(label(name, theme::BODY, true))
+                                .child(label(id, theme::SUBHEADLINE, false)),
+                        )
+                        .child(label(
+                            if blocked { "Hidden" } else { "Shown" },
+                            theme::SUBHEADLINE,
+                            false,
+                        ))
+                        .child(toggle_knob(!blocked))
+                        .into_any_element(),
+                );
+            }
+        }
         div()
             .flex()
             .flex_col()
@@ -3005,6 +3103,21 @@ impl SettingsView {
                 nook_core::spotify::REDIRECT_URI
             )),
         )
+                "Full Disk Access",
+                settings_group(vec![toggle_row(
+                    "Read notification history",
+                    settings.notification_fda_opt_in,
+                    cx,
+                    |s| s.notification_fda_opt_in = !s.notification_fda_opt_in,
+                )
+                .into_any_element()]),
+                Some("Backfills banners the Accessibility scrape missed. You must add openNook in System Settings › Privacy & Security › Full Disk Access — there is no prompt."),
+            ))
+            .child(section(
+                "Per-app filter",
+                settings_group(filter_rows),
+                Some("Hidden apps never enter the shelf."),
+            ))
     }
 
     fn render_observe_settings(
@@ -3492,6 +3605,8 @@ fn module_blurb(module: WidgetModule) -> SharedString {
             "Record from the island. Transcription uses Apple's on-device Speech model when available; turn it off for long recordings.".into()
         WidgetModule::Meeting => {
             "Mute and leave from the island. Zoom reads mute from the Meeting menu. Teams is a blind shortcut (the localhost API is gone). Meet focuses the tab unless you enable Apple Events JS.".into()
+        WidgetModule::Notifications => {
+            "Captures other apps' banners via Accessibility. Optional usernoted backfill needs a manual Full Disk Access grant. Misses Focus / Do Not Disturb / 'None' styles.".into()
         }
     }
 }
@@ -4194,6 +4309,12 @@ mod tests {
         assert_eq!(
             WidgetModule::SysStats.subtitle(&settings).as_ref(),
             "Hidden"
+    fn notifications_subtitle_is_honest_when_off() {
+        let settings = AppSettings::default();
+        assert!(!settings.show_notifications);
+        assert_eq!(
+            WidgetModule::Notifications.subtitle(&settings).as_ref(),
+            "Off"
         );
     }
 
@@ -4236,6 +4357,7 @@ mod tests {
                 "Stats",
                 "Voice",
                 "Meetings",
+                "Notifications",
             ]
         );
         assert!(!names

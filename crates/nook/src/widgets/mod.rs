@@ -9,6 +9,7 @@ mod high_alert;
 mod meeting;
 mod notes;
 mod notes_editor;
+mod notifications;
 mod observe;
 mod obsidian;
 mod quick_add;
@@ -36,6 +37,10 @@ pub(crate) use meeting::{
 };
 pub(crate) use notes::notes_card;
 pub(crate) use notes_editor::{NotesEditor, NotesEditorEvent};
+pub(crate) use notifications::{
+    compact_left as notifications_compact_left, compact_right as notifications_compact_right,
+    notifications_card,
+};
 pub(crate) use observe::{observe_card, ObserveHover};
 pub(crate) use obsidian::obsidian_card;
 pub(crate) use quick_add::{QuickAdd, QuickAddEvent};

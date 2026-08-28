@@ -29,6 +29,7 @@ use nook_core::models::{NowPlayingData, PlaybackQueue};
 use nook_core::notch;
 use nook_core::messages::MessagesSnapshot;
 use nook_core::meetings::MeetingSnapshot;
+use nook_core::notifications::NotificationEvent;
 use nook_core::observe::{MetricHistory, ObserveSnapshot};
 use nook_core::power::PowerSnapshot;
 use nook_core::obsidian::{NoteEntry, VaultWatch};
@@ -84,6 +85,7 @@ pub enum CompactMode {
     Vpn,
     Recording,
     Meeting,
+    Notifications,
     Onboard,
     Messages,
     Share,
@@ -226,6 +228,8 @@ pub struct Island {
     pub sysstats: nook_core::sysstats::SysSnapshot,
     pub(crate) sysstats_sampling: bool,
     pub meeting: MeetingSnapshot,
+    pub notifications: Vec<NotificationEvent>,
+    pub notification_unread: usize,
     pub settings: AppSettings,
     pub first_run: bool,
     pub speed_mbps: Option<f64>,
@@ -447,6 +451,8 @@ impl Island {
             sysstats: nook_core::sysstats::SysSnapshot::default(),
             sysstats_sampling: false,
             meeting: MeetingSnapshot::default(),
+            notifications: nook_core::notifications::snapshot(),
+            notification_unread: nook_core::notifications::unread_count(),
             settings,
             first_run,
             speed_mbps: None,
@@ -545,6 +551,7 @@ impl Island {
         platform::install_meeting_observers();
         platform::install_screen_lock_observer();
         platform::sync_search_hotkey(this.settings.search.enabled, &this.settings.search.hotkey);
+        nook_core::notifications::sync_backends(&this.settings);
         nook_core::runtime().spawn(async {
             let _ = nook_core::calendar::request_calendar_access().await;
         });
@@ -638,6 +645,7 @@ impl Island {
                             this.settings.search.enabled,
                             &this.settings.search.hotkey,
                         );
+                        nook_core::notifications::sync_backends(&this.settings);
                         dirty = true;
                     }
                     if platform::take_search_hotkey() {
@@ -1247,6 +1255,21 @@ impl Island {
                 if this
                     .update(cx, |this, cx| {
                         this.apply_vpn_snapshot(snap, cx);
+        cx.spawn(async move |this, cx| {
+            let mut rx = nook_core::notifications::subscribe();
+            loop {
+                let items = nook_core::notifications::snapshot();
+                let unread = nook_core::notifications::unread_count();
+                if this
+                    .update(cx, |this, cx| {
+                        let was = this.notification_unread;
+                        this.notifications = items;
+                        this.notification_unread = unread;
+                        if this.settings.show_notifications && unread > was {
+                            this.preferred = Some(CompactMode::Notifications);
+                            nook_core::haptics::trigger(None);
+                        }
+                        cx.notify();
                     })
                     .is_err()
                 {
@@ -1450,6 +1473,9 @@ impl Island {
                 .is_err()
             {
                 break;
+                if rx.changed().await.is_err() {
+                    break;
+                }
             }
         })
         .detach();
@@ -2647,6 +2673,13 @@ impl Island {
             });
         })
         .detach();
+    fn has_notifications(&self) -> bool {
+        self.settings.show_notifications && self.notification_unread > 0
+    }
+
+    pub(crate) fn refresh_notifications(&mut self) {
+        self.notifications = nook_core::notifications::snapshot();
+        self.notification_unread = nook_core::notifications::unread_count();
     }
 
     fn available_modes(&self) -> Vec<CompactMode> {
@@ -2667,6 +2700,8 @@ impl Island {
             modes.push(CompactMode::Messages);
         if self.has_vpn_face() {
             modes.push(CompactMode::Vpn);
+        if self.has_notifications() {
+            modes.push(CompactMode::Notifications);
         }
         if self.has_media() {
             modes.push(CompactMode::Media);
@@ -3554,6 +3589,7 @@ mod tests {
     use crate::island::files::{file_grid_metrics, file_tile_height, files_pane_min_height};
     use crate::island::ui::format_timer;
     use nook_core::agents::{AgentKind, AgentStatus};
+    use nook_core::notifications::NotificationEvent;
     use std::collections::HashMap;
     use std::rc::Rc;
     use std::sync::{Mutex, MutexGuard};
@@ -3641,6 +3677,8 @@ mod tests {
             sysstats: nook_core::sysstats::SysSnapshot::default(),
             sysstats_sampling: false,
             meeting: MeetingSnapshot::default(),
+            notifications: Vec::new(),
+            notification_unread: 0,
             settings: AppSettings::default(),
             first_run: false,
             speed_mbps: None,
@@ -4182,6 +4220,27 @@ mod tests {
         );
         assert_eq!(island.mode(), CompactMode::Meeting);
         island.settings.show_meetings = false;
+    fn available_modes_includes_notifications() {
+        let mut island = test_island();
+        island.settings.show_notifications = true;
+        island.notification_unread = 2;
+        island.notifications.push(NotificationEvent::new(
+            "com.hnc.Discord",
+            "Discord",
+            "Hello",
+            "",
+            "there",
+            1,
+        ));
+        assert_eq!(
+            island.available_modes(),
+            vec![CompactMode::Notifications, CompactMode::Idle]
+        );
+        assert_eq!(island.mode(), CompactMode::Notifications);
+        island.settings.show_notifications = false;
+        assert_eq!(island.available_modes(), vec![CompactMode::Idle]);
+        island.settings.show_notifications = true;
+        island.notification_unread = 0;
         assert_eq!(island.available_modes(), vec![CompactMode::Idle]);
     }
 

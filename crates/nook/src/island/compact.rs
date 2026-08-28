@@ -106,6 +106,9 @@ impl Island {
             CompactMode::Shell => lucide("terminal", theme::COMPACT_FACE).into_any_element(),
             CompactMode::Recording => rec_dot().into_any_element(),
             CompactMode::Meeting => widgets::meeting_compact_left(&self.meeting),
+            CompactMode::Notifications => {
+                widgets::notifications_compact_left(self.notifications.first())
+            }
             CompactMode::Onboard => label("openNook", theme::BODY, true).into_any_element(),
             CompactMode::Messages => self
                 .messages
@@ -215,6 +218,10 @@ impl Island {
                 )
                 .child(lucide("search", theme::COMPACT_FACE))
                 .into_any_element(),
+            CompactMode::Notifications => widgets::notifications_compact_right(
+                self.notification_unread,
+                self.notifications.first(),
+            ),
             CompactMode::Onboard if hovered => div()
                 .id("github")
                 .cursor(CursorStyle::PointingHand)
@@ -327,6 +334,7 @@ impl Island {
                 CompactMode::Vpn => "vpn",
                 CompactMode::Recording => "recording",
                 CompactMode::Meeting => "meeting",
+                CompactMode::Notifications => "notify",
                 CompactMode::Onboard => "onboard",
                 CompactMode::Messages => "messages",
                 CompactMode::Share => "share",
