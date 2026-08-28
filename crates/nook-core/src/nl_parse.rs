@@ -760,8 +760,8 @@ mod macos {
     use super::*;
     use objc2::rc::Retained;
     use objc2_foundation::{
-        NSDataDetector, NSMatchingOptions, NSRange, NSString, NSTextCheckingResult,
-        NSTextCheckingType, NSTextCheckingTypes,
+        NSDataDetector, NSMatchingOptions, NSRange, NSString, NSTextCheckingType,
+        NSTextCheckingTypes,
     };
     use std::sync::OnceLock;
 
@@ -771,7 +771,7 @@ mod macos {
             .get_or_init(|| {
                 let types: NSTextCheckingTypes =
                     NSTextCheckingType::Date.0 | NSTextCheckingType::Address.0;
-                unsafe { NSDataDetector::dataDetectorWithTypes_error(types) }.ok()
+                NSDataDetector::dataDetectorWithTypes_error(types).ok()
             })
             .as_ref()
     }
@@ -796,14 +796,13 @@ mod macos {
             length: ns.length(),
         };
         let matches = unsafe {
-            detector.matchesInString_options_range(&ns, NSMatchingOptions::default(), full)
+            detector.matchesInString_options_range(&ns, NSMatchingOptions::empty(), full)
         };
 
         let mut date_span: Option<(f64, f64, std::ops::Range<usize>, bool)> = None;
         let mut location: Option<String> = None;
 
         for result in matches.iter() {
-            let result: &NSTextCheckingResult = result;
             let kind = unsafe { result.resultType() };
             if is_date(kind) {
                 if date_span.is_some() {
