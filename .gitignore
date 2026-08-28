@@ -5,3 +5,7 @@
 .vscode
 *.pdb
 /third_party/mediaremote-adapter
+node_modules
+dist
+dist-ssr
+*.local

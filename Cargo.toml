@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = ["crates/nook-core", "crates/nook"]
+exclude = ["src-tauri"]
 
 [workspace.package]
 version = "0.3.0"
