@@ -180,7 +180,13 @@ impl WidgetModuleExt for WidgetModule {
     fn subtitle(self, settings: &AppSettings) -> SharedString {
         match self {
             Self::Calendar => "7 days".into(),
-            Self::Music => "Now Playing".into(),
+            Self::Music => {
+                if settings.show_media_queue {
+                    "Now Playing + queue".into()
+                } else {
+                    "Now Playing".into()
+                }
+            }
             Self::Files => "Tray tab".into(),
             Self::Notes => "Scratchpad".into(),
             Self::Observe => observe_subtitle(settings.observe.metrics.len()),
@@ -407,6 +413,10 @@ pub(super) struct SettingsView {
     url_draft: String,
     token_draft: String,
     ignore_draft: String,
+    client_id_focus: FocusHandle,
+    url_draft: String,
+    token_draft: String,
+    client_id_draft: String,
     token_revealed: bool,
     query_draft: String,
     heading_draft: String,
@@ -507,6 +517,10 @@ impl SettingsView {
             url_draft: settings.observe.prometheus_url,
             token_draft: settings.observe.metrics_token,
             ignore_draft: nook_core::vpn::format_ignore_list(&settings.vpn_ignore_interfaces),
+            client_id_focus: cx.focus_handle(),
+            url_draft: settings.observe.prometheus_url,
+            token_draft: settings.observe.metrics_token,
+            client_id_draft: settings.spotify_client_id,
             token_revealed: false,
             query_draft: String::new(),
             heading_draft: settings.obsidian_capture_heading.clone().unwrap_or_default(),
@@ -776,6 +790,7 @@ impl gpui::Render for SettingsView {
         let city_focused = self.city_focus.is_focused(window);
         let ignore_focused = self.ignore_focus.is_focused(window);
         let exclude_focused = self.exclude_focus.is_focused(window);
+        let client_id_focused = self.client_id_focus.is_focused(window);
 
         div()
             .id("settings-root")
@@ -806,6 +821,7 @@ impl gpui::Render for SettingsView {
                     heading_focused,
                     city_focused,
                     ignore_focused,
+                    client_id_focused,
                     cx,
                 )
                     .into_any_element()
@@ -1869,6 +1885,7 @@ impl SettingsView {
         heading_focused: bool,
         city_focused: bool,
         ignore_focused: bool,
+        client_id_focused: bool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let remaining = settings.remaining_cells();
@@ -1914,6 +1931,7 @@ impl SettingsView {
                     heading_focused,
                     city_focused,
                     ignore_focused,
+                    client_id_focused,
                     cx,
                 )),
         )
@@ -2146,6 +2164,7 @@ impl SettingsView {
         heading_focused: bool,
         city_focused: bool,
         ignore_focused: bool,
+        client_id_focused: bool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let name = self.module.name();
@@ -2463,6 +2482,68 @@ impl SettingsView {
                     if event.keystroke.key == "enter" {
                         this.search_city(cx);
                     } else if SettingsView::apply_key(&mut this.city_draft, event, cx) {
+            .when(self.module == WidgetModule::Music, |d| {
+                d.child(self.render_music_settings(settings, client_id_focused, cx))
+            })
+    }
+
+    fn persist_client_id(&self) {
+        let draft = self.client_id_draft.trim().to_string();
+        if nook_core::settings::get_app_settings().spotify_client_id == draft {
+            return;
+        }
+        nook_core::settings::tweak_app_settings(|s| s.spotify_client_id = draft);
+    }
+
+    fn render_music_settings(
+        &self,
+        settings: &AppSettings,
+        client_id_focused: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        if !client_id_focused {
+            self.persist_client_id();
+        }
+        use nook_core::spotify::SpotifyStatus;
+        let status = nook_core::spotify::status();
+        let status_text = match &status {
+            SpotifyStatus::Disconnected => "Not connected".to_string(),
+            SpotifyStatus::Connecting => "Waiting for Spotify login…".to_string(),
+            SpotifyStatus::Connected => "Connected".to_string(),
+            SpotifyStatus::NeedsClientId => "Add a client ID first".to_string(),
+            SpotifyStatus::PremiumRequired => {
+                "Spotify Premium is required for queue control".to_string()
+            }
+            SpotifyStatus::Error(err) => err.clone(),
+        };
+        let connected = matches!(
+            status,
+            SpotifyStatus::Connected | SpotifyStatus::PremiumRequired
+        );
+        let client_placeholder = self.client_id_draft.is_empty();
+        let client_value = if client_placeholder {
+            "Paste your Spotify client ID"
+        } else {
+            self.client_id_draft.as_str()
+        };
+        let mut rows = vec![
+            toggle_row("Show Up Next", settings.show_media_queue, cx, |s| {
+                s.show_media_queue = !s.show_media_queue;
+            })
+            .into_any_element(),
+            field_row(
+                "spotify-client-id",
+                "Client ID",
+                client_value,
+                client_placeholder,
+                client_id_focused,
+                &self.client_id_focus,
+                cx,
+                |this, event, cx| {
+                    if event.keystroke.key == "enter" {
+                        this.persist_client_id();
+                        cx.notify();
+                    } else if SettingsView::apply_key(&mut this.client_id_draft, event, cx) {
                         cx.notify();
                     }
                 },
@@ -2522,6 +2603,63 @@ impl SettingsView {
                         "Use",
                         cx,
                         move |this, _, cx| this.pick_place(picked.clone(), cx),
+            settings_row("spotify-status")
+                .child(label("Spotify", theme::BODY, true))
+                .child(label(status_text, theme::SUBHEADLINE, false))
+                .into_any_element(),
+        ];
+        if connected {
+            rows.push(
+                action_row(
+                    "spotify-disconnect",
+                    "Account",
+                    "Disconnect",
+                    cx,
+                    |_, _, cx| {
+                        nook_core::spotify::disconnect();
+                        cx.notify();
+                    },
+                )
+                .into_any_element(),
+            );
+        } else {
+            rows.push(
+                action_row(
+                    "spotify-connect",
+                    "Account",
+                    "Connect Spotify",
+                    cx,
+                    |this, _, cx| {
+                        this.persist_client_id();
+                        cx.spawn(async move |this, cx| {
+                            let result = cx
+                                .background_executor()
+                                .spawn(async {
+                                    nook_core::runtime().block_on(nook_core::spotify::connect())
+                                })
+                                .await;
+                            this.update(cx, |_, cx| {
+                                if let Err(err) = result {
+                                    log::warn!("spotify connect: {err}");
+                                }
+                                cx.notify();
+                            })
+                            .ok();
+                        })
+                        .detach();
+                        cx.notify();
+                    },
+                )
+                .into_any_element(),
+            );
+        }
+        if nook_core::queue::music_automation_denied() {
+            rows.push(
+                settings_row("music-tcc")
+                    .child(label(
+                        "Music Automation was denied. Grant it in System Settings → Privacy & Security → Automation to show Up Next in playlist.",
+                        theme::SUBHEADLINE,
+                        false,
                     ))
                     .into_any_element(),
             );
@@ -2612,6 +2750,13 @@ impl SettingsView {
                 .into_any_element(),
             ]),
             Some("Samples only while the expanded card is visible. CPU and network need two ticks; a collapse longer than a few minutes resets the rates."),
+        section(
+            "Playing Next",
+            settings_group(rows),
+            Some(format!(
+                "Register redirect URI {} on your Spotify developer app. No client secret is used. Apple Music shows upcoming tracks from the current playlist — not the real Playing Next queue — and hides the list when shuffle or radio is on.",
+                nook_core::spotify::REDIRECT_URI
+            )),
         )
     }
 
@@ -3059,6 +3204,7 @@ fn module_blurb(module: WidgetModule) -> SharedString {
         WidgetModule::Music => {
             "Now Playing from MediaRemote on macOS. The output picker lists CoreAudio devices; it cannot start AirPlay to a HomePod or Apple TV.".into()
             "Now Playing from MediaRemote. Optional Apple Music motion art is opt-in and fails silent to static covers; the glow uses local artwork colors.".into()
+            "Now Playing from MediaRemote on macOS, with an AppleScript fallback. Up Next lists the current Music playlist (unshuffled) or the Spotify Web API queue.".into()
         }
         WidgetModule::Files => "Drop zone and tray live on the Tray tab of the expanded island.".into(),
         WidgetModule::Timers => {

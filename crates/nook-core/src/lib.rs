@@ -48,6 +48,9 @@ pub mod sysvol;
 pub mod share;
 pub mod shell;
 pub mod sysstats;
+pub mod queue;
+pub mod settings;
+pub mod spotify;
 pub mod utils;
 pub mod weather;
 pub mod vpn;
@@ -55,6 +58,7 @@ pub mod widgets;
 pub mod window_snap;
 
 pub use models::{LyricLine, NotchInfo, NowPlayingData, SyncedLyrics};
+pub use models::{NotchInfo, NowPlayingData, PlaybackQueue, QueueItem};
 pub use settings::{AppSettings, WindowSettings};
 
 use std::sync::{Once, OnceLock};
@@ -96,6 +100,7 @@ pub fn init() {
         audio::setup_audio_monitoring();
         mixer::init();
         audio_devices::start();
+        crate::spotify::hydrate_status();
         mouse::start_polling();
         power::start();
         messages::start_watchers();

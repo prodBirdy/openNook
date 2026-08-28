@@ -194,6 +194,13 @@ pub struct AppSettings {
     /// Opt-in time-synced lyrics beside Now Playing (LRCLIB, cached locally).
     #[serde(default)]
     pub show_lyrics: bool,
+    /// Upcoming list on the expanded Music pane. Off hides Music/Spotify queue
+    /// fetch entirely (no extra osascript / HTTPS when the card is open).
+    #[serde(default = "default_true")]
+    pub show_media_queue: bool,
+    /// Spotify developer-app client ID for PKCE. No client secret is stored.
+    #[serde(default)]
+    pub spotify_client_id: String,
     #[serde(default = "default_true")]
     pub show_calendar: bool,
     #[serde(default = "default_true")]
@@ -493,6 +500,8 @@ impl Default for AppSettings {
             widget_order: default_widget_order(),
             show_media: true,
             show_lyrics: false,
+            show_media_queue: true,
+            spotify_client_id: String::new(),
             show_calendar: true,
             show_reminders: true,
             quick_add: true,
@@ -1027,6 +1036,8 @@ mod tests {
         assert_eq!(parsed.widget_order, default_widget_order());
         assert!(parsed.show_media);
         assert!(!parsed.show_lyrics);
+        assert!(parsed.show_media_queue);
+        assert!(parsed.spotify_client_id.is_empty());
         assert!(parsed.show_calendar);
         assert!(parsed.show_reminders);
         assert!(parsed.quick_add);

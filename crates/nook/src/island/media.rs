@@ -5,14 +5,14 @@ use super::ui::{
     card_chrome, slide_label, MEDIA_ART, MEDIA_ART_RADIUS, MEDIA_PLAY, MEDIA_PROGRESS_HIT,
     MEDIA_TIME_PAD_GAP, MEDIA_TIME_PAD_TOP,
 };
-use super::Island;
+use super::{queue_list_height, Island, QUEUE_ROW_H};
 use crate::icons::lucide_color;
 use crate::theme;
 use gpui::{
     canvas, div, img, linear_color_stop, linear_gradient, prelude::*, px, relative, rgb, rgba,
     AnyElement, Context, CursorStyle, Image, MouseButton, MouseDownEvent, Rgba, SharedString,
 };
-use nook_core::models::NowPlayingData;
+use nook_core::models::{NowPlayingData, PlaybackQueue, QueueItem};
 use std::sync::{Mutex, OnceLock};
 
 const MAX_ARTWORK_BYTES: usize = 5 * 1024 * 1024;
@@ -252,6 +252,7 @@ pub(crate) fn nook_media_pane(island: &Island, cx: &mut Context<Island>) -> impl
     let aura = media_aura(island);
     let elapsed = np.elapsed_time.unwrap_or(0.0);
     let duration = np.duration.unwrap_or(0.0);
+    let elapsed = displayed_elapsed(np, island.scrubber_drag);
     let progress = if duration > 0.0 {
         (elapsed / duration) as f32
     } else {
@@ -272,11 +273,12 @@ pub(crate) fn nook_media_pane(island: &Island, cx: &mut Context<Island>) -> impl
         .map(|d| d.icon())
         .unwrap_or("airplay");
 
-    div()
+    let player = div()
         .id("nook-media")
         .relative()
         .w_full()
-        .h_full()
+        .flex_1()
+        .min_h(px(theme::NOOK_BODY - 4.0))
         .overflow_hidden()
         .when_some(aura, |d, aura| d.child(aura))
         .flex()
@@ -531,6 +533,28 @@ fn output_picker_list(island: &Island, cx: &mut Context<Island>) -> impl IntoEle
             .line_height(px(11.))
             .child(nook_core::audio_devices::AIRPLAY_INITIATE_NOTE),
     )
+                .child(nook_progress(
+                    island,
+                    progress,
+                    elapsed,
+                    duration,
+                    seekable,
+                    cx,
+                )),
+        );
+    let queue = island.queue.clone();
+    let show_queue = island.settings.show_media_queue && !queue.items.is_empty();
+    div()
+        .id("nook-media-col")
+        .w_full()
+        .h_full()
+        .overflow_hidden()
+        .flex()
+        .flex_col()
+        .child(player)
+        .when(show_queue, |d| {
+            d.child(up_next_list(&queue, queue_list_height(queue.items.len()), cx))
+        })
 }
 
 fn app_badge(bundle_id: Option<&str>, app_name: Option<&str>) -> AnyElement {
@@ -586,14 +610,30 @@ pub(crate) fn app_icon_image(
     loaded
 }
 
+fn displayed_elapsed(np: &NowPlayingData, drag: Option<f32>) -> f64 {
+    if let Some(ratio) = drag {
+        return np.duration.unwrap_or(0.0) * ratio as f64;
+    }
+    np.elapsed_time.unwrap_or(0.0)
+}
+
+pub(crate) fn scrubber_ratio(x: f32, origin: f32, width: f32) -> f32 {
+    if width < 1.0 {
+        return 0.0;
+    }
+    ((x - origin) / width).clamp(0.0, 1.0)
+}
+
 fn nook_progress(
+    island: &Island,
     progress: f32,
     elapsed: f64,
     duration: f64,
     seekable: bool,
     cx: &mut Context<Island>,
 ) -> impl IntoElement {
-    let progress = progress.clamp(0.0, 1.0);
+    let progress = island.scrubber_drag.unwrap_or(progress).clamp(0.0, 1.0);
+    let bounds = island.scrubber_bounds.clone();
     div()
         .w_full()
         .mt(px(6.))
@@ -603,13 +643,40 @@ fn nook_progress(
         } else {
             CursorStyle::Arrow
         })
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                if !seekable {
+                    return;
+                }
+                cx.stop_propagation();
+                this.update_scrubber_from_x(event.position.x.into());
+                cx.notify();
+            }),
+        )
         .child(
             div()
                 .relative()
                 .w_full()
-                .h(px(10.))
+                .h(px(12.))
                 .flex()
                 .items_center()
+                .child(
+                    canvas(
+                        {
+                            let bounds = bounds.clone();
+                            move |layout, _, _| {
+                                let origin: f32 = layout.origin.x.into();
+                                let width: f32 = layout.size.width.into();
+                                *bounds.borrow_mut() = Some((origin, width));
+                                layout
+                            }
+                        },
+                        |_bounds, _, _, _| {},
+                    )
+                    .absolute()
+                    .inset_0(),
+                )
                 .child(
                     div()
                         .w_full()
@@ -624,7 +691,7 @@ fn nook_progress(
                                 .bg(rgb(0xffffff)),
                         ),
                 )
-                .when(seekable, |d| d.child(nook_seek_hits(cx))),
+                .when(seekable, |d| d.child(scrubber_thumb(progress))),
         )
         .child(
             div()
@@ -636,9 +703,8 @@ fn nook_progress(
         )
 }
 
-fn nook_seek_hits(cx: &mut Context<Island>) -> impl IntoElement {
-    const SEGMENTS: u32 = 24;
-    let mut row = div()
+fn scrubber_thumb(progress: f32) -> impl IntoElement {
+    div()
         .absolute()
         .inset_0()
         .flex()
@@ -667,6 +733,12 @@ fn nook_seek_hits(cx: &mut Context<Island>) -> impl IntoElement {
         );
     }
     row
+        .left(relative(progress.clamp(0.0, 1.0)))
+        .ml(px(-5.))
+        .size(px(10.))
+        .rounded_full()
+        .bg(rgb(0xffffff))
+        .shadow_sm()
 }
 
 fn nook_skip(
@@ -723,12 +795,13 @@ fn nook_play(playing: bool, cx: &mut Context<Island>) -> impl IntoElement {
 }
 
 #[allow(dead_code)]
-pub(crate) fn media_card(np: &NowPlayingData, cx: &mut Context<Island>) -> impl IntoElement {
+pub(crate) fn media_card(island: &Island, cx: &mut Context<Island>) -> impl IntoElement {
+    let np = &island.now_playing;
     let title = np.title.clone().unwrap_or_else(|| "Unknown Title".into());
     let artist = np.artist.clone().unwrap_or_else(|| "Unknown Artist".into());
     let playing = np.is_playing;
-    let elapsed = np.elapsed_time.unwrap_or(0.0);
     let duration = np.duration.unwrap_or(0.0);
+    let elapsed = displayed_elapsed(np, island.scrubber_drag);
     let progress = if duration > 0.0 {
         (elapsed / duration) as f32
     } else {
@@ -780,18 +853,37 @@ pub(crate) fn media_card(np: &NowPlayingData, cx: &mut Context<Island>) -> impl 
                         .child(slide_label(artist, theme::BODY, false).w_full()),
                 ),
         )
-        .child(progress_block(progress, elapsed, duration, seekable, cx))
+        .child(progress_block(
+            island,
+            progress,
+            elapsed,
+            duration,
+            seekable,
+            cx,
+        ))
         .child(transport_row(playing, cx))
+        .when(
+            island.settings.show_media_queue && !island.queue.items.is_empty(),
+            |d| {
+                d.child(up_next_list(
+                    &island.queue,
+                    queue_list_height(island.queue.items.len()),
+                    cx,
+                ))
+            },
+        )
 }
 
 fn progress_block(
+    island: &Island,
     progress: f32,
     elapsed: f64,
     duration: f64,
     seekable: bool,
     cx: &mut Context<Island>,
 ) -> impl IntoElement {
-    let progress = progress.clamp(0.0, 1.0);
+    let progress = island.scrubber_drag.unwrap_or(progress).clamp(0.0, 1.0);
+    let bounds = island.scrubber_bounds.clone();
     div()
         .flex()
         .flex_col()
@@ -802,6 +894,17 @@ fn progress_block(
         } else {
             CursorStyle::Arrow
         })
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                if !seekable {
+                    return;
+                }
+                cx.stop_propagation();
+                this.update_scrubber_from_x(event.position.x.into());
+                cx.notify();
+            }),
+        )
         .child(
             div()
                 .relative()
@@ -809,6 +912,22 @@ fn progress_block(
                 .h(px(MEDIA_PROGRESS_HIT))
                 .flex()
                 .items_center()
+                .child(
+                    canvas(
+                        {
+                            let bounds = bounds.clone();
+                            move |layout, _, _| {
+                                let origin: f32 = layout.origin.x.into();
+                                let width: f32 = layout.size.width.into();
+                                *bounds.borrow_mut() = Some((origin, width));
+                                layout
+                            }
+                        },
+                        |_bounds, _, _, _| {},
+                    )
+                    .absolute()
+                    .inset_0(),
+                )
                 .child(
                     div()
                         .w_full()
@@ -823,7 +942,7 @@ fn progress_block(
                                 .bg(rgb(0xffffff)),
                         ),
                 )
-                .when(seekable, |d| d.child(seek_hits(cx))),
+                .when(seekable, |d| d.child(scrubber_thumb(progress))),
         )
         .child(
             div()
@@ -837,16 +956,25 @@ fn progress_block(
         )
 }
 
-fn seek_hits(cx: &mut Context<Island>) -> impl IntoElement {
-    const SEGMENTS: u32 = 32;
-    let mut row = div()
-        .absolute()
-        .inset_0()
+fn up_next_list(
+    queue: &PlaybackQueue,
+    height: f32,
+    cx: &mut Context<Island>,
+) -> impl IntoElement {
+    let label = if queue.label.is_empty() {
+        "Up Next in playlist".to_string()
+    } else {
+        queue.label.clone()
+    };
+    let list = div()
+        .id("up-next")
+        .w_full()
+        .h(px(height))
+        .flex_shrink_0()
         .flex()
-        .cursor(CursorStyle::PointingHand);
-    for i in 0..SEGMENTS {
-        let ratio = (i as f32 + 0.5) / SEGMENTS as f32;
-        row = row.child(
+        .flex_col()
+        .pt(px(6.))
+        .child(
             div()
                 .id(SharedString::from(format!("seek-{i}")))
                 .flex_1()
@@ -865,9 +993,99 @@ fn seek_hits(cx: &mut Context<Island>) -> impl IntoElement {
                         });
                     }),
                 ),
+                .text_size(px(theme::FOOTNOTE.size))
+                .font_weight(theme::FOOTNOTE.emphasized)
+                .text_color(rgba(0xffffff88))
+                .child(label),
         );
+    let mut rows = div()
+        .id("up-next-rows")
+        .flex_1()
+        .min_h(px(0.))
+        .overflow_y_scroll();
+    for (i, item) in queue.items.iter().enumerate() {
+        rows = rows.child(queue_row(i, item, cx));
     }
-    row
+    list.child(rows)
+}
+
+fn queue_row(index: usize, item: &QueueItem, cx: &mut Context<Island>) -> impl IntoElement {
+    if let Some(url) = item.artwork_url.as_ref() {
+        if nook_core::queue::cached_artwork(&item.id).is_none() {
+            nook_core::queue::request_artwork(item.id.clone(), url.clone());
+        }
+    }
+    let thumb = item
+        .artwork_base64
+        .as_deref()
+        .map(str::to_string)
+        .or_else(|| {
+            nook_core::queue::cached_artwork(&item.id).and_then(|hit| hit)
+        });
+    let art = thumb
+        .as_deref()
+        .and_then(|b64| artwork_element(b64, 32.0, 6.0))
+        .unwrap_or_else(|| {
+            div()
+                .size(px(32.))
+                .rounded(px(6.))
+                .bg(rgba(0xffffff14))
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(lucide_color("music", 12.0, rgba(0xffffff66)))
+                .into_any_element()
+        });
+    let title = item.title.clone();
+    let artist = item.artist.clone();
+    let jump = item.clone();
+    div()
+        .id(SharedString::from(format!("up-next-{index}")))
+        .h(px(QUEUE_ROW_H))
+        .w_full()
+        .flex()
+        .items_center()
+        .gap(px(8.))
+        .rounded(px(6.))
+        .hover(|s| s.bg(rgba(0xffffff14)))
+        .cursor(CursorStyle::PointingHand)
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                cx.stop_propagation();
+                let item = jump.clone();
+                let context = this.queue.context_uri.clone();
+                nook_core::runtime().spawn(async move {
+                    let _ = nook_core::audio::media_jump_to_queue_item(item, context).await;
+                });
+            }),
+        )
+        .child(art)
+        .child(
+            div()
+                .flex_1()
+                .min_w(px(0.))
+                .overflow_hidden()
+                .flex()
+                .flex_col()
+                .child(
+                    div()
+                        .text_size(px(theme::CALLOUT.size))
+                        .font_weight(theme::CALLOUT.emphasized)
+                        .text_color(rgb(0xffffff))
+                        .text_ellipsis()
+                        .whitespace_nowrap()
+                        .child(title),
+                )
+                .child(
+                    div()
+                        .text_size(px(theme::FOOTNOTE.size))
+                        .text_color(rgba(0xffffff88))
+                        .text_ellipsis()
+                        .whitespace_nowrap()
+                        .child(artist),
+                ),
+        )
 }
 
 fn transport_row(playing: bool, cx: &mut Context<Island>) -> impl IntoElement {
@@ -1194,6 +1412,14 @@ mod tests {
             .unwrap();
         let b64 = base64::engine::general_purpose::STANDARD.encode(encoded.into_inner());
         assert!(artwork_bytes(&b64).is_none());
+    }
+
+    #[test]
+    fn scrubber_ratio_clamps_to_the_bar() {
+        assert_eq!(scrubber_ratio(50.0, 0.0, 100.0), 0.5);
+        assert_eq!(scrubber_ratio(-10.0, 0.0, 100.0), 0.0);
+        assert_eq!(scrubber_ratio(200.0, 0.0, 100.0), 1.0);
+        assert_eq!(scrubber_ratio(10.0, 0.0, 0.0), 0.0);
     }
 
     #[test]

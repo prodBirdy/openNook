@@ -88,5 +88,6 @@
 	<string>openNook records voice memos from the island. Audio stays on this Mac.</string>
 	<key>NSSpeechRecognitionUsageDescription</key>
 	<string>openNook transcribes voice memos on-device so you can read them back from the island.</string>
+	<string>openNook uses Automation to pause or skip Music, Spotify, and Safari if system media controls are unavailable, to read the current Music playlist so the island can show upcoming tracks, and to read the current Safari or Chrome tab URL so the island can show a YouTube thumbnail or site icon when the browser does not provide artwork.</string>
 </dict>
 </plist>
