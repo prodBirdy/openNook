@@ -461,11 +461,13 @@ fn collect_ifaddrs() -> Vec<IfAddr> {
 #[cfg(target_os = "macos")]
 mod macos {
     use super::{parse_scutil_connect_time, parse_scutil_nc_list};
-    use core_foundation::array::CFArray;
-    use core_foundation::runloop::{kCFRunLoopCommonModes, CFRunLoop};
-    use core_foundation::string::CFString;
     use std::process::Command;
     use std::time::SystemTime;
+    use system_configuration::core_foundation::array::CFArray;
+    use system_configuration::core_foundation::runloop::{
+        kCFRunLoopCommonModes, CFRunLoop, CFRunLoopRun,
+    };
+    use system_configuration::core_foundation::string::CFString;
     use system_configuration::dynamic_store::{
         SCDynamicStore, SCDynamicStoreBuilder, SCDynamicStoreCallBackContext,
     };
@@ -483,13 +485,9 @@ mod macos {
             callout: on_change,
             info: (),
         };
-        let Some(store) = SCDynamicStoreBuilder::new("openNook-vpn")
+        let store = SCDynamicStoreBuilder::new("openNook-vpn")
             .callback_context(context)
-            .build()
-        else {
-            log::warn!("SCDynamicStoreCreate failed");
-            return;
-        };
+            .build();
         let patterns = CFArray::from_CFTypes(
             &PATTERNS
                 .iter()
@@ -504,7 +502,7 @@ mod macos {
         let source = store.create_run_loop_source();
         let rl = CFRunLoop::get_current();
         rl.add_source(&source, unsafe { kCFRunLoopCommonModes });
-        CFRunLoop::run();
+        unsafe { CFRunLoopRun() };
     }
 
     fn on_change(_store: SCDynamicStore, _changed: CFArray<CFString>, _info: &mut ()) {
