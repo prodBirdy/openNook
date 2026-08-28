@@ -17,6 +17,7 @@ chrono.workspace = true
 reqwest.workspace = true
 futures-util.workspace = true
 open.workspace = true
+image.workspace = true
 sysinfo = "0.37"
 notify = "7"
 plist = "1"

@@ -14,6 +14,7 @@ mod observe;
 mod obsidian;
 mod quick_add;
 mod recorder;
+mod process;
 mod reminders;
 mod speed;
 mod terminal;
@@ -45,6 +46,10 @@ pub(crate) use observe::{observe_card, ObserveHover};
 pub(crate) use obsidian::obsidian_card;
 pub(crate) use quick_add::{QuickAdd, QuickAddEvent};
 pub(crate) use recorder::recorder_card;
+pub(crate) use process::{
+    compact_left as process_compact_left, compact_right as process_compact_right, process_card,
+    process_hud_expired,
+};
 pub(crate) use reminders::reminders_card;
 pub(crate) use speed::speed_card;
 pub(crate) use terminal::terminal_card;

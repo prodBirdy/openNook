@@ -42,6 +42,7 @@ pub mod power;
 pub mod pomodoro;
 pub mod scroll;
 pub mod recorder;
+pub mod process;
 pub mod settings;
 pub mod shortcuts;
 pub mod system_timers;

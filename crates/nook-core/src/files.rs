@@ -265,19 +265,68 @@ pub fn add_dropped_path(path: &str) -> Result<FileTrayItem, String> {
     })
 }
 
-pub(crate) fn mime_from_path(path: &str) -> String {
+pub fn mime_from_path(path: &str) -> String {
     match std::path::Path::new(path)
         .extension()
         .and_then(|e| e.to_str())
         .map(|s| s.to_ascii_lowercase())
         .as_deref()
     {
-        Some("png" | "jpg" | "jpeg" | "gif" | "webp" | "heic") => "image".into(),
-        Some("mp4" | "mov" | "mkv") => "video".into(),
-        Some("mp3" | "wav" | "aac" | "flac") => "audio".into(),
+        Some("png" | "jpg" | "jpeg" | "gif" | "webp" | "heic" | "heif" | "tif" | "tiff" | "bmp") => {
+            "image".into()
+        }
+        Some("mp4" | "mov" | "m4v" | "mkv" | "webm") => "video".into(),
+        Some("mp3" | "wav" | "aac" | "flac" | "m4a" | "aiff" | "caf" | "alac") => "audio".into(),
         Some("pdf") => "pdf".into(),
         Some("zip" | "tar" | "gz") => "archive".into(),
         _ => "file".into(),
+    }
+}
+
+/// Actions the file-processing suite can offer for a tray item.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FileCapabilities {
+    pub convert: bool,
+    pub target_size: bool,
+    pub compress_pdf: bool,
+    pub remove_bg: bool,
+    pub ocr: bool,
+}
+
+impl FileCapabilities {
+    pub fn any(self) -> bool {
+        self.convert || self.target_size || self.compress_pdf || self.remove_bg || self.ocr
+    }
+}
+
+pub fn capabilities_for(path: &str, ffmpeg_extended: bool) -> FileCapabilities {
+    capabilities(mime_from_path(path).as_str(), path, ffmpeg_extended)
+}
+
+pub fn item_capabilities(item: &FileTrayItem, ffmpeg_extended: bool) -> FileCapabilities {
+    capabilities(item.mime_type.as_str(), &item.path, ffmpeg_extended)
+}
+
+pub fn capabilities(mime: &str, path: &str, ffmpeg_extended: bool) -> FileCapabilities {
+    let ext = std::path::Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let mime = mime.to_ascii_lowercase();
+    let is_image = mime.starts_with("image") || matches!(mime.as_str(), "image");
+    let is_video = mime.starts_with("video") || matches!(mime.as_str(), "video");
+    let is_audio = mime.starts_with("audio") || matches!(mime.as_str(), "audio");
+    let is_pdf = mime.contains("pdf") || ext == "pdf";
+    let mkv = ext == "mkv";
+    let webm = ext == "webm";
+    FileCapabilities {
+        convert: is_image
+            || ((is_video || is_audio) && (!mkv && !webm || ffmpeg_extended)),
+        target_size: is_video && (!mkv && !webm || ffmpeg_extended),
+        compress_pdf: is_pdf,
+        remove_bg: is_image,
+        ocr: is_image || is_pdf,
     }
 }
 
@@ -299,8 +348,38 @@ mod tests {
     fn mime_from_common_extensions() {
         assert_eq!(mime_from_path("a.PNG"), "image");
         assert_eq!(mime_from_path("clip.mp4"), "video");
+        assert_eq!(mime_from_path("clip.m4v"), "video");
         assert_eq!(mime_from_path("doc.pdf"), "pdf");
+        assert_eq!(mime_from_path("shot.tiff"), "image");
+        assert_eq!(mime_from_path("song.m4a"), "audio");
         assert_eq!(mime_from_path("noext"), "file");
+    }
+
+    #[test]
+    fn capability_matrix() {
+        let img = capabilities("image", "shot.png", false);
+        assert!(img.convert && img.remove_bg && img.ocr);
+        assert!(!img.target_size && !img.compress_pdf);
+
+        let vid = capabilities("video", "clip.mp4", false);
+        assert!(vid.convert && vid.target_size);
+        assert!(!vid.remove_bg && !vid.ocr && !vid.compress_pdf);
+
+        let mkv = capabilities("video", "clip.mkv", false);
+        assert!(!mkv.convert && !mkv.target_size);
+        let mkv_ff = capabilities("video", "clip.mkv", true);
+        assert!(mkv_ff.convert && mkv_ff.target_size);
+
+        let pdf = capabilities("pdf", "doc.pdf", false);
+        assert!(pdf.compress_pdf && pdf.ocr);
+        assert!(!pdf.remove_bg && !pdf.target_size);
+
+        let wav = capabilities("audio", "take.wav", false);
+        assert!(wav.convert);
+        assert!(!wav.target_size && !wav.ocr);
+
+        let other = capabilities("file", "notes.txt", false);
+        assert!(!other.any());
     }
 
     #[test]

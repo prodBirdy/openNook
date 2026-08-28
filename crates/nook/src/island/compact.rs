@@ -79,6 +79,7 @@ impl Island {
             CompactMode::Agents => widgets::agents_compact_left(&self.agents, self.pixel_t),
             CompactMode::Files => super::files::compact_left(&self.files),
             CompactMode::Timer => widgets::timer_compact_left(self, cx),
+            CompactMode::Process => widgets::process_compact_left(self),
             CompactMode::Observe => {
                 lucide("triangle-alert", theme::COMPACT_FACE).into_any_element()
             }
@@ -163,6 +164,7 @@ impl Island {
                     .text_right()
                     .into_any_element()
             }
+            CompactMode::Process => widgets::process_compact_right(self),
             CompactMode::Observe => {
                 let text = match self.observe.alerts.as_slice() {
                     [one] => one.name.clone(),
@@ -329,6 +331,7 @@ impl Island {
                 CompactMode::Agents => "agents",
                 CompactMode::Files => "files",
                 CompactMode::Timer => "timer",
+                CompactMode::Process => "process",
                 CompactMode::Observe => "observe",
                 CompactMode::Battery => "battery",
                 CompactMode::Vpn => "vpn",

@@ -24,6 +24,8 @@ use crate::widgets::{
     timer_card,
     agents_card, calendar_card, notes_card, notifications_card, observe_card, reminders_card,
     speed_card, timer_card,
+    agents_card, calendar_card, notes_card, observe_card, process_card, reminders_card, speed_card,
+    timer_card,
 };
 use gpui::{
     div, img, prelude::*, px, rgba, AnyElement, Context, CursorStyle, FontWeight, MouseButton,
@@ -249,6 +251,17 @@ impl Island {
                         notifications_card(&self.notifications, cx),
                     ),
                 ),
+                WidgetModule::Process
+                    if self.settings.show_process && self.settings.file_actions.enabled =>
+                {
+                    add(
+                        &mut kids,
+                        cell_pane(
+                            self.settings.cells_for(module),
+                            process_card(self, cx),
+                        ),
+                    )
+                }
                 _ => {}
             }
         }

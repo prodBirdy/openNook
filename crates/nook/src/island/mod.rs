@@ -86,6 +86,7 @@ pub enum CompactMode {
     Recording,
     Meeting,
     Notifications,
+    Process,
     Onboard,
     Messages,
     Share,
@@ -348,6 +349,11 @@ pub struct Island {
     pub search_query: String,
     search_gen: u64,
     search_loading: bool,
+    pub(crate) process_jobs: Vec<nook_core::process::JobSnapshot>,
+    pub(crate) process_hud: Option<(String, Instant)>,
+    pub(crate) process_focus: Option<String>,
+    pub(crate) process_menu: Option<String>,
+    last_process_sig: u64,
 }
 
 struct PendingFileDrag {
@@ -538,6 +544,11 @@ impl Island {
             search_query: String::new(),
             search_gen: 0,
             search_loading: false,
+            process_jobs: Vec::new(),
+            process_hud: None,
+            process_focus: None,
+            process_menu: None,
+            last_process_sig: 0,
         };
         // Start at the compact idle size so the first paint isn't a jump.
         let (w, h) = this.target_size();
@@ -906,6 +917,26 @@ impl Island {
                         this.motion_art_bounds = Some(rect);
                     }
                     this.apply_motion_art_layer();
+                    if this.settings.file_actions.enabled {
+                        let jobs = nook_core::process::snapshot_jobs();
+                        let sig = jobs.iter().fold(0u64, |acc, j| {
+                            acc.wrapping_mul(33)
+                                .wrapping_add(j.id)
+                                .wrapping_add(j.progress as u64)
+                                .wrapping_add(j.status as u8 as u64)
+                        });
+                        if sig != this.last_process_sig {
+                            this.last_process_sig = sig;
+                            this.process_jobs = jobs;
+                            dirty = true;
+                        }
+                        if let Some((_, at)) = this.process_hud {
+                            if crate::widgets::process_hud_expired(at) {
+                                this.process_hud = None;
+                                dirty = true;
+                            }
+                        }
+                    }
                     if this.mirror_on {
                         if let Some((gen, bgra)) = platform::mirror_frame(this.mirror_gen) {
                             this.mirror_gen = gen;
@@ -926,6 +957,7 @@ impl Island {
                     if dirty {
                         cx.notify();
                     }
+                    let process_live = this.process_face_active();
                     let active = dirty
                         || this.hovered
                         || this.expanded
@@ -939,6 +971,7 @@ impl Island {
                         || this.shell_running;
                         || this.search_open
                         || any_working;
+                        || process_live;
                     // Media playing promotes itself through `dirty` (the
                     // visualizer levels change every frame), so it needs no
                     // term of its own here.
@@ -1593,6 +1626,11 @@ impl Island {
         }
         self.output_picker_open = false;
         cx.notify();
+    fn process_face_active(&self) -> bool {
+        self.settings.file_actions.enabled
+            && (self.process_jobs.iter().any(|j| j.status.is_live())
+                || self.process_hud.is_some()
+                || nook_core::process::any_live())
     }
 
     pub(crate) fn has_media(&self) -> bool {
@@ -2719,6 +2757,9 @@ impl Island {
         if self.settings.show_files && !self.files.is_empty() {
             modes.push(CompactMode::Files);
         }
+        if self.process_face_active() {
+            modes.push(CompactMode::Process);
+        }
         if self.first_run {
             modes.push(CompactMode::Onboard);
         }
@@ -3763,6 +3804,11 @@ mod tests {
             search_query: String::new(),
             search_gen: 0,
             search_loading: false,
+            process_jobs: Vec::new(),
+            process_hud: None,
+            process_focus: None,
+            process_menu: None,
+            last_process_sig: 0,
         }
     }
 
@@ -4326,6 +4372,25 @@ mod tests {
         assert!(!island.has_vpn_face());
         assert_eq!(island.preferred, None);
         assert_eq!(island.mode(), CompactMode::Idle);
+    fn available_modes_includes_process_while_a_job_or_hud_is_live() {
+        use nook_core::process::{JobKind, JobSnapshot, JobStatus};
+        let mut island = test_island();
+        assert!(!island.available_modes().contains(&CompactMode::Process));
+        island.process_jobs.push(JobSnapshot {
+            id: 1,
+            kind: JobKind::Convert,
+            input: "/tmp/a.png".into(),
+            output: None,
+            progress: 40,
+            status: JobStatus::Running,
+            message: String::new(),
+        });
+        assert!(island.available_modes().contains(&CompactMode::Process));
+        island.process_jobs.clear();
+        island.process_hud = Some(("Saved a.jpeg".into(), Instant::now()));
+        assert!(island.available_modes().contains(&CompactMode::Process));
+        island.settings.file_actions.enabled = false;
+        assert!(!island.available_modes().contains(&CompactMode::Process));
     }
 
     #[test]
