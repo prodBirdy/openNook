@@ -286,14 +286,18 @@ impl Island {
                 platform::apply_island_chrome();
             }
             platform::request_pin();
+            // Park until a screen/space notification (or a 30s backstop).
+            // The previous 250 ms poll was an idle wakeup; handlers already
+            // pin on the main thread, this only covers a missed first pin.
             loop {
-                cx.background_executor()
-                    .timer(Duration::from_millis(250))
+                let needed = cx
+                    .background_executor()
+                    .spawn(async { platform::wait_pin_needed(Duration::from_secs(30)) })
                     .await;
                 if this.update(cx, |_, _| ()).is_err() {
                     break;
                 }
-                if platform::take_pin_needed() {
+                if needed || platform::take_pin_needed() {
                     platform::pin_island_windows();
                 }
             }
@@ -573,22 +577,19 @@ impl Island {
                 // Stream-backed adapter reads are a cheap lock; cadence is
                 // for interpolated elapsed (1s while playing) and the
                 // AppleScript fallback (5s idle). Distributed-notification
-                // observers and the MediaRemote stream flip `take_media_event`
-                // so the wait wakes instantly on real changes.
+                // observers and the MediaRemote stream poke `note_media_event`
+                // so this parks until a real change instead of slicing 250 ms.
                 let cadence = if is_playing {
                     Duration::from_secs(1)
                 } else {
                     Duration::from_secs(5)
                 };
-                let slice = Duration::from_millis(250);
-                let mut waited = Duration::ZERO;
-                loop {
-                    cx.background_executor().timer(slice).await;
-                    waited += slice;
-                    if nook_core::audio::take_media_event() || waited >= cadence {
-                        break;
-                    }
-                }
+                cx.background_executor()
+                    .spawn(async move {
+                        nook_core::runtime()
+                            .block_on(nook_core::audio::wait_media_or_timeout(cadence))
+                    })
+                    .await;
             }
         })
         .detach();

@@ -220,19 +220,48 @@ fn scan_processes_all() -> HashMap<u32, ProcInfo> {
     map
 }
 
-/// macOS two-stage scan: list every pid with a cheap `proc_pidpath` (exe
-/// OnlyIfNotSet), then fetch argv / cwd / cpu only for agent candidates and
-/// their descendants. Avoids KERN_PROCARGS2 on hundreds of unrelated pids.
+/// Cached argv/cwd/exe for a live pid. Invalidated when start_time changes
+/// (pid reuse) or the pid disappears.
+#[cfg(any(target_os = "macos", test))]
+#[derive(Clone, Debug, PartialEq)]
+struct CachedDetail {
+    start_time: u64,
+    name: String,
+    argv: Vec<String>,
+    cwd: Option<PathBuf>,
+    exe: Option<PathBuf>,
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn cache_lookup<'a>(
+    cache: &'a HashMap<u32, CachedDetail>,
+    pid: u32,
+    start_time: u64,
+) -> Option<&'a CachedDetail> {
+    let hit = cache.get(&pid)?;
+    (start_time > 0 && hit.start_time == start_time).then_some(hit)
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn prune_detail_cache(cache: &mut HashMap<u32, CachedDetail>, live: &HashSet<u32>) {
+    cache.retain(|pid, _| live.contains(pid));
+}
+
+#[cfg(target_os = "macos")]
+fn detail_cache() -> &'static Mutex<HashMap<u32, CachedDetail>> {
+    static CACHE: OnceLock<Mutex<HashMap<u32, CachedDetail>>> = OnceLock::new();
+    CACHE.get_or_init(Mutex::default)
+}
+
+/// macOS two-stage scan: `proc_listallpids` + `proc_pidpath` / `PROC_PIDTBSDINFO`
+/// first (cheap), then argv (KERN_PROCARGS2) and cwd only for agent candidates
+/// and their descendants, and only when `(pid, start_time)` is not cached.
 #[cfg(target_os = "macos")]
 fn scan_processes_macos() -> HashMap<u32, ProcInfo> {
-    let mut sys = process_system().lock().unwrap_or_else(|e| e.into_inner());
-    sys.refresh_processes_specifics(
-        ProcessesToUpdate::All,
-        true,
-        ProcessRefreshKind::nothing()
-            .without_tasks()
-            .with_exe(UpdateKind::OnlyIfNotSet),
-    );
+    let stage = list_stage1();
+    if stage.is_empty() {
+        return scan_processes_all();
+    }
 
     let sidecar: HashSet<u32> = grok_sessions()
         .keys()
@@ -241,19 +270,14 @@ fn scan_processes_macos() -> HashMap<u32, ProcInfo> {
         .collect();
 
     let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
+    let mut by_pid: HashMap<u32, Stage1> = HashMap::new();
     let mut seeds = Vec::new();
-    for (pid, proc_) in sys.processes() {
-        let pid_u32 = pid.as_u32();
-        let ppid = proc_.parent().map(|p| p.as_u32()).unwrap_or(0);
-        children.entry(ppid).or_default().push(pid_u32);
-        let name = proc_.name().to_string_lossy();
-        let exe = proc_
-            .exe()
-            .map(|p| p.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        if is_scan_seed(&exe, &name) || sidecar.contains(&pid_u32) {
-            seeds.push(pid_u32);
+    for info in stage {
+        children.entry(info.ppid).or_default().push(info.pid);
+        if is_scan_seed(&info.path, &info.comm) || sidecar.contains(&info.pid) {
+            seeds.push(info.pid);
         }
+        by_pid.insert(info.pid, info);
     }
 
     let mut detail = HashSet::new();
@@ -266,31 +290,233 @@ fn scan_processes_macos() -> HashMap<u32, ProcInfo> {
         }
     }
     if detail.is_empty() {
+        let mut cache = detail_cache().lock().unwrap_or_else(|e| e.into_inner());
+        cache.clear();
         return HashMap::new();
     }
 
-    let pids: Vec<Pid> = detail.iter().copied().map(Pid::from_u32).collect();
-    sys.refresh_processes_specifics(
-        ProcessesToUpdate::Some(&pids),
-        true,
-        ProcessRefreshKind::nothing()
-            .without_tasks()
-            .with_cpu()
-            .with_cmd(UpdateKind::OnlyIfNotSet)
-            .with_cwd(UpdateKind::Always)
-            .with_exe(UpdateKind::OnlyIfNotSet),
-    );
+    let mut cache = detail_cache().lock().unwrap_or_else(|e| e.into_inner());
+    let mut hits: HashMap<u32, CachedDetail> = HashMap::new();
+    let mut misses = Vec::new();
+    for pid in &detail {
+        let start = by_pid.get(pid).map(|s| s.start_time).unwrap_or(0);
+        if let Some(hit) = cache_lookup(&cache, *pid, start) {
+            hits.insert(*pid, hit.clone());
+        } else {
+            misses.push(*pid);
+        }
+    }
+
+    let mut sys = process_system().lock().unwrap_or_else(|e| e.into_inner());
+    let cpu_kind = ProcessRefreshKind::nothing().without_tasks().with_cpu();
+    let all_pids: Vec<Pid> = detail.iter().copied().map(Pid::from_u32).collect();
+    sys.refresh_processes_specifics(ProcessesToUpdate::Some(&all_pids), true, cpu_kind);
+    if !misses.is_empty() {
+        let miss_pids: Vec<Pid> = misses.iter().copied().map(Pid::from_u32).collect();
+        sys.refresh_processes_specifics(
+            ProcessesToUpdate::Some(&miss_pids),
+            true,
+            ProcessRefreshKind::nothing()
+                .without_tasks()
+                .with_cpu()
+                .with_cmd(UpdateKind::OnlyIfNotSet)
+                .with_cwd(UpdateKind::OnlyIfNotSet)
+                .with_exe(UpdateKind::OnlyIfNotSet),
+        );
+    }
 
     let mut map = HashMap::new();
     for pid in detail {
+        let stage = by_pid.get(&pid);
+        let start = stage.map(|s| s.start_time).unwrap_or(0);
+        let ppid = stage.map(|s| s.ppid).unwrap_or(0);
+        let cpu_pct = sys
+            .process(Pid::from_u32(pid))
+            .map(|p| p.cpu_usage())
+            .unwrap_or(0.0);
+        if let Some(hit) = hits.get(&pid) {
+            map.insert(
+                pid,
+                ProcInfo {
+                    pid,
+                    ppid,
+                    cpu_pct,
+                    name: hit.name.clone(),
+                    argv: hit.argv.clone(),
+                    cwd: hit.cwd.clone(),
+                    exe: hit.exe.clone(),
+                    start_time: hit.start_time,
+                },
+            );
+            continue;
+        }
         let Some(proc_) = sys.process(Pid::from_u32(pid)) else {
             continue;
         };
-        if let Some(info) = proc_from_sysinfo(pid, proc_) {
-            map.insert(info.pid, info);
+        let Some(mut info) = proc_from_sysinfo(pid, proc_) else {
+            continue;
+        };
+        if info.start_time == 0 {
+            info.start_time = start;
         }
+        if info.ppid == 0 {
+            info.ppid = ppid;
+        }
+        cache.insert(
+            pid,
+            CachedDetail {
+                start_time: info.start_time,
+                name: info.name.clone(),
+                argv: info.argv.clone(),
+                cwd: info.cwd.clone(),
+                exe: info.exe.clone(),
+            },
+        );
+        map.insert(pid, info);
     }
+    prune_detail_cache(&mut cache, &map.keys().copied().collect());
     map
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Clone)]
+struct Stage1 {
+    pid: u32,
+    ppid: u32,
+    start_time: u64,
+    path: String,
+    comm: String,
+}
+
+#[cfg(target_os = "macos")]
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct ProcBsdInfo {
+    pbi_flags: u32,
+    pbi_status: u32,
+    pbi_xstatus: u32,
+    pbi_pid: u32,
+    pbi_ppid: u32,
+    pbi_uid: u32,
+    pbi_gid: u32,
+    pbi_ruid: u32,
+    pbi_rgid: u32,
+    pbi_svuid: u32,
+    pbi_svgid: u32,
+    rfu_1: u32,
+    pbi_comm: [u8; 16],
+    pbi_name: [u8; 32],
+    pbi_nfiles: u32,
+    pbi_pgid: u32,
+    pbi_pjobc: u32,
+    e_tdev: u32,
+    e_tpgid: u32,
+    pbi_nice: i32,
+    pbi_start_tvsec: u64,
+    pbi_start_tvusec: u64,
+}
+
+#[cfg(target_os = "macos")]
+const PROC_PIDTBSDINFO: i32 = 3;
+
+#[cfg(target_os = "macos")]
+extern "C" {
+    fn proc_listallpids(buffer: *mut std::ffi::c_void, buffersize: i32) -> i32;
+    fn proc_pidpath(pid: i32, buffer: *mut std::ffi::c_void, buffersize: u32) -> i32;
+    fn proc_pidinfo(
+        pid: i32,
+        flavor: i32,
+        arg: u64,
+        buffer: *mut std::ffi::c_void,
+        buffersize: i32,
+    ) -> i32;
+}
+
+#[cfg(target_os = "macos")]
+fn c_name(buf: &[u8]) -> String {
+    let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+    String::from_utf8_lossy(&buf[..end]).into_owned()
+}
+
+#[cfg(target_os = "macos")]
+fn list_all_pids() -> Vec<i32> {
+    unsafe {
+        let hint = proc_listallpids(std::ptr::null_mut(), 0);
+        if hint <= 0 {
+            return Vec::new();
+        }
+        let mut buf = vec![0i32; hint as usize + 64];
+        let bytes = (buf.len() * std::mem::size_of::<i32>()) as i32;
+        let n = proc_listallpids(buf.as_mut_ptr() as *mut std::ffi::c_void, bytes);
+        if n <= 0 {
+            return Vec::new();
+        }
+        buf.truncate(n as usize);
+        buf.retain(|&p| p > 0);
+        buf
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn pid_path(pid: i32) -> String {
+    let mut buf = [0u8; 4096];
+    let n = unsafe {
+        proc_pidpath(
+            pid,
+            buf.as_mut_ptr() as *mut std::ffi::c_void,
+            buf.len() as u32,
+        )
+    };
+    if n <= 0 {
+        return String::new();
+    }
+    String::from_utf8_lossy(&buf[..n as usize]).into_owned()
+}
+
+#[cfg(target_os = "macos")]
+fn pid_bsdinfo(pid: i32) -> Option<ProcBsdInfo> {
+    let mut info = ProcBsdInfo::default();
+    let sz = std::mem::size_of::<ProcBsdInfo>() as i32;
+    let n = unsafe {
+        proc_pidinfo(
+            pid,
+            PROC_PIDTBSDINFO,
+            0,
+            &mut info as *mut _ as *mut std::ffi::c_void,
+            sz,
+        )
+    };
+    (n == sz).then_some(info)
+}
+
+#[cfg(target_os = "macos")]
+fn list_stage1() -> Vec<Stage1> {
+    list_all_pids()
+        .into_iter()
+        .filter_map(|pid| {
+            let bsd = pid_bsdinfo(pid)?;
+            let path = pid_path(pid);
+            let comm = {
+                let name = c_name(&bsd.pbi_name);
+                if name.is_empty() {
+                    c_name(&bsd.pbi_comm)
+                } else {
+                    name
+                }
+            };
+            Some(Stage1 {
+                pid: if bsd.pbi_pid != 0 {
+                    bsd.pbi_pid
+                } else {
+                    pid as u32
+                },
+                ppid: bsd.pbi_ppid,
+                start_time: bsd.pbi_start_tvsec,
+                path,
+                comm,
+            })
+        })
+        .collect()
 }
 
 /// Stage-1 filter: exe path or `comm` looks like an agent or a wrapper that
@@ -1115,17 +1341,16 @@ fn activate(_pid: u32) -> bool {
     false
 }
 
-/// How long the island should wait between scans: quick while sessions are
-/// live (status changes matter), relaxed once none have been seen for a
-/// while — a newly started agent then appears within one slow tick, which is
-/// fine for a status glance and keeps the recurring process-table walk off
-/// the battery.
+/// How long the island should wait between scans: 2s while a session was
+/// seen recently, 5s once none are active — a newly started agent then
+/// appears within one slow tick, which is fine for a status glance and
+/// keeps the recurring process-table walk off the battery.
 pub fn poll_interval() -> Duration {
     let last = LAST_AGENT_SEEN.load(std::sync::atomic::Ordering::Relaxed);
     if unix_secs().saturating_sub(last) < 30 {
         Duration::from_secs(2)
     } else {
-        Duration::from_secs(6)
+        Duration::from_secs(5)
     }
 }
 
@@ -1227,6 +1452,37 @@ mod tests {
         assert!(!is_scan_seed("/usr/bin/grep", "grep"));
         assert!(!is_scan_seed("/Applications/Safari.app/Contents/MacOS/Safari", "Safari"));
         assert!(!is_scan_seed("/usr/sbin/syslogd", "syslogd"));
+    }
+
+    #[test]
+    fn argv_cache_hits_only_matching_start_time() {
+        let mut cache = HashMap::new();
+        cache.insert(
+            7,
+            CachedDetail {
+                start_time: 100,
+                name: "claude".into(),
+                argv: vec!["claude".into()],
+                cwd: None,
+                exe: None,
+            },
+        );
+        assert!(cache_lookup(&cache, 7, 100).is_some());
+        assert!(cache_lookup(&cache, 7, 101).is_none());
+        assert!(cache_lookup(&cache, 7, 0).is_none());
+        assert!(cache_lookup(&cache, 8, 100).is_none());
+        let live = HashSet::from([8u32]);
+        prune_detail_cache(&mut cache, &live);
+        assert!(cache.is_empty());
+    }
+
+    #[test]
+    fn poll_interval_is_5s_when_no_recent_session() {
+        let prev = LAST_AGENT_SEEN.swap(0, std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(poll_interval(), Duration::from_secs(5));
+        LAST_AGENT_SEEN.store(unix_secs(), std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(poll_interval(), Duration::from_secs(2));
+        LAST_AGENT_SEEN.store(prev, std::sync::atomic::Ordering::Relaxed);
     }
 
     #[test]

@@ -20,6 +20,9 @@ use nook_core::notch::{CGPoint, CGRect, CGSize};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 #[cfg(target_os = "macos")]
 use std::sync::Once;
+#[cfg(target_os = "macos")]
+use std::sync::{Condvar, Mutex, OnceLock};
+use std::time::Duration;
 
 #[cfg(target_os = "macos")]
 static INSTALL: Once = Once::new();
@@ -46,7 +49,14 @@ pub fn install() {
 /// handlers also pin immediately on the main thread.
 pub fn request_pin() {
     #[cfg(target_os = "macos")]
-    PIN_NEEDED.store(true, Ordering::Release);
+    {
+        PIN_NEEDED.store(true, Ordering::Release);
+        let wait = pin_wait();
+        if let Ok(mut ready) = wait.ready.lock() {
+            *ready = true;
+            wait.cv.notify_one();
+        }
+    }
 }
 
 pub fn take_pin_needed() -> bool {
@@ -56,6 +66,52 @@ pub fn take_pin_needed() -> bool {
     }
     #[cfg(not(target_os = "macos"))]
     false
+}
+
+#[cfg(target_os = "macos")]
+struct PinWait {
+    ready: Mutex<bool>,
+    cv: Condvar,
+}
+
+#[cfg(target_os = "macos")]
+fn pin_wait() -> &'static PinWait {
+    static WAIT: OnceLock<PinWait> = OnceLock::new();
+    WAIT.get_or_init(|| PinWait {
+        ready: Mutex::new(false),
+        cv: Condvar::new(),
+    })
+}
+
+/// Block until [`request_pin`] or `timeout`. Must run off the main thread.
+pub fn wait_pin_needed(timeout: Duration) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        if PIN_NEEDED.load(Ordering::Acquire) {
+            return true;
+        }
+        let wait = pin_wait();
+        let Ok(mut ready) = wait.ready.lock() else {
+            std::thread::sleep(timeout);
+            return PIN_NEEDED.load(Ordering::Acquire);
+        };
+        if *ready {
+            *ready = false;
+            return true;
+        }
+        let (mut ready, _) = wait
+            .cv
+            .wait_timeout(ready, timeout)
+            .unwrap_or_else(|e| e.into_inner());
+        let signaled = *ready;
+        *ready = false;
+        signaled || PIN_NEEDED.load(Ordering::Acquire)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        std::thread::sleep(timeout);
+        false
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -887,6 +943,17 @@ unsafe fn observe_screen_changes() {
         addObserver: target,
         selector: sel!(colorsChanged:),
         name: colors_name,
+        object: std::ptr::null_mut::<AnyObject>()
+    ];
+    let appearance_name: *mut AnyObject = msg_send![
+        class!(NSString),
+        stringWithUTF8String: c"NSApplicationDidChangeEffectiveAppearanceNotification".as_ptr()
+    ];
+    let _: () = msg_send![
+        center,
+        addObserver: target,
+        selector: sel!(colorsChanged:),
+        name: appearance_name,
         object: std::ptr::null_mut::<AnyObject>()
     ];
 

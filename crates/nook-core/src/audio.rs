@@ -2,6 +2,9 @@ use crate::models::NowPlayingData;
 use crate::utils::fetch_artwork_from_url;
 
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::OnceLock;
+use std::time::Duration;
+use tokio::sync::Notify;
 
 /// Global state for audio levels (updated by audio monitoring thread)
 static AUDIO_LEVELS: std::sync::OnceLock<std::sync::Mutex<Vec<f64>>> = std::sync::OnceLock::new();
@@ -317,12 +320,38 @@ const MEDIA_APP_SPOTIFY: u8 = 1 << 1;
 const MEDIA_APP_MUSIC: u8 = 1 << 2;
 const MEDIA_APP_SAFARI: u8 = 1 << 3;
 
+static MEDIA_WAKE: OnceLock<Notify> = OnceLock::new();
+
+fn media_wake() -> &'static Notify {
+    MEDIA_WAKE.get_or_init(Notify::new)
+}
+
 pub fn note_media_event() {
     MEDIA_EVENT.store(true, Ordering::Relaxed);
+    media_wake().notify_waiters();
 }
 
 pub fn take_media_event() -> bool {
     MEDIA_EVENT.swap(false, Ordering::Relaxed)
+}
+
+/// Park until a playback-change poke or `timeout`.
+///
+/// The island now-playing loop uses this so idle is one timer, not a 250 ms
+/// poll of the event flag. Subscribe before checking the flag so a poke that
+/// lands in between cannot be missed.
+pub async fn wait_media_or_timeout(timeout: Duration) {
+    let notified = media_wake().notified();
+    tokio::pin!(notified);
+    if MEDIA_EVENT.swap(false, Ordering::Relaxed) {
+        return;
+    }
+    tokio::select! {
+        _ = notified => {
+            let _ = MEDIA_EVENT.swap(false, Ordering::Relaxed);
+        }
+        _ = tokio::time::sleep(timeout) => {}
+    }
 }
 
 /// Record that a media-capable app launched or quit. Unknown bundle ids are
@@ -1488,5 +1517,41 @@ mod tests {
             ),
             Some("https://music.youtube.com/favicon.ico")
         );
+    }
+
+    static MEDIA_WAIT_TEST: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn wait_media_returns_when_event_already_set() {
+        let _g = MEDIA_WAIT_TEST.lock().unwrap_or_else(|e| e.into_inner());
+        let _ = take_media_event();
+        note_media_event();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        let start = std::time::Instant::now();
+        rt.block_on(wait_media_or_timeout(Duration::from_secs(3)));
+        assert!(start.elapsed() < Duration::from_millis(250));
+    }
+
+    #[test]
+    fn wait_media_wakes_on_note() {
+        let _g = MEDIA_WAIT_TEST.lock().unwrap_or_else(|e| e.into_inner());
+        let _ = take_media_event();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        let start = std::time::Instant::now();
+        rt.block_on(async {
+            let waiter = wait_media_or_timeout(Duration::from_secs(3));
+            let poker = async {
+                tokio::time::sleep(Duration::from_millis(15)).await;
+                note_media_event();
+            };
+            tokio::join!(waiter, poker);
+        });
+        assert!(start.elapsed() < Duration::from_millis(500));
     }
 }
