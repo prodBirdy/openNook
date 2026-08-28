@@ -10,6 +10,7 @@ pub mod calendar;
 pub mod database;
 pub mod files;
 pub mod haptics;
+pub mod lyrics;
 #[cfg(any(target_os = "macos", test))]
 mod mediaremote;
 pub mod models;
@@ -22,7 +23,7 @@ pub mod settings;
 pub mod utils;
 pub mod widgets;
 
-pub use models::{NotchInfo, NowPlayingData};
+pub use models::{LyricLine, NotchInfo, NowPlayingData, SyncedLyrics};
 pub use settings::{AppSettings, WindowSettings};
 
 use std::sync::{Once, OnceLock};

@@ -76,8 +76,7 @@ pub(super) fn album_chip(
             MouseButton::Left,
             cx.listener(move |this, _: &MouseDownEvent, _, cx| {
                 cx.stop_propagation();
-                this.now_playing.is_playing = !this.now_playing.is_playing;
-                cx.notify();
+                this.note_media_play_pause(cx);
                 nook_core::runtime().spawn(async {
                     let _ = nook_core::audio::media_play_pause().await;
                 });
@@ -241,12 +240,15 @@ const APP_BADGE: f32 = 22.0;
 const APP_BADGE_RADIUS: f32 = 5.0;
 
 /// Horizontal Now Playing strip for the Nook tab (art + metadata + transport).
-pub(crate) fn nook_media_pane(np: &NowPlayingData, cx: &mut Context<Island>) -> impl IntoElement {
+/// When lyrics are on and a fetch has landed, a 3-line highlight window sits
+/// beside the artwork column.
+pub(crate) fn nook_media_pane(island: &Island, cx: &mut Context<Island>) -> impl IntoElement {
+    let np = &island.now_playing;
     let title = np.title.clone().unwrap_or_else(|| "Unknown Title".into());
     let artist = np.artist.clone().unwrap_or_else(|| "Unknown Artist".into());
     let album = np.album.clone().filter(|s| !s.is_empty());
     let playing = np.is_playing;
-    let elapsed = np.elapsed_time.unwrap_or(0.0);
+    let elapsed = island.lyrics_position();
     let duration = np.duration.unwrap_or(0.0);
     let progress = if duration > 0.0 {
         (elapsed / duration) as f32
@@ -258,6 +260,7 @@ pub(crate) fn nook_media_pane(np: &NowPlayingData, cx: &mut Context<Island>) -> 
         .artwork_base64
         .as_deref()
         .and_then(|b64| artwork_element(b64, NOOK_ART, NOOK_ART_RADIUS));
+    let lyrics = lyrics_pane(island);
 
     div()
         .id("nook-media")
@@ -309,13 +312,15 @@ pub(crate) fn nook_media_pane(np: &NowPlayingData, cx: &mut Context<Island>) -> 
                 .flex_col()
                 .justify_center()
                 .min_w(px(0.))
-                .w(px(160.))
+                .w(px(if lyrics.is_some() { 120. } else { 160. }))
                 .overflow_hidden()
                 .child(slide_label(title, theme::TITLE_3, true).w_full())
-                .when_some(album, |d, album| {
+                .when_some(album.filter(|_| lyrics.is_none()), |d, album| {
                     d.child(slide_label(album, theme::CALLOUT, false).w_full())
                 })
-                .child(slide_label(artist, theme::CALLOUT, false).w_full())
+                .when(lyrics.is_none(), |d| {
+                    d.child(slide_label(artist, theme::CALLOUT, false).w_full())
+                })
                 .child(
                     div()
                         .flex()
@@ -336,6 +341,59 @@ pub(crate) fn nook_media_pane(np: &NowPlayingData, cx: &mut Context<Island>) -> 
                 )
                 .child(nook_progress(progress, elapsed, duration, seekable, cx)),
         )
+        .when_some(lyrics, |d, pane| d.child(pane))
+}
+
+fn lyrics_pane(island: &Island) -> Option<AnyElement> {
+    if !island.settings.show_lyrics {
+        return None;
+    }
+    let lyrics = island.lyrics.as_ref()?;
+    if lyrics.instrumental {
+        return None;
+    }
+    if lyrics.has_synced() {
+        let [prev, cur, next] = lyrics.highlight_window(island.lyrics_position_ms());
+        return Some(lyrics_window(prev, cur, next));
+    }
+    let plain = lyrics.plain.as_deref()?;
+    let mut lines = plain.lines().filter(|line| !line.trim().is_empty());
+    let first = lines.next()?;
+    Some(lyrics_window(
+        None,
+        Some(first.trim()),
+        lines.next().map(str::trim),
+    ))
+}
+
+fn lyrics_window(prev: Option<&str>, cur: Option<&str>, next: Option<&str>) -> AnyElement {
+    div()
+        .id("lyrics-pane")
+        .flex_1()
+        .min_w(px(72.))
+        .max_w(px(220.))
+        .h(px(NOOK_ART))
+        .flex()
+        .flex_col()
+        .justify_center()
+        .gap(px(2.))
+        .overflow_hidden()
+        .child(lyric_line(prev.unwrap_or(""), false))
+        .child(lyric_line(cur.unwrap_or(""), true))
+        .child(lyric_line(next.unwrap_or(""), false))
+        .into_any_element()
+}
+
+fn lyric_line(text: &str, current: bool) -> AnyElement {
+    if text.is_empty() {
+        return div()
+            .h(px(theme::CALLOUT.leading))
+            .w_full()
+            .into_any_element();
+    }
+    slide_label(text.to_string(), theme::CALLOUT, current)
+        .w_full()
+        .into_any_element()
 }
 
 fn app_badge(bundle_id: Option<&str>, app_name: Option<&str>) -> AnyElement {
@@ -463,8 +521,7 @@ fn nook_seek_hits(cx: &mut Context<Island>) -> impl IntoElement {
                             return;
                         };
                         let position = duration * ratio as f64;
-                        this.now_playing.elapsed_time = Some(position);
-                        cx.notify();
+                        this.note_media_seek(position, cx);
                         nook_core::runtime().spawn(async move {
                             let _ = nook_core::audio::media_seek(position).await;
                         });
@@ -520,8 +577,7 @@ fn nook_play(playing: bool, cx: &mut Context<Island>) -> impl IntoElement {
             MouseButton::Left,
             cx.listener(move |this, _: &MouseDownEvent, _, cx| {
                 cx.stop_propagation();
-                this.now_playing.is_playing = !this.now_playing.is_playing;
-                cx.notify();
+                this.note_media_play_pause(cx);
                 nook_core::runtime().spawn(async {
                     let _ = nook_core::audio::media_play_pause().await;
                 });
@@ -666,8 +722,7 @@ fn seek_hits(cx: &mut Context<Island>) -> impl IntoElement {
                             return;
                         };
                         let position = duration * ratio as f64;
-                        this.now_playing.elapsed_time = Some(position);
-                        cx.notify();
+                        this.note_media_seek(position, cx);
                         nook_core::runtime().spawn(async move {
                             let _ = nook_core::audio::media_seek(position).await;
                         });
@@ -756,8 +811,7 @@ fn play_btn(playing: bool, cx: &mut Context<Island>) -> impl IntoElement {
             MouseButton::Left,
             cx.listener(move |this, _: &MouseDownEvent, _, cx| {
                 cx.stop_propagation();
-                this.now_playing.is_playing = !this.now_playing.is_playing;
-                cx.notify();
+                this.note_media_play_pause(cx);
                 nook_core::runtime().spawn(async {
                     let _ = nook_core::audio::media_play_pause().await;
                 });

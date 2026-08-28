@@ -74,6 +74,16 @@ fn migrate(conn: &Connection) -> Result<()> {
         [],
     )?;
 
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS lyrics (
+            cache_key TEXT PRIMARY KEY,
+            payload TEXT,
+            hit INTEGER NOT NULL DEFAULT 0,
+            fetched_at INTEGER NOT NULL
+        )",
+        [],
+    )?;
+
     Ok(())
 }
 
