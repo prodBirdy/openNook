@@ -677,6 +677,10 @@ mod macos {
     const SYSTEM_OBJECT: AudioObjectID = kAudioObjectSystemObject as AudioObjectID;
 
     /// Same layout as Foundation's `NSOperatingSystemVersion` (`NSInteger` triple).
+    ///
+    /// Encoded as an anonymous struct (`{?=qqq}`). Apple's runtime type for
+    /// `isOperatingSystemAtLeastVersion:` / `operatingSystemVersion` uses `?`,
+    /// not the typedef name — a named encoding panics in objc2's checker.
     #[repr(C)]
     struct NsVer {
         major: isize,
@@ -686,7 +690,7 @@ mod macos {
 
     unsafe impl Encode for NsVer {
         const ENCODING: Encoding = Encoding::Struct(
-            "NSOperatingSystemVersion",
+            "?",
             &[isize::ENCODING, isize::ENCODING, isize::ENCODING],
         );
     }
@@ -1504,6 +1508,11 @@ mod tests {
         assert!(version_at_least(14, 5, 1, 14, 4, 0));
         assert!(!version_at_least(14, 3, 9, 14, 4, 0));
         assert!(!version_at_least(13, 6, 0, 14, 4, 0));
+    }
+
+    #[test]
+    fn is_available_does_not_panic() {
+        let _ = is_available();
     }
 
     #[test]

@@ -1786,8 +1786,17 @@ mod tests {
     #[test]
     fn remaining_cells_saturate_at_zero() {
         let settings = AppSettings::default();
-        assert_eq!(AppSettings::TOTAL_CELLS, 11);
-        assert!(settings.used_cells() >= AppSettings::TOTAL_CELLS);
+        let default_used: u8 = WidgetModule::ALL
+            .iter()
+            .copied()
+            .filter(|module| module.occupies_nook_cells() && settings.is_enabled(*module))
+            .map(WidgetModule::default_cells)
+            .fold(0, u8::saturating_add);
+        assert_eq!(settings.used_cells(), default_used);
+        assert_eq!(
+            settings.remaining_cells(),
+            AppSettings::TOTAL_CELLS.saturating_sub(default_used)
+        );
         assert_eq!(settings.remaining_cells(), 0);
     }
 }
