@@ -141,7 +141,7 @@ impl SysSampler {
         let elapsed = self.prev_at.map(|prev| now.saturating_duration_since(prev));
         let fresh = elapsed.is_some_and(|dt| dt > Duration::ZERO && dt <= RATE_GAP);
 
-        let cpu_pct = if fresh {
+        let cpu = if fresh {
             match (self.prev_cpu, raw.cpu) {
                 (Some(prev), Some(next)) => cpu_pct(prev, next),
                 _ => None,
@@ -184,7 +184,7 @@ impl SysSampler {
         self.prev_at = Some(now);
 
         SysSnapshot {
-            cpu_pct,
+            cpu_pct: cpu,
             per_core,
             mem_used: raw.mem_used,
             mem_total: raw.mem_total,
