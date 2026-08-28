@@ -22,6 +22,7 @@ sysinfo = "0.37"
 objc2 = "0.6"
 objc2-foundation = "0.3"
 objc2-event-kit = { version = "0.3", features = ["EKEventStore", "EKEvent", "EKReminder", "EKCalendar"] }
+objc2-core-location = { version = "0.3", features = ["CLLocationManager", "CLLocation"] }
 block2 = "0.6"
 security-framework = "3.7"
 

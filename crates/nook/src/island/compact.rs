@@ -64,7 +64,7 @@ impl Island {
                 lucide("triangle-alert", theme::COMPACT_FACE).into_any_element()
             }
             CompactMode::Onboard => label("openNook", theme::BODY, true).into_any_element(),
-            CompactMode::Idle => div().into_any_element(),
+            CompactMode::Idle => widgets::compact_weather(self),
         }
     }
 

@@ -28,6 +28,10 @@
 	<string>openNook shows reminders in the island and lets you mark them complete from there.</string>
 	<key>NSCameraUsageDescription</key>
 	<string>openNook shows a live camera preview in the Mirror control so you can check yourself before a call.</string>
+	<key>NSLocationUsageDescription</key>
+	<string>openNook can use a one-shot city-level location so Weather can show the forecast for where you are. Location is optional — you can enter a city instead. The grant is tied to this build's signature and resets after an ad-hoc re-sign.</string>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>openNook can use a one-shot city-level location so Weather can show the forecast for where you are. Location is optional — you can enter a city instead.</string>
 	<key>NSAppleEventsUsageDescription</key>
 	<string>openNook uses Automation to pause or skip Music, Spotify, and Safari if system media controls are unavailable, and to read the current Safari or Chrome tab URL so the island can show a YouTube thumbnail or site icon when the browser does not provide artwork.</string>
 </dict>

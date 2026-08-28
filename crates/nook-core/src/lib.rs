@@ -10,6 +10,7 @@ pub mod calendar;
 pub mod database;
 pub mod files;
 pub mod haptics;
+pub mod location;
 #[cfg(target_os = "macos")]
 mod mediaremote;
 pub mod models;
@@ -20,6 +21,7 @@ pub mod observe;
 pub mod occupancy;
 pub mod settings;
 pub mod utils;
+pub mod weather;
 pub mod widgets;
 
 pub use models::{NotchInfo, NowPlayingData};

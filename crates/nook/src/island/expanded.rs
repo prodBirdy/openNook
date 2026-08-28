@@ -6,6 +6,7 @@ use crate::icons::lucide_color;
 use crate::theme;
 use crate::widgets::{
     agents_card, calendar_card, notes_card, observe_card, reminders_card, speed_card, timer_card,
+    weather_card,
 };
 use gpui::{
     div, img, prelude::*, px, rgba, AnyElement, Context, CursorStyle, FontWeight, MouseButton,
@@ -156,6 +157,10 @@ impl Island {
                         self.settings.cells_for(module),
                         speed_card(self.speed_mbps, self.speed_progress, self.speed_running, cx),
                     ),
+                ),
+                WidgetModule::Weather if self.settings.weather.enabled => add(
+                    &mut kids,
+                    cell_pane(self.settings.cells_for(module), weather_card(self, cx)),
                 ),
                 _ => {}
             }

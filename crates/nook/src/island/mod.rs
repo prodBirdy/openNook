@@ -27,6 +27,7 @@ use nook_core::models::NowPlayingData;
 use nook_core::notch;
 use nook_core::observe::{MetricHistory, ObserveSnapshot};
 use nook_core::settings::AppSettings;
+use nook_core::weather::WeatherSnapshot;
 use settings::SettingsView;
 use std::time::{Duration, Instant};
 
@@ -94,6 +95,9 @@ pub struct Island {
     /// Bumped on start and on Stop so an in-flight test cannot apply after it
     /// was cancelled (Stop then Run would otherwise take the old result).
     pub speed_gen: u64,
+    pub weather: Option<WeatherSnapshot>,
+    pub weather_error: Option<String>,
+    pub(crate) weather_inflight: bool,
     pub last_tick: Instant,
     last_frame: Instant,
     /// Last seen `nook_core::settings::settings_generation()`; the tick loop
@@ -219,6 +223,9 @@ impl Island {
             speed_progress: 0.0,
             speed_running: false,
             speed_gen: 0,
+            weather: nook_core::weather::cached_snapshot(),
+            weather_error: None,
+            weather_inflight: false,
             last_tick: Instant::now(),
             last_frame: Instant::now(),
             settings_gen: nook_core::settings::settings_generation(),
@@ -263,6 +270,7 @@ impl Island {
         this.anim_h.set(h);
 
         platform::install_media_observers();
+        platform::install_weather_observers();
         nook_core::runtime().spawn(async {
             let _ = nook_core::calendar::request_calendar_access().await;
         });
@@ -688,6 +696,32 @@ impl Island {
             cx.background_executor()
                 .timer(Duration::from_secs(wait))
                 .await;
+        })
+        .detach();
+
+        // Weather: 30 min TTL, fetch only when stale and the card/adornment
+        // is visible, or after a wake. The wait is a clock compare — no radio
+        // unless fetch() decides the cache is stale.
+        cx.spawn(async move |this, cx| loop {
+            let wake = nook_core::weather::take_wake();
+            let plan = this
+                .update(cx, |this, _| {
+                    let enabled = this.settings.weather.enabled;
+                    let has_coords = this.settings.weather.location.coords().is_some();
+                    let fresh = nook_core::weather::is_fresh_for(&this.settings.weather);
+                    let visible = this.weather_visible();
+                    (enabled && has_coords && (!fresh || this.weather.is_none()) && (visible || wake), fresh)
+                })
+                .unwrap_or((false, true));
+            if plan.0 {
+                let _ = this.update(cx, |this, cx| this.refresh_weather(cx));
+            }
+            let wait = if plan.1 {
+                Duration::from_secs(30 * 60)
+            } else {
+                Duration::from_secs(30)
+            };
+            cx.background_executor().timer(wait).await;
         })
         .detach();
     }
@@ -1458,6 +1492,9 @@ mod tests {
             speed_progress: 0.0,
             speed_running: false,
             speed_gen: 0,
+            weather: None,
+            weather_error: None,
+            weather_inflight: false,
             last_tick: Instant::now(),
             last_frame: Instant::now(),
             settings_gen: 0,

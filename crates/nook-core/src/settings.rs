@@ -1,5 +1,6 @@
 use crate::database;
 use crate::observe::ObserveConfig;
+use crate::weather::WeatherSettings;
 use serde::{Deserialize, Serialize};
 use std::sync::RwLock;
 
@@ -17,10 +18,11 @@ pub enum WidgetModule {
     Speed = 7,
     Agents = 8,
     Mirror = 9,
+    Weather = 10,
 }
 
 impl WidgetModule {
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 11] = [
         Self::Calendar,
         Self::Music,
         Self::Files,
@@ -31,6 +33,7 @@ impl WidgetModule {
         Self::Speed,
         Self::Agents,
         Self::Mirror,
+        Self::Weather,
     ];
 
     pub fn from_u8(value: u8) -> Self {
@@ -45,7 +48,7 @@ impl WidgetModule {
         match self {
             Self::Calendar | Self::Music => 5,
             Self::Files | Self::Notes | Self::Observe | Self::Reminders | Self::Agents => 4,
-            Self::Timers | Self::Speed | Self::Mirror => 3,
+            Self::Timers | Self::Speed | Self::Mirror | Self::Weather => 3,
         }
     }
 
@@ -53,13 +56,13 @@ impl WidgetModule {
         match self {
             Self::Calendar => 4,
             Self::Music | Self::Files | Self::Observe | Self::Reminders | Self::Mirror => 3,
-            Self::Notes | Self::Timers | Self::Speed | Self::Agents => 2,
+            Self::Notes | Self::Timers | Self::Speed | Self::Agents | Self::Weather => 2,
         }
     }
 
     pub fn max_cells(self) -> u8 {
         match self {
-            Self::Timers | Self::Speed | Self::Agents | Self::Mirror => 6,
+            Self::Timers | Self::Speed | Self::Agents | Self::Mirror | Self::Weather => 6,
             _ => 8,
         }
     }
@@ -82,6 +85,7 @@ fn default_widget_order() -> Vec<WidgetModule> {
         WidgetModule::Timers,
         WidgetModule::Notes,
         WidgetModule::Speed,
+        WidgetModule::Weather,
     ]
 }
 
@@ -142,6 +146,8 @@ pub struct AppSettings {
     pub show_files: bool,
     #[serde(default = "default_true")]
     pub show_mirror: bool,
+    #[serde(default)]
+    pub weather: WeatherSettings,
     #[serde(default)]
     pub observe: ObserveConfig,
     #[serde(default)]
@@ -231,6 +237,7 @@ impl Default for AppSettings {
             show_speed: true,
             show_files: true,
             show_mirror: true,
+            weather: WeatherSettings::default(),
             observe: ObserveConfig::default(),
             liquid_glass_mode: false,
             non_notch_mode: false,
@@ -276,6 +283,7 @@ impl AppSettings {
             WidgetModule::Speed => self.show_speed,
             WidgetModule::Agents => self.show_agents,
             WidgetModule::Mirror => self.show_mirror,
+            WidgetModule::Weather => self.weather.enabled,
         }
     }
 
@@ -291,6 +299,7 @@ impl AppSettings {
             WidgetModule::Speed => self.show_speed = !self.show_speed,
             WidgetModule::Agents => self.show_agents = !self.show_agents,
             WidgetModule::Mirror => self.show_mirror = !self.show_mirror,
+            WidgetModule::Weather => self.weather.enabled = !self.weather.enabled,
         }
     }
 
@@ -611,6 +620,8 @@ mod tests {
         assert!(parsed.show_speed);
         assert!(parsed.show_files);
         assert!(parsed.show_mirror);
+        assert!(parsed.weather.enabled);
+        assert!(parsed.weather.show_on_compact_face);
         assert!(parsed.liquid_glass_mode);
         assert!(!parsed.non_notch_mode);
         assert!((parsed.island_x - 0.5).abs() < f32::EPSILON);
@@ -696,6 +707,7 @@ mod tests {
         settings.show_speed = false;
         settings.show_agents = false;
         settings.show_mirror = false;
+        settings.weather.enabled = false;
         settings.set_cells(WidgetModule::Music, 5);
         assert_eq!(settings.used_cells(), 5);
         assert_eq!(settings.remaining_cells(), AppSettings::TOTAL_CELLS - 5);
