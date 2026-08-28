@@ -97,6 +97,7 @@ pub fn parse_pgrep_stdout(stdout: &str) -> Vec<i32> {
 static STARTED: Once = Once::new();
 static SUPPRESSED: AtomicBool = AtomicBool::new(false);
 static HELPER_SEEN: AtomicBool = AtomicBool::new(false);
+#[allow(dead_code)]
 static CACHED_PID: AtomicI32 = AtomicI32::new(0);
 static GUARD: std::sync::OnceLock<OsdGuard> = std::sync::OnceLock::new();
 

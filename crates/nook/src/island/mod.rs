@@ -742,28 +742,12 @@ impl Island {
                 if event.is_initial() {
                     continue;
                 }
-                let Ok(gen) = this.update(cx, |this, cx| this.apply_hud_event(event, cx)) else {
+                if this
+                    .update(cx, |this, cx| this.apply_hud_event(event, cx))
+                    .is_err()
+                {
                     break;
-                };
-                if gen == 0 {
-                    continue;
                 }
-                let this2 = this.clone();
-                cx.spawn(async move |_, cx| {
-                    cx.background_executor().timer(HUD_TTL).await;
-                    this2
-                        .update(cx, |this, cx| {
-                            if this
-                                .hud
-                                .is_some_and(|hud| hud.gen == gen && !this.hud_dragging)
-                            {
-                                this.hud = None;
-                                cx.notify();
-                            }
-                        })
-                        .ok();
-                })
-                .detach();
             }
         })
         .detach();
