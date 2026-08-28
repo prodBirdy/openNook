@@ -312,7 +312,7 @@ mod macos {
     use objc2::runtime::{AnyClass, AnyObject, Bool};
     use objc2::msg_send;
     use objc2_foundation::NSString;
-    use std::ffi::c_void;
+    use std::ffi::{c_void, CStr};
     use std::ptr;
     use tokio::sync::oneshot;
 
@@ -333,18 +333,13 @@ mod macos {
         file: Option<SyncObj>,
         request: Option<SyncObj>,
         recognizer: Option<SyncObj>,
-        _tap: TapKeep,
-        _result: Option<TapKeep>,
     }
-
-    // RcBlock must stay alive for the tap / result handler.
-    struct TapKeep(Box<dyn Send + Sync>);
 
     static ENGINE: Mutex<Option<Engine>> = Mutex::new(None);
     static PLAYER: Mutex<Option<SyncObj>> = Mutex::new(None);
 
-    fn class(name: &str) -> Result<&'static AnyClass, String> {
-        AnyClass::get(name).ok_or_else(|| format!("missing {name}"))
+    fn class(name: &CStr) -> Result<&'static AnyClass, String> {
+        AnyClass::get(name).ok_or_else(|| format!("missing {}", name.to_string_lossy()))
     }
 
     fn ns_string(s: &str) -> Retained<NSString> {
@@ -382,13 +377,13 @@ mod macos {
     pub fn play(path: &str, id: i64) -> Result<(), String> {
         stop_playback();
         let url = file_url(path)?;
-        let cls = class("AVAudioPlayer")?;
+        let cls = class(c"AVAudioPlayer")?;
         let mut err: *mut AnyObject = ptr::null_mut();
-        let player: Option<Retained<AnyObject>> = unsafe {
+        let player: *mut AnyObject = unsafe {
             let alloc: *mut AnyObject = msg_send![cls, alloc];
             msg_send![alloc, initWithContentsOfURL: &*url, error: &mut err]
         };
-        let Some(player) = player else {
+        let Some(player) = (unsafe { Retained::from_raw(player) }) else {
             return Err(ns_error(err).unwrap_or_else(|| "AVAudioPlayer failed".into()));
         };
         let ok: bool = unsafe { msg_send![&*player, play] };
@@ -432,7 +427,7 @@ mod macos {
     }
 
     fn mic_status() -> isize {
-        let Ok(cls) = class("AVCaptureDevice") else {
+        let Ok(cls) = class(c"AVCaptureDevice") else {
             return 0;
         };
         let media = ns_string("soun");
@@ -449,7 +444,7 @@ mod macos {
             }
             _ => {}
         }
-        let cls = class("AVCaptureDevice")?;
+        let cls = class(c"AVCaptureDevice")?;
         let media = ns_string("soun");
         let (tx, rx) = oneshot::channel::<bool>();
         let tx = Mutex::new(Some(tx));
@@ -475,7 +470,7 @@ mod macos {
     }
 
     async fn request_speech() -> Result<bool, String> {
-        let cls = class("SFSpeechRecognizer")?;
+        let cls = class(c"SFSpeechRecognizer")?;
         let status: isize = unsafe { msg_send![cls, authorizationStatus] };
         match status {
             3 => return Ok(true),
@@ -502,7 +497,7 @@ mod macos {
     }
 
     fn begin_engine(transcribe: bool) -> Result<(), String> {
-        let engine_cls = class("AVAudioEngine")?;
+        let engine_cls = class(c"AVAudioEngine")?;
         let engine: Retained<AnyObject> = unsafe { msg_send![engine_cls, new] };
         let input: Retained<AnyObject> = unsafe { msg_send![&*engine, inputNode] };
         let format: Retained<AnyObject> = unsafe { msg_send![&*input, outputFormatForBus: 0usize] };
@@ -510,9 +505,9 @@ mod macos {
         let path = recordings_dir().join(format!("rec-{}.caf", now_unix()));
         let url = file_url(path.to_str().unwrap_or("rec.caf"))?;
         let settings: Retained<AnyObject> = unsafe { msg_send![&*format, settings] };
-        let file_cls = class("AVAudioFile")?;
+        let file_cls = class(c"AVAudioFile")?;
         let mut err: *mut AnyObject = ptr::null_mut();
-        let file: Option<Retained<AnyObject>> = unsafe {
+        let file: *mut AnyObject = unsafe {
             let alloc: *mut AnyObject = msg_send![file_cls, alloc];
             msg_send![
                 alloc,
@@ -521,23 +516,24 @@ mod macos {
                 error: &mut err
             ]
         };
-        let file = file.ok_or_else(|| ns_error(err).unwrap_or_else(|| "AVAudioFile failed".into()))?;
+        let file = unsafe { Retained::from_raw(file) }
+            .ok_or_else(|| ns_error(err).unwrap_or_else(|| "AVAudioFile failed".into()))?;
 
-        let (request, recognizer, result_keep) = if transcribe {
+        let (request, recognizer) = if transcribe {
             match start_recognition() {
                 Ok(parts) => {
                     TRANSCRIBING.store(true, Ordering::Relaxed);
-                    (Some(parts.0), Some(parts.1), Some(parts.2))
+                    (Some(parts.0), Some(parts.1))
                 }
                 Err(err) => {
                     log::warn!("on-device speech unavailable ({err}); record-only");
                     TRANSCRIBING.store(false, Ordering::Relaxed);
-                    (None, None, None)
+                    (None, None)
                 }
             }
         } else {
             TRANSCRIBING.store(false, Ordering::Relaxed);
-            (None, None, None)
+            (None, None)
         };
 
         let file_for_tap = SyncObj(file.clone());
@@ -572,6 +568,9 @@ mod macos {
                 return Err(ns_error(start_err).unwrap_or_else(|| "AVAudioEngine failed".into()));
             }
         }
+        // RcBlock is !Send/!Sync — leak so it outlives the tap without
+        // sitting in the ENGINE Mutex.
+        std::mem::forget(tap);
 
         let now = Instant::now();
         if let Ok(mut g) = shared().lock() {
@@ -592,18 +591,16 @@ mod macos {
             file: Some(SyncObj(file)),
             request,
             recognizer,
-            _tap: TapKeep(Box::new(tap)),
-            _result: result_keep,
         };
         *ENGINE.lock().map_err(|e| e.to_string())? = Some(session);
         Ok(())
     }
 
-    fn start_recognition() -> Result<(SyncObj, SyncObj, TapKeep), String> {
-        let rec_cls = class("SFSpeechRecognizer")?;
+    fn start_recognition() -> Result<(SyncObj, SyncObj), String> {
+        let rec_cls = class(c"SFSpeechRecognizer")?;
         let recognizer: Retained<AnyObject> = unsafe { msg_send![rec_cls, new] };
         let on_device: bool = unsafe { msg_send![&*recognizer, supportsOnDeviceRecognition] };
-        let req_cls = class("SFSpeechAudioBufferRecognitionRequest")?;
+        let req_cls = class(c"SFSpeechAudioBufferRecognitionRequest")?;
         let request: Retained<AnyObject> = unsafe { msg_send![req_cls, new] };
         unsafe {
             let _: () = msg_send![&*request, setShouldReportPartialResults: true];
@@ -635,11 +632,8 @@ mod macos {
                 resultHandler: &*handler
             ]
         };
-        Ok((
-            SyncObj(request),
-            SyncObj(recognizer),
-            TapKeep(Box::new(handler)),
-        ))
+        std::mem::forget(handler);
+        Ok((SyncObj(request), SyncObj(recognizer)))
     }
 
     fn restart_recognition() -> Result<(), String> {
@@ -655,10 +649,9 @@ mod macos {
             g.segment_started = Some(Instant::now());
         }
         match start_recognition() {
-            Ok((req, rec, keep)) => {
+            Ok((req, rec)) => {
                 session.request = Some(req);
                 session.recognizer = Some(rec);
-                session._result = Some(keep);
                 TRANSCRIBING.store(true, Ordering::Relaxed);
             }
             Err(err) => {
@@ -680,7 +673,7 @@ mod macos {
                 drop(session.file);
             }
         }
-        if let Ok(mut g) = shared().lock() {
+        if let Ok(g) = shared().lock() {
             if let Some(started) = g.started {
                 STARTED_MS.store(started.elapsed().as_millis() as u64, Ordering::Relaxed);
             }
@@ -688,11 +681,10 @@ mod macos {
     }
 
     fn file_url(path: &str) -> Result<Retained<AnyObject>, String> {
-        let cls = class("NSURL")?;
+        let cls = class(c"NSURL")?;
         let ns = ns_string(path);
-        let url: Option<Retained<AnyObject>> =
-            unsafe { msg_send![cls, fileURLWithPath: &*ns] };
-        url.ok_or_else(|| "NSURL failed".into())
+        let url: *mut AnyObject = unsafe { msg_send![cls, fileURLWithPath: &*ns] };
+        unsafe { Retained::retain(url) }.ok_or_else(|| "NSURL failed".into())
     }
 
     fn ns_error(err: *mut AnyObject) -> Option<String> {
@@ -785,7 +777,9 @@ mod tests {
         let snap = snapshot();
         assert!(!snap.recording);
         assert_eq!(snap.level, 0.0);
+        assert_eq!(snap.elapsed_ms, 0);
         pump();
         assert!(!is_live());
+        assert_eq!(snapshot().level, 0.0);
     }
 }
