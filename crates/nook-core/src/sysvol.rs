@@ -143,10 +143,9 @@ static AVAILABLE: AtomicBool = AtomicBool::new(false);
 #[cfg(target_os = "macos")]
 mod macos {
     use super::{clamp_unit, publish, HudKind, AVAILABLE};
-    use block2::{Block, RcBlock};
     use std::ffi::c_void;
     use std::sync::atomic::{AtomicU32, Ordering};
-    use std::sync::{Mutex, Once};
+    use std::sync::Once;
 
     type AudioObjectId = u32;
     type OsStatus = i32;
@@ -187,11 +186,16 @@ mod macos {
             data_size: u32,
             data: *const c_void,
         ) -> OsStatus;
-        fn AudioObjectAddPropertyListenerBlock(
+        fn AudioObjectAddPropertyListener(
             object: AudioObjectId,
             address: *const PropertyAddress,
-            queue: *mut c_void,
-            listener: *mut Block<dyn Fn(u32, *const PropertyAddress)>,
+            listener: unsafe extern "C" fn(
+                AudioObjectId,
+                u32,
+                *const PropertyAddress,
+                *mut c_void,
+            ) -> OsStatus,
+            client: *mut c_void,
         ) -> OsStatus;
     }
 
@@ -199,8 +203,6 @@ mod macos {
     static DEVICE: AtomicU32 = AtomicU32::new(0);
     static LAST_VOLUME: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
     static LAST_MUTE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-    static BLOCKS: Mutex<Vec<RcBlock<dyn Fn(u32, *const PropertyAddress)>>> =
-        Mutex::new(Vec::new());
 
     fn addr(selector: u32, scope: u32, element: u32) -> PropertyAddress {
         PropertyAddress {
@@ -354,23 +356,28 @@ mod macos {
         );
     }
 
+    /// CoreAudio HAL thread. `client` is a leaked `fn()` from [`listen`].
+    unsafe extern "C" fn on_property(
+        _object: AudioObjectId,
+        _n: u32,
+        _addrs: *const PropertyAddress,
+        client: *mut c_void,
+    ) -> OsStatus {
+        if !client.is_null() {
+            // SAFETY: `client` is `Box::leak` of a `fn()`; listeners are
+            // registered once and never removed or sent across threads.
+            let callback = unsafe { *(client as *const fn()) };
+            callback();
+        }
+        0
+    }
+
     fn listen(object: AudioObjectId, address: PropertyAddress, on_change: fn()) {
-        let block = RcBlock::new(move |_n: u32, _addrs: *const PropertyAddress| {
-            on_change();
-        });
-        let status = unsafe {
-            let block_ref = &*block;
-            let block_ptr = block_ref as *const Block<dyn Fn(u32, *const PropertyAddress)>
-                as *mut Block<dyn Fn(u32, *const PropertyAddress)>;
-            AudioObjectAddPropertyListenerBlock(object, &address, std::ptr::null_mut(), block_ptr)
-        };
-        if status == 0 {
-            if let Ok(mut guard) = BLOCKS.lock() {
-                guard.push(block);
-            } else {
-                std::mem::forget(block);
-            }
-        } else {
+        // Process-lifetime: keep the callback pointer alive for CoreAudio.
+        let client = Box::leak(Box::new(on_change)) as *mut fn() as *mut c_void;
+        let status =
+            unsafe { AudioObjectAddPropertyListener(object, &address, on_property, client) };
+        if status != 0 {
             log::warn!("CoreAudio listener failed ({status:#x})");
         }
     }
