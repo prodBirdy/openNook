@@ -398,6 +398,107 @@ pub struct AppSettings {
     pub ambient_art_glow: bool,
     #[serde(default)]
     pub window: WindowSettings,
+    /// Universal search + clipboard history (WP21). Clipboard capture stays
+    /// off until the user opts in.
+    #[serde(default)]
+    pub search: SearchSettings,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SearchHotkey {
+    #[serde(default)]
+    pub alt: bool,
+    #[serde(default)]
+    pub ctrl: bool,
+    #[serde(default)]
+    pub meta: bool,
+    #[serde(default)]
+    pub shift: bool,
+    #[serde(default = "default_hotkey_key")]
+    pub key: String,
+}
+
+fn default_hotkey_key() -> String {
+    "Space".into()
+}
+
+impl Default for SearchHotkey {
+    fn default() -> Self {
+        // Option+Space — common launcher binding that does not steal Spotlight.
+        Self {
+            alt: true,
+            ctrl: false,
+            meta: false,
+            shift: false,
+            key: default_hotkey_key(),
+        }
+    }
+}
+
+impl SearchHotkey {
+    pub fn label(&self) -> String {
+        let mut parts = Vec::new();
+        if self.ctrl {
+            parts.push("⌃");
+        }
+        if self.alt {
+            parts.push("⌥");
+        }
+        if self.shift {
+            parts.push("⇧");
+        }
+        if self.meta {
+            parts.push("⌘");
+        }
+        let key = if self.key.is_empty() {
+            "Space"
+        } else {
+            self.key.as_str()
+        };
+        parts.push(key);
+        parts.join(" ")
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SearchSettings {
+    /// Register the global hotkey. Search itself needs no TCC.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub hotkey: SearchHotkey,
+    /// Persist clipboard history. Default OFF — privacy.
+    #[serde(default)]
+    pub clipboard_history: bool,
+    #[serde(default = "default_clipboard_cap")]
+    pub clipboard_history_size: u32,
+    /// Bundle identifiers skipped at copy time (frontmost-app heuristic).
+    #[serde(default)]
+    pub clipboard_exclude_apps: Vec<String>,
+    /// Synthesize Cmd-V after paste-back. Off + Accessibility-gated.
+    #[serde(default)]
+    pub auto_paste: bool,
+    /// Optional magnifier on the compact idle face.
+    #[serde(default)]
+    pub show_magnifier: bool,
+}
+
+fn default_clipboard_cap() -> u32 {
+    500
+}
+
+impl Default for SearchSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            hotkey: SearchHotkey::default(),
+            clipboard_history: false,
+            clipboard_history_size: default_clipboard_cap(),
+            clipboard_exclude_apps: Vec::new(),
+            auto_paste: false,
+            show_magnifier: false,
+        }
+    }
 }
 
 fn default_terminal_timeout() -> u32 {
@@ -635,6 +736,7 @@ impl Default for AppSettings {
             animated_album_art: false,
             ambient_art_glow: true,
             window: WindowSettings::default(),
+            search: SearchSettings::default(),
         }
     }
 }
@@ -1087,6 +1189,17 @@ mod tests {
     use super::*;
 
     #[test]
+    fn search_defaults_keep_clipboard_off() {
+        let settings = AppSettings::default();
+        assert!(settings.search.enabled);
+        assert!(!settings.search.clipboard_history);
+        assert!(!settings.search.auto_paste);
+        assert_eq!(settings.search.hotkey.label(), "⌥ Space");
+        let parsed: SearchSettings = serde_json::from_str("{}").unwrap();
+        assert_eq!(parsed, SearchSettings::default());
+    }
+
+    #[test]
     fn empty_json_matches_default() {
         let parsed: AppSettings = serde_json::from_str("{}").unwrap();
         assert_eq!(parsed, AppSettings::default());
@@ -1178,6 +1291,11 @@ mod tests {
         assert!(parsed.ambient_art_glow);
         assert_eq!(parsed.animated_album_art, AppSettings::default().animated_album_art);
         assert_eq!(parsed.ambient_art_glow, AppSettings::default().ambient_art_glow);
+        assert!(parsed.search.enabled);
+        assert!(!parsed.search.clipboard_history);
+        assert!(!parsed.search.auto_paste);
+        assert_eq!(parsed.search.clipboard_history_size, 500);
+        assert_eq!(parsed.search.hotkey, SearchHotkey::default());
     }
 
     #[test]

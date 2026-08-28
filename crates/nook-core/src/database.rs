@@ -31,8 +31,22 @@ pub fn init_db() -> Result<()> {
 fn try_init(path: &Path) -> Result<()> {
     let conn = Connection::open(path)?;
     migrate(&conn)?;
+    restrict_db_mode(path);
     let _ = ACTIVE_PATH.set(path.to_path_buf());
     Ok(())
+}
+
+/// History is plain text; keep the file owner-only when the OS allows it.
+fn restrict_db_mode(path: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(meta) = std::fs::metadata(path) {
+            let mut perm = meta.permissions();
+            perm.set_mode(0o600);
+            let _ = std::fs::set_permissions(path, perm);
+        }
+    }
 }
 
 fn migrate(conn: &Connection) -> Result<()> {
@@ -94,6 +108,22 @@ fn migrate(conn: &Connection) -> Result<()> {
             duration_ms INTEGER NOT NULL,
             transcript TEXT NOT NULL DEFAULT ''
         )",
+        [],
+    )?;
+        "CREATE TABLE IF NOT EXISTS clipboard_items (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            kind TEXT NOT NULL,
+            text TEXT,
+            image BLOB,
+            app_bundle_id TEXT,
+            copied_at INTEGER NOT NULL,
+            pinned INTEGER NOT NULL DEFAULT 0
+        )",
+        [],
+    )?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS clipboard_items_copied_at
+         ON clipboard_items (copied_at)",
         [],
     )?;
 

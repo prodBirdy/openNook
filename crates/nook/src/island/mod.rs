@@ -7,6 +7,7 @@ mod files;
 mod marquee;
 pub(crate) mod media;
 mod render;
+mod search;
 mod settings;
 pub(crate) mod ui;
 
@@ -334,6 +335,15 @@ pub struct Island {
     pub recorder_error: Option<String>,
     pub playing_recording: Option<i64>,
     recorder_last_notify: Instant,
+    pub search_open: bool,
+    pub(crate) search_editor: Option<Entity<search::SearchEditor>>,
+    search_sub: Option<Subscription>,
+    pub(crate) search_results: Vec<search::SearchResult>,
+    pub search_selected: usize,
+    pub search_clipboard_only: bool,
+    pub search_query: String,
+    search_gen: u64,
+    search_loading: bool,
 }
 
 struct PendingFileDrag {
@@ -513,6 +523,15 @@ impl Island {
             recorder_error: None,
             playing_recording: None,
             recorder_last_notify: Instant::now(),
+            search_open: false,
+            search_editor: None,
+            search_sub: None,
+            search_results: Vec::new(),
+            search_selected: 0,
+            search_clipboard_only: false,
+            search_query: String::new(),
+            search_gen: 0,
+            search_loading: false,
         };
         // Start at the compact idle size so the first paint isn't a jump.
         let (w, h) = this.target_size();
@@ -524,6 +543,8 @@ impl Island {
         platform::install_osd_wake_observer();
         platform::install_weather_observers();
         platform::install_meeting_observers();
+        platform::install_screen_lock_observer();
+        platform::sync_search_hotkey(this.settings.search.enabled, &this.settings.search.hotkey);
         nook_core::runtime().spawn(async {
             let _ = nook_core::calendar::request_calendar_access().await;
         });
@@ -613,6 +634,14 @@ impl Island {
                             this.settings.low_battery_release_pct,
                         );
                         this.sync_motion_art_from_settings(cx);
+                        platform::sync_search_hotkey(
+                            this.settings.search.enabled,
+                            &this.settings.search.hotkey,
+                        );
+                        dirty = true;
+                    }
+                    if platform::take_search_hotkey() {
+                        this.open_search(None, cx);
                         dirty = true;
                     }
                     let mixer_on = this
@@ -653,6 +682,7 @@ impl Island {
                     let want_suppress = this.settings.hide_when_maximized
                         && !this.repositioning
                         && !this.settings_open
+                        && !this.search_open
                         && nook_core::occupancy::frontmost_fills_display();
                     if this.suppressed != want_suppress {
                         this.suppressed = want_suppress;
@@ -661,6 +691,7 @@ impl Island {
                             if this.expanded {
                                 this.expanded = false;
                                 this.close_notes_editor(cx);
+                                this.close_search(cx);
                                 this.stop_mirror(cx);
                             }
                         }
@@ -731,6 +762,7 @@ impl Island {
                             && !this.notes_editing
                             && !this.obsidian_typing
                             && !this.shell_focused
+                            && !this.search_open
                             && !this.mirror_on
                             && !this.file_drag
                             && !nook_core::files::outbound_drag_active()
@@ -756,6 +788,14 @@ impl Island {
                     let elapsed_secs = now.duration_since(this.last_tick).as_secs() as u32;
                     if elapsed_secs >= 1 {
                         this.last_tick += Duration::from_secs(elapsed_secs as u64);
+                        // Clipboard history piggybacks this 1 Hz gate — no new timer.
+                        if this.settings.search.clipboard_history
+                            && nook_core::clipboard::change_count_moved()
+                        {
+                            let exclusions = this.settings.search.clipboard_exclude_apps.clone();
+                            let cap = this.settings.search.clipboard_history_size;
+                            let _ = nook_core::clipboard::capture_current(&exclusions, cap);
+                        }
                         // Repaint only when a countdown actually moved — an
                         // unconditional dirty here kept the island rendering
                         // (and Metal submitting) once a second forever.
@@ -889,6 +929,8 @@ impl Island {
                         || any_working
                         || this.hud_active();
                         || this.shell_running;
+                        || this.search_open
+                        || any_working;
                     // Media playing promotes itself through `dirty` (the
                     // visualizer levels change every frame), so it needs no
                     // term of its own here.
@@ -2721,6 +2763,10 @@ impl Island {
     fn target_size(&self) -> (f32, f32) {
         let base_w = self.notch_width.max(180.0);
         let base_h = self.notch_height.max(32.0);
+        if self.search_open {
+            let w = self.expanded_width().min(search::SEARCH_WIDTH);
+            return (w, self.notch_height.max(32.0) + self.search_body_height());
+        }
         if self.expanded {
             let w = self.expanded_width();
             let body = if self.tab == Tab::Files {
@@ -2763,6 +2809,9 @@ impl Island {
         let mut body = theme::NOOK_INSET + theme::NOOK_BODY + Self::queue_reserve_height(&self.settings);
         if self.settings.show_files {
             body = body.max(theme::EXPANDED_PAD * 2.0 + files::files_pane_min_height(w));
+        }
+        if self.search_open || self.settings.search.enabled {
+            body = body.max(self.search_body_height());
         }
         let h = self.notch_height.max(32.0) + body;
         let (_, top) = self.settings.island_origin(
@@ -2953,6 +3002,7 @@ impl Island {
             }
         } else {
             self.close_notes_editor(cx);
+            self.close_search(cx);
             self.stop_mirror(cx);
         }
         nook_core::power::set_detail_watch(self.expanded && self.settings.show_battery);
@@ -3666,6 +3716,15 @@ mod tests {
             recorder_error: None,
             playing_recording: None,
             recorder_last_notify: Instant::now(),
+            search_open: false,
+            search_editor: None,
+            search_sub: None,
+            search_results: Vec::new(),
+            search_selected: 0,
+            search_clipboard_only: false,
+            search_query: String::new(),
+            search_gen: 0,
+            search_loading: false,
         }
     }
 
@@ -3834,6 +3893,13 @@ mod tests {
         island.queue_inflight = false;
         island.expanded = false;
         assert!(!island.maybe_start_queue_fetch());
+    fn search_summon_uses_a_compact_card() {
+        let mut island = test_island();
+        island.search_open = true;
+        let (w, h) = island.target_size();
+        assert!(w <= search::SEARCH_WIDTH + 1.0);
+        assert!(h > island.notch_height);
+        assert!(h < 400.0);
     }
 
     #[test]

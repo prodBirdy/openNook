@@ -2806,6 +2806,230 @@ fn motion_art_cap() -> &'static std::sync::Mutex<MotionArtCap> {
             hidden: true,
             paused: true,
         })
+// WP21 — Carbon global hotkey, frontmost restore, Spotlight launch, auto-paste.
+
+use std::sync::atomic::AtomicBool as SearchAtomicBool;
+
+static SEARCH_HOTKEY_FIRED: SearchAtomicBool = SearchAtomicBool::new(false);
+
+pub fn take_search_hotkey() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        drain_hotkey_events();
+    }
+    SEARCH_HOTKEY_FIRED.swap(false, std::sync::atomic::Ordering::SeqCst)
+}
+
+pub fn sync_search_hotkey(enabled: bool, hotkey: &nook_core::settings::SearchHotkey) {
+    #[cfg(target_os = "macos")]
+    {
+        sync_search_hotkey_macos(enabled, hotkey);
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (enabled, hotkey);
+    }
+}
+
+pub fn remember_frontmost() {
+    #[cfg(target_os = "macos")]
+    remember_frontmost_macos();
+}
+
+pub fn restore_frontmost() {
+    #[cfg(target_os = "macos")]
+    restore_frontmost_macos();
+}
+
+pub fn make_island_key() {
+    #[cfg(target_os = "macos")]
+    unsafe {
+        use objc2::runtime::AnyObject;
+        use objc2::*;
+        for_each_island_window(|ns_win| {
+            if window_title_is(ns_win, "openNook-island") {
+                let _: () = msg_send![ns_win, makeKeyAndOrderFront: std::ptr::null_mut::<AnyObject>()];
+            }
+        });
+    }
+}
+
+pub fn launch_path(path: &str) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        launch_path_macos(path)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = path;
+        false
+    }
+}
+
+/// Synthesize Cmd-V. Requires Accessibility TCC; returns false when untrusted.
+pub fn auto_paste_cmd_v() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        auto_paste_cmd_v_macos()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        false
+    }
+}
+
+pub fn accessibility_trusted() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        accessibility_trusted_macos()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        false
+    }
+}
+
+pub fn install_screen_lock_observer() {
+    #[cfg(target_os = "macos")]
+    install_screen_lock_observer_macos();
+}
+
+#[cfg(target_os = "macos")]
+fn drain_hotkey_events() {
+    use global_hotkey::{GlobalHotKeyEvent, HotKeyState};
+    while let Ok(event) = GlobalHotKeyEvent::receiver().try_recv() {
+        if event.state == HotKeyState::Pressed {
+            SEARCH_HOTKEY_FIRED.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+struct HotkeyCap {
+    manager: global_hotkey::GlobalHotKeyManager,
+    registered: Option<global_hotkey::hotkey::HotKey>,
+    last: Option<(bool, nook_core::settings::SearchHotkey)>,
+}
+
+#[cfg(target_os = "macos")]
+fn hotkey_cap() -> &'static std::sync::Mutex<Option<HotkeyCap>> {
+    static CAP: std::sync::OnceLock<std::sync::Mutex<Option<HotkeyCap>>> = std::sync::OnceLock::new();
+    CAP.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+#[cfg(target_os = "macos")]
+fn sync_search_hotkey_macos(enabled: bool, hotkey: &nook_core::settings::SearchHotkey) {
+    use global_hotkey::hotkey::{HotKey, Modifiers};
+    use global_hotkey::GlobalHotKeyManager;
+
+    let mut guard = hotkey_cap().lock().unwrap_or_else(|e| e.into_inner());
+    if guard.is_none() {
+        match GlobalHotKeyManager::new() {
+            Ok(manager) => {
+                *guard = Some(HotkeyCap {
+                    manager,
+                    registered: None,
+                    last: None,
+                });
+            }
+            Err(err) => {
+                log::warn!("search hotkey manager: {err}");
+                return;
+            }
+        }
+    }
+    let Some(cap) = guard.as_mut() else {
+        return;
+    };
+    let fingerprint = (enabled, hotkey.clone());
+    if cap.last.as_ref() == Some(&fingerprint) {
+        return;
+    }
+    if let Some(old) = cap.registered.take() {
+        if let Err(err) = cap.manager.unregister(old) {
+            log::debug!("unregister search hotkey: {err}");
+        }
+    }
+    cap.last = Some(fingerprint);
+    if !enabled {
+        return;
+    }
+    let Some(code) = hotkey_code(&hotkey.key) else {
+        log::warn!("search hotkey: unknown key {}", hotkey.key);
+        return;
+    };
+    let mut mods = Modifiers::empty();
+    if hotkey.alt {
+        mods |= Modifiers::ALT;
+    }
+    if hotkey.ctrl {
+        mods |= Modifiers::CONTROL;
+    }
+    if hotkey.shift {
+        mods |= Modifiers::SHIFT;
+    }
+    if hotkey.meta {
+        mods |= Modifiers::SUPER;
+    }
+    if mods.is_empty() {
+        log::warn!("search hotkey needs a modifier");
+        return;
+    }
+    let hk = HotKey::new(Some(mods), code);
+    match cap.manager.register(hk) {
+        Ok(()) => {
+            cap.registered = Some(hk);
+            log::info!("search hotkey registered as {}", hotkey.label());
+        }
+        Err(err) => log::warn!("search hotkey register {}: {err}", hotkey.label()),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn hotkey_code(key: &str) -> Option<global_hotkey::hotkey::Code> {
+    use global_hotkey::hotkey::Code;
+    Some(match key.trim().to_ascii_lowercase().as_str() {
+        "space" => Code::Space,
+        "tab" => Code::Tab,
+        "enter" | "return" => Code::Enter,
+        "escape" | "esc" => Code::Escape,
+        "a" => Code::KeyA,
+        "b" => Code::KeyB,
+        "c" => Code::KeyC,
+        "d" => Code::KeyD,
+        "e" => Code::KeyE,
+        "f" => Code::KeyF,
+        "g" => Code::KeyG,
+        "h" => Code::KeyH,
+        "i" => Code::KeyI,
+        "j" => Code::KeyJ,
+        "k" => Code::KeyK,
+        "l" => Code::KeyL,
+        "m" => Code::KeyM,
+        "n" => Code::KeyN,
+        "o" => Code::KeyO,
+        "p" => Code::KeyP,
+        "q" => Code::KeyQ,
+        "r" => Code::KeyR,
+        "s" => Code::KeyS,
+        "t" => Code::KeyT,
+        "u" => Code::KeyU,
+        "v" => Code::KeyV,
+        "w" => Code::KeyW,
+        "x" => Code::KeyX,
+        "y" => Code::KeyY,
+        "z" => Code::KeyZ,
+        "0" | "digit0" => Code::Digit0,
+        "1" | "digit1" => Code::Digit1,
+        "2" | "digit2" => Code::Digit2,
+        "3" | "digit3" => Code::Digit3,
+        "4" | "digit4" => Code::Digit4,
+        "5" | "digit5" => Code::Digit5,
+        "6" | "digit6" => Code::Digit6,
+        "7" | "digit7" => Code::Digit7,
+        "8" | "digit8" => Code::Digit8,
+        "9" | "digit9" => Code::Digit9,
+        _ => return None,
     })
 }
 
@@ -2997,6 +3221,160 @@ unsafe fn create_motion_art_layer(
     let _: () = msg_send![layer, setCornerRadius: radius];
     let _: () = msg_send![layer, setMasksToBounds: true];
     Some((layer, player, looper))
+fn remember_frontmost_macos() {
+    use objc2::runtime::AnyObject;
+    use objc2::*;
+    unsafe {
+        let ws: *mut AnyObject = msg_send![class!(NSWorkspace), sharedWorkspace];
+        if ws.is_null() {
+            return;
+        }
+        let app: *mut AnyObject = msg_send![ws, frontmostApplication];
+        if app.is_null() {
+            return;
+        }
+        let pid: i32 = msg_send![app, processIdentifier];
+        if pid as u32 == std::process::id() {
+            return;
+        }
+        *frontmost_pid() = Some(pid);
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn restore_frontmost_macos() {
+    use objc2::runtime::AnyObject;
+    use objc2::*;
+    let Some(pid) = frontmost_pid().take() else {
+        return;
+    };
+    unsafe {
+        let app: *mut AnyObject = msg_send![
+            class!(NSRunningApplication),
+            runningApplicationWithProcessIdentifier: pid
+        ];
+        if app.is_null() {
+            return;
+        }
+        // NSApplicationActivateIgnoringOtherApps
+        let _: bool = msg_send![app, activateWithOptions: 2u64];
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn frontmost_pid() -> std::sync::MutexGuard<'static, Option<i32>> {
+    static PID: std::sync::OnceLock<std::sync::Mutex<Option<i32>>> = std::sync::OnceLock::new();
+    PID.get_or_init(|| std::sync::Mutex::new(None))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+}
+
+#[cfg(target_os = "macos")]
+fn launch_path_macos(path: &str) -> bool {
+    use objc2::runtime::AnyObject;
+    use objc2::*;
+    unsafe {
+        let ws: *mut AnyObject = msg_send![class!(NSWorkspace), sharedWorkspace];
+        if ws.is_null() {
+            return false;
+        }
+        let ns: *mut AnyObject = msg_send![class!(NSString), alloc];
+        let ns_path: *mut AnyObject =
+            msg_send![ns, initWithBytes: path.as_ptr(), length: path.len(), encoding: 4u64];
+        if ns_path.is_null() {
+            return false;
+        }
+        let url: *mut AnyObject = msg_send![class!(NSURL), fileURLWithPath: ns_path];
+        let _: () = msg_send![ns_path, release];
+        if url.is_null() {
+            return false;
+        }
+        let ok: bool = msg_send![ws, openURL: url];
+        ok
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn accessibility_trusted_macos() -> bool {
+    #[link(name = "ApplicationServices", kind = "framework")]
+    extern "C" {
+        fn AXIsProcessTrusted() -> bool;
+    }
+    unsafe { AXIsProcessTrusted() }
+}
+
+#[cfg(target_os = "macos")]
+fn auto_paste_cmd_v_macos() -> bool {
+    if !accessibility_trusted_macos() {
+        return false;
+    }
+    #[link(name = "CoreGraphics", kind = "framework")]
+    extern "C" {
+        fn CGEventCreateKeyboardEvent(
+            source: *mut std::ffi::c_void,
+            virtual_key: u16,
+            key_down: bool,
+        ) -> *mut std::ffi::c_void;
+        fn CGEventSetFlags(event: *mut std::ffi::c_void, flags: u64);
+        fn CGEventPost(tap: u32, event: *mut std::ffi::c_void);
+        fn CFRelease(cf: *mut std::ffi::c_void);
+    }
+    const KEY_V: u16 = 9;
+    const CMD: u64 = 0x0010_0000;
+    const TAP_HID: u32 = 0;
+    unsafe {
+        let down = CGEventCreateKeyboardEvent(std::ptr::null_mut(), KEY_V, true);
+        let up = CGEventCreateKeyboardEvent(std::ptr::null_mut(), KEY_V, false);
+        if down.is_null() || up.is_null() {
+            if !down.is_null() {
+                CFRelease(down);
+            }
+            if !up.is_null() {
+                CFRelease(up);
+            }
+            return false;
+        }
+        CGEventSetFlags(down, CMD);
+        CGEventSetFlags(up, CMD);
+        CGEventPost(TAP_HID, down);
+        CGEventPost(TAP_HID, up);
+        CFRelease(down);
+        CFRelease(up);
+        true
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn install_screen_lock_observer_macos() {
+    use block2::RcBlock;
+    use objc2::runtime::AnyObject;
+    use objc2::*;
+    static INSTALLED: Once = Once::new();
+    INSTALLED.call_once(|| unsafe {
+        let center: *mut AnyObject =
+            msg_send![class!(NSDistributedNotificationCenter), defaultCenter];
+        if center.is_null() {
+            return;
+        }
+        for (name, locked) in [
+            (c"com.apple.screenIsLocked", true),
+            (c"com.apple.screenIsUnlocked", false),
+        ] {
+            let ns_name: *mut AnyObject =
+                msg_send![class!(NSString), stringWithUTF8String: name.as_ptr()];
+            let block = RcBlock::new(move |_note: *mut AnyObject| {
+                nook_core::clipboard::set_screen_locked(locked);
+            });
+            let _token: *mut AnyObject = msg_send![
+                center,
+                addObserverForName: ns_name,
+                object: std::ptr::null_mut::<AnyObject>(),
+                queue: std::ptr::null_mut::<AnyObject>(),
+                usingBlock: &*block
+            ];
+            std::mem::forget(block);
+        }
+    });
 }
 
 #[cfg(all(test, target_os = "macos"))]

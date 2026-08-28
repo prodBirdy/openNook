@@ -39,6 +39,13 @@ impl Island {
             Tab::Files if !self.settings.show_files => Tab::Widgets,
             Tab::Terminal if !self.settings.terminal_enabled => Tab::Widgets,
             other => other,
+        if self.search_open {
+            return self.render_search(cx).into_any_element();
+        }
+        let tab = if self.tab == Tab::Files && !self.settings.show_files {
+            Tab::Widgets
+        } else {
+            self.tab
         };
         div()
             .flex()
@@ -67,6 +74,7 @@ impl Island {
                             .into_any_element(),
                     }),
             )
+            .into_any_element()
     }
 
     fn render_topbar(&self, notch_w: f32, cx: &mut Context<Self>) -> impl IntoElement {

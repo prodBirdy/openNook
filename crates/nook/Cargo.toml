@@ -39,3 +39,4 @@ objc2-user-notifications = { version = "0.3", features = [
     "block2",
 ] }
 block2 = "0.6"
+global-hotkey = "0.7"

@@ -6,7 +6,7 @@ use super::{CompactMode, Island};
 use crate::platform;
 use crate::theme;
 use gpui::{
-    div, point, prelude::*, px, rgba, AnyElement, App, Bounds, Context, CursorStyle,
+    div, point, prelude::*, px, rgba, AnyElement, App, Bounds, Context, CursorStyle, Focusable,
     ExternalPaths, FontFallbacks, FontWeight, MouseButton, MouseDownEvent, MouseMoveEvent,
     MouseUpEvent, ScrollWheelEvent, Window, WindowBackgroundAppearance, WindowBounds, WindowKind,
     WindowOptions,
@@ -15,7 +15,18 @@ use nook_core::notch;
 use std::any::Any;
 
 impl gpui::Render for Island {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.search_open {
+            if let Some(editor) = &self.search_editor {
+                let handle = editor.focus_handle(cx);
+                if !handle.is_focused(window) {
+                    window.focus(&handle);
+                    window.activate_window();
+                    platform::activate_app();
+                    platform::make_island_key();
+                }
+            }
+        }
         self.sync_geometry(cx);
         if self.suppressed {
             nook_core::mouse::update_ui_bounds(0.0, -100.0, 0.0, 0.0);
