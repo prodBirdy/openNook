@@ -2546,12 +2546,44 @@ pub fn hide_motion_art() {
     sync_motion_art(None);
 }
 
+/// Retained AVFoundation object stored for the process lifetime.
+///
+/// # Safety
+/// `Send` so the pointer can live in a `static Mutex` (`OnceLock` requires
+/// `Sync`). AVQueuePlayer / AVPlayerLayer / AVPlayerLooper are only created,
+/// messaged, and released on the AppKit main thread (GPUI's UI thread). The
+/// mutex is storage, not a cross-thread handoff of the objects.
+#[cfg(target_os = "macos")]
+struct MainThreadObjc(*mut objc2::runtime::AnyObject);
+
+#[cfg(target_os = "macos")]
+unsafe impl Send for MainThreadObjc {}
+
+#[cfg(target_os = "macos")]
+impl MainThreadObjc {
+    const fn null() -> Self {
+        Self(std::ptr::null_mut())
+    }
+
+    fn is_null(&self) -> bool {
+        self.0.is_null()
+    }
+
+    fn get(&self) -> *mut objc2::runtime::AnyObject {
+        self.0
+    }
+
+    fn set(&mut self, ptr: *mut objc2::runtime::AnyObject) {
+        self.0 = ptr;
+    }
+}
+
 #[cfg(target_os = "macos")]
 struct MotionArtCap {
     url: String,
-    layer: *mut objc2::runtime::AnyObject,
-    player: *mut objc2::runtime::AnyObject,
-    looper: *mut objc2::runtime::AnyObject,
+    layer: MainThreadObjc,
+    player: MainThreadObjc,
+    looper: MainThreadObjc,
     last: Option<(f64, f64, f64, f64, f64)>,
     hidden: bool,
     paused: bool,
@@ -2563,9 +2595,9 @@ fn motion_art_cap() -> &'static std::sync::Mutex<MotionArtCap> {
     CAP.get_or_init(|| {
         std::sync::Mutex::new(MotionArtCap {
             url: String::new(),
-            layer: std::ptr::null_mut(),
-            player: std::ptr::null_mut(),
-            looper: std::ptr::null_mut(),
+            layer: MainThreadObjc::null(),
+            player: MainThreadObjc::null(),
+            looper: MainThreadObjc::null(),
             last: None,
             hidden: true,
             paused: true,
@@ -2583,7 +2615,7 @@ unsafe fn sync_motion_art_macos(spec: Option<&MotionArtSpec>) {
         return;
     };
 
-    let mut ns_win = std::ptr::null_mut();
+    let mut ns_win: *mut AnyObject = std::ptr::null_mut();
     for_each_island_window(|w| {
         if ns_win.is_null() {
             ns_win = w;
@@ -2621,9 +2653,9 @@ unsafe fn sync_motion_art_macos(spec: Option<&MotionArtSpec>) {
         };
         let _: () = msg_send![host, addSublayer: layer];
         cap.url = spec.url.clone();
-        cap.layer = layer;
-        cap.player = player;
-        cap.looper = looper;
+        cap.layer.set(layer);
+        cap.player.set(player);
+        cap.looper.set(looper);
         cap.last = None;
         cap.hidden = false;
         cap.paused = true;
@@ -2631,21 +2663,21 @@ unsafe fn sync_motion_art_macos(spec: Option<&MotionArtSpec>) {
 
     let frame_key = (cx, cy, cw, ch, spec.radius);
     if cap.last != Some(frame_key) && !cap.layer.is_null() {
-        let _: () = msg_send![cap.layer, setFrame: rect];
-        let _: () = msg_send![cap.layer, setCornerRadius: spec.radius];
+        let _: () = msg_send![cap.layer.get(), setFrame: rect];
+        let _: () = msg_send![cap.layer.get(), setCornerRadius: spec.radius];
         cap.last = Some(frame_key);
     }
 
     let hide = !spec.playing;
     if cap.hidden != hide && !cap.layer.is_null() {
-        let _: () = msg_send![cap.layer, setHidden: hide];
+        let _: () = msg_send![cap.layer.get(), setHidden: hide];
         cap.hidden = hide;
     }
     if cap.paused != hide && !cap.player.is_null() {
         if hide {
-            let _: () = msg_send![cap.player, pause];
+            let _: () = msg_send![cap.player.get(), pause];
         } else {
-            let _: () = msg_send![cap.player, play];
+            let _: () = msg_send![cap.player.get(), play];
         }
         cap.paused = hide;
     }
@@ -2656,11 +2688,11 @@ unsafe fn hide_motion_art_macos() {
     use objc2::*;
     let mut cap = motion_art_cap().lock().unwrap_or_else(|e| e.into_inner());
     if !cap.layer.is_null() && !cap.hidden {
-        let _: () = msg_send![cap.layer, setHidden: true];
+        let _: () = msg_send![cap.layer.get(), setHidden: true];
         cap.hidden = true;
     }
     if !cap.player.is_null() && !cap.paused {
-        let _: () = msg_send![cap.player, pause];
+        let _: () = msg_send![cap.player.get(), pause];
         cap.paused = true;
     }
 }
@@ -2669,18 +2701,18 @@ unsafe fn hide_motion_art_macos() {
 unsafe fn teardown_motion_art_locked(cap: &mut MotionArtCap) {
     use objc2::*;
     if !cap.player.is_null() {
-        let _: () = msg_send![cap.player, pause];
-        let _: () = msg_send![cap.player, release];
-        cap.player = std::ptr::null_mut();
+        let _: () = msg_send![cap.player.get(), pause];
+        let _: () = msg_send![cap.player.get(), release];
+        cap.player.set(std::ptr::null_mut());
     }
     if !cap.looper.is_null() {
-        let _: () = msg_send![cap.looper, release];
-        cap.looper = std::ptr::null_mut();
+        let _: () = msg_send![cap.looper.get(), release];
+        cap.looper.set(std::ptr::null_mut());
     }
     if !cap.layer.is_null() {
-        let _: () = msg_send![cap.layer, removeFromSuperlayer];
-        let _: () = msg_send![cap.layer, release];
-        cap.layer = std::ptr::null_mut();
+        let _: () = msg_send![cap.layer.get(), removeFromSuperlayer];
+        let _: () = msg_send![cap.layer.get(), release];
+        cap.layer.set(std::ptr::null_mut());
     }
     cap.url.clear();
     cap.last = None;
@@ -2731,7 +2763,7 @@ unsafe fn create_motion_art_layer(
         let _: () = msg_send![player, setPreventsDisplaySleepDuringVideoPlayback: false];
     }
 
-    let looper = if let Some(looper_cls) = av_class(c"AVPlayerLooper") {
+    let looper: *mut AnyObject = if let Some(looper_cls) = av_class(c"AVPlayerLooper") {
         let looper: *mut AnyObject =
             msg_send![looper_cls, playerLooperWithPlayer: player, templateItem: item];
         if looper.is_null() {
@@ -2766,6 +2798,13 @@ unsafe fn create_motion_art_layer(
 #[cfg(all(test, target_os = "macos"))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn motion_art_cap_is_send() {
+        fn assert_send<T: Send>() {}
+        assert_send::<MainThreadObjc>();
+        assert_send::<MotionArtCap>();
+    }
 
     #[test]
     fn media_app_icon_png_is_a_reasonable_png() {
