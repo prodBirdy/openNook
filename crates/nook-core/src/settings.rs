@@ -172,6 +172,9 @@ pub struct AppSettings {
     /// Fragile Accessibility CGEvent Return after opening `whatsapp://`.
     #[serde(default)]
     pub experimental_whatsapp_autosend: bool,
+    /// Mirror Apple Clock timers in the Timers widget (plist / vnode watch).
+    #[serde(default = "default_true")]
+    pub sync_clock_timers: bool,
     #[serde(default)]
     pub observe: ObserveConfig,
     #[serde(default)]
@@ -288,6 +291,7 @@ impl Default for AppSettings {
             lpm_shortcut_name: default_lpm_shortcut_name(),
             show_messages: true,
             experimental_whatsapp_autosend: false,
+            sync_clock_timers: true,
             observe: ObserveConfig::default(),
             liquid_glass_mode: false,
             non_notch_mode: false,
@@ -690,6 +694,7 @@ mod tests {
         );
         assert!(parsed.show_messages);
         assert!(!parsed.experimental_whatsapp_autosend);
+        assert!(parsed.sync_clock_timers);
         assert!(parsed.liquid_glass_mode);
         assert!(!parsed.non_notch_mode);
         assert!((parsed.island_x - 0.5).abs() < f32::EPSILON);

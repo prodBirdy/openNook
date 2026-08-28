@@ -2,6 +2,7 @@ mod dotmatrix;
 mod icons;
 mod island;
 mod motion;
+mod notify;
 mod platform;
 mod theme;
 mod widgets;

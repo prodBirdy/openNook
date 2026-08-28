@@ -160,7 +160,13 @@ impl WidgetModuleExt for WidgetModule {
             Self::Files => "Tray tab".into(),
             Self::Notes => "Scratchpad".into(),
             Self::Observe => observe_subtitle(settings.observe.metrics.len()),
-            Self::Timers => "Countdown".into(),
+            Self::Timers => {
+                if settings.sync_clock_timers {
+                    "Island + Clock".into()
+                } else {
+                    "Countdown".into()
+                }
+            }
             Self::Reminders => "EventKit".into(),
             Self::Speed => "Cloudflare".into(),
             Self::Agents => "Sessions".into(),
@@ -1124,6 +1130,25 @@ impl SettingsView {
                         |_, _, _| {
                             if let Err(err) = nook_core::messages::open_fda_settings() {
                                 log::warn!("open FDA settings: {err}");
+            WidgetModule::Timers => {
+                rows.push(
+                    toggle_row(
+                        "Apple Clock timers",
+                        settings.sync_clock_timers,
+                        cx,
+                        |s| s.sync_clock_timers = !s.sync_clock_timers,
+                    )
+                    .into_any_element(),
+                );
+                rows.push(
+                    action_row(
+                        "clock-shortcuts",
+                        "Clock shortcuts",
+                        "Install…",
+                        cx,
+                        |_, _, _| {
+                            if let Err(err) = nook_core::shortcuts::import_bundled_shortcuts() {
+                                log::info!("clock shortcuts: {err}");
                             }
                         },
                     )
@@ -1492,7 +1517,9 @@ fn module_blurb(module: WidgetModule) -> SharedString {
             "Now Playing from MediaRemote. Optional time-synced lyrics from LRCLIB — opt-in, fetched at runtime, never bundled.".into()
         }
         WidgetModule::Files => "Drop zone and tray live on the Tray tab of the expanded island.".into(),
-        WidgetModule::Timers => "Countdown presets and a compact ring while a timer is running.".into(),
+        WidgetModule::Timers => {
+            "Island countdowns plus Apple Clock timers (read from mobiletimerd). Import the bundled Nook Clock shortcuts once to pause, resume, or cancel from the island.".into()
+        }
         WidgetModule::Reminders => "Incomplete reminders from EventKit, same store as Calendar.".into(),
         WidgetModule::Speed => "Cloudflare (then OVH) download probe. Runs from the island card.".into(),
         WidgetModule::Agents => {
@@ -1937,6 +1964,16 @@ mod tests {
         assert_eq!(
             WidgetModule::Battery.subtitle(&settings).as_ref(),
             "Alert at 5%"
+    fn timers_subtitle_mentions_clock_when_sync_is_on() {
+        let mut settings = AppSettings::default();
+        assert_eq!(
+            WidgetModule::Timers.subtitle(&settings).as_ref(),
+            "Island + Clock"
+        );
+        settings.sync_clock_timers = false;
+        assert_eq!(
+            WidgetModule::Timers.subtitle(&settings).as_ref(),
+            "Countdown"
         );
     }
 

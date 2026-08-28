@@ -45,6 +45,12 @@ else
   echo "warning: MediaRemote adapter not bundled; Now Playing will use AppleScript" >&2
 fi
 
+# Clock App Intent shortcuts (user imports once from Settings).
+if [[ -d "$ROOT/resources/shortcuts" ]]; then
+  mkdir -p "$APP/Contents/Resources/shortcuts"
+  cp -R "$ROOT/resources/shortcuts/." "$APP/Contents/Resources/shortcuts/"
+fi
+
 # Ad-hoc sign so the .app launches without "damaged" on this machine.
 # A Developer ID identity, if present, is used instead.
 if security find-identity -v -p codesigning 2>/dev/null | grep -q "Developer ID Application"; then

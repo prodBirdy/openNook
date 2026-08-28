@@ -145,7 +145,7 @@ impl Island {
                     &mut kids,
                     cell_pane(
                         self.settings.cells_for(module),
-                        timer_card(&self.timers, self.timer_composer, cx),
+                        timer_card(self, cx),
                     ),
                 ),
                 WidgetModule::Notes if self.settings.show_notes => add(

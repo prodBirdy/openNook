@@ -25,6 +25,8 @@ pub mod observe;
 pub mod occupancy;
 pub mod power;
 pub mod settings;
+pub mod shortcuts;
+pub mod system_timers;
 pub mod utils;
 pub mod widgets;
 pub mod window_snap;
@@ -72,6 +74,7 @@ pub fn init() {
         mouse::start_polling();
         power::start();
         messages::start_watchers();
+        system_timers::start_watcher();
     });
 }
 
