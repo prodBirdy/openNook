@@ -20,6 +20,7 @@ static UI_BOUNDS: std::sync::OnceLock<RwLock<Option<UiBounds>>> = std::sync::Onc
 static MOUSE_X: AtomicU64 = AtomicU64::new(0);
 static MOUSE_Y: AtomicU64 = AtomicU64::new(0);
 static DRAG_ACTIVE: AtomicBool = AtomicBool::new(false);
+static DRAG_GEN: AtomicU64 = AtomicU64::new(0);
 static POLL_STARTED: AtomicBool = AtomicBool::new(false);
 
 fn bounds_store() -> &'static RwLock<Option<UiBounds>> {
@@ -46,6 +47,12 @@ pub fn current_mouse_logical() -> (f64, f64) {
 
 pub fn drag_active() -> bool {
     DRAG_ACTIVE.load(Ordering::Relaxed)
+}
+
+/// Bumped on each `drag_active` edge. Window snap can watch this instead of
+/// polling AX while the pointer is still.
+pub fn drag_generation() -> u64 {
+    DRAG_GEN.load(Ordering::Relaxed)
 }
 
 /// Hit-test the cursor against the island activation area.
@@ -212,7 +219,11 @@ fn sample_now() {
     let (x, y) = read_mouse_logical();
     MOUSE_X.store(x.to_bits(), Ordering::Relaxed);
     MOUSE_Y.store(y.to_bits(), Ordering::Relaxed);
-    DRAG_ACTIVE.store(crate::files::file_drag_active(), Ordering::Relaxed);
+    let drag = crate::files::file_drag_active();
+    let was = DRAG_ACTIVE.swap(drag, Ordering::Relaxed);
+    if was != drag {
+        DRAG_GEN.fetch_add(1, Ordering::Relaxed);
+    }
 }
 
 fn read_mouse_logical() -> (f64, f64) {
