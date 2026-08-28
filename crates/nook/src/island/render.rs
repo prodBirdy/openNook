@@ -6,16 +6,27 @@ use super::{CompactMode, Island};
 use crate::platform;
 use crate::theme;
 use gpui::{
-    div, point, prelude::*, px, rgba, AnyElement, App, Bounds, Context, CursorStyle,
+    div, point, prelude::*, px, rgba, AnyElement, App, Bounds, Context, CursorStyle, Focusable,
     ExternalPaths, FontFallbacks, FontWeight, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, ScrollWheelEvent, Window, WindowBackgroundAppearance, WindowBounds, WindowKind,
-    WindowOptions,
+    MouseUpEvent, ScrollWheelEvent, Window, WindowBackgroundAppearance, WindowBounds,
+    WindowDecorations, WindowKind, WindowOptions,
 };
 use nook_core::notch;
 use std::any::Any;
 
 impl gpui::Render for Island {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.search_open {
+            if let Some(editor) = &self.search_editor {
+                let handle = editor.focus_handle(cx);
+                if !handle.is_focused(window) {
+                    window.focus(&handle);
+                    window.activate_window();
+                    platform::activate_app();
+                    platform::make_island_key();
+                }
+            }
+        }
         self.sync_geometry(cx);
         if self.suppressed {
             nook_core::mouse::update_ui_bounds(0.0, -100.0, 0.0, 0.0);
@@ -122,6 +133,10 @@ impl gpui::Render for Island {
                     this.apply_reposition(event.position.x.into(), event.position.y.into());
                     cx.notify();
                 }
+                if this.scrubber_drag.is_some() {
+                    this.update_scrubber_from_x(event.position.x.into());
+                    cx.notify();
+                }
                 if this.poll_pending_file_drag(Some(window)) {
                     cx.notify();
                 }
@@ -131,7 +146,8 @@ impl gpui::Render for Island {
                 cx.listener(|this, _: &MouseUpEvent, _, cx| {
                     let moved = this.finish_reposition();
                     let file = this.finish_file_press();
-                    if moved || file {
+                    let seek = this.finish_scrubber();
+                    if moved || file || seek {
                         cx.notify();
                     }
                 }),
@@ -472,7 +488,7 @@ pub fn open_island(cx: &mut App) {
             is_resizable: false,
             is_minimizable: false,
             window_background: WindowBackgroundAppearance::Transparent,
-            window_decorations: None,
+            window_decorations: Some(WindowDecorations::Client),
             app_id: Some("com.jonasvogel.opennook-gpui".into()),
             ..Default::default()
         },

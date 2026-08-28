@@ -13,17 +13,41 @@ dirs.workspace = true
 rusqlite.workspace = true
 base64.workspace = true
 log.workspace = true
+chrono.workspace = true
 reqwest.workspace = true
 futures-util.workspace = true
 open.workspace = true
+image.workspace = true
 sysinfo = "0.37"
+notify = "7"
+notify-debouncer-mini = "0.5"
+plist = "1"
+walkdir = "2"
+sha2 = "0.10"
+hmac = "0.12"
+uuid = { version = "1", features = ["v4"] }
+libc = "0.2"
 
 [target.'cfg(target_os = "macos")'.dependencies]
+system-configuration = "0.6"
+core-foundation = "0.10"
 objc2 = "0.6"
-objc2-foundation = "0.3"
+objc2-foundation = { version = "0.3", features = [
+    "NSRegularExpression",
+    "NSTextCheckingResult",
+] }
 objc2-event-kit = { version = "0.3", features = ["EKEventStore", "EKEvent", "EKReminder", "EKCalendar"] }
+objc2-core-audio = { version = "0.3.2", features = ["AudioHardware", "objc2", "objc2-foundation", "block2"] }
+objc2-core-audio-types = "0.3.2"
+objc2-core-foundation = { version = "0.3.2", features = ["CFDictionary", "CFString"] }
+objc2-core-location = { version = "0.3", features = ["CLLocationManager", "CLLocation"] }
+objc2-avf-audio = "0.3"
+objc2-speech = "0.3"
+objc2-av-foundation = "0.3"
 block2 = "0.6"
 security-framework = "3.7"
+cpal = "0.15"
+symphonia = { version = "0.5", default-features = false, features = ["ogg", "vorbis", "wav", "pcm"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { version = "0.52", features = [

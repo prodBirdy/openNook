@@ -177,7 +177,7 @@ fn push_inline(
 }
 
 /// Rendered markdown blocks, stacked vertically.
-fn markdown_preview(src: &str) -> gpui::Div {
+pub(crate) fn markdown_preview(src: &str) -> gpui::Div {
     let mut opts = Options::empty();
     opts.insert(Options::ENABLE_STRIKETHROUGH);
 

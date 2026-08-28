@@ -20,6 +20,9 @@ use nook_core::notch::{CGPoint, CGRect, CGSize};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 #[cfg(target_os = "macos")]
 use std::sync::Once;
+#[cfg(target_os = "macos")]
+use std::sync::{Condvar, Mutex, OnceLock};
+use std::time::Duration;
 
 #[cfg(target_os = "macos")]
 static INSTALL: Once = Once::new();
@@ -28,13 +31,87 @@ static LOGGED_PIN: AtomicBool = AtomicBool::new(false);
 #[cfg(target_os = "macos")]
 static OPEN_SETTINGS: AtomicBool = AtomicBool::new(false);
 #[cfg(target_os = "macos")]
+static PIN_NEEDED: AtomicBool = AtomicBool::new(false);
+#[cfg(target_os = "macos")]
 static STATUS_ITEM: std::sync::atomic::AtomicPtr<objc2::runtime::AnyObject> =
     std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
 
 /// Call once before `open_island`. Safe to call again.
 pub fn install() {
     #[cfg(target_os = "macos")]
-    install_macos();
+    {
+        install_macos();
+        install_mouse_monitors();
+    }
+}
+
+/// Ask the pin backstop loop to restyle/pin island windows. Notification
+/// handlers also pin immediately on the main thread.
+pub fn request_pin() {
+    #[cfg(target_os = "macos")]
+    {
+        PIN_NEEDED.store(true, Ordering::Release);
+        let wait = pin_wait();
+        if let Ok(mut ready) = wait.ready.lock() {
+            *ready = true;
+            wait.cv.notify_one();
+        }
+    }
+}
+
+pub fn take_pin_needed() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        return PIN_NEEDED.swap(false, Ordering::AcqRel);
+    }
+    #[cfg(not(target_os = "macos"))]
+    false
+}
+
+#[cfg(target_os = "macos")]
+struct PinWait {
+    ready: Mutex<bool>,
+    cv: Condvar,
+}
+
+#[cfg(target_os = "macos")]
+fn pin_wait() -> &'static PinWait {
+    static WAIT: OnceLock<PinWait> = OnceLock::new();
+    WAIT.get_or_init(|| PinWait {
+        ready: Mutex::new(false),
+        cv: Condvar::new(),
+    })
+}
+
+/// Block until [`request_pin`] or `timeout`. Must run off the main thread.
+pub fn wait_pin_needed(timeout: Duration) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        if PIN_NEEDED.load(Ordering::Acquire) {
+            return true;
+        }
+        let wait = pin_wait();
+        let Ok(mut ready) = wait.ready.lock() else {
+            std::thread::sleep(timeout);
+            return PIN_NEEDED.load(Ordering::Acquire);
+        };
+        if *ready {
+            *ready = false;
+            return true;
+        }
+        let (mut ready, _) = wait
+            .cv
+            .wait_timeout(ready, timeout)
+            .unwrap_or_else(|e| e.into_inner());
+        let signaled = *ready;
+        *ready = false;
+        signaled || PIN_NEEDED.load(Ordering::Acquire)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        std::thread::sleep(timeout);
+        false
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -74,7 +151,106 @@ fn install_macos() {
         }
         log::info!("notch constrainFrameRect installed on GPUIPanel");
         install_app_target();
+        install_services_provider();
     });
+}
+
+#[cfg(target_os = "macos")]
+static SERVICES_PROVIDER: std::sync::atomic::AtomicPtr<objc2::runtime::AnyObject> =
+    std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
+
+/// Finder "Send to openNook" — same path bus as `opennook://tray/add`. Never shell.
+#[cfg(target_os = "macos")]
+fn install_services_provider() {
+    use objc2::runtime::{AnyClass, AnyObject, ClassBuilder, NSObject, Sel};
+    use objc2::{class, msg_send, sel, ClassType};
+    use std::sync::OnceLock;
+
+    static CLASS: OnceLock<&'static AnyClass> = OnceLock::new();
+    let cls = CLASS.get_or_init(|| {
+        if let Some(existing) = AnyClass::get(c"NookServicesProvider") {
+            return existing;
+        }
+        let mut builder = ClassBuilder::new(c"NookServicesProvider", NSObject::class())
+            .expect("NookServicesProvider");
+
+        extern "C-unwind" fn send_to_opennook(
+            _this: &NSObject,
+            _cmd: Sel,
+            pboard: *mut AnyObject,
+            _user_data: *mut AnyObject,
+            _error: *mut *mut AnyObject,
+        ) {
+            let paths = unsafe { read_service_paths(pboard) };
+            if !paths.is_empty() {
+                nook_core::automation::ingest_service_paths(paths);
+            }
+        }
+        unsafe {
+            builder.add_method(
+                sel!(sendToOpenNook:userData:error:),
+                send_to_opennook as extern "C-unwind" fn(_, _, _, _, _),
+            );
+        }
+        builder.register()
+    });
+
+    unsafe {
+        let provider: *mut AnyObject = msg_send![*cls, new];
+        if provider.is_null() {
+            log::error!("services provider alloc failed");
+            return;
+        }
+        let _: *mut AnyObject = msg_send![provider, retain];
+        SERVICES_PROVIDER.store(provider, Ordering::Relaxed);
+        let ns_app: *mut AnyObject = msg_send![class!(NSApplication), sharedApplication];
+        let _: () = msg_send![ns_app, setServicesProvider: provider];
+        ns_update_dynamic_services();
+        log::info!("NSServices provider installed (Send to openNook)");
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[link(name = "AppKit", kind = "framework")]
+extern "C" {
+    fn NSUpdateDynamicServices();
+}
+
+#[cfg(target_os = "macos")]
+fn ns_update_dynamic_services() {
+    unsafe { NSUpdateDynamicServices() }
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn read_service_paths(pboard: *mut objc2::runtime::AnyObject) -> Vec<std::path::PathBuf> {
+    use objc2::runtime::AnyObject;
+    use objc2::*;
+    if pboard.is_null() {
+        return Vec::new();
+    }
+    let type_name: *mut AnyObject = msg_send![
+        class!(NSString),
+        stringWithUTF8String: c"NSFilenamesPboardType".as_ptr()
+    ];
+    let list: *mut AnyObject = msg_send![pboard, propertyListForType: type_name];
+    if list.is_null() {
+        return Vec::new();
+    }
+    let count: usize = msg_send![list, count];
+    let mut paths = Vec::new();
+    for i in 0..count {
+        let item: *mut AnyObject = msg_send![list, objectAtIndex: i];
+        if item.is_null() {
+            continue;
+        }
+        let utf8: *const i8 = msg_send![item, UTF8String];
+        if utf8.is_null() {
+            continue;
+        }
+        let raw = std::ffi::CStr::from_ptr(utf8).to_string_lossy().into_owned();
+        paths.push(std::path::PathBuf::from(raw));
+    }
+    paths
 }
 
 /// Style + pin every GPUI island panel. Does not touch GPUI `Window`.
@@ -774,7 +950,26 @@ fn install_app_target() {
         }
         extern "C" fn screen_changed(_this: *mut AnyObject, _cmd: Sel, _note: *mut AnyObject) {
             nook_core::notch::invalidate_screen_cache();
+            request_pin();
             pin_island_windows();
+        }
+        extern "C" fn space_changed(_this: *mut AnyObject, _cmd: Sel, _note: *mut AnyObject) {
+            nook_core::notch::invalidate_screen_cache();
+            request_pin();
+            pin_island_windows();
+        }
+        extern "C" fn app_activated(_this: *mut AnyObject, _cmd: Sel, _note: *mut AnyObject) {
+            nook_core::occupancy::invalidate();
+        }
+        extern "C" fn accessibility_changed(
+            _this: *mut AnyObject,
+            _cmd: Sel,
+            _note: *mut AnyObject,
+        ) {
+            invalidate_accessibility_flags();
+        }
+        extern "C" fn colors_changed(_this: *mut AnyObject, _cmd: Sel, _note: *mut AnyObject) {
+            invalidate_accent_color();
         }
 
         let super_cls = class!(NSObject) as *const AnyClass as *mut AnyClass;
@@ -790,8 +985,24 @@ fn install_app_target() {
         let imp_screen: Imp = std::mem::transmute(
             screen_changed as extern "C" fn(*mut AnyObject, Sel, *mut AnyObject),
         );
+        let imp_space: Imp = std::mem::transmute(
+            space_changed as extern "C" fn(*mut AnyObject, Sel, *mut AnyObject),
+        );
+        let imp_app: Imp = std::mem::transmute(
+            app_activated as extern "C" fn(*mut AnyObject, Sel, *mut AnyObject),
+        );
+        let imp_a11y: Imp = std::mem::transmute(
+            accessibility_changed as extern "C" fn(*mut AnyObject, Sel, *mut AnyObject),
+        );
+        let imp_colors: Imp = std::mem::transmute(
+            colors_changed as extern "C" fn(*mut AnyObject, Sel, *mut AnyObject),
+        );
         let _ = class_addMethod(cls, sel!(openSettings:), imp_settings, types.as_ptr());
         let _ = class_addMethod(cls, sel!(screenChanged:), imp_screen, types.as_ptr());
+        let _ = class_addMethod(cls, sel!(spaceChanged:), imp_space, types.as_ptr());
+        let _ = class_addMethod(cls, sel!(appActivated:), imp_app, types.as_ptr());
+        let _ = class_addMethod(cls, sel!(accessibilityChanged:), imp_a11y, types.as_ptr());
+        let _ = class_addMethod(cls, sel!(colorsChanged:), imp_colors, types.as_ptr());
         objc_registerClassPair(cls);
         observe_screen_changes();
     }
@@ -821,6 +1032,113 @@ unsafe fn observe_screen_changes() {
         name: name,
         object: std::ptr::null_mut::<AnyObject>()
     ];
+
+    let colors_name: *mut AnyObject = msg_send![
+        class!(NSString),
+        stringWithUTF8String: c"NSSystemColorsDidChangeNotification".as_ptr()
+    ];
+    let _: () = msg_send![
+        center,
+        addObserver: target,
+        selector: sel!(colorsChanged:),
+        name: colors_name,
+        object: std::ptr::null_mut::<AnyObject>()
+    ];
+    let appearance_name: *mut AnyObject = msg_send![
+        class!(NSString),
+        stringWithUTF8String: c"NSApplicationDidChangeEffectiveAppearanceNotification".as_ptr()
+    ];
+    let _: () = msg_send![
+        center,
+        addObserver: target,
+        selector: sel!(colorsChanged:),
+        name: appearance_name,
+        object: std::ptr::null_mut::<AnyObject>()
+    ];
+
+    let workspace: *mut AnyObject = msg_send![class!(NSWorkspace), sharedWorkspace];
+    if workspace.is_null() {
+        return;
+    }
+    let wsnc: *mut AnyObject = msg_send![workspace, notificationCenter];
+    if wsnc.is_null() {
+        return;
+    }
+    let space_name: *mut AnyObject = msg_send![
+        class!(NSString),
+        stringWithUTF8String: c"NSWorkspaceActiveSpaceDidChangeNotification".as_ptr()
+    ];
+    let _: () = msg_send![
+        wsnc,
+        addObserver: target,
+        selector: sel!(spaceChanged:),
+        name: space_name,
+        object: std::ptr::null_mut::<AnyObject>()
+    ];
+    let app_name: *mut AnyObject = msg_send![
+        class!(NSString),
+        stringWithUTF8String: c"NSWorkspaceDidActivateApplicationNotification".as_ptr()
+    ];
+    let _: () = msg_send![
+        wsnc,
+        addObserver: target,
+        selector: sel!(appActivated:),
+        name: app_name,
+        object: std::ptr::null_mut::<AnyObject>()
+    ];
+    let a11y_name: *mut AnyObject = msg_send![
+        class!(NSString),
+        stringWithUTF8String: c"NSWorkspaceAccessibilityDisplayOptionsDidChangeNotification"
+            .as_ptr()
+    ];
+    let _: () = msg_send![
+        wsnc,
+        addObserver: target,
+        selector: sel!(accessibilityChanged:),
+        name: a11y_name,
+        object: std::ptr::null_mut::<AnyObject>()
+    ];
+}
+
+/// NSEvent global + local monitors for mouse moved / left-drag / left-up.
+/// Main thread only. Handlers write the same atomics as the 250 ms backstop
+/// poll in `nook_core::mouse`. Local handler must return the event.
+pub fn install_mouse_monitors() {
+    #[cfg(target_os = "macos")]
+    unsafe {
+        use block2::RcBlock;
+        use objc2::runtime::AnyObject;
+        use objc2::*;
+
+        static INSTALLED: Once = Once::new();
+        INSTALLED.call_once(|| {
+            // MouseMoved | LeftMouseDragged | LeftMouseUp
+            const MASK: u64 = (1 << 5) | (1 << 6) | (1 << 2);
+
+            let global = RcBlock::new(move |_event: *mut AnyObject| {
+                nook_core::mouse::sample_now();
+            });
+            let g: *mut AnyObject = msg_send![
+                class!(NSEvent),
+                addGlobalMonitorForEventsMatchingMask: MASK,
+                handler: &*global
+            ];
+            std::mem::forget(global);
+            let _ = g;
+
+            let local = RcBlock::new(move |event: *mut AnyObject| -> *mut AnyObject {
+                nook_core::mouse::sample_now();
+                event
+            });
+            let l: *mut AnyObject = msg_send![
+                class!(NSEvent),
+                addLocalMonitorForEventsMatchingMask: MASK,
+                handler: &*local
+            ];
+            std::mem::forget(local);
+            let _ = l;
+        });
+    }
 }
 
 /// Hand files to the system AirDrop picker (`NSSharingServiceNameSendViaAirDrop`).
@@ -1132,6 +1450,8 @@ fn known_bundle_id(app_name: &str) -> Option<&'static str> {
         "VLC" => "org.videolan.vlc",
         "TIDAL" => "com.tidal.desktop",
         "Arc" => "company.thebrowser.Browser",
+        "zoom.us" | "Zoom" => "us.zoom.xos",
+        "Microsoft Teams" | "Teams" => "com.microsoft.teams2",
         _ => return None,
     })
 }
@@ -1259,6 +1579,59 @@ unsafe fn app_icon_png_macos(bundle_id: Option<&str>, app_name: Option<&str>) ->
     })
 }
 
+/// Directory picker for the Obsidian vault. Blocks on the main thread via
+/// `NSOpenPanel.runModal`. `None` when cancelled or off macOS.
+pub fn choose_directory() -> Option<std::path::PathBuf> {
+    #[cfg(target_os = "macos")]
+    {
+        choose_directory_macos()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        None
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn choose_directory_macos() -> Option<std::path::PathBuf> {
+    use objc2::runtime::AnyObject;
+    use objc2::*;
+    use std::ffi::CStr;
+    use std::path::PathBuf;
+
+    unsafe {
+        let panel: *mut AnyObject = msg_send![class!(NSOpenPanel), openPanel];
+        if panel.is_null() {
+            return None;
+        }
+        let _: () = msg_send![panel, setCanChooseFiles: false];
+        let _: () = msg_send![panel, setCanChooseDirectories: true];
+        let _: () = msg_send![panel, setAllowsMultipleSelection: false];
+        let _: () = msg_send![panel, setCanCreateDirectories: true];
+        let message: *mut AnyObject =
+            msg_send![class!(NSString), stringWithUTF8String: c"Choose Obsidian Vault".as_ptr()];
+        let _: () = msg_send![panel, setMessage: message];
+        let response: i64 = msg_send![panel, runModal];
+        // NSModalResponseOK == 1
+        if response != 1 {
+            return None;
+        }
+        let url: *mut AnyObject = msg_send![panel, URL];
+        if url.is_null() {
+            return None;
+        }
+        let path_ns: *mut AnyObject = msg_send![url, path];
+        if path_ns.is_null() {
+            return None;
+        }
+        let cstr: *const i8 = msg_send![path_ns, UTF8String];
+        if cstr.is_null() {
+            return None;
+        }
+        Some(PathBuf::from(CStr::from_ptr(cstr).to_string_lossy().into_owned()))
+    }
+}
+
 /// Open the system Calendar app. No-op off macOS.
 pub fn open_calendar() {
     #[cfg(target_os = "macos")]
@@ -1270,16 +1643,73 @@ pub fn open_calendar() {
     }
 }
 
+#[cfg(target_os = "macos")]
+static ACCENT_VALID: AtomicBool = AtomicBool::new(false);
+#[cfg(target_os = "macos")]
+static ACCENT_R: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+#[cfg(target_os = "macos")]
+static ACCENT_G: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+#[cfg(target_os = "macos")]
+static ACCENT_B: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+#[cfg(target_os = "macos")]
+fn invalidate_accent_color() {
+    ACCENT_VALID.store(false, Ordering::Relaxed);
+}
+/// Accessibility TCC via `AXIsProcessTrustedWithOptions`. `prompt` shows the
+/// system dialog (and deep-links if the user agrees).
+pub fn ax_process_trusted(prompt: bool) -> bool {
+    nook_core::notifications::ax_trusted(prompt)
+}
+
+/// Probe Full Disk Access by trying a readonly open of the usernoted store.
+pub fn full_disk_access() -> nook_core::notifications::PermissionState {
+    nook_core::notifications::fda_status()
+}
+
+pub fn open_privacy_accessibility() {
+    open_privacy_pane("Privacy_Accessibility");
+}
+
+pub fn open_privacy_full_disk_access() {
+    open_privacy_pane("Privacy_AllFiles");
+}
+
+fn open_privacy_pane(anchor: &str) {
+    #[cfg(target_os = "macos")]
+    {
+        let url = format!("x-apple.systempreferences:com.apple.preference.security?{anchor}");
+        let _ = std::process::Command::new("/usr/bin/open").arg(url).spawn();
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = anchor;
+    }
+}
+
 /// System Settings → Appearance → *Accent color* (`NSColor.controlAccentColor`),
 /// as sRGB components in 0..=1. `None` when there is no AppKit to ask or the
 /// color cannot be converted to an RGB space — callers fall back to systemBlue.
 ///
-/// Read live rather than cached so switching the accent in System Settings
-/// shows up on the next frame. Must be called on the main thread.
+/// Cached until `NSSystemColorsDidChangeNotification` so idle frames do not
+/// walk CoreUI catalog colors. Must be called on the main thread for the
+/// first resolve.
 pub fn accent_color() -> Option<(f32, f32, f32)> {
     #[cfg(target_os = "macos")]
     {
-        accent_color_macos()
+        if ACCENT_VALID.load(Ordering::Relaxed) {
+            return Some((
+                f32::from_bits(ACCENT_R.load(Ordering::Relaxed)),
+                f32::from_bits(ACCENT_G.load(Ordering::Relaxed)),
+                f32::from_bits(ACCENT_B.load(Ordering::Relaxed)),
+            ));
+        }
+        let color = accent_color_macos()?;
+        ACCENT_R.store(color.0.to_bits(), Ordering::Relaxed);
+        ACCENT_G.store(color.1.to_bits(), Ordering::Relaxed);
+        ACCENT_B.store(color.2.to_bits(), Ordering::Relaxed);
+        ACCENT_VALID.store(true, Ordering::Relaxed);
+        Some(color)
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -1322,10 +1752,23 @@ fn accent_color_macos() -> Option<(f32, f32, f32)> {
     })
 }
 
+#[cfg(target_os = "macos")]
+static REDUCE_TRANSPARENCY_CACHE: AtomicU64 = AtomicU64::new(0);
+#[cfg(target_os = "macos")]
+static REDUCE_MOTION_CACHE: AtomicU64 = AtomicU64::new(0);
+
+#[cfg(target_os = "macos")]
+fn invalidate_accessibility_flags() {
+    REDUCE_TRANSPARENCY_CACHE.store(0, Ordering::Relaxed);
+    REDUCE_MOTION_CACHE.store(0, Ordering::Relaxed);
+}
+
 /// 1s-TTL cache for an AppKit accessibility flag. Both flags below are read
 /// from the 20ms island tick; two ObjC round-trips per tick is pointless for
-/// settings a human toggles at most a few times a day. Layout: bit0 = value,
-/// bit1 = valid, upper bits = last-read unix ms.
+/// settings a human toggles at most a few times a day. The workspace
+/// accessibility-display observer also invalidates these so a toggle applies
+/// on the next tick. Layout: bit0 = value, bit1 = valid, upper bits = last-read
+/// unix ms.
 #[cfg(target_os = "macos")]
 fn cached_accessibility_flag(cache: &AtomicU64, read: unsafe fn() -> bool) -> bool {
     let now_ms = std::time::SystemTime::now()
@@ -1347,7 +1790,6 @@ fn cached_accessibility_flag(cache: &AtomicU64, read: unsafe fn() -> bool) -> bo
 pub fn reduce_transparency() -> bool {
     #[cfg(target_os = "macos")]
     {
-        static CACHE: AtomicU64 = AtomicU64::new(0);
         unsafe fn read() -> bool {
             use objc2::runtime::AnyObject;
             use objc2::*;
@@ -1357,7 +1799,7 @@ pub fn reduce_transparency() -> bool {
             }
             msg_send![workspace, accessibilityDisplayShouldReduceTransparency]
         }
-        cached_accessibility_flag(&CACHE, read)
+        cached_accessibility_flag(&REDUCE_TRANSPARENCY_CACHE, read)
     }
     #[cfg(not(target_os = "macos"))]
     false
@@ -1370,7 +1812,6 @@ pub fn reduce_transparency() -> bool {
 pub fn reduce_motion() -> bool {
     #[cfg(target_os = "macos")]
     {
-        static CACHE: AtomicU64 = AtomicU64::new(0);
         unsafe fn read() -> bool {
             use objc2::runtime::AnyObject;
             use objc2::*;
@@ -1380,10 +1821,54 @@ pub fn reduce_motion() -> bool {
             }
             msg_send![workspace, accessibilityDisplayShouldReduceMotion]
         }
-        cached_accessibility_flag(&CACHE, read)
+        cached_accessibility_flag(&REDUCE_MOTION_CACHE, read)
     }
     #[cfg(not(target_os = "macos"))]
     false
+}
+
+/// Accessibility (TCC) for window snap. Cached by the AX call itself; Settings
+/// reads this when the pane is open, never from the island tick.
+pub fn accessibility_trusted() -> bool {
+    nook_core::window_snap::is_trusted()
+}
+
+/// Show the system Accessibility prompt. Call from a user gesture.
+pub fn prompt_accessibility() -> bool {
+    nook_core::window_snap::prompt_trust()
+}
+#[cfg(target_os = "macos")]
+unsafe fn workspace_note_bundle_id(note: *mut objc2::runtime::AnyObject) -> Option<String> {
+    use objc2::runtime::AnyObject;
+    use objc2::*;
+    if note.is_null() {
+        return None;
+    }
+    let info: *mut AnyObject = msg_send![note, userInfo];
+    if info.is_null() {
+        return None;
+    }
+    let key: *mut AnyObject = msg_send![
+        class!(NSString),
+        stringWithUTF8String: c"NSWorkspaceApplicationKey".as_ptr()
+    ];
+    let app: *mut AnyObject = msg_send![info, objectForKey: key];
+    if app.is_null() {
+        return None;
+    }
+    let ident: *mut AnyObject = msg_send![app, bundleIdentifier];
+    if ident.is_null() {
+        return None;
+    }
+    let utf8: *const std::ffi::c_char = msg_send![ident, UTF8String];
+    if utf8.is_null() {
+        return None;
+    }
+    Some(
+        std::ffi::CStr::from_ptr(utf8)
+            .to_string_lossy()
+            .into_owned(),
+    )
 }
 
 /// Subscribe to Spotify's and Music's public playback-change broadcasts.
@@ -1395,6 +1880,31 @@ pub fn reduce_motion() -> bool {
 /// battery cost that matters. Safari/YouTube posts nothing and rides the slow
 /// poll. Blocks only flip an atomic, so the posting thread is fine. Observer
 /// tokens are intentionally leaked — they live for the process.
+/// Accessibility (kTCCServiceAccessibility). Required for AX menu clicks and
+/// `CGEventPostToPid`. Off-macOS this is always false.
+pub fn ax_is_process_trusted() -> bool {
+    nook_core::meetings::accessibility_trusted()
+}
+
+/// Prompt via `AXIsProcessTrustedWithOptions` + `kAXTrustedCheckOptionPrompt`.
+pub fn ax_prompt_accessibility() -> bool {
+    nook_core::meetings::prompt_accessibility()
+}
+
+/// Focus-free keystrokes to another process. Needs Accessibility.
+pub fn post_keys_to_pid(pid: i32, keycode: u16, flags: u64) {
+    nook_core::meetings::post_keys_to_pid(pid, keycode, flags);
+}
+
+pub fn open_accessibility_settings() {
+    nook_core::meetings::open_accessibility_settings();
+}
+
+/// NSWorkspace launch/terminate + CoreAudio mic listeners for WP19.
+pub fn install_meeting_observers() {
+    nook_core::meetings::start();
+}
+
 pub fn install_media_observers() {
     #[cfg(target_os = "macos")]
     unsafe {
@@ -1404,23 +1914,60 @@ pub fn install_media_observers() {
 
         static INSTALLED: Once = Once::new();
         INSTALLED.call_once(|| {
+            let _ = nook_core::audio::prime_media_apps();
+
             let center: *mut AnyObject =
                 msg_send![class!(NSDistributedNotificationCenter), defaultCenter];
-            if center.is_null() {
+            if !center.is_null() {
+                for name in [
+                    c"com.spotify.client.PlaybackStateChanged",
+                    c"com.apple.Music.playerInfo",
+                    c"com.apple.iTunes.playerInfo",
+                ] {
+                    let ns_name: *mut AnyObject =
+                        msg_send![class!(NSString), stringWithUTF8String: name.as_ptr()];
+                    let block = RcBlock::new(move |_note: *mut AnyObject| {
+                        nook_core::audio::note_media_event();
+                    });
+                    let token: *mut AnyObject = msg_send![
+                        center,
+                        addObserverForName: ns_name,
+                        object: std::ptr::null_mut::<AnyObject>(),
+                        queue: std::ptr::null_mut::<AnyObject>(),
+                        usingBlock: &*block
+                    ];
+                    std::mem::forget(block);
+                    let _ = token;
+                }
+            }
+
+            let workspace: *mut AnyObject = msg_send![class!(NSWorkspace), sharedWorkspace];
+            if workspace.is_null() {
                 return;
             }
-            for name in [
-                c"com.spotify.client.PlaybackStateChanged",
-                c"com.apple.Music.playerInfo",
-                c"com.apple.iTunes.playerInfo",
+            let wsnc: *mut AnyObject = msg_send![workspace, notificationCenter];
+            if wsnc.is_null() {
+                return;
+            }
+            for (name, running) in [
+                (c"NSWorkspaceDidLaunchApplicationNotification", true),
+                (c"NSWorkspaceDidTerminateApplicationNotification", false),
             ] {
                 let ns_name: *mut AnyObject =
                     msg_send![class!(NSString), stringWithUTF8String: name.as_ptr()];
-                let block = RcBlock::new(move |_note: *mut AnyObject| {
-                    nook_core::audio::note_media_event();
+                let block = RcBlock::new(move |note: *mut AnyObject| {
+                    if let Some(id) = workspace_note_bundle_id(note) {
+                        nook_core::audio::note_media_app_running(&id, running);
+                        if matches!(
+                            id.as_str(),
+                            "com.spotify.client" | "com.apple.Music" | "com.apple.Safari"
+                        ) {
+                            nook_core::audio::note_media_event();
+                        }
+                    }
                 });
                 let token: *mut AnyObject = msg_send![
-                    center,
+                    wsnc,
                     addObserverForName: ns_name,
                     object: std::ptr::null_mut::<AnyObject>(),
                     queue: std::ptr::null_mut::<AnyObject>(),
@@ -1429,6 +1976,50 @@ pub fn install_media_observers() {
                 std::mem::forget(block);
                 let _ = token;
             }
+        });
+    }
+}
+
+/// Re-assert OSDUIHelper suppression after sleep — launchd can respawn it.
+pub fn install_osd_wake_observer() {
+}
+/// Refresh weather after sleep without polling through it. The weather loop
+/// consumes [`nook_core::weather::take_wake`] and only hits the network when
+/// the 30 min cache is stale.
+pub fn install_weather_observers() {
+    #[cfg(target_os = "macos")]
+    unsafe {
+        use block2::RcBlock;
+        use objc2::runtime::AnyObject;
+        use objc2::*;
+
+        static INSTALLED: Once = Once::new();
+        INSTALLED.call_once(|| {
+            let workspace: *mut AnyObject = msg_send![class!(NSWorkspace), sharedWorkspace];
+            if workspace.is_null() {
+                return;
+            }
+            let center: *mut AnyObject = msg_send![workspace, notificationCenter];
+            if center.is_null() {
+                return;
+            }
+            let ns_name: *mut AnyObject = msg_send![
+                class!(NSString),
+                stringWithUTF8String: c"NSWorkspaceDidWakeNotification".as_ptr()
+            ];
+            let block = RcBlock::new(move |_note: *mut AnyObject| {
+                nook_core::osd::apply_from_settings();
+                nook_core::weather::note_wake();
+            });
+            let token: *mut AnyObject = msg_send![
+                center,
+                addObserverForName: ns_name,
+                object: std::ptr::null_mut::<AnyObject>(),
+                queue: std::ptr::null_mut::<AnyObject>(),
+                usingBlock: &*block
+            ];
+            std::mem::forget(block);
+            let _ = token;
         });
     }
 }
@@ -2189,6 +2780,629 @@ fn stop_mirror_macos() {
             let _: () = msg_send![sink, release];
         }
     }));
+}
+
+/// GPUI top-left artwork rect plus the HLS URL to play over it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MotionArtSpec {
+    pub url: String,
+    pub x: f64,
+    pub y: f64,
+    pub w: f64,
+    pub h: f64,
+    pub radius: f64,
+    pub playing: bool,
+}
+
+/// Attach or update the looping AVPlayerLayer. `None` hides and pauses.
+/// Created once per URL; later calls only move the frame or pause.
+pub fn sync_motion_art(spec: Option<&MotionArtSpec>) {
+    #[cfg(target_os = "macos")]
+    unsafe {
+        sync_motion_art_macos(spec);
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = spec;
+}
+
+pub fn hide_motion_art() {
+    sync_motion_art(None);
+}
+
+#[cfg(target_os = "macos")]
+struct MotionArtCap {
+    url: String,
+    layer: *mut objc2::runtime::AnyObject,
+    player: *mut objc2::runtime::AnyObject,
+    looper: *mut objc2::runtime::AnyObject,
+    last: Option<(f64, f64, f64, f64, f64)>,
+    hidden: bool,
+    paused: bool,
+}
+
+#[cfg(target_os = "macos")]
+fn motion_art_cap() -> &'static std::sync::Mutex<MotionArtCap> {
+    static CAP: std::sync::OnceLock<std::sync::Mutex<MotionArtCap>> = std::sync::OnceLock::new();
+    CAP.get_or_init(|| {
+        std::sync::Mutex::new(MotionArtCap {
+            url: String::new(),
+            layer: std::ptr::null_mut(),
+            player: std::ptr::null_mut(),
+            looper: std::ptr::null_mut(),
+            last: None,
+            hidden: true,
+            paused: true,
+        })
+    })
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn sync_motion_art_macos(spec: Option<&MotionArtSpec>) {
+    use objc2::runtime::AnyObject;
+    use objc2::*;
+
+    let Some(spec) = spec.filter(|s| !s.url.is_empty() && s.w > 1.0 && s.h > 1.0) else {
+        hide_motion_art_macos();
+        return;
+    };
+
+    let mut ns_win = std::ptr::null_mut();
+    for_each_island_window(|w| {
+        if ns_win.is_null() {
+            ns_win = w;
+        }
+    });
+    if ns_win.is_null() {
+        return;
+    }
+    let content: *mut AnyObject = msg_send![ns_win, contentView];
+    if content.is_null() {
+        return;
+    }
+    let _: () = msg_send![content, setWantsLayer: true];
+    let host: *mut AnyObject = msg_send![content, layer];
+    if host.is_null() {
+        return;
+    }
+    let view_frame: CGRect = msg_send![content, bounds];
+    let view_h = view_frame.size.height;
+    let (cx, cy, cw, ch) = cocoa_rect_from_gpui(spec.x, spec.y, spec.w, spec.h, view_h);
+    let rect = CGRect {
+        origin: CGPoint { x: cx, y: cy },
+        size: CGSize {
+            width: cw,
+            height: ch,
+        },
+    };
+
+    let mut cap = motion_art_cap().lock().unwrap_or_else(|e| e.into_inner());
+    if cap.url != spec.url || cap.layer.is_null() {
+        teardown_motion_art_locked(&mut cap);
+        let Some((layer, player, looper)) = create_motion_art_layer(&spec.url, rect, spec.radius)
+        else {
+            return;
+        };
+        let _: () = msg_send![host, addSublayer: layer];
+        cap.url = spec.url.clone();
+        cap.layer = layer;
+        cap.player = player;
+        cap.looper = looper;
+        cap.last = None;
+        cap.hidden = false;
+        cap.paused = true;
+    }
+
+    let frame_key = (cx, cy, cw, ch, spec.radius);
+    if cap.last != Some(frame_key) && !cap.layer.is_null() {
+        let _: () = msg_send![cap.layer, setFrame: rect];
+        let _: () = msg_send![cap.layer, setCornerRadius: spec.radius];
+        cap.last = Some(frame_key);
+    }
+
+    let hide = !spec.playing;
+    if cap.hidden != hide && !cap.layer.is_null() {
+        let _: () = msg_send![cap.layer, setHidden: hide];
+        cap.hidden = hide;
+    }
+    if cap.paused != hide && !cap.player.is_null() {
+        if hide {
+            let _: () = msg_send![cap.player, pause];
+        } else {
+            let _: () = msg_send![cap.player, play];
+        }
+        cap.paused = hide;
+}
+}
+// WP21 — Carbon global hotkey, frontmost restore, Spotlight launch, auto-paste.
+
+use std::sync::atomic::AtomicBool as SearchAtomicBool;
+
+static SEARCH_HOTKEY_FIRED: SearchAtomicBool = SearchAtomicBool::new(false);
+
+pub fn take_search_hotkey() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        drain_hotkey_events();
+    }
+    SEARCH_HOTKEY_FIRED.swap(false, std::sync::atomic::Ordering::SeqCst)
+}
+
+pub fn sync_search_hotkey(enabled: bool, hotkey: &nook_core::settings::SearchHotkey) {
+    #[cfg(target_os = "macos")]
+    {
+        sync_search_hotkey_macos(enabled, hotkey);
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (enabled, hotkey);
+    }
+}
+
+pub fn remember_frontmost() {
+    #[cfg(target_os = "macos")]
+    remember_frontmost_macos();
+}
+
+pub fn restore_frontmost() {
+    #[cfg(target_os = "macos")]
+    restore_frontmost_macos();
+}
+
+pub fn make_island_key() {
+    #[cfg(target_os = "macos")]
+    unsafe {
+        use objc2::runtime::AnyObject;
+        use objc2::*;
+        for_each_island_window(|ns_win| {
+            if window_title_is(ns_win, "openNook-island") {
+                let _: () = msg_send![ns_win, makeKeyAndOrderFront: std::ptr::null_mut::<AnyObject>()];
+            }
+        });
+    }
+}
+
+pub fn launch_path(path: &str) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        launch_path_macos(path)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = path;
+        false
+    }
+}
+
+/// Synthesize Cmd-V. Requires Accessibility TCC; returns false when untrusted.
+pub fn auto_paste_cmd_v() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        auto_paste_cmd_v_macos()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        false
+    }
+}
+
+pub fn accessibility_trusted() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        accessibility_trusted_macos()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        false
+    }
+}
+
+pub fn install_screen_lock_observer() {
+    #[cfg(target_os = "macos")]
+    install_screen_lock_observer_macos();
+}
+
+#[cfg(target_os = "macos")]
+fn drain_hotkey_events() {
+    use global_hotkey::{GlobalHotKeyEvent, HotKeyState};
+    while let Ok(event) = GlobalHotKeyEvent::receiver().try_recv() {
+        if event.state == HotKeyState::Pressed {
+            SEARCH_HOTKEY_FIRED.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+struct HotkeyCap {
+    manager: global_hotkey::GlobalHotKeyManager,
+    registered: Option<global_hotkey::hotkey::HotKey>,
+    last: Option<(bool, nook_core::settings::SearchHotkey)>,
+}
+
+#[cfg(target_os = "macos")]
+fn hotkey_cap() -> &'static std::sync::Mutex<Option<HotkeyCap>> {
+    static CAP: std::sync::OnceLock<std::sync::Mutex<Option<HotkeyCap>>> = std::sync::OnceLock::new();
+    CAP.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+#[cfg(target_os = "macos")]
+fn sync_search_hotkey_macos(enabled: bool, hotkey: &nook_core::settings::SearchHotkey) {
+    use global_hotkey::hotkey::{HotKey, Modifiers};
+    use global_hotkey::GlobalHotKeyManager;
+
+    let mut guard = hotkey_cap().lock().unwrap_or_else(|e| e.into_inner());
+    if guard.is_none() {
+        match GlobalHotKeyManager::new() {
+            Ok(manager) => {
+                *guard = Some(HotkeyCap {
+                    manager,
+                    registered: None,
+                    last: None,
+                });
+            }
+            Err(err) => {
+                log::warn!("search hotkey manager: {err}");
+                return;
+            }
+        }
+    }
+    let Some(cap) = guard.as_mut() else {
+        return;
+    };
+    let fingerprint = (enabled, hotkey.clone());
+    if cap.last.as_ref() == Some(&fingerprint) {
+        return;
+    }
+    if let Some(old) = cap.registered.take() {
+        if let Err(err) = cap.manager.unregister(old) {
+            log::debug!("unregister search hotkey: {err}");
+        }
+    }
+    cap.last = Some(fingerprint);
+    if !enabled {
+        return;
+    }
+    let Some(code) = hotkey_code(&hotkey.key) else {
+        log::warn!("search hotkey: unknown key {}", hotkey.key);
+        return;
+    };
+    let mut mods = Modifiers::empty();
+    if hotkey.alt {
+        mods |= Modifiers::ALT;
+    }
+    if hotkey.ctrl {
+        mods |= Modifiers::CONTROL;
+    }
+    if hotkey.shift {
+        mods |= Modifiers::SHIFT;
+    }
+    if hotkey.meta {
+        mods |= Modifiers::SUPER;
+    }
+    if mods.is_empty() {
+        log::warn!("search hotkey needs a modifier");
+        return;
+    }
+    let hk = HotKey::new(Some(mods), code);
+    match cap.manager.register(hk) {
+        Ok(()) => {
+            cap.registered = Some(hk);
+            log::info!("search hotkey registered as {}", hotkey.label());
+        }
+        Err(err) => log::warn!("search hotkey register {}: {err}", hotkey.label()),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn hotkey_code(key: &str) -> Option<global_hotkey::hotkey::Code> {
+    use global_hotkey::hotkey::Code;
+    Some(match key.trim().to_ascii_lowercase().as_str() {
+        "space" => Code::Space,
+        "tab" => Code::Tab,
+        "enter" | "return" => Code::Enter,
+        "escape" | "esc" => Code::Escape,
+        "a" => Code::KeyA,
+        "b" => Code::KeyB,
+        "c" => Code::KeyC,
+        "d" => Code::KeyD,
+        "e" => Code::KeyE,
+        "f" => Code::KeyF,
+        "g" => Code::KeyG,
+        "h" => Code::KeyH,
+        "i" => Code::KeyI,
+        "j" => Code::KeyJ,
+        "k" => Code::KeyK,
+        "l" => Code::KeyL,
+        "m" => Code::KeyM,
+        "n" => Code::KeyN,
+        "o" => Code::KeyO,
+        "p" => Code::KeyP,
+        "q" => Code::KeyQ,
+        "r" => Code::KeyR,
+        "s" => Code::KeyS,
+        "t" => Code::KeyT,
+        "u" => Code::KeyU,
+        "v" => Code::KeyV,
+        "w" => Code::KeyW,
+        "x" => Code::KeyX,
+        "y" => Code::KeyY,
+        "z" => Code::KeyZ,
+        "0" | "digit0" => Code::Digit0,
+        "1" | "digit1" => Code::Digit1,
+        "2" | "digit2" => Code::Digit2,
+        "3" | "digit3" => Code::Digit3,
+        "4" | "digit4" => Code::Digit4,
+        "5" | "digit5" => Code::Digit5,
+        "6" | "digit6" => Code::Digit6,
+        "7" | "digit7" => Code::Digit7,
+        "8" | "digit8" => Code::Digit8,
+        "9" | "digit9" => Code::Digit9,
+        _ => return None,
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn remember_frontmost_macos() {
+    use objc2::runtime::AnyObject;
+    use objc2::*;
+    unsafe {
+        let ws: *mut AnyObject = msg_send![class!(NSWorkspace), sharedWorkspace];
+        if ws.is_null() {
+            return;
+        }
+        let app: *mut AnyObject = msg_send![ws, frontmostApplication];
+        if app.is_null() {
+            return;
+        }
+        let pid: i32 = msg_send![app, processIdentifier];
+        if pid as u32 == std::process::id() {
+            return;
+        }
+        *frontmost_pid() = Some(pid);
+    }
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn hide_motion_art_macos() {
+    use objc2::*;
+    let mut cap = motion_art_cap().lock().unwrap_or_else(|e| e.into_inner());
+    if !cap.layer.is_null() && !cap.hidden {
+        let _: () = msg_send![cap.layer, setHidden: true];
+        cap.hidden = true;
+    }
+    if !cap.player.is_null() && !cap.paused {
+        let _: () = msg_send![cap.player, pause];
+        cap.paused = true;
+}
+}
+fn restore_frontmost_macos() {
+    use objc2::runtime::AnyObject;
+    use objc2::*;
+    let Some(pid) = frontmost_pid().take() else {
+        return;
+    };
+    unsafe {
+        let app: *mut AnyObject = msg_send![
+            class!(NSRunningApplication),
+            runningApplicationWithProcessIdentifier: pid
+        ];
+        if app.is_null() {
+            return;
+        }
+        // NSApplicationActivateIgnoringOtherApps
+        let _: bool = msg_send![app, activateWithOptions: 2u64];
+    }
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn teardown_motion_art_locked(cap: &mut MotionArtCap) {
+    use objc2::*;
+    if !cap.player.is_null() {
+        let _: () = msg_send![cap.player, pause];
+        let _: () = msg_send![cap.player, release];
+        cap.player = std::ptr::null_mut();
+    }
+    if !cap.looper.is_null() {
+        let _: () = msg_send![cap.looper, release];
+        cap.looper = std::ptr::null_mut();
+    }
+    if !cap.layer.is_null() {
+        let _: () = msg_send![cap.layer, removeFromSuperlayer];
+        let _: () = msg_send![cap.layer, release];
+        cap.layer = std::ptr::null_mut();
+    }
+    cap.url.clear();
+    cap.last = None;
+    cap.hidden = true;
+    cap.paused = true;
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn create_motion_art_layer(
+    url: &str,
+    rect: CGRect,
+    radius: f64,
+) -> Option<(
+    *mut objc2::runtime::AnyObject,
+    *mut objc2::runtime::AnyObject,
+    *mut objc2::runtime::AnyObject,
+)> {
+    use objc2::runtime::AnyObject;
+    use objc2::*;
+
+    load_avfoundation();
+    let item_cls = av_class(c"AVPlayerItem")?;
+    let player_cls = av_class(c"AVQueuePlayer")?;
+    let layer_cls = av_class(c"AVPlayerLayer")?;
+    let ns_url_cls = class!(NSURL);
+    let url_str = ns_string(url);
+    if url_str.is_null() {
+        return None;
+    }
+    let ns_url: *mut AnyObject = msg_send![ns_url_cls, URLWithString: url_str];
+    if ns_url.is_null() {
+        return None;
+    }
+    let item: *mut AnyObject = msg_send![item_cls, playerItemWithURL: ns_url];
+    if item.is_null() {
+        return None;
+    }
+    let items: *mut AnyObject = msg_send![class!(NSArray), arrayWithObject: item];
+    let player: *mut AnyObject = msg_send![player_cls, queuePlayerWithItems: items];
+    if player.is_null() {
+        return None;
+    }
+    let _: *mut AnyObject = msg_send![player, retain];
+    let _: () = msg_send![player, setMuted: true];
+    let sel = sel!(setPreventsDisplaySleepDuringVideoPlayback:);
+    let can_sleep: bool = msg_send![player, respondsToSelector: sel];
+    if can_sleep {
+        let _: () = msg_send![player, setPreventsDisplaySleepDuringVideoPlayback: false];
+    }
+
+    let looper = if let Some(looper_cls) = av_class(c"AVPlayerLooper") {
+        let looper: *mut AnyObject =
+            msg_send![looper_cls, playerLooperWithPlayer: player, templateItem: item];
+        if looper.is_null() {
+            std::ptr::null_mut()
+        } else {
+            let _: *mut AnyObject = msg_send![looper, retain];
+            looper
+        }
+    } else {
+        std::ptr::null_mut()
+    };
+
+    let layer: *mut AnyObject = msg_send![layer_cls, playerLayerWithPlayer: player];
+    if layer.is_null() {
+        let _: () = msg_send![player, release];
+        if !looper.is_null() {
+            let _: () = msg_send![looper, release];
+        }
+        return None;
+    }
+    let _: *mut AnyObject = msg_send![layer, retain];
+    let gravity = ns_string("AVLayerVideoGravityResizeAspectFill");
+    if !gravity.is_null() {
+        let _: () = msg_send![layer, setVideoGravity: gravity];
+    }
+    let _: () = msg_send![layer, setFrame: rect];
+    let _: () = msg_send![layer, setCornerRadius: radius];
+    let _: () = msg_send![layer, setMasksToBounds: true];
+    Some((layer, player, looper))
+}
+fn frontmost_pid() -> std::sync::MutexGuard<'static, Option<i32>> {
+    static PID: std::sync::OnceLock<std::sync::Mutex<Option<i32>>> = std::sync::OnceLock::new();
+    PID.get_or_init(|| std::sync::Mutex::new(None))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+}
+
+#[cfg(target_os = "macos")]
+fn launch_path_macos(path: &str) -> bool {
+    use objc2::runtime::AnyObject;
+    use objc2::*;
+    unsafe {
+        let ws: *mut AnyObject = msg_send![class!(NSWorkspace), sharedWorkspace];
+        if ws.is_null() {
+            return false;
+        }
+        let ns: *mut AnyObject = msg_send![class!(NSString), alloc];
+        let ns_path: *mut AnyObject =
+            msg_send![ns, initWithBytes: path.as_ptr(), length: path.len(), encoding: 4u64];
+        if ns_path.is_null() {
+            return false;
+        }
+        let url: *mut AnyObject = msg_send![class!(NSURL), fileURLWithPath: ns_path];
+        let _: () = msg_send![ns_path, release];
+        if url.is_null() {
+            return false;
+        }
+        let ok: bool = msg_send![ws, openURL: url];
+        ok
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn accessibility_trusted_macos() -> bool {
+    #[link(name = "ApplicationServices", kind = "framework")]
+    extern "C" {
+        fn AXIsProcessTrusted() -> bool;
+    }
+    unsafe { AXIsProcessTrusted() }
+}
+
+#[cfg(target_os = "macos")]
+fn auto_paste_cmd_v_macos() -> bool {
+    if !accessibility_trusted_macos() {
+        return false;
+    }
+    #[link(name = "CoreGraphics", kind = "framework")]
+    extern "C" {
+        fn CGEventCreateKeyboardEvent(
+            source: *mut std::ffi::c_void,
+            virtual_key: u16,
+            key_down: bool,
+        ) -> *mut std::ffi::c_void;
+        fn CGEventSetFlags(event: *mut std::ffi::c_void, flags: u64);
+        fn CGEventPost(tap: u32, event: *mut std::ffi::c_void);
+        fn CFRelease(cf: *mut std::ffi::c_void);
+    }
+    const KEY_V: u16 = 9;
+    const CMD: u64 = 0x0010_0000;
+    const TAP_HID: u32 = 0;
+    unsafe {
+        let down = CGEventCreateKeyboardEvent(std::ptr::null_mut(), KEY_V, true);
+        let up = CGEventCreateKeyboardEvent(std::ptr::null_mut(), KEY_V, false);
+        if down.is_null() || up.is_null() {
+            if !down.is_null() {
+                CFRelease(down);
+            }
+            if !up.is_null() {
+                CFRelease(up);
+            }
+            return false;
+        }
+        CGEventSetFlags(down, CMD);
+        CGEventSetFlags(up, CMD);
+        CGEventPost(TAP_HID, down);
+        CGEventPost(TAP_HID, up);
+        CFRelease(down);
+        CFRelease(up);
+        true
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn install_screen_lock_observer_macos() {
+    use block2::RcBlock;
+    use objc2::runtime::AnyObject;
+    use objc2::*;
+    static INSTALLED: Once = Once::new();
+    INSTALLED.call_once(|| unsafe {
+        let center: *mut AnyObject =
+            msg_send![class!(NSDistributedNotificationCenter), defaultCenter];
+        if center.is_null() {
+            return;
+        }
+        for (name, locked) in [
+            (c"com.apple.screenIsLocked", true),
+            (c"com.apple.screenIsUnlocked", false),
+        ] {
+            let ns_name: *mut AnyObject =
+                msg_send![class!(NSString), stringWithUTF8String: name.as_ptr()];
+            let block = RcBlock::new(move |_note: *mut AnyObject| {
+                nook_core::clipboard::set_screen_locked(locked);
+            });
+            let _token: *mut AnyObject = msg_send![
+                center,
+                addObserverForName: ns_name,
+                object: std::ptr::null_mut::<AnyObject>(),
+                queue: std::ptr::null_mut::<AnyObject>(),
+                usingBlock: &*block
+            ];
+            std::mem::forget(block);
+        }
+    });
 }
 
 #[cfg(all(test, target_os = "macos"))]

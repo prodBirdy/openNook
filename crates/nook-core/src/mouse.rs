@@ -20,6 +20,7 @@ static UI_BOUNDS: std::sync::OnceLock<RwLock<Option<UiBounds>>> = std::sync::Onc
 static MOUSE_X: AtomicU64 = AtomicU64::new(0);
 static MOUSE_Y: AtomicU64 = AtomicU64::new(0);
 static DRAG_ACTIVE: AtomicBool = AtomicBool::new(false);
+static DRAG_GEN: AtomicU64 = AtomicU64::new(0);
 static POLL_STARTED: AtomicBool = AtomicBool::new(false);
 
 fn bounds_store() -> &'static RwLock<Option<UiBounds>> {
@@ -46,6 +47,12 @@ pub fn current_mouse_logical() -> (f64, f64) {
 
 pub fn drag_active() -> bool {
     DRAG_ACTIVE.load(Ordering::Relaxed)
+}
+
+/// Bumped on each `drag_active` edge. Window snap can watch this instead of
+/// polling AX while the pointer is still.
+pub fn drag_generation() -> u64 {
+    DRAG_GEN.load(Ordering::Relaxed)
 }
 
 /// Hit-test the cursor against the island activation area.
@@ -185,7 +192,11 @@ fn contains((x0, x1, y0, y1): (f64, f64, f64, f64), x: f64, y: f64) -> bool {
     x >= x0 && x <= x1 && y >= y0 && y <= y1
 }
 
-/// Sample the cursor off the UI thread. Safe to call more than once.
+/// Sample the cursor. On macOS this is a 250 ms backstop — NSEvent global
+/// and local monitors (installed on the main thread from `platform`) write
+/// the same atomics on every move/drag. Monitors can drop during secure
+/// input or some full-screen games; the slow poll is how hover still exits.
+/// Windows/Linux keep the tighter poll (no AppKit monitors).
 pub fn start_polling() {
     if POLL_STARTED.swap(true, Ordering::SeqCst) {
         return;
@@ -195,24 +206,41 @@ pub fn start_polling() {
         .name("nook-mouse".into())
         .spawn(|| loop {
             sample_now();
-            let inside = {
-                let (mx, my) = current_mouse_logical();
-                hit_test(mx, my)
-            };
-            let ms = if inside || DRAG_ACTIVE.load(Ordering::Relaxed) {
-                20
-            } else {
-                33
-            };
+            let ms = poll_interval_ms();
             std::thread::sleep(std::time::Duration::from_millis(ms));
         });
 }
 
-fn sample_now() {
+fn poll_interval_ms() -> u64 {
+    #[cfg(target_os = "macos")]
+    {
+        250
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let inside = {
+            let (mx, my) = current_mouse_logical();
+            hit_test(mx, my)
+        };
+        if inside || DRAG_ACTIVE.load(Ordering::Relaxed) {
+            20
+        } else {
+            33
+        }
+    }
+}
+
+/// Read cursor + drag into the atomics. Safe from NSEvent monitor handlers
+/// (main thread) and from the safety-poll thread.
+pub fn sample_now() {
     let (x, y) = read_mouse_logical();
     MOUSE_X.store(x.to_bits(), Ordering::Relaxed);
     MOUSE_Y.store(y.to_bits(), Ordering::Relaxed);
-    DRAG_ACTIVE.store(crate::files::file_drag_active(), Ordering::Relaxed);
+    let drag = crate::files::file_drag_active();
+    let was = DRAG_ACTIVE.swap(drag, Ordering::Relaxed);
+    if was != drag {
+        DRAG_GEN.fetch_add(1, Ordering::Relaxed);
+    }
 }
 
 fn read_mouse_logical() -> (f64, f64) {

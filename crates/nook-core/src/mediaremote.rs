@@ -11,10 +11,14 @@
 //!
 //! [mediaremote-adapter]: https://github.com/ungive/mediaremote-adapter
 
-use serde_json::Value;
+use serde::Deserialize;
+use serde_json::{Map, Value};
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::sync::OnceLock;
+use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, Once, OnceLock};
+use std::time::{Duration, Instant};
 
 /// MediaRemote `MRCommand` / adapter `MRACommand` IDs.
 #[derive(Debug, Clone, Copy)]
@@ -180,6 +184,247 @@ fn find_media_control() -> Option<PathBuf> {
     None
 }
 
+fn adapter_supports_stream() -> bool {
+    matches!(backend(), Some(Backend::Adapter { .. }))
+}
+
+struct StreamState {
+    merged: Value,
+    track: Option<AdapterTrack>,
+    elapsed_base: Option<f64>,
+    elapsed_at: Instant,
+    playing: bool,
+    primed: bool,
+}
+
+impl StreamState {
+    fn fresh() -> Self {
+        Self {
+            merged: Value::Object(Map::new()),
+            track: None,
+            elapsed_base: None,
+            elapsed_at: Instant::now(),
+            playing: false,
+            primed: false,
+        }
+    }
+}
+
+fn stream_state() -> &'static Mutex<StreamState> {
+    static STATE: OnceLock<Mutex<StreamState>> = OnceLock::new();
+    STATE.get_or_init(|| Mutex::new(StreamState::fresh()))
+}
+
+static STREAM_CHANGED: AtomicBool = AtomicBool::new(false);
+static STREAM_ALIVE: AtomicBool = AtomicBool::new(false);
+
+#[derive(Deserialize)]
+struct StreamEvent {
+    #[serde(rename = "type")]
+    kind: String,
+    #[serde(default)]
+    diff: bool,
+    #[serde(default)]
+    payload: Value,
+}
+
+/// Spawn the long-lived adapter `stream --diff` child (once). No-op for the
+/// debug `media-control` backend and when the adapter is missing.
+pub fn ensure_stream() {
+    if !adapter_supports_stream() {
+        return;
+    }
+    static STARTED: Once = Once::new();
+    STARTED.call_once(|| {
+        let _ = std::thread::Builder::new()
+            .name("nook-mr-stream".into())
+            .spawn(stream_supervisor);
+    });
+}
+
+/// Latest snapshot from the live stream, with `elapsed_time` interpolated
+/// from the last event while playing. `None` if the stream has not produced
+/// a snapshot yet (caller should one-shot `get --now`).
+pub fn latest_now_playing() -> Option<Option<AdapterTrack>> {
+    let Ok(state) = stream_state().lock() else {
+        return None;
+    };
+    if !state.primed {
+        return None;
+    }
+    Some(interpolated_track(&state))
+}
+
+pub fn take_stream_changed() -> bool {
+    STREAM_CHANGED.swap(false, Ordering::Relaxed)
+}
+
+pub fn stream_is_live() -> bool {
+    STREAM_ALIVE.load(Ordering::Relaxed)
+}
+
+fn interpolated_track(state: &StreamState) -> Option<AdapterTrack> {
+    let mut track = state.track.clone()?;
+    if state.playing {
+        if let Some(base) = state.elapsed_base.or(track.elapsed_time) {
+            let mut elapsed = base + state.elapsed_at.elapsed().as_secs_f64();
+            if let Some(duration) = track.duration {
+                elapsed = elapsed.min(duration.max(0.0));
+            }
+            track.elapsed_time = Some(elapsed);
+        }
+    }
+    Some(track)
+}
+
+fn merge_diff(target: &mut Value, diff: Value) {
+    let Value::Object(diff_map) = diff else {
+        if !diff.is_null() {
+            *target = diff;
+        }
+        return;
+    };
+    if !target.is_object() {
+        *target = Value::Object(Map::new());
+    }
+    let Some(map) = target.as_object_mut() else {
+        return;
+    };
+    for (k, v) in diff_map {
+        if v.is_null() {
+            map.remove(&k);
+        } else {
+            map.insert(k, v);
+        }
+    }
+}
+
+fn apply_payload(diff: bool, payload: Value) {
+    let mut state = stream_state().lock().unwrap_or_else(|e| e.into_inner());
+    if diff {
+        merge_diff(&mut state.merged, payload);
+    } else {
+        state.merged = match payload {
+            Value::Object(map) => Value::Object(map),
+            Value::Null => Value::Object(Map::new()),
+            other => other,
+        };
+    }
+    let json = serde_json::to_string(&state.merged).unwrap_or_else(|_| "{}".into());
+    let track = parse_get_output(&json).ok().flatten();
+    state.playing = track.as_ref().map(|t| t.is_playing).unwrap_or(false);
+    state.elapsed_base = track.as_ref().and_then(|t| t.elapsed_time);
+    state.elapsed_at = Instant::now();
+    state.track = track;
+    state.primed = true;
+    STREAM_CHANGED.store(true, Ordering::Relaxed);
+    drop(state);
+    crate::audio::note_media_event();
+}
+
+fn apply_stream_event(line: &str) -> bool {
+    let ev: StreamEvent = match serde_json::from_str(line) {
+        Ok(v) => v,
+        Err(err) => {
+            log::debug!("MediaRemote stream JSON: {err}");
+            return false;
+        }
+    };
+    if ev.kind != "data" {
+        return false;
+    }
+    apply_payload(ev.diff, ev.payload);
+    true
+}
+
+fn apply_primer_stdout(stdout: &str) {
+    let trimmed = stdout.trim();
+    let payload = if trimmed.is_empty() || trimmed == "null" {
+        Value::Object(Map::new())
+    } else {
+        serde_json::from_str(trimmed).unwrap_or_else(|_| Value::Object(Map::new()))
+    };
+    apply_payload(false, payload);
+}
+
+fn stream_supervisor() {
+    if let Ok(out) = run(&["get", "--now"]) {
+        apply_primer_stdout(&out);
+    }
+    let mut backoff = Duration::from_millis(200);
+    loop {
+        match spawn_stream_child() {
+            Ok(mut child) => {
+                STREAM_ALIVE.store(true, Ordering::Relaxed);
+                backoff = Duration::from_millis(200);
+                let _ = read_stream(&mut child);
+                STREAM_ALIVE.store(false, Ordering::Relaxed);
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+            Err(err) => {
+                log::debug!("MediaRemote stream spawn failed: {err}");
+            }
+        }
+        std::thread::sleep(backoff);
+        backoff = (backoff * 2).min(Duration::from_secs(8));
+    }
+}
+
+fn spawn_stream_child() -> Result<std::process::Child, String> {
+    let Some(Backend::Adapter {
+        perl,
+        script,
+        framework,
+    }) = backend()
+    else {
+        return Err("MediaRemote stream needs the adapter backend".into());
+    };
+    Command::new(perl)
+        .arg(script)
+        .arg(framework)
+        .arg("stream")
+        .arg("--diff")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| format!("failed to spawn MediaRemote stream: {e}"))
+}
+
+fn read_stream(child: &mut std::process::Child) -> bool {
+    let Some(stdout) = child.stdout.take() else {
+        return false;
+    };
+    let pid = child.id();
+    let first = std::sync::Arc::new(AtomicBool::new(false));
+    let first_flag = first.clone();
+    let _ = std::thread::Builder::new()
+        .name("nook-mr-watchdog".into())
+        .spawn(move || {
+            std::thread::sleep(Duration::from_secs(3));
+            if !first_flag.load(Ordering::Relaxed) {
+                let _ = Command::new("/bin/kill").arg(pid.to_string()).status();
+            }
+        });
+    let reader = BufReader::new(stdout);
+    let mut saw_line = false;
+    for line in reader.lines() {
+        let Ok(line) = line else {
+            break;
+        };
+        if line.trim().is_empty() {
+            continue;
+        }
+        if !saw_line {
+            saw_line = true;
+            first.store(true, Ordering::Relaxed);
+        }
+        apply_stream_event(&line);
+    }
+    saw_line
+}
+
 fn run(args: &[&str]) -> Result<String, String> {
     let backend = backend().ok_or_else(|| "MediaRemote adapter not available".to_string())?;
     let mut cmd = match backend {
@@ -211,7 +456,13 @@ fn run(args: &[&str]) -> Result<String, String> {
 }
 
 /// `adapter_get` / `get --now`. `Ok(None)` means no now-playing item (`null`).
+/// Prefers the live `stream` cell when the supervisor has primed it so a
+/// poll never forks perl. One-shot `get --now` remains the startup primer
+/// and the debug `media-control` path.
 pub fn get_now_playing() -> Result<Option<AdapterTrack>, String> {
+    if let Some(cached) = latest_now_playing() {
+        return Ok(cached);
+    }
     let stdout = run(&["get", "--now"])?;
     parse_get_output(&stdout)
 }
@@ -442,6 +693,94 @@ mod tests {
     #[test]
     fn release_build_has_no_ambient_backend_fallback() {
         assert!(development_backend().is_none());
+    }
+
+    static STREAM_TEST: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn reset_stream() {
+        let mut state = stream_state().lock().unwrap_or_else(|e| e.into_inner());
+        *state = StreamState::fresh();
+        STREAM_CHANGED.store(false, Ordering::Relaxed);
+    }
+
+    #[test]
+    fn stream_full_replace_then_diff_merge() {
+        let _guard = STREAM_TEST.lock().unwrap_or_else(|e| e.into_inner());
+        reset_stream();
+        assert!(apply_stream_event(
+            r#"{"type":"data","diff":false,"payload":{
+                "title":"Helpless","artist":"The Staves","playing":true,
+                "duration":214.2,"elapsedTime":12,
+                "bundleIdentifier":"com.spotify.client"
+            }}"#
+        ));
+        let track = latest_now_playing().unwrap().unwrap();
+        assert_eq!(track.title.as_deref(), Some("Helpless"));
+        let elapsed = track.elapsed_time.unwrap();
+        assert!(elapsed >= 12.0 && elapsed < 12.2, "elapsed={elapsed}");
+        assert!(track.is_playing);
+
+        assert!(apply_stream_event(
+            r#"{"type":"data","diff":true,"payload":{"elapsedTime":40,"playing":false}}"#
+        ));
+        let track = latest_now_playing().unwrap().unwrap();
+        assert_eq!(track.title.as_deref(), Some("Helpless"));
+        assert_eq!(track.elapsed_time, Some(40.0));
+        assert!(!track.is_playing);
+        assert!(take_stream_changed());
+    }
+
+    #[test]
+    fn stream_empty_payload_is_idle() {
+        let _guard = STREAM_TEST.lock().unwrap_or_else(|e| e.into_inner());
+        reset_stream();
+        apply_stream_event(
+            r#"{"type":"data","diff":false,"payload":{"title":"X","playing":true,"bundleIdentifier":"com.spotify.client"}}"#,
+        );
+        apply_stream_event(r#"{"type":"data","diff":false,"payload":{}}"#);
+        assert!(latest_now_playing().unwrap().is_none());
+    }
+
+    #[test]
+    fn stream_diff_null_removes_key() {
+        let _guard = STREAM_TEST.lock().unwrap_or_else(|e| e.into_inner());
+        reset_stream();
+        apply_stream_event(
+            r#"{"type":"data","diff":false,"payload":{"title":"A","artist":"B","playing":true,"bundleIdentifier":"com.spotify.client"}}"#,
+        );
+        apply_stream_event(r#"{"type":"data","diff":true,"payload":{"title":null}}"#);
+        assert!(latest_now_playing().unwrap().is_none());
+    }
+
+    #[test]
+    fn elapsed_interpolates_while_playing() {
+        let _guard = STREAM_TEST.lock().unwrap_or_else(|e| e.into_inner());
+        reset_stream();
+        apply_stream_event(
+            r#"{"type":"data","diff":false,"payload":{"title":"A","playing":true,"elapsedTime":10,"duration":100,"bundleIdentifier":"com.spotify.client"}}"#,
+        );
+        std::thread::sleep(Duration::from_millis(40));
+        let elapsed = latest_now_playing()
+            .unwrap()
+            .unwrap()
+            .elapsed_time
+            .unwrap();
+        assert!(elapsed >= 10.03, "elapsed={elapsed}");
+        assert!(elapsed < 11.0, "elapsed={elapsed}");
+    }
+
+    #[test]
+    fn elapsed_does_not_advance_when_paused() {
+        let _guard = STREAM_TEST.lock().unwrap_or_else(|e| e.into_inner());
+        reset_stream();
+        apply_stream_event(
+            r#"{"type":"data","diff":false,"payload":{"title":"A","playing":false,"elapsedTime":10,"duration":100,"bundleIdentifier":"com.spotify.client"}}"#,
+        );
+        std::thread::sleep(Duration::from_millis(40));
+        assert_eq!(
+            latest_now_playing().unwrap().unwrap().elapsed_time,
+            Some(10.0)
+        );
     }
 
     #[test]

@@ -1,9 +1,11 @@
-//! Compact timer ring + expanded timers Nook pane.
+//! Compact timer ring + expanded timers Nook pane (island + Apple Clock).
 
 use crate::icons::{lucide, lucide_color};
 use crate::island::ui::{format_timer, nook_display, nook_empty, nook_icon_btn, nook_pane};
-use crate::island::{Island, Timer};
+use crate::island::{ClockTimerAction, Island, Timer};
+use crate::island::{Island, Timer, TimerKind};
 use crate::theme;
+use nook_core::system_timers::{self, MTTimerState, SystemTimer};
 use gpui::{
     canvas, div, point, prelude::*, px, rgb, rgba, AnyElement, Context, FontWeight, MouseButton,
     MouseDownEvent, PathBuilder, Rgba, SharedString,
@@ -26,7 +28,6 @@ pub(crate) fn compact_left(island: &Island, cx: &mut Context<Island>) -> AnyElem
     let total = timer.total.max(1);
     let progress = 1.0 - timer.remaining as f32 / total as f32;
     let done = timer.remaining == 0;
-    let id = timer.id;
     div()
         .id("timer-ring")
         .size(px(COMPACT_RING))
@@ -38,9 +39,8 @@ pub(crate) fn compact_left(island: &Island, cx: &mut Context<Island>) -> AnyElem
             MouseButton::Left,
             cx.listener(move |this, _: &MouseDownEvent, _, cx| {
                 cx.stop_propagation();
-                if let Some(t) = this.timers.iter_mut().find(|t| t.id == id) {
-                    t.running = !t.running;
-                }
+                this.toggle_face_timer();
+                this.toggle_timer(id);
                 cx.notify();
             }),
         )
@@ -52,7 +52,7 @@ pub(crate) fn compact_left(island: &Island, cx: &mut Context<Island>) -> AnyElem
             if done {
                 theme::DESTRUCTIVE
             } else {
-                rgb(0xffffff)
+                phase_color(timer)
             },
             rgba(0xffffff40),
         ))
@@ -105,23 +105,38 @@ pub(crate) fn timer_ring(
     .h(px(size))
 }
 
-pub(crate) fn timer_card(
-    timers: &[Timer],
-    _composer: bool,
-    cx: &mut Context<Island>,
-) -> impl IntoElement {
+pub(crate) fn timer_card(island: &Island, cx: &mut Context<Island>) -> impl IntoElement {
+    let timers = &island.timers;
+    let clock: Vec<&SystemTimer> = if island.settings.sync_clock_timers {
+        island
+            .system_timers
+            .iter()
+            .filter(|t| t.state.is_active())
+            .collect()
+    } else {
+        Vec::new()
+    };
+
     let mut week = div().flex().items_end().gap(px(10.));
     for (id, unit, num, seconds) in PRESETS {
         week = week.child(preset_col(id, unit, num, seconds, cx));
     }
+    week = week.child(pomodoro_col(cx));
 
-    let remaining = timers.first().map(|t| format_timer(t.remaining));
-    let body = if timers.is_empty() {
+    let remaining = island
+        .face_timer()
+        .map(|t| format_timer(t.remaining))
+        .or_else(|| timers.first().map(|t| format_timer(t.remaining)));
+    let empty = timers.is_empty() && clock.is_empty();
+    let body = if empty {
         nook_empty("clock", "No timers").into_any_element()
     } else {
-        let mut col = div().flex().flex_col().flex_1().min_w(px(0.));
+        let mut col = div().flex().flex_col().flex_1().min_w(px(0.)).gap(px(8.));
         if let Some(first) = timers.first() {
             col = col.child(featured_timer(first, cx));
+        }
+        if !clock.is_empty() {
+            col = col.child(clock_section(&clock, cx));
         }
         col.into_any_element()
     };
@@ -138,6 +153,134 @@ pub(crate) fn timer_card(
                 .child(week),
         )
         .child(body)
+}
+
+fn clock_section(timers: &[&SystemTimer], cx: &mut Context<Island>) -> impl IntoElement {
+    let can_control = nook_core::shortcuts::cached_shortcuts().can_control();
+    let now = system_timers::unix_now();
+    let mut list = div().flex().flex_col().gap(px(4.));
+    list = list.child(
+        div()
+            .flex()
+            .items_center()
+            .gap(px(6.))
+            .child(
+                div()
+                    .px(px(5.))
+                    .py(px(1.))
+                    .rounded(px(4.))
+                    .bg(rgba(0xffffff18))
+                    .text_size(px(9.))
+                    .line_height(px(12.))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(theme::accent())
+                    .child("Clock"),
+            )
+            .child(
+                div()
+                    .text_size(px(11.))
+                    .text_color(theme::SECONDARY_LABEL)
+                    .child(if can_control {
+                        "Shortcuts"
+                    } else {
+                        "Open Clock to control"
+                    }),
+            ),
+    );
+    for timer in timers.iter().take(3) {
+        list = list.child(clock_row(timer, now, can_control, cx));
+    }
+    list
+}
+
+fn clock_row(
+    timer: &SystemTimer,
+    now: f64,
+    can_control: bool,
+    cx: &mut Context<Island>,
+) -> impl IntoElement {
+    let id = timer.id.clone();
+    let running = timer.state.is_running();
+    let remaining = timer.remaining_secs(now);
+    let done = timer.state == MTTimerState::Fired || remaining == 0;
+    let title = if timer.title.is_empty() {
+        match timer.state {
+            MTTimerState::Running => "Running",
+            MTTimerState::Paused => "Paused",
+            MTTimerState::Fired => "Done",
+            _ => "Timer",
+        }
+        .to_string()
+    } else {
+        timer.title.clone()
+    };
+    let play_icon = if running { "pause-fill" } else { "play-fill" };
+    div()
+        .id(SharedString::from(format!("clock-timer-{id}")))
+        .flex()
+        .items_center()
+        .gap(px(8.))
+        .child(
+            div()
+                .flex_1()
+                .min_w(px(0.))
+                .flex()
+                .flex_col()
+                .child(
+                    div()
+                        .text_size(px(13.))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(theme::LABEL)
+                        .child(title),
+                )
+                .child(
+                    div()
+                        .text_size(px(12.))
+                        .text_color(if done {
+                            theme::DESTRUCTIVE
+                        } else {
+                            theme::SECONDARY_LABEL
+                        })
+                        .child(format_timer(remaining)),
+                ),
+        )
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(4.))
+                .child(nook_icon_btn(
+                    if can_control { play_icon } else { "clock" },
+                    format!("clock-toggle-{id}"),
+                    cx,
+                    {
+                        let id = id.clone();
+                        move |this, _, _, cx| {
+                            if can_control {
+                                this.control_clock_timer(if running {
+                                    ClockTimerAction::Pause
+                                } else {
+                                    ClockTimerAction::Resume
+                                });
+                            } else {
+                                this.control_clock_timer(ClockTimerAction::Open(id.clone()));
+                            }
+                            cx.notify();
+                        }
+                    },
+                ))
+                .when(can_control, |d| {
+                    d.child(nook_icon_btn(
+                        "x",
+                        format!("clock-cancel-{id}"),
+                        cx,
+                        move |this, _, _, cx| {
+                            this.control_clock_timer(ClockTimerAction::Cancel);
+                            cx.notify();
+                        },
+                    ))
+                }),
+        )
 }
 
 fn preset_col(
@@ -193,7 +336,7 @@ fn featured_timer(timer: &Timer, cx: &mut Context<Island>) -> impl IntoElement {
     let ring_color = if done {
         theme::DESTRUCTIVE
     } else {
-        theme::accent()
+        phase_color(timer)
     };
     let play_icon = if timer.running {
         "pause-fill"
@@ -246,6 +389,7 @@ fn featured_timer(timer: &Timer, cx: &mut Context<Island>) -> impl IntoElement {
                             timer.name.clone()
                         }),
                 )
+                .when_some(cycle_dots(timer), |d, dots| d.child(dots))
                 .child(
                     div()
                         .flex()
@@ -296,9 +440,8 @@ fn timer_face(
             MouseButton::Left,
             cx.listener(move |this, _: &MouseDownEvent, _, cx| {
                 cx.stop_propagation();
-                if let Some(t) = this.timers.iter_mut().find(|t| t.id == id) {
-                    t.running = !t.running;
-                }
+                this.toggle_local_timer(id);
+                this.toggle_timer(id);
                 cx.notify();
             }),
         )
@@ -322,4 +465,67 @@ fn timer_face(
                     .child(lucide_color(play_icon, 16.0, rgb(0xffffff))),
             )
         })
+}
+
+fn pomodoro_col(cx: &mut Context<Island>) -> impl IntoElement {
+    div()
+        .id("timer-preset-pomo")
+        .flex()
+        .flex_col()
+        .items_center()
+        .gap(px(4.))
+        .cursor(gpui::CursorStyle::PointingHand)
+        .hover(|s| s.opacity(0.85))
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                cx.stop_propagation();
+                this.add_pomodoro();
+                cx.notify();
+            }),
+        )
+        .child(
+            div()
+                .text_size(px(9.))
+                .line_height(px(11.))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(theme::SECONDARY_LABEL)
+                .child("P"),
+        )
+        .child(
+            div()
+                .text_size(px(15.))
+                .line_height(px(18.))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(theme::LABEL)
+                .child("omo"),
+        )
+}
+
+fn phase_color(timer: &Timer) -> Rgba {
+    match timer.kind {
+        TimerKind::Pomodoro(spec) if !spec.phase.is_work() => theme::SUCCESS,
+        _ => theme::accent(),
+    }
+}
+
+fn cycle_dots(timer: &Timer) -> Option<impl IntoElement> {
+    let TimerKind::Pomodoro(spec) = timer.kind else {
+        return None;
+    };
+    let filled = spec.filled_cycles();
+    let mut row = div().flex().items_center().gap(px(4.)).mt(px(4.));
+    for i in 1..=spec.cycles_per_long {
+        row = row.child(
+            div()
+                .size(px(5.))
+                .rounded_full()
+                .bg(if i <= filled {
+                    theme::LABEL
+                } else {
+                    theme::TERTIARY_LABEL
+                }),
+        );
+    }
+    Some(row)
 }

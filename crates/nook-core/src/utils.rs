@@ -60,6 +60,38 @@ pub async fn fetch_artwork_from_url(url: &str) -> Option<String> {
     }
 }
 
+/// Run `/usr/bin/osascript`. Shared by media controls and iMessage send.
+pub fn run_osascript(script: &str) -> Result<String, String> {
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = script;
+        return Err("osascript is only available on macOS".into());
+    }
+    #[cfg(target_os = "macos")]
+    {
+        use std::process::Command;
+        let output = Command::new("/usr/bin/osascript")
+            .arg("-e")
+            .arg(script)
+            .output()
+            .map_err(|e| e.to_string())?;
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if !output.status.success() {
+            log::warn!("osascript failed ({}): {stderr}", output.status);
+            if stderr.contains("-1743") || stderr.to_lowercase().contains("not allowed") {
+                log::warn!(
+                    "Automation permission denied. Grant access in System Settings → Privacy & Security → Automation."
+                );
+            }
+            return Err(format!("osascript failed: {}", output.status));
+        }
+        if !stderr.is_empty() {
+            log::debug!("osascript stderr: {stderr}");
+        }
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    }
+}
+
 /// Encode binary data as a base64 string (used for album artwork).
 pub fn encode_bytes_base64(data: &[u8]) -> Option<String> {
     if data.is_empty() {

@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = ["crates/nook-core", "crates/nook"]
+exclude = ["src-tauri"]
 
 [workspace.package]
 version = "0.3.0"
@@ -15,13 +16,13 @@ gpui = "=0.2.2"
 gpui-component = "0.5.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "process"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "process", "net", "io-util"] }
 dirs = "6"
 rusqlite = { version = "0.32", features = ["bundled"] }
 base64 = "0.22"
 log = "0.4"
 env_logger = "0.11"
-reqwest = { version = "0.12", features = ["json", "stream", "blocking"] }
+reqwest = { version = "0.12", features = ["json", "stream", "blocking", "multipart"] }
 futures-util = "0.3"
 open = "5"
 image = "0.25"

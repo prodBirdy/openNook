@@ -5,7 +5,27 @@ use super::{Island, Tab};
 use crate::icons::lucide_color;
 use crate::theme;
 use crate::widgets::{
+    agents_card, battery_card, calendar_card, notes_card, observe_card, reminders_card, speed_card,
+    agents_card, calendar_card, messages_card, notes_card, observe_card, reminders_card, speed_card,
+    agents_card, calendar_card, notes_card, observe_card, obsidian_card, reminders_card, speed_card,
+    agents_card, calendar_card, mixer_card, notes_card, observe_card, reminders_card, speed_card,
+    timer_card,
     agents_card, calendar_card, notes_card, observe_card, reminders_card, speed_card, timer_card,
+    weather_card,
+    vpn_card,
+    agents_card, calendar_card, high_alert_card, notes_card, observe_card, reminders_card,
+    speed_card, timer_card,
+    agents_card, calendar_card, notes_card, observe_card, reminders_card, speed_card, terminal_card,
+    timer_card,
+    agents_card, calendar_card, notes_card, observe_card, reminders_card, speed_card,
+    sysstats_card, timer_card,
+    agents_card, calendar_card, notes_card, observe_card, recorder_card, reminders_card, speed_card,
+    agents_card, calendar_card, meeting_card, notes_card, observe_card, reminders_card, speed_card,
+    timer_card,
+    agents_card, calendar_card, notes_card, notifications_card, observe_card, reminders_card,
+    speed_card, timer_card,
+    agents_card, calendar_card, notes_card, observe_card, process_card, reminders_card, speed_card,
+    timer_card,
 };
 use gpui::{
     div, img, prelude::*, px, rgba, AnyElement, Context, CursorStyle, FontWeight, MouseButton,
@@ -19,6 +39,9 @@ impl Island {
         notch_w: f32,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        if self.search_open {
+            return self.render_search(cx).into_any_element();
+        }
         let tab = if self.tab == Tab::Files && !self.settings.show_files {
             Tab::Widgets
         } else {
@@ -35,21 +58,26 @@ impl Island {
                     .flex_1()
                     .w_full()
                     .overflow_hidden()
-                    .child(if tab == Tab::Widgets {
-                        self.render_nook(cx).into_any_element()
-                    } else {
-                        div()
+                    .child(match tab {
+                        Tab::Widgets => self.render_nook(cx).into_any_element(),
+                        Tab::Files => div()
                             .size_full()
                             .px(px(theme::EXPANDED_PAD))
                             .pb(px(theme::EXPANDED_PAD))
                             .child(self.render_files(cx))
-                            .into_any_element()
+                            .into_any_element(),
+                        Tab::Terminal => div()
+                            .size_full()
+                            .px(px(theme::EXPANDED_PAD))
+                            .pb(px(theme::EXPANDED_PAD))
+                            .child(terminal_card(self, cx))
+                            .into_any_element(),
                     }),
             )
+            .into_any_element()
     }
 
     fn render_topbar(&self, notch_w: f32, cx: &mut Context<Self>) -> impl IntoElement {
-        let widgets_active = self.tab == Tab::Widgets;
         div()
             .w_full()
             .flex_shrink_0()
@@ -61,7 +89,7 @@ impl Island {
             .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _, cx| {
                 this.on_wheel(event, cx);
             }))
-            .child(tab_switch(widgets_active, self.settings.show_files, cx))
+            .child(tab_switch(self, cx))
             .child(div().w(px(notch_w)))
             .child(
                 div()
@@ -85,6 +113,17 @@ impl Island {
     }
 
     fn render_nook(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        let show_qa = self.settings.quick_add;
+        let calendar_qa = if show_qa && self.settings.show_calendar {
+            Some(self.ensure_calendar_quick_add(cx))
+        } else {
+            None
+        };
+        let reminders_qa = if show_qa && self.settings.show_reminders {
+            Some(self.ensure_reminders_quick_add(cx))
+        } else {
+            None
+        };
         let mut kids: Vec<AnyElement> = Vec::new();
         let add = |kids: &mut Vec<AnyElement>, child: AnyElement| {
             if !kids.is_empty() {
@@ -99,14 +138,15 @@ impl Island {
                     &mut kids,
                     cell_pane(
                         self.settings.cells_for(module),
-                        nook_media_pane(&self.now_playing, cx),
+                        nook_media_pane(self, cx),
                     ),
+                    cell_pane(self.settings.cells_for(module), nook_media_pane(self, cx)),
                 ),
                 WidgetModule::Calendar if self.settings.show_calendar => add(
                     &mut kids,
                     cell_pane(
                         self.settings.cells_for(module),
-                        calendar_card(&self.events, self.calendar_day, cx),
+                        calendar_card(&self.events, self.calendar_day, calendar_qa.clone(), cx),
                     ),
                 ),
                 WidgetModule::Mirror if self.settings.show_mirror => add(
@@ -118,6 +158,13 @@ impl Island {
                     cell_pane(
                         self.settings.cells_for(module),
                         agents_card(&self.agents, self.pixel_t, cx),
+                    ),
+                ),
+                WidgetModule::Meeting if self.settings.show_meetings => add(
+                    &mut kids,
+                    cell_pane(
+                        self.settings.cells_for(module),
+                        meeting_card(&self.meeting, cx),
                     ),
                 ),
                 WidgetModule::Observe if self.settings.show_observe => add(
@@ -136,19 +183,23 @@ impl Island {
                     &mut kids,
                     cell_pane(
                         self.settings.cells_for(module),
-                        reminders_card(&self.reminders, cx),
+                        reminders_card(&self.reminders, reminders_qa.clone(), cx),
                     ),
                 ),
                 WidgetModule::Timers if self.settings.show_timers => add(
                     &mut kids,
                     cell_pane(
                         self.settings.cells_for(module),
-                        timer_card(&self.timers, self.timer_composer, cx),
+                        timer_card(self, cx),
                     ),
                 ),
                 WidgetModule::Notes if self.settings.show_notes => add(
                     &mut kids,
                     cell_pane(self.settings.cells_for(module), notes_card(self, cx)),
+                ),
+                WidgetModule::Obsidian if self.settings.show_obsidian => add(
+                    &mut kids,
+                    cell_pane(self.settings.cells_for(module), obsidian_card(self, cx)),
                 ),
                 WidgetModule::Speed if self.settings.show_speed => add(
                     &mut kids,
@@ -157,6 +208,65 @@ impl Island {
                         speed_card(self.speed_mbps, self.speed_progress, self.speed_running, cx),
                     ),
                 ),
+                WidgetModule::Battery if self.settings.show_battery => add(
+                    &mut kids,
+                    cell_pane(self.settings.cells_for(module), battery_card(self, cx)),
+                ),
+                WidgetModule::Messages if self.settings.show_messages => add(
+                    &mut kids,
+                    cell_pane(
+                        self.settings.cells_for(module),
+                        messages_card(self, cx),
+                    ),
+                ),
+                WidgetModule::Mixer if self.settings.is_enabled(WidgetModule::Mixer) => add(
+                    &mut kids,
+                    cell_pane(self.settings.cells_for(module), mixer_card(self, cx)),
+                ),
+                WidgetModule::Weather if self.settings.weather.enabled => add(
+                    &mut kids,
+                    cell_pane(self.settings.cells_for(module), weather_card(self, cx)),
+                ),
+                WidgetModule::Vpn if self.settings.show_vpn => add(
+                    &mut kids,
+                    cell_pane(self.settings.cells_for(module), vpn_card(&self.vpn)),
+                ),
+                WidgetModule::HighAlert if self.settings.show_high_alert => add(
+                    &mut kids,
+                    cell_pane(
+                        self.settings.cells_for(module),
+                        high_alert_card(self, cx),
+                    ),
+                ),
+                WidgetModule::SysStats if self.settings.show_sysstats => add(
+                    &mut kids,
+                    cell_pane(self.settings.cells_for(module), sysstats_card(self, cx)),
+                ),
+                WidgetModule::Recorder if self.settings.show_recorder => add(
+                    &mut kids,
+                    cell_pane(
+                        self.settings.cells_for(module),
+                        recorder_card(self, cx),
+                    ),
+                ),
+                WidgetModule::Notifications if self.settings.show_notifications => add(
+                    &mut kids,
+                    cell_pane(
+                        self.settings.cells_for(module),
+                        notifications_card(&self.notifications, cx),
+                    ),
+                ),
+                WidgetModule::Process
+                    if self.settings.show_process && self.settings.file_actions.enabled =>
+                {
+                    add(
+                        &mut kids,
+                        cell_pane(
+                            self.settings.cells_for(module),
+                            process_card(self, cx),
+                        ),
+                    )
+                }
                 _ => {}
             }
         }
@@ -198,27 +308,34 @@ fn pane_divider() -> impl IntoElement {
         .flex_shrink_0()
 }
 
-fn tab_switch(
-    widgets_active: bool,
-    show_files: bool,
-    cx: &mut Context<Island>,
-) -> impl IntoElement {
+fn tab_switch(island: &Island, cx: &mut Context<Island>) -> impl IntoElement {
+    let current = island.tab;
     let mut row = div().flex().items_center().gap(px(4.)).child(labeled_tab(
         "tab-nook",
         "map-pin",
         "Nook",
-        widgets_active || !show_files,
+        current == Tab::Widgets,
         cx,
         Tab::Widgets,
     ));
-    if show_files {
+    if island.settings.show_files {
         row = row.child(labeled_tab(
             "tab-tray",
             "files",
             "Tray",
-            !widgets_active,
+            current == Tab::Files,
             cx,
             Tab::Files,
+        ));
+    }
+    if island.settings.terminal_enabled {
+        row = row.child(labeled_tab(
+            "tab-term",
+            "terminal",
+            "Term",
+            current == Tab::Terminal,
+            cx,
+            Tab::Terminal,
         ));
     }
     row

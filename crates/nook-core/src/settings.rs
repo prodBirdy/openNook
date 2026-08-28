@@ -1,6 +1,11 @@
 use crate::database;
+use crate::high_alert::HighAlertKind;
 use crate::observe::ObserveConfig;
+use crate::share::ShareSettings;
+use crate::weather::WeatherSettings;
+use crate::sysstats::SysStatsSettings;
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 use std::sync::RwLock;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -17,10 +22,22 @@ pub enum WidgetModule {
     Speed = 7,
     Agents = 8,
     Mirror = 9,
+    Battery = 10,
+    Messages = 11,
+    Obsidian = 12,
+    Mixer = 13,
+    Weather = 14,
+    Vpn = 15,
+    HighAlert = 16,
+    SysStats = 17,
+    Recorder = 18,
+    Meeting = 19,
+    Notifications = 20,
+    Process = 21,
 }
 
 impl WidgetModule {
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 22] = [
         Self::Calendar,
         Self::Music,
         Self::Files,
@@ -31,6 +48,18 @@ impl WidgetModule {
         Self::Speed,
         Self::Agents,
         Self::Mirror,
+        Self::Battery,
+        Self::Messages,
+        Self::Obsidian,
+        Self::Mixer,
+        Self::Weather,
+        Self::Vpn,
+        Self::HighAlert,
+        Self::SysStats,
+        Self::Recorder,
+        Self::Meeting,
+        Self::Notifications,
+        Self::Process,
     ];
 
     pub fn from_u8(value: u8) -> Self {
@@ -44,22 +73,68 @@ impl WidgetModule {
     pub fn default_cells(self) -> u8 {
         match self {
             Self::Calendar | Self::Music => 5,
-            Self::Files | Self::Notes | Self::Observe | Self::Reminders | Self::Agents => 4,
-            Self::Timers | Self::Speed | Self::Mirror => 3,
+            Self::Files
+            | Self::Notes
+            | Self::Observe
+            | Self::Reminders
+            | Self::Agents
+            | Self::Messages
+            | Self::Obsidian
+            | Self::Mixer
+            | Self::SysStats
+            | Self::Recorder
+            | Self::Notifications => 4,
+            Self::Timers
+            | Self::Speed
+            | Self::Mirror
+            | Self::Battery
+            | Self::Weather
+            | Self::Vpn
+            | Self::HighAlert
+            | Self::Meeting
+            | Self::Process => 3,
         }
     }
 
     pub fn min_cells(self) -> u8 {
         match self {
             Self::Calendar => 4,
-            Self::Music | Self::Files | Self::Observe | Self::Reminders | Self::Mirror => 3,
-            Self::Notes | Self::Timers | Self::Speed | Self::Agents => 2,
+            Self::Music
+            | Self::Files
+            | Self::Observe
+            | Self::Reminders
+            | Self::Mirror
+            | Self::Messages
+            | Self::Mixer
+            | Self::SysStats
+            | Self::Notifications => 3,
+            Self::Notes
+            | Self::Timers
+            | Self::Speed
+            | Self::Agents
+            | Self::Battery
+            | Self::Obsidian
+            | Self::Weather
+            | Self::Vpn
+            | Self::HighAlert
+            | Self::Recorder
+            | Self::Meeting
+            | Self::Process => 2,
         }
     }
 
     pub fn max_cells(self) -> u8 {
         match self {
-            Self::Timers | Self::Speed | Self::Agents | Self::Mirror => 6,
+            Self::Timers
+            | Self::Speed
+            | Self::Agents
+            | Self::Mirror
+            | Self::Battery
+            | Self::Weather
+            | Self::Vpn
+            | Self::HighAlert
+            | Self::Meeting
+            | Self::Process => 6,
             _ => 8,
         }
     }
@@ -73,16 +148,121 @@ impl WidgetModule {
 fn default_widget_order() -> Vec<WidgetModule> {
     vec![
         WidgetModule::Music,
+        WidgetModule::Mixer,
         WidgetModule::Calendar,
         WidgetModule::Mirror,
         WidgetModule::Files,
         WidgetModule::Agents,
+        WidgetModule::Meeting,
         WidgetModule::Observe,
         WidgetModule::Reminders,
         WidgetModule::Timers,
         WidgetModule::Notes,
+        WidgetModule::Obsidian,
         WidgetModule::Speed,
+        WidgetModule::Battery,
+        WidgetModule::Messages,
+        WidgetModule::Weather,
+        WidgetModule::Vpn,
+        WidgetModule::HighAlert,
+        WidgetModule::SysStats,
+        WidgetModule::Recorder,
+        WidgetModule::Notifications,
+        WidgetModule::Process,
     ]
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum PdfPreset {
+    #[default]
+    Screen,
+    Print,
+    Raster,
+}
+
+impl PdfPreset {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Screen => "Screen",
+            Self::Print => "Print",
+            Self::Raster => "Raster",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct FileActionsSettings {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Empty / `None` writes alongside the source.
+    #[serde(default)]
+    pub output_folder: Option<String>,
+    #[serde(default = "default_jpeg_quality")]
+    pub jpeg_quality: u8,
+    #[serde(default)]
+    pub pdf_preset: PdfPreset,
+    /// Only takes effect when a user-installed ffmpeg is on PATH. Never downloads.
+    #[serde(default)]
+    pub use_ffmpeg: bool,
+    #[serde(default = "default_image_format")]
+    pub default_image_format: String,
+    #[serde(default = "default_video_format")]
+    pub default_video_format: String,
+}
+
+fn default_jpeg_quality() -> u8 {
+    80
+}
+
+fn default_image_format() -> String {
+    "jpeg".into()
+}
+
+fn default_video_format() -> String {
+    "mp4".into()
+}
+
+impl Default for FileActionsSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            output_folder: None,
+            jpeg_quality: default_jpeg_quality(),
+            pdf_preset: PdfPreset::Screen,
+            use_ffmpeg: false,
+            default_image_format: default_image_format(),
+            default_video_format: default_video_format(),
+        }
+    }
+}
+
+impl FileActionsSettings {
+    pub fn ffmpeg_enabled(&self) -> bool {
+        self.use_ffmpeg && crate::process::ffmpeg::on_path()
+    }
+
+    pub fn output_is_downloads(&self) -> bool {
+        match self.output_folder.as_deref() {
+            Some(folder) => {
+                dirs::download_dir()
+                    .map(|d| d == std::path::Path::new(folder))
+                    .unwrap_or(false)
+                    || folder.ends_with("Downloads")
+            }
+            None => false,
+        }
+    }
+
+    pub fn set_alongside_source(&mut self) {
+        self.output_folder = None;
+    }
+
+    pub fn set_downloads(&mut self) {
+        self.output_folder = dirs::download_dir()
+            .or_else(dirs::home_dir)
+            .map(|p| p.to_string_lossy().into_owned());
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
@@ -124,10 +304,23 @@ pub struct AppSettings {
     pub widget_order: Vec<WidgetModule>,
     #[serde(default = "default_true")]
     pub show_media: bool,
+    /// Opt-in time-synced lyrics beside Now Playing (LRCLIB, cached locally).
+    #[serde(default)]
+    pub show_lyrics: bool,
+    /// Upcoming list on the expanded Music pane. Off hides Music/Spotify queue
+    /// fetch entirely (no extra osascript / HTTPS when the card is open).
+    #[serde(default = "default_true")]
+    pub show_media_queue: bool,
+    /// Spotify developer-app client ID for PKCE. No client secret is stored.
+    #[serde(default)]
+    pub spotify_client_id: String,
     #[serde(default = "default_true")]
     pub show_calendar: bool,
     #[serde(default = "default_true")]
     pub show_reminders: bool,
+    /// Natural-language quick-add row on the Calendar and Reminders cards.
+    #[serde(default = "default_true")]
+    pub quick_add: bool,
     #[serde(default = "default_true")]
     pub show_agents: bool,
     #[serde(default = "default_true")]
@@ -142,6 +335,91 @@ pub struct AppSettings {
     pub show_files: bool,
     #[serde(default = "default_true")]
     pub show_mirror: bool,
+    #[serde(default = "default_true")]
+    pub show_battery: bool,
+    /// Percent at or below which the compact face takes over while discharging.
+    #[serde(default = "default_battery_alert_threshold")]
+    pub battery_alert_threshold: u8,
+    /// Shortcuts.app name for the one-tap LPM toggle. `None` or a missing
+    /// shortcut falls back to the osascript-admin prompt.
+    #[serde(default = "default_lpm_shortcut_name")]
+    pub lpm_shortcut_name: Option<String>,
+    pub show_messages: bool,
+    /// Fragile Accessibility CGEvent Return after opening `whatsapp://`.
+    #[serde(default)]
+    pub experimental_whatsapp_autosend: bool,
+    /// Mirror Apple Clock timers in the Timers widget (plist / vnode watch).
+    #[serde(default = "default_true")]
+    pub sync_clock_timers: bool,
+    pub show_obsidian: bool,
+    /// User-chosen vault folder. `None` until Settings picks one.
+    #[serde(default)]
+    pub obsidian_vault: Option<PathBuf>,
+    /// Optional markdown heading that daily-note capture appends under.
+    #[serde(default)]
+    pub obsidian_capture_heading: Option<String>,
+    /// Use `obsidian://new?append=true` instead of writing the daily note.
+    #[serde(default)]
+    pub obsidian_uri_capture: bool,
+    pub show_mixer: bool,
+    #[serde(default)]
+    pub weather: WeatherSettings,
+    pub show_vpn: bool,
+    /// Elapsed session clock on the compact VPN face.
+    #[serde(default = "default_true")]
+    pub vpn_show_timer: bool,
+    /// Interface names the classifier must ignore (utun helpers, ZTNA, etc.).
+    #[serde(default)]
+    pub vpn_ignore_interfaces: Vec<String>,
+    pub show_high_alert: bool,
+    /// Seconds; `0` means until turned off. Default is 30 minutes — never forever.
+    #[serde(default = "default_high_alert_duration")]
+    pub high_alert_default_duration_secs: u32,
+    #[serde(default)]
+    pub high_alert_kind: HighAlertKind,
+    /// Auto-release the assertion at or below this battery percent. `0` disables.
+    #[serde(default = "default_low_battery_pct")]
+    pub low_battery_release_pct: u8,
+    #[serde(default = "default_pomo_work")]
+    pub pomodoro_work_secs: u32,
+    #[serde(default = "default_pomo_break")]
+    pub pomodoro_break_secs: u32,
+    #[serde(default = "default_pomo_long")]
+    pub pomodoro_long_break_secs: u32,
+    #[serde(default = "default_pomo_cycles")]
+    pub pomodoro_cycles_per_long: u8,
+    #[serde(default = "default_true")]
+    pub pomodoro_auto_advance: bool,
+    #[serde(default = "default_true")]
+    pub pomodoro_keep_awake: bool,
+    #[serde(default)]
+    pub focus_shortcut_work: Option<String>,
+    #[serde(default)]
+    pub focus_shortcut_break: Option<String>,
+    pub show_sysstats: bool,
+    #[serde(default)]
+    pub sysstats: SysStatsSettings,
+    pub show_recorder: bool,
+    /// On-device Speech while recording. Off = record-only (cheaper).
+    #[serde(default = "default_true")]
+    pub recorder_transcribe: bool,
+    pub show_meetings: bool,
+    #[serde(default)]
+    pub meetings: MeetingsConfig,
+    /// Off by default: Accessibility (and optional Full Disk Access) must be
+    /// granted before the shelf can see other apps' notifications.
+    #[serde(default)]
+    pub show_notifications: bool,
+    /// User opted into reading the usernoted SQLite store. Still requires a
+    /// manual Full Disk Access grant — there is no programmatic prompt.
+    #[serde(default)]
+    pub notification_fda_opt_in: bool,
+    /// Bundle IDs (or app names) hidden from the shelf.
+    #[serde(default)]
+    pub notification_blocked_apps: Vec<String>,
+    pub show_process: bool,
+    #[serde(default)]
+    pub file_actions: FileActionsSettings,
     #[serde(default)]
     pub observe: ObserveConfig,
     #[serde(default)]
@@ -160,6 +438,13 @@ pub struct AppSettings {
     /// the display.
     #[serde(default)]
     pub hide_when_maximized: bool,
+    /// Transient volume/brightness HUD on the compact island face.
+    #[serde(default = "default_true")]
+    pub show_volume_brightness_hud: bool,
+    /// SIGSTOP `OSDUIHelper` so the system bezel does not draw on top.
+    /// Default off — suppression also hides caps-lock and keyboard-backlight bezels.
+    #[serde(default)]
+    pub replace_system_hud: bool,
     /// Island fill as `0xRRGGBB`. `None` uses the default black Live Activity
     /// fill.
     #[serde(default)]
@@ -167,8 +452,178 @@ pub struct AppSettings {
     /// Per-widget widths in Nook cells. Missing entries use [`WidgetModule::default_cells`].
     #[serde(default)]
     pub widget_widths: Vec<(WidgetModule, u8)>,
+    /// Rectangle-style halves / quarters via Carbon hotkeys. Needs Accessibility.
+    #[serde(default)]
+    pub window_snap_enabled: bool,
+    /// Stretch our own menu-bar separator so extras to its left go off-screen.
+    #[serde(default)]
+    pub thaw_enabled: bool,
+    /// Separator is currently stretched (extras hidden). Ignored when Thaw is off.
+    #[serde(default)]
+    pub thaw_hidden: bool,
+    /// Reserved for drag-to-edge (tier 2). Geometry is implemented; the live
+    /// AX tracker is not wired so idle cost stays zero.
+    #[serde(default)]
+    pub snap_drag_to_edge: bool,
+    #[serde(default)]
+    pub share: ShareSettings,
+    /// Termi-Notch one-shot shell card. Off until the user opts in — this is
+    /// an arbitrary-code-execution surface and must stay unreachable from
+    /// `opennook://` URLs, the CLI, and Finder Services.
+    #[serde(default)]
+    pub terminal_enabled: bool,
+    /// Login shell used for `-lc`. Empty means `$SHELL`.
+    #[serde(default)]
+    pub terminal_shell: String,
+    #[serde(default = "default_terminal_timeout")]
+    pub terminal_timeout_secs: u32,
+    /// Persist typed commands in the settings DB. Off by default.
+    #[serde(default)]
+    pub terminal_history: bool,
+    /// AirPlay / output-device picker on the expanded media card. CoreAudio
+    /// HAL only — cannot initiate a new AirPlay route to a HomePod / Apple TV.
+    #[serde(default = "default_true")]
+    pub audio_output_picker: bool,
+    /// Mechey: mechanical keyboard sounds. Opt-in; needs Input Monitoring.
+    #[serde(default)]
+    pub keysounds_enabled: bool,
+    /// Builtin pack id (`nook-click` / `nook-thock`) or a user folder name.
+    #[serde(default = "default_keysound_pack")]
+    pub keysound_pack: String,
+    /// 0..=1 playback gain.
+    #[serde(default = "default_keysound_volume")]
+    pub keysound_volume: f32,
+    /// LiquidMouse: smooth pixel scrolling for discrete wheel mice.
+    #[serde(default)]
+    pub smooth_scroll_enabled: bool,
+    /// Pixel multiplier applied to each wheel notch (0.25..=4).
+    #[serde(default = "default_scroll_speed")]
+    pub scroll_speed: f32,
+    /// Exponential-decay time constant in seconds (0.08..=1.2).
+    #[serde(default = "default_scroll_duration")]
+    pub scroll_duration: f32,
+    /// Negate discrete-mouse wheel deltas (Scroll Reverser).
+    #[serde(default)]
+    pub reverse_mouse_scroll: bool,
+    /// Frontmost bundle ids that skip the scroll tap (games, VMs, remotes).
+    #[serde(default)]
+    pub scroll_excluded_apps: Vec<String>,
+    /// Reserved: per-device overrides need private sender IDs (phase 2).
+    #[serde(default)]
+    pub scroll_device_overrides: std::collections::BTreeMap<String, ScrollDeviceOverride>,
+    /// Network lookup for Apple Music editorialVideo loops. Opt-in; ToS-gray.
+    #[serde(default)]
+    pub animated_album_art: bool,
+    /// Local dominant-color glow behind the expanded media card.
+    #[serde(default = "default_true")]
+    pub ambient_art_glow: bool,
     #[serde(default)]
     pub window: WindowSettings,
+    /// Universal search + clipboard history (WP21). Clipboard capture stays
+    /// off until the user opts in.
+    #[serde(default)]
+    pub search: SearchSettings,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SearchHotkey {
+    #[serde(default)]
+    pub alt: bool,
+    #[serde(default)]
+    pub ctrl: bool,
+    #[serde(default)]
+    pub meta: bool,
+    #[serde(default)]
+    pub shift: bool,
+    #[serde(default = "default_hotkey_key")]
+    pub key: String,
+}
+
+fn default_hotkey_key() -> String {
+    "Space".into()
+}
+
+impl Default for SearchHotkey {
+    fn default() -> Self {
+        // Option+Space — common launcher binding that does not steal Spotlight.
+        Self {
+            alt: true,
+            ctrl: false,
+            meta: false,
+            shift: false,
+            key: default_hotkey_key(),
+        }
+    }
+}
+
+impl SearchHotkey {
+    pub fn label(&self) -> String {
+        let mut parts = Vec::new();
+        if self.ctrl {
+            parts.push("⌃");
+        }
+        if self.alt {
+            parts.push("⌥");
+        }
+        if self.shift {
+            parts.push("⇧");
+        }
+        if self.meta {
+            parts.push("⌘");
+        }
+        let key = if self.key.is_empty() {
+            "Space"
+        } else {
+            self.key.as_str()
+        };
+        parts.push(key);
+        parts.join(" ")
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SearchSettings {
+    /// Register the global hotkey. Search itself needs no TCC.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub hotkey: SearchHotkey,
+    /// Persist clipboard history. Default OFF — privacy.
+    #[serde(default)]
+    pub clipboard_history: bool,
+    #[serde(default = "default_clipboard_cap")]
+    pub clipboard_history_size: u32,
+    /// Bundle identifiers skipped at copy time (frontmost-app heuristic).
+    #[serde(default)]
+    pub clipboard_exclude_apps: Vec<String>,
+    /// Synthesize Cmd-V after paste-back. Off + Accessibility-gated.
+    #[serde(default)]
+    pub auto_paste: bool,
+    /// Optional magnifier on the compact idle face.
+    #[serde(default)]
+    pub show_magnifier: bool,
+}
+
+fn default_clipboard_cap() -> u32 {
+    500
+}
+
+impl Default for SearchSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            hotkey: SearchHotkey::default(),
+            clipboard_history: false,
+            clipboard_history_size: default_clipboard_cap(),
+            clipboard_exclude_apps: Vec::new(),
+            auto_paste: false,
+            show_magnifier: false,
+        }
+    }
+}
+
+fn default_terminal_timeout() -> u32 {
+    30
 }
 
 fn default_island_x() -> f32 {
@@ -213,8 +668,112 @@ pub const ISLAND_SWATCHES: [IslandSwatch; 7] = [
     },
 ];
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum MeetControlMode {
+    /// Activate the Meet tab then send Cmd+D / Cmd+E (focus-stealing).
+    #[default]
+    FocusTab,
+    /// Chrome/Safari `execute javascript` — needs "Allow JavaScript from Apple Events".
+    AppleEventsJs,
+}
+
+impl MeetControlMode {
+    pub fn caption(self) -> &'static str {
+        match self {
+            Self::FocusTab => "Focus tab",
+            Self::AppleEventsJs => "Apple Events JS",
+        }
+    }
+
+    pub fn cycle(self) -> Self {
+        match self {
+            Self::FocusTab => Self::AppleEventsJs,
+            Self::AppleEventsJs => Self::FocusTab,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MeetingsConfig {
+    #[serde(default = "default_true")]
+    pub zoom: bool,
+    #[serde(default = "default_true")]
+    pub teams: bool,
+    #[serde(default = "default_true")]
+    pub meet: bool,
+    #[serde(default)]
+    pub meet_mode: MeetControlMode,
+}
+
+impl Default for MeetingsConfig {
+    fn default() -> Self {
+        Self {
+            zoom: true,
+            teams: true,
+            meet: true,
+            meet_mode: MeetControlMode::FocusTab,
+        }
+    }
+}
+
 fn default_true() -> bool {
     true
+}
+
+fn default_battery_alert_threshold() -> u8 {
+    20
+}
+
+fn default_lpm_shortcut_name() -> Option<String> {
+    Some(crate::power::default_lpm_shortcut_name().into())
+}
+fn default_high_alert_duration() -> u32 {
+    30 * 60
+}
+
+fn default_low_battery_pct() -> u8 {
+    10
+}
+
+fn default_pomo_work() -> u32 {
+    25 * 60
+}
+
+fn default_pomo_break() -> u32 {
+    5 * 60
+}
+
+fn default_pomo_long() -> u32 {
+    15 * 60
+}
+
+fn default_pomo_cycles() -> u8 {
+    4
+}
+fn default_keysound_pack() -> String {
+    "nook-click".into()
+}
+
+fn default_keysound_volume() -> f32 {
+    0.7
+}
+
+fn default_scroll_speed() -> f32 {
+    1.0
+}
+
+fn default_scroll_duration() -> f32 {
+    0.35
+}
+
+/// Best-effort per-device scroll knobs. Unused until sender-ID matching ships.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct ScrollDeviceOverride {
+    #[serde(default)]
+    pub reverse: Option<bool>,
+    #[serde(default)]
+    pub speed: Option<f32>,
 }
 
 impl Default for AppSettings {
@@ -222,8 +781,12 @@ impl Default for AppSettings {
         Self {
             widget_order: default_widget_order(),
             show_media: true,
+            show_lyrics: false,
+            show_media_queue: true,
+            spotify_client_id: String::new(),
             show_calendar: true,
             show_reminders: true,
+            quick_add: true,
             show_agents: true,
             show_observe: true,
             show_timers: true,
@@ -231,15 +794,77 @@ impl Default for AppSettings {
             show_speed: true,
             show_files: true,
             show_mirror: true,
+            show_battery: true,
+            battery_alert_threshold: default_battery_alert_threshold(),
+            lpm_shortcut_name: default_lpm_shortcut_name(),
+            show_messages: true,
+            experimental_whatsapp_autosend: false,
+            sync_clock_timers: true,
+            show_obsidian: true,
+            obsidian_vault: None,
+            obsidian_capture_heading: None,
+            obsidian_uri_capture: false,
+            show_mixer: true,
+            weather: WeatherSettings::default(),
+            show_vpn: true,
+            vpn_show_timer: true,
+            vpn_ignore_interfaces: Vec::new(),
+            show_high_alert: true,
+            high_alert_default_duration_secs: default_high_alert_duration(),
+            high_alert_kind: HighAlertKind::default(),
+            low_battery_release_pct: default_low_battery_pct(),
+            pomodoro_work_secs: default_pomo_work(),
+            pomodoro_break_secs: default_pomo_break(),
+            pomodoro_long_break_secs: default_pomo_long(),
+            pomodoro_cycles_per_long: default_pomo_cycles(),
+            pomodoro_auto_advance: true,
+            pomodoro_keep_awake: true,
+            focus_shortcut_work: None,
+            focus_shortcut_break: None,
+            show_sysstats: true,
+            sysstats: SysStatsSettings::default(),
+            show_recorder: true,
+            recorder_transcribe: true,
+            show_meetings: true,
+            meetings: MeetingsConfig::default(),
+            show_notifications: false,
+            notification_fda_opt_in: false,
+            notification_blocked_apps: Vec::new(),
+            show_process: true,
+            file_actions: FileActionsSettings::default(),
             observe: ObserveConfig::default(),
             liquid_glass_mode: false,
             non_notch_mode: false,
             island_x: default_island_x(),
             island_y: 0.0,
             hide_when_maximized: false,
+            show_volume_brightness_hud: true,
+            replace_system_hud: false,
             island_color: None,
             widget_widths: Vec::new(),
+            window_snap_enabled: false,
+            thaw_enabled: false,
+            thaw_hidden: false,
+            snap_drag_to_edge: false,
+            share: ShareSettings::default(),
+            terminal_enabled: false,
+            terminal_shell: String::new(),
+            terminal_timeout_secs: default_terminal_timeout(),
+            terminal_history: false,
+            audio_output_picker: true,
+            keysounds_enabled: false,
+            keysound_pack: default_keysound_pack(),
+            keysound_volume: default_keysound_volume(),
+            smooth_scroll_enabled: false,
+            scroll_speed: default_scroll_speed(),
+            scroll_duration: default_scroll_duration(),
+            reverse_mouse_scroll: false,
+            scroll_excluded_apps: Vec::new(),
+            scroll_device_overrides: std::collections::BTreeMap::new(),
+            animated_album_art: false,
+            ambient_art_glow: true,
             window: WindowSettings::default(),
+            search: SearchSettings::default(),
         }
     }
 }
@@ -276,6 +901,36 @@ impl AppSettings {
             WidgetModule::Speed => self.show_speed,
             WidgetModule::Agents => self.show_agents,
             WidgetModule::Mirror => self.show_mirror,
+            WidgetModule::Battery => self.show_battery,
+            WidgetModule::Messages => self.show_messages,
+            WidgetModule::Obsidian => self.show_obsidian,
+            WidgetModule::Mixer => self.show_mixer && crate::mixer::is_available(),
+            WidgetModule::Weather => self.weather.enabled,
+            WidgetModule::Vpn => self.show_vpn,
+            WidgetModule::HighAlert => self.show_high_alert,
+            WidgetModule::SysStats => self.show_sysstats,
+            WidgetModule::Recorder => self.show_recorder,
+            WidgetModule::Meeting => self.show_meetings,
+            WidgetModule::Notifications => self.show_notifications,
+            WidgetModule::Process => self.show_process,
+        }
+    }
+
+    pub fn notification_app_blocked(&self, id: &str) -> bool {
+        self.notification_blocked_apps
+            .iter()
+            .any(|entry| entry.eq_ignore_ascii_case(id))
+    }
+
+    pub fn toggle_notification_app(&mut self, id: &str) {
+        if let Some(index) = self
+            .notification_blocked_apps
+            .iter()
+            .position(|entry| entry.eq_ignore_ascii_case(id))
+        {
+            self.notification_blocked_apps.remove(index);
+        } else if !id.is_empty() {
+            self.notification_blocked_apps.push(id.to_string());
         }
     }
 
@@ -291,6 +946,21 @@ impl AppSettings {
             WidgetModule::Speed => self.show_speed = !self.show_speed,
             WidgetModule::Agents => self.show_agents = !self.show_agents,
             WidgetModule::Mirror => self.show_mirror = !self.show_mirror,
+            WidgetModule::Battery => self.show_battery = !self.show_battery,
+            WidgetModule::Messages => {
+                self.show_messages = !self.show_messages;
+                crate::messages::request_refresh();
+            }
+            WidgetModule::Obsidian => self.show_obsidian = !self.show_obsidian,
+            WidgetModule::Mixer => self.show_mixer = !self.show_mixer,
+            WidgetModule::Weather => self.weather.enabled = !self.weather.enabled,
+            WidgetModule::Vpn => self.show_vpn = !self.show_vpn,
+            WidgetModule::HighAlert => self.show_high_alert = !self.show_high_alert,
+            WidgetModule::SysStats => self.show_sysstats = !self.show_sysstats,
+            WidgetModule::Recorder => self.show_recorder = !self.show_recorder,
+            WidgetModule::Meeting => self.show_meetings = !self.show_meetings,
+            WidgetModule::Notifications => self.show_notifications = !self.show_notifications,
+            WidgetModule::Process => self.show_process = !self.show_process,
         }
     }
 
@@ -422,6 +1092,14 @@ static APP_SETTINGS: std::sync::OnceLock<RwLock<AppSettings>> = std::sync::OnceL
 const METRICS_TOKEN_SERVICE: &str = "com.prodBirdy.openNook.metrics";
 #[cfg(target_os = "macos")]
 const METRICS_TOKEN_ACCOUNT: &str = "warmup-bearer";
+#[cfg(target_os = "macos")]
+const SHARE_SECRET_SERVICE: &str = "com.prodBirdy.openNook.share";
+#[cfg(target_os = "macos")]
+const SHARE_WEBDAV_ACCOUNT: &str = "webdav-password";
+#[cfg(target_os = "macos")]
+const SHARE_S3_ACCESS_ACCOUNT: &str = "s3-access-key";
+#[cfg(target_os = "macos")]
+const SHARE_S3_SECRET_ACCOUNT: &str = "s3-secret-key";
 
 #[cfg(target_os = "macos")]
 fn load_metrics_token() -> Option<String> {
@@ -458,6 +1136,66 @@ fn load_metrics_token() -> Option<String> {
 
 #[cfg(not(target_os = "macos"))]
 fn store_metrics_token(_token: &str) -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn load_share_secret(account: &str) -> Option<String> {
+    security_framework::passwords::get_generic_password(SHARE_SECRET_SERVICE, account)
+        .ok()
+        .and_then(|bytes| String::from_utf8(bytes).ok())
+}
+
+#[cfg(target_os = "macos")]
+fn store_share_secret(account: &str, secret: &str) -> Result<(), String> {
+    if secret.is_empty() {
+        let _ = security_framework::passwords::delete_generic_password(
+            SHARE_SECRET_SERVICE,
+            account,
+        );
+        Ok(())
+    } else {
+        security_framework::passwords::set_generic_password(
+            SHARE_SECRET_SERVICE,
+            account,
+            secret.as_bytes(),
+        )
+        .map_err(|err| err.to_string())
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn hydrate_share_secrets(share: &mut ShareSettings) {
+    if share.webdav_password.is_empty() {
+        if let Some(secret) = load_share_secret(SHARE_WEBDAV_ACCOUNT) {
+            share.webdav_password = secret;
+        }
+    }
+    if share.s3_access_key.is_empty() {
+        if let Some(secret) = load_share_secret(SHARE_S3_ACCESS_ACCOUNT) {
+            share.s3_access_key = secret;
+        }
+    }
+    if share.s3_secret_key.is_empty() {
+        if let Some(secret) = load_share_secret(SHARE_S3_SECRET_ACCOUNT) {
+            share.s3_secret_key = secret;
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn hydrate_share_secrets(_share: &mut ShareSettings) {}
+
+#[cfg(target_os = "macos")]
+fn persist_share_secrets(share: &ShareSettings) -> Result<(), String> {
+    store_share_secret(SHARE_WEBDAV_ACCOUNT, &share.webdav_password)?;
+    store_share_secret(SHARE_S3_ACCESS_ACCOUNT, &share.s3_access_key)?;
+    store_share_secret(SHARE_S3_SECRET_ACCOUNT, &share.s3_secret_key)?;
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn persist_share_secrets(_share: &ShareSettings) -> Result<(), String> {
     Ok(())
 }
 
@@ -499,6 +1237,10 @@ pub fn update_app_settings(settings: AppSettings) {
     }
     SETTINGS_GEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     persist();
+    crate::hotkeys::sync();
+    crate::menubar::sync();
+    crate::eventtap::sync();
+    crate::keysounds::sync();
 }
 
 /// Bumped on every [`update_app_settings`]. Hot loops compare this before
@@ -532,6 +1274,7 @@ pub fn load_from_db() {
             if settings.window.non_notch_mode {
                 settings.non_notch_mode = true;
             }
+            hydrate_share_secrets(&mut settings.share);
             let filled_url = settings.observe.prometheus_url.trim().is_empty();
             crate::observe::fill_default_url(&mut settings.observe);
             if let Ok(mut guard) = app_store().write() {
@@ -580,6 +1323,10 @@ fn persist() {
         log::warn!("failed to persist metrics token to Keychain: {err}");
         return;
     }
+    if let Err(err) = persist_share_secrets(&settings.share) {
+        log::warn!("failed to persist share secrets: {err}");
+        return;
+    }
     if let Ok(json) = serde_json::to_string(&settings) {
         if let Err(err) = database::set_setting("app_settings", &json) {
             log::warn!("failed to persist app settings: {err}");
@@ -592,6 +1339,17 @@ mod tests {
     use super::*;
 
     #[test]
+    fn search_defaults_keep_clipboard_off() {
+        let settings = AppSettings::default();
+        assert!(settings.search.enabled);
+        assert!(!settings.search.clipboard_history);
+        assert!(!settings.search.auto_paste);
+        assert_eq!(settings.search.hotkey.label(), "⌥ Space");
+        let parsed: SearchSettings = serde_json::from_str("{}").unwrap();
+        assert_eq!(parsed, SearchSettings::default());
+    }
+
+    #[test]
     fn empty_json_matches_default() {
         let parsed: AppSettings = serde_json::from_str("{}").unwrap();
         assert_eq!(parsed, AppSettings::default());
@@ -602,8 +1360,12 @@ mod tests {
         let parsed: AppSettings = serde_json::from_str(r#"{"liquid_glass_mode":true}"#).unwrap();
         assert_eq!(parsed.widget_order, default_widget_order());
         assert!(parsed.show_media);
+        assert!(!parsed.show_lyrics);
+        assert!(parsed.show_media_queue);
+        assert!(parsed.spotify_client_id.is_empty());
         assert!(parsed.show_calendar);
         assert!(parsed.show_reminders);
+        assert!(parsed.quick_add);
         assert!(parsed.show_agents);
         assert!(parsed.show_observe);
         assert!(parsed.show_timers);
@@ -611,12 +1373,87 @@ mod tests {
         assert!(parsed.show_speed);
         assert!(parsed.show_files);
         assert!(parsed.show_mirror);
+        assert!(parsed.show_battery);
+        assert_eq!(parsed.battery_alert_threshold, 20);
+        assert_eq!(
+            parsed.lpm_shortcut_name.as_deref(),
+            Some(crate::power::default_lpm_shortcut_name())
+        );
+        assert!(parsed.show_messages);
+        assert!(!parsed.experimental_whatsapp_autosend);
+        assert!(parsed.sync_clock_timers);
+        assert!(parsed.show_obsidian);
+        assert_eq!(parsed.obsidian_vault, None);
+        assert_eq!(parsed.obsidian_capture_heading, None);
+        assert!(!parsed.obsidian_uri_capture);
+        assert!(parsed.show_mixer);
+        assert!(parsed.weather.enabled);
+        assert!(parsed.weather.show_on_compact_face);
+        assert!(parsed.show_vpn);
+        assert!(parsed.vpn_show_timer);
+        assert!(parsed.vpn_ignore_interfaces.is_empty());
+        assert!(parsed.show_high_alert);
+        assert_eq!(parsed.high_alert_default_duration_secs, 30 * 60);
+        assert_eq!(parsed.high_alert_kind, HighAlertKind::Display);
+        assert_eq!(parsed.low_battery_release_pct, 10);
+        assert_eq!(parsed.pomodoro_work_secs, 25 * 60);
+        assert_eq!(parsed.pomodoro_break_secs, 5 * 60);
+        assert_eq!(parsed.pomodoro_long_break_secs, 15 * 60);
+        assert_eq!(parsed.pomodoro_cycles_per_long, 4);
+        assert!(parsed.pomodoro_auto_advance);
+        assert!(parsed.pomodoro_keep_awake);
+        assert_eq!(parsed.focus_shortcut_work, None);
+        assert!(parsed.show_sysstats);
+        assert_eq!(parsed.sysstats, SysStatsSettings::default());
+        assert!(parsed.show_recorder);
+        assert!(parsed.recorder_transcribe);
+        assert!(parsed.show_meetings);
+        assert!(parsed.meetings.zoom);
+        assert!(parsed.meetings.teams);
+        assert!(parsed.meetings.meet);
+        assert_eq!(parsed.meetings.meet_mode, MeetControlMode::FocusTab);
+        assert!(!parsed.show_notifications);
+        assert!(!parsed.notification_fda_opt_in);
+        assert!(parsed.notification_blocked_apps.is_empty());
+        assert!(parsed.show_process);
+        assert!(parsed.file_actions.enabled);
+        assert_eq!(parsed.file_actions.jpeg_quality, 80);
+        assert_eq!(parsed.file_actions.pdf_preset, PdfPreset::Screen);
+        assert!(!parsed.file_actions.use_ffmpeg);
         assert!(parsed.liquid_glass_mode);
         assert!(!parsed.non_notch_mode);
         assert!((parsed.island_x - 0.5).abs() < f32::EPSILON);
         assert_eq!(parsed.island_y, 0.0);
         assert!(!parsed.hide_when_maximized);
+        assert!(parsed.show_volume_brightness_hud);
+        assert!(!parsed.replace_system_hud);
         assert_eq!(parsed.island_color, None);
+        assert!(!parsed.share.localsend_receive);
+        assert_eq!(parsed.share.device_alias, "openNook");
+        assert_eq!(
+            parsed.share.link_backend,
+            crate::share::LinkBackendKind::ZeroXZero
+        );
+        assert!(!parsed.terminal_enabled);
+        assert!(parsed.terminal_shell.is_empty());
+        assert_eq!(parsed.terminal_timeout_secs, 30);
+        assert!(!parsed.terminal_history);
+        assert!(!parsed.animated_album_art);
+        assert!(parsed.ambient_art_glow);
+    }
+
+    #[test]
+    fn motion_art_toggles_default_network_off_aura_on() {
+        let parsed: AppSettings = serde_json::from_str("{}").unwrap();
+        assert!(!parsed.animated_album_art);
+        assert!(parsed.ambient_art_glow);
+        assert_eq!(parsed.animated_album_art, AppSettings::default().animated_album_art);
+        assert_eq!(parsed.ambient_art_glow, AppSettings::default().ambient_art_glow);
+        assert!(parsed.search.enabled);
+        assert!(!parsed.search.clipboard_history);
+        assert!(!parsed.search.auto_paste);
+        assert_eq!(parsed.search.clipboard_history_size, 500);
+        assert_eq!(parsed.search.hotkey, SearchHotkey::default());
     }
 
     #[test]
@@ -696,6 +1533,18 @@ mod tests {
         settings.show_speed = false;
         settings.show_agents = false;
         settings.show_mirror = false;
+        settings.show_battery = false;
+        settings.show_messages = false;
+        settings.show_obsidian = false;
+        settings.show_mixer = false;
+        settings.weather.enabled = false;
+        settings.show_vpn = false;
+        settings.show_high_alert = false;
+        settings.show_sysstats = false;
+        settings.show_recorder = false;
+        settings.show_meetings = false;
+        settings.show_notifications = false;
+        settings.show_process = false;
         settings.set_cells(WidgetModule::Music, 5);
         assert_eq!(settings.used_cells(), 5);
         assert_eq!(settings.remaining_cells(), AppSettings::TOTAL_CELLS - 5);
@@ -713,6 +1562,21 @@ mod tests {
         );
     }
 
+    #[test]
+    fn notifications_default_off_and_filter_toggles() {
+        let parsed: AppSettings = serde_json::from_str("{}").unwrap();
+        assert!(!parsed.show_notifications);
+        assert!(!parsed.notification_fda_opt_in);
+        assert!(!parsed.is_enabled(WidgetModule::Notifications));
+        let mut settings = AppSettings::default();
+        settings.toggle_enabled(WidgetModule::Notifications);
+        assert!(settings.show_notifications);
+        settings.toggle_notification_app("com.apple.mail");
+        assert!(settings.notification_app_blocked("com.apple.mail"));
+        settings.toggle_notification_app("com.apple.mail");
+        assert!(!settings.notification_app_blocked("com.apple.mail"));
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn serialized_settings_omit_the_metrics_token() {
@@ -725,5 +1589,34 @@ mod tests {
         let legacy: AppSettings =
             serde_json::from_str(r#"{"observe":{"metrics_token":"legacy-secret"}}"#).unwrap();
         assert_eq!(legacy.observe.metrics_token, "legacy-secret");
+    }
+
+    #[test]
+    fn window_management_flags_default_off() {
+        let parsed: AppSettings = serde_json::from_str("{}").unwrap();
+        assert!(!parsed.window_snap_enabled);
+        assert!(!parsed.thaw_enabled);
+        assert!(!parsed.thaw_hidden);
+        assert!(!parsed.snap_drag_to_edge);
+}
+    fn audio_output_picker_defaults_on() {
+        let parsed: AppSettings = serde_json::from_str("{}").unwrap();
+        assert!(parsed.audio_output_picker);
+        assert_eq!(
+            parsed.audio_output_picker,
+            AppSettings::default().audio_output_picker
+        );
+}
+    fn input_feel_flags_default_off() {
+        let parsed: AppSettings = serde_json::from_str("{}").unwrap();
+        assert!(!parsed.keysounds_enabled);
+        assert!(!parsed.smooth_scroll_enabled);
+        assert!(!parsed.reverse_mouse_scroll);
+        assert_eq!(parsed.keysound_pack, "nook-click");
+        assert!((parsed.keysound_volume - 0.7).abs() < f32::EPSILON);
+        assert!((parsed.scroll_speed - 1.0).abs() < f32::EPSILON);
+        assert!((parsed.scroll_duration - 0.35).abs() < f32::EPSILON);
+        assert!(parsed.scroll_excluded_apps.is_empty());
+        assert!(parsed.scroll_device_overrides.is_empty());
     }
 }

@@ -9,7 +9,9 @@ use gpui::{
     ObjectFit, Pixels, Rgba, SharedString, Subscription, Window,
 };
 use gpui_component::slider::{Slider, SliderEvent, SliderState};
+use nook_core::high_alert::HighAlertKind;
 use nook_core::settings::{AppSettings, IslandSwatch, WidgetModule, ISLAND_SWATCHES};
+use nook_core::share::LinkBackendKind;
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU8, Ordering};
@@ -57,12 +59,18 @@ fn desktop_wallpaper_image() -> Option<std::sync::Arc<Image>> {
 enum SettingsCategory {
     General = 0,
     Widgets = 1,
+    Keyboard = 2,
+    Scrolling = 3,
+    Search = 2,
 }
 
 impl SettingsCategory {
     fn from_u8(v: u8) -> Self {
         match v {
             1 => Self::Widgets,
+            2 => Self::Keyboard,
+            3 => Self::Scrolling,
+            2 => Self::Search,
             _ => Self::General,
         }
     }
@@ -71,6 +79,9 @@ impl SettingsCategory {
         match self {
             Self::General => "General",
             Self::Widgets => "Widgets",
+            Self::Keyboard => "Keyboard",
+            Self::Scrolling => "Scrolling",
+            Self::Search => "Search",
         }
     }
 
@@ -78,6 +89,9 @@ impl SettingsCategory {
         match self {
             Self::General => "settings",
             Self::Widgets => "layout-grid",
+            Self::Keyboard => "keyboard",
+            Self::Scrolling => "mouse",
+            Self::Search => "search",
         }
     }
 }
@@ -131,6 +145,18 @@ impl WidgetModuleExt for WidgetModule {
             Self::Speed => "Speed Test",
             Self::Agents => "Agents",
             Self::Mirror => "Mirror",
+            Self::Battery => "Battery",
+            Self::Messages => "Messages",
+            Self::Obsidian => "Obsidian",
+            Self::Mixer => "Mixer",
+            Self::Weather => "Weather",
+            Self::Vpn => "VPN",
+            Self::HighAlert => "High Alert",
+            Self::SysStats => "Stats",
+            Self::Recorder => "Voice",
+            Self::Meeting => "Meetings",
+            Self::Notifications => "Notifications",
+            Self::Process => "Process",
         }
     }
 
@@ -146,21 +172,72 @@ impl WidgetModuleExt for WidgetModule {
             Self::Speed => "gauge",
             Self::Agents => "bot",
             Self::Mirror => "webcam",
+            Self::Battery => "battery",
+            Self::Messages => "message-circle",
+            Self::Obsidian => "book",
+            Self::Mixer => "volume-2",
+            Self::Weather => "cloud-sun",
+            Self::Vpn => "shield",
+            Self::HighAlert => "sun",
+            Self::SysStats => "activity",
+            Self::Recorder => "mic",
+            Self::Meeting => "video",
+            Self::Notifications => "bell",
+            Self::Process => "image",
         }
     }
 
     fn subtitle(self, settings: &AppSettings) -> SharedString {
         match self {
             Self::Calendar => "7 days".into(),
-            Self::Music => "Now Playing".into(),
+            Self::Music => {
+                if settings.show_media_queue {
+                    "Now Playing + queue".into()
+                } else {
+                    "Now Playing".into()
+                }
+            }
             Self::Files => "Tray tab".into(),
             Self::Notes => "Scratchpad".into(),
             Self::Observe => observe_subtitle(settings.observe.metrics.len()),
-            Self::Timers => "Countdown".into(),
+            Self::Timers => {
+                if settings.sync_clock_timers {
+                    "Island + Clock".into()
+                } else {
+                    "Countdown".into()
+                }
+            }
             Self::Reminders => "EventKit".into(),
             Self::Speed => "Cloudflare".into(),
             Self::Agents => "Sessions".into(),
             Self::Mirror => "Camera".into(),
+            Self::Battery => format!(
+                "Alert at {}%",
+                nook_core::power::clamp_alert_threshold(settings.battery_alert_threshold)
+            )
+            .into(),
+            Self::Messages => "iMessage".into(),
+            Self::Obsidian => settings
+                .obsidian_vault
+                .as_ref()
+                .and_then(|path| path.file_name())
+                .map(|name| SharedString::from(name.to_string_lossy().into_owned()))
+                .unwrap_or_else(|| "No vault".into()),
+            Self::Mixer => "Per-app volume".into(),
+            Self::Weather => weather_subtitle(settings),
+            Self::Vpn => vpn_subtitle(settings.vpn_show_timer),
+            Self::HighAlert => "Keep awake".into(),
+            Self::SysStats => sysstats_subtitle(settings),
+            Self::Recorder => {
+                if settings.recorder_transcribe {
+                    "Live transcript".into()
+                } else {
+                    "Record only".into()
+                }
+            }
+            Self::Meeting => "Zoom / Teams / Meet".into(),
+            Self::Notifications => notify_subtitle(settings),
+            Self::Process => "Convert / OCR".into(),
         }
     }
 
@@ -184,7 +261,132 @@ impl WidgetModuleExt for WidgetModule {
             Self::Speed => "Speed",
             Self::Agents => "Agents",
             Self::Mirror => "Mirror",
+            Self::Battery => "Battery",
+            Self::Messages => "Messages",
+            Self::Obsidian => "Obsidian",
+            Self::Mixer => "Mixer",
+            Self::HighAlert => "Alert",
+            Self::Meeting => "Meetings",
         }
+    }
+}
+
+fn share_field_a(settings: &AppSettings) -> String {
+    match settings.share.link_backend {
+        LinkBackendKind::WebDav => settings.share.webdav_url.clone(),
+        LinkBackendKind::S3 => settings.share.s3_bucket.clone(),
+        LinkBackendKind::ZeroXZero => String::new(),
+    }
+}
+
+fn share_field_b(settings: &AppSettings) -> String {
+    match settings.share.link_backend {
+        LinkBackendKind::WebDav => settings.share.webdav_username.clone(),
+        LinkBackendKind::S3 => settings.share.s3_access_key.clone(),
+        LinkBackendKind::ZeroXZero => String::new(),
+    }
+}
+
+fn share_field_c(settings: &AppSettings) -> String {
+    match settings.share.link_backend {
+        LinkBackendKind::WebDav => settings.share.webdav_password.clone(),
+        LinkBackendKind::S3 => settings.share.s3_secret_key.clone(),
+        LinkBackendKind::ZeroXZero => String::new(),
+    }
+}
+
+fn share_blurb(backend: LinkBackendKind, receive: bool) -> SharedString {
+    let host = match backend {
+        LinkBackendKind::ZeroXZero => {
+            "0x0.st is a public community host (512 MiB, 30–365 day retention). Files are public-by-URL."
+        }
+        LinkBackendKind::WebDav => {
+            "WebDAV PUT needs a base URL that is already publicly readable. Nextcloud share links need its OCS API — not this mode."
+        }
+        LinkBackendKind::S3 => {
+            "S3 PUT uses SigV4. Permanent links need a public bucket or CloudFront; otherwise treat the object URL as short-lived."
+        }
+    };
+    if receive {
+        format!("{host} Receive is saved but this release does not open a listener.").into()
+    } else {
+        format!("{host} LocalSend is send-only until you turn receive on (listener ships later).")
+            .into()
+    }
+}
+
+fn weather_subtitle(settings: &AppSettings) -> SharedString {
+    let name = settings.weather.location.name();
+    if name.is_empty() {
+        "Open-Meteo".into()
+    } else {
+        name.to_string().into()
+    }
+}
+
+fn vpn_subtitle(show_timer: bool) -> SharedString {
+    if show_timer {
+        "Session timer".into()
+    } else {
+        "Status".into()
+    }
+}
+
+fn sysstats_subtitle(settings: &AppSettings) -> SharedString {
+    let n = [
+        settings.sysstats.show_cpu,
+        settings.sysstats.show_mem,
+        settings.sysstats.show_net,
+        settings.sysstats.show_disk,
+    ]
+    .into_iter()
+    .filter(|on| *on)
+    .count();
+    match n {
+        0 => "Hidden".into(),
+        1 => "1 readout".into(),
+        n => format!("{n} readouts").into(),
+    }
+}
+
+fn notification_permission_rows(cx: &mut Context<SettingsView>) -> Vec<AnyElement> {
+    use nook_core::notifications::PermissionState;
+    let ax = crate::platform::ax_process_trusted(false);
+    let fda = crate::platform::full_disk_access();
+    let ax_label = if ax { "Granted" } else { "Not granted" };
+    let fda_label = match fda {
+        PermissionState::Granted => "Granted",
+        PermissionState::Denied => "Not granted",
+        PermissionState::Unavailable => "Unavailable",
+    };
+    vec![
+        action_row("notify-ax", "Accessibility", ax_label, cx, |_, _, _| {
+            if !crate::platform::ax_process_trusted(true) {
+                crate::platform::open_privacy_accessibility();
+            }
+        })
+        .into_any_element(),
+        action_row(
+            "notify-fda",
+            "Full Disk Access",
+            fda_label,
+            cx,
+            |_, _, _| {
+                crate::platform::open_privacy_full_disk_access();
+            },
+        )
+        .into_any_element(),
+    ]
+}
+
+fn notify_subtitle(settings: &AppSettings) -> SharedString {
+    if !settings.show_notifications {
+        return "Off".into();
+    }
+    if crate::platform::ax_process_trusted(false) {
+        "Accessibility".into()
+    } else {
+        "Needs Accessibility".into()
     }
 }
 
@@ -221,51 +423,193 @@ fn create_width_slider(
     (slider, subscription)
 }
 
+fn create_float_slider(
+    min: f32,
+    max: f32,
+    step: f32,
+    value: f32,
+    cx: &mut Context<SettingsView>,
+    write: impl Fn(f32) + 'static,
+) -> (Entity<SliderState>, Subscription) {
+    let slider = cx.new(|_| {
+        SliderState::new()
+            .min(min)
+            .max(max)
+            .step(step)
+            .default_value(value)
+    });
+    let subscription = cx.subscribe(&slider, move |_, _, event: &SliderEvent, cx| {
+        let SliderEvent::Change(value) = event;
+        write(value.start());
+        cx.notify();
+    });
+    (slider, subscription)
+}
+
 pub(super) struct SettingsView {
     category: SettingsCategory,
     module: WidgetModule,
     url_focus: FocusHandle,
     token_focus: FocusHandle,
     query_focus: FocusHandle,
+    heading_focus: FocusHandle,
+    alias_focus: FocusHandle,
+    pin_focus: FocusHandle,
+    share_a_focus: FocusHandle,
+    share_b_focus: FocusHandle,
+    share_c_focus: FocusHandle,
+    city_focus: FocusHandle,
     url_draft: String,
     token_draft: String,
+    alias_draft: String,
+    pin_draft: String,
+    share_a_draft: String,
+    share_b_draft: String,
+    share_c_draft: String,
+    ignore_focus: FocusHandle,
+    shell_focus: FocusHandle,
+    timeout_focus: FocusHandle,
+    url_draft: String,
+    token_draft: String,
+    ignore_draft: String,
+    client_id_focus: FocusHandle,
+    url_draft: String,
+    token_draft: String,
+    client_id_draft: String,
     token_revealed: bool,
     query_draft: String,
+    heading_draft: String,
+    city_draft: String,
+    geo_results: Vec<nook_core::weather::GeoPlace>,
+    geo_error: Option<String>,
+    geo_loading: bool,
+    location_status: Option<String>,
+    location_busy: bool,
+    shell_draft: String,
+    timeout_draft: String,
     catalog: Vec<String>,
     catalog_error: Option<String>,
     catalog_loading: bool,
     width_slider: Entity<SliderState>,
     width_slider_config: (WidgetModule, u8, u8),
     _width_slider_subscription: Subscription,
+    volume_slider: Entity<SliderState>,
+    _volume_slider_subscription: Subscription,
+    scroll_speed_slider: Entity<SliderState>,
+    _scroll_speed_slider_subscription: Subscription,
+    scroll_duration_slider: Entity<SliderState>,
+    _scroll_duration_slider_subscription: Subscription,
+    exclude_focus: FocusHandle,
+    exclude_draft: String,
     placement_drag: bool,
     placement_bounds: Rc<RefCell<Option<Bounds<Pixels>>>>,
+    recording_hotkey: bool,
+    exclude_draft: String,
 }
 
 impl SettingsView {
     pub(super) fn new(cx: &mut Context<Self>) -> Self {
         let settings = nook_core::settings::get_app_settings();
-        let module = WidgetModule::from_u8(LAST_MODULE.load(Ordering::Relaxed));
+        let mut module = WidgetModule::from_u8(LAST_MODULE.load(Ordering::Relaxed));
+        if module == WidgetModule::Mixer && !nook_core::mixer::is_available() {
+            module = WidgetModule::Calendar;
+        }
         let min = module.min_cells();
         let max = settings.max_cells_for(module).max(min);
         let (width_slider, width_slider_subscription) = create_width_slider(module, &settings, cx);
+        let (volume_slider, volume_slider_subscription) = create_float_slider(
+            0.0,
+            1.0,
+            0.05,
+            settings.keysound_volume.clamp(0.0, 1.0),
+            cx,
+            |value| {
+                nook_core::settings::tweak_app_settings(|s| {
+                    s.keysound_volume = value.clamp(0.0, 1.0);
+                });
+            },
+        );
+        let (scroll_speed_slider, scroll_speed_subscription) = create_float_slider(
+            0.25,
+            3.0,
+            0.05,
+            settings.scroll_speed.clamp(0.25, 3.0),
+            cx,
+            |value| {
+                nook_core::settings::tweak_app_settings(|s| {
+                    s.scroll_speed = value.clamp(0.25, 3.0);
+                });
+            },
+        );
+        let (scroll_duration_slider, scroll_duration_subscription) = create_float_slider(
+            0.1,
+            1.0,
+            0.05,
+            settings.scroll_duration.clamp(0.1, 1.0),
+            cx,
+            |value| {
+                nook_core::settings::tweak_app_settings(|s| {
+                    s.scroll_duration = value.clamp(0.1, 1.0);
+                });
+            },
+        );
         Self {
             category: SettingsCategory::from_u8(LAST_CATEGORY.load(Ordering::Relaxed)),
             module,
             url_focus: cx.focus_handle(),
             token_focus: cx.focus_handle(),
             query_focus: cx.focus_handle(),
+            heading_focus: cx.focus_handle(),
+            alias_focus: cx.focus_handle(),
+            pin_focus: cx.focus_handle(),
+            share_a_focus: cx.focus_handle(),
+            share_b_focus: cx.focus_handle(),
+            share_c_focus: cx.focus_handle(),
+            alias_draft: settings.share.device_alias.clone(),
+            pin_draft: settings.share.localsend_pin.clone(),
+            share_a_draft: share_field_a(&settings),
+            share_b_draft: share_field_b(&settings),
+            share_c_draft: share_field_c(&settings),
+            city_focus: cx.focus_handle(),
+            ignore_focus: cx.focus_handle(),
+            shell_focus: cx.focus_handle(),
+            timeout_focus: cx.focus_handle(),
+            exclude_focus: cx.focus_handle(),
             url_draft: settings.observe.prometheus_url,
             token_draft: settings.observe.metrics_token,
+            ignore_draft: nook_core::vpn::format_ignore_list(&settings.vpn_ignore_interfaces),
+            client_id_focus: cx.focus_handle(),
+            url_draft: settings.observe.prometheus_url,
+            token_draft: settings.observe.metrics_token,
+            client_id_draft: settings.spotify_client_id,
             token_revealed: false,
             query_draft: String::new(),
+            heading_draft: settings.obsidian_capture_heading.clone().unwrap_or_default(),
+            city_draft: settings.weather.location.name().to_string(),
+            geo_results: Vec::new(),
+            geo_error: None,
+            geo_loading: false,
+            location_status: None,
+            location_busy: false,
+            shell_draft: settings.terminal_shell.clone(),
+            timeout_draft: settings.terminal_timeout_secs.to_string(),
+            exclude_draft: String::new(),
             catalog: Vec::new(),
             catalog_error: None,
             catalog_loading: false,
             width_slider,
             width_slider_config: (module, min, max),
             _width_slider_subscription: width_slider_subscription,
+            volume_slider,
+            _volume_slider_subscription: volume_slider_subscription,
+            scroll_speed_slider,
+            _scroll_speed_slider_subscription: scroll_speed_subscription,
+            scroll_duration_slider,
+            _scroll_duration_slider_subscription: scroll_duration_subscription,
             placement_drag: false,
             placement_bounds: Rc::new(RefCell::new(None)),
+            recording_hotkey: false,
+            exclude_draft: settings.search.clipboard_exclude_apps.join(", "),
         }
     }
 
@@ -320,6 +664,15 @@ impl SettingsView {
 
     fn persist_observe(tweak: impl FnOnce(&mut AppSettings)) {
         nook_core::settings::tweak_app_settings(tweak);
+    }
+
+    fn persist_ignore(&self) {
+        let names = nook_core::vpn::parse_ignore_list(&self.ignore_draft);
+        nook_core::settings::tweak_app_settings(|s| {
+            if s.vpn_ignore_interfaces != names {
+                s.vpn_ignore_interfaces = names;
+            }
+        });
     }
 
     fn apply_key(draft: &mut String, event: &KeyDownEvent, cx: &Context<Self>) -> bool {
@@ -382,6 +735,113 @@ impl SettingsView {
         })
         .detach();
     }
+
+    fn search_city(&mut self, cx: &mut Context<Self>) {
+        let query = self.city_draft.trim().to_string();
+        if query.is_empty() || self.geo_loading {
+            return;
+        }
+        self.geo_loading = true;
+        self.geo_error = None;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    nook_core::runtime().block_on(nook_core::weather::search_places(&query, 5))
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                this.geo_loading = false;
+                match result {
+                    Ok(places) => {
+                        this.geo_results = places;
+                        this.geo_error = if this.geo_results.is_empty() {
+                            Some("No matching cities.".into())
+                        } else {
+                            None
+                        };
+                    }
+                    Err(err) => this.geo_error = Some(err),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn pick_place(&mut self, place: nook_core::weather::GeoPlace, cx: &mut Context<Self>) {
+        let name = place.display_name();
+        nook_core::settings::tweak_app_settings(|s| {
+            s.weather.location = nook_core::weather::WeatherLocationMode::Manual {
+                name: name.clone(),
+                lat: place.latitude,
+                lon: place.longitude,
+            };
+        });
+        nook_core::weather::invalidate();
+        self.city_draft = name;
+        self.geo_results.clear();
+        self.location_status = None;
+        cx.notify();
+    }
+
+    fn use_system_location(&mut self, cx: &mut Context<Self>) {
+        if self.location_busy {
+            return;
+        }
+        self.location_busy = true;
+        self.location_status = Some("Locating…".into());
+        cx.notify();
+        let rx = nook_core::location::begin_request();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { rx.await.unwrap_or_else(|_| Err("Location request ended.".into())) })
+                .await;
+            this.update(cx, |this, cx| {
+                this.location_busy = false;
+                match result {
+                    Ok((lat, lon)) => {
+                        nook_core::settings::tweak_app_settings(|s| {
+                            s.weather.location = nook_core::weather::WeatherLocationMode::System {
+                                name: "Current location".into(),
+                                lat,
+                                lon,
+                            };
+                        });
+                        nook_core::weather::invalidate();
+                        this.city_draft = "Current location".into();
+                        this.location_status = None;
+                    }
+                    Err(err) => this.location_status = Some(err),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+    fn fetch_shortcuts(&mut self, cx: &mut Context<Self>) {
+        if self.catalog_loading {
+            return;
+        }
+        self.catalog_loading = true;
+        cx.spawn(async move |this, cx| {
+            let names = cx
+                .background_executor()
+                .spawn(async { nook_core::runtime().block_on(nook_core::focus::list_shortcuts()) })
+                .await;
+            this.update(cx, |this, cx| {
+                this.catalog_loading = false;
+                this.catalog = names;
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
 }
 
 impl gpui::Render for SettingsView {
@@ -390,6 +850,16 @@ impl gpui::Render for SettingsView {
         let url_focused = self.url_focus.is_focused(window);
         let token_focused = self.token_focus.is_focused(window);
         let query_focused = self.query_focus.is_focused(window);
+        let heading_focused = self.heading_focus.is_focused(window);
+        let alias_focused = self.alias_focus.is_focused(window);
+        let pin_focused = self.pin_focus.is_focused(window);
+        let share_a_focused = self.share_a_focus.is_focused(window);
+        let share_b_focused = self.share_b_focus.is_focused(window);
+        let share_c_focused = self.share_c_focus.is_focused(window);
+        let city_focused = self.city_focus.is_focused(window);
+        let ignore_focused = self.ignore_focus.is_focused(window);
+        let exclude_focused = self.exclude_focus.is_focused(window);
+        let client_id_focused = self.client_id_focus.is_focused(window);
 
         div()
             .id("settings-root")
@@ -411,11 +881,39 @@ impl gpui::Render for SettingsView {
             })
             .child(self.sidebar(cx))
             .child(div().w(px(1.)).h_full().bg(hairline()))
-            .child(if self.category == SettingsCategory::Widgets {
-                self.render_widgets(&settings, url_focused, token_focused, query_focused, cx)
-                    .into_any_element()
-            } else {
-                self.render_general(&settings, cx).into_any_element()
+            .child(match self.category {
+                SettingsCategory::Widgets => self
+                    .render_widgets(
+                        &settings,
+                        url_focused,
+                        token_focused,
+                        query_focused,
+                        heading_focused,
+                        city_focused,
+                        ignore_focused,
+                        client_id_focused,
+                        cx,
+                    )
+                    .into_any_element(),
+                SettingsCategory::Keyboard => self.render_keyboard(&settings, cx).into_any_element(),
+                SettingsCategory::Scrolling => self
+                    .render_scrolling(&settings, exclude_focused, cx)
+                    .into_any_element(),
+                SettingsCategory::Search => {
+                    self.render_search_settings(&settings, cx).into_any_element()
+                }
+                SettingsCategory::General => self
+                    .render_general(
+                        &settings,
+                        window,
+                        alias_focused,
+                        pin_focused,
+                        share_a_focused,
+                        share_b_focused,
+                        share_c_focused,
+                        cx,
+                    )
+                    .into_any_element(),
             })
     }
 }
@@ -435,7 +933,10 @@ impl SettingsView {
             .pb(px(16.))
             .gap(px(2.))
             .child(self.sidebar_item(SettingsCategory::General, cx))
+            .child(self.sidebar_item(SettingsCategory::Search, cx))
             .child(self.sidebar_item(SettingsCategory::Widgets, cx))
+            .child(self.sidebar_item(SettingsCategory::Keyboard, cx))
+            .child(self.sidebar_item(SettingsCategory::Scrolling, cx))
     }
 
     fn sidebar_item(&self, category: SettingsCategory, cx: &mut Context<Self>) -> impl IntoElement {
@@ -518,7 +1019,51 @@ impl SettingsView {
             )
     }
 
-    fn render_general(&self, settings: &AppSettings, cx: &mut Context<Self>) -> impl IntoElement {
+    fn persist_share_alias(&self) {
+        let draft = self.alias_draft.trim().to_string();
+        let alias = if draft.is_empty() {
+            nook_core::share::default_device_alias()
+        } else {
+            draft
+        };
+        nook_core::settings::tweak_app_settings(|s| s.share.device_alias = alias);
+    }
+
+    fn persist_share_pin(&self) {
+        let draft = self.pin_draft.trim().to_string();
+        nook_core::settings::tweak_app_settings(|s| s.share.localsend_pin = draft);
+    }
+
+    fn persist_share_creds(&self) {
+        let a = self.share_a_draft.trim().to_string();
+        let b = self.share_b_draft.trim().to_string();
+        let c = self.share_c_draft.trim().to_string();
+        nook_core::settings::tweak_app_settings(|s| match s.share.link_backend {
+            LinkBackendKind::WebDav => {
+                s.share.webdav_url = a;
+                s.share.webdav_username = b;
+                s.share.webdav_password = c;
+            }
+            LinkBackendKind::S3 => {
+                s.share.s3_bucket = a;
+                s.share.s3_access_key = b;
+                s.share.s3_secret_key = c;
+            }
+            LinkBackendKind::ZeroXZero => {}
+        });
+    }
+
+    fn render_general(
+        &self,
+        settings: &AppSettings,
+        window: &gpui::Window,
+        alias_focused: bool,
+        pin_focused: bool,
+        share_a_focused: bool,
+        share_b_focused: bool,
+        share_c_focused: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         Self::pane(
             "General",
             div()
@@ -569,8 +1114,1058 @@ impl SettingsView {
                         .into_any_element(),
                     ]),
                     Some("Hover the island to expand. Settings and Quit are in the menu bar extra."),
+                ))
+                .child(section(
+                    "Window Snap",
+                    settings_group({
+                        let mut rows = vec![
+                            toggle_row(
+                                "Snap hotkeys",
+                                settings.window_snap_enabled,
+                                cx,
+                                |s| {
+                                    s.window_snap_enabled = !s.window_snap_enabled;
+                                    if s.window_snap_enabled
+                                        && !crate::platform::accessibility_trusted()
+                                    {
+                                        crate::platform::prompt_accessibility();
+                                    }
+                                },
+                            )
+                            .into_any_element(),
+                            status_row(
+                                "Accessibility",
+                                nook_core::window_snap::accessibility_status().label(),
+                            )
+                            .into_any_element(),
+                            action_row(
+                                "ax-prompt",
+                                "Request Accessibility",
+                                "Prompt",
+                                cx,
+                                |_, _, cx| {
+                                    crate::platform::prompt_accessibility();
+                                    cx.notify();
+                                },
+                            )
+                            .into_any_element(),
+                            action_row(
+                                "ax-open",
+                                "Privacy settings",
+                                "Open",
+                                cx,
+                                |_, _, _| {
+                                    nook_core::window_snap::open_accessibility_settings();
+                                },
+                            )
+                            .into_any_element(),
+                        ];
+                        for (kind, hotkey) in nook_core::hotkeys::default_bindings() {
+                            rows.push(
+                                shortcut_row(kind.label(), hotkey.display()).into_any_element(),
+                            );
+                        }
+                        rows
+                    }),
+                    Some("⌃⌥ plus arrows, U/I/J/K, or Return. macOS 15+ tiling can fight drag-to-edge; hotkeys stay independent."),
+                ))
+                .child(section(
+                    "Menu bar (Thaw)",
+                    settings_group(vec![
+                        toggle_row("Hide extras with a separator", settings.thaw_enabled, cx, |s| {
+                            s.thaw_enabled = !s.thaw_enabled;
+                            if !s.thaw_enabled {
+                                s.thaw_hidden = false;
+                            }
+                        })
+                        .into_any_element(),
+                        toggle_row("Extras hidden", settings.thaw_hidden, cx, |s| {
+                            if s.thaw_enabled {
+                                s.thaw_hidden = !s.thaw_hidden;
+                            }
+                        })
+                        .into_any_element(),
+                    ]),
+                    Some("⌘-drag extras so hidden items sit to the left of the Nook chevron. Click the chevron to hide or show. No Screen Recording."),
+                    "HUD",
+                    settings_group(vec![
+                        toggle_row(
+                            "Show volume & brightness HUD",
+                            settings.show_volume_brightness_hud,
+                            cx,
+                            |s| {
+                                s.show_volume_brightness_hud = !s.show_volume_brightness_hud;
+                }
+                    "Termi-Notch",
+                    settings_group(vec![
+                        toggle_row(
+                            "Enable one-shot shell",
+                            settings.terminal_enabled,
+                            cx,
+                            |s| s.terminal_enabled = !s.terminal_enabled,
+                        )
+                        .into_any_element(),
+                        field_row(
+                            "term-shell",
+                            "Shell",
+                            if self.shell_draft.is_empty() {
+                                "$SHELL"
+                            } else {
+                                self.shell_draft.as_str()
+                            },
+                            self.shell_draft.is_empty(),
+                            self.shell_focus.is_focused(window),
+                            &self.shell_focus,
+                            cx,
+                            |this, event, cx| {
+                                if SettingsView::apply_key(&mut this.shell_draft, event, cx) {
+                                    nook_core::settings::tweak_app_settings(|s| {
+                                        s.terminal_shell = this.shell_draft.trim().to_string();
+                                    });
+                                    cx.notify();
+                                }
+                            },
+                        )
+                        .into_any_element(),
+                        field_row(
+                            "term-timeout",
+                            "Timeout",
+                            &self.timeout_draft,
+                            false,
+                            self.timeout_focus.is_focused(window),
+                            &self.timeout_focus,
+                            cx,
+                            |this, event, cx| {
+                                if SettingsView::apply_key(&mut this.timeout_draft, event, cx) {
+                                    this.timeout_draft
+                                        .retain(|ch| ch.is_ascii_digit());
+                                    if let Ok(secs) = this.timeout_draft.parse::<u32>() {
+                                        nook_core::settings::tweak_app_settings(|s| {
+                                            s.terminal_timeout_secs = secs.clamp(1, 600);
+                                        });
+                                    }
+                                    cx.notify();
+                                }
+                            },
+                        )
+                        .into_any_element(),
+                        toggle_row(
+                            "Replace system volume/brightness HUD",
+                            settings.replace_system_hud,
+                            cx,
+                            |s| {
+                                s.replace_system_hud = !s.replace_system_hud;
+                                nook_core::osd::apply(s.replace_system_hud);
+                            },
+                        )
+                        .into_any_element(),
+                    ]),
+                    Some(hud_caption(settings)),
+                )
+                .child(self.render_sharing(
+                    settings,
+                    alias_focused,
+                    pin_focused,
+                    share_a_focused,
+                    share_b_focused,
+                    share_c_focused,
+                    cx,
+                ))
+                .child(self.file_actions_section(settings, cx)),
+        )
+    }
+
+    fn file_actions_section(
+        &self,
+        settings: &AppSettings,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let fa = &settings.file_actions;
+        let ffmpeg_present = nook_core::process::ffmpeg::on_path();
+        let ffmpeg_on = fa.use_ffmpeg && ffmpeg_present;
+        let jpeg = fa.jpeg_quality;
+        let preset = fa.pdf_preset;
+        let downloads = fa.output_is_downloads();
+        section(
+            "File Actions",
+            settings_group(vec![
+                toggle_row("Enable file actions", fa.enabled, cx, |s| {
+                    s.file_actions.enabled = !s.file_actions.enabled;
+                })
+                .into_any_element(),
+                settings_row("output-folder")
+                    .child(label("Output folder", theme::BODY, true))
+                    .child(
+                        segmented_group()
+                            .child(segment("Alongside", !downloads, cx, |_, _, cx| {
+                                nook_core::settings::tweak_app_settings(|s| {
+                                    s.file_actions.set_alongside_source();
+                                });
+                                cx.notify();
+                            }))
+                            .child(segment("Downloads", downloads, cx, |_, _, cx| {
+                                nook_core::settings::tweak_app_settings(|s| {
+                                    s.file_actions.set_downloads();
+                                });
+                                cx.notify();
+                            })),
+                    )
+                    .into_any_element(),
+                settings_row("jpeg-quality")
+                    .child(label("JPEG quality", theme::BODY, true))
+                    .child(
+                        segmented_group()
+                            .child(segment("60", jpeg <= 70, cx, |_, _, cx| {
+                                nook_core::settings::tweak_app_settings(|s| {
+                                    s.file_actions.jpeg_quality = 60;
+                                });
+                                cx.notify();
+                            }))
+                            .child(segment("80", jpeg > 70 && jpeg < 90, cx, |_, _, cx| {
+                                nook_core::settings::tweak_app_settings(|s| {
+                                    s.file_actions.jpeg_quality = 80;
+                                });
+                                cx.notify();
+                            }))
+                            .child(segment("95", jpeg >= 90, cx, |_, _, cx| {
+                                nook_core::settings::tweak_app_settings(|s| {
+                                    s.file_actions.jpeg_quality = 95;
+                                });
+                                cx.notify();
+                            })),
+                    )
+                    .into_any_element(),
+                settings_row("pdf-preset")
+                    .child(label("PDF preset", theme::BODY, true))
+                    .child(
+                        segmented_group()
+                            .child(segment(
+                                "Screen",
+                                preset == nook_core::settings::PdfPreset::Screen,
+                                cx,
+                                |_, _, cx| {
+                                    nook_core::settings::tweak_app_settings(|s| {
+                                        s.file_actions.pdf_preset =
+                                            nook_core::settings::PdfPreset::Screen;
+                                    });
+                                    cx.notify();
+                                },
+                            ))
+                            .child(segment(
+                                "Print",
+                                preset == nook_core::settings::PdfPreset::Print,
+                                cx,
+                                |_, _, cx| {
+                                    nook_core::settings::tweak_app_settings(|s| {
+                                        s.file_actions.pdf_preset =
+                                            nook_core::settings::PdfPreset::Print;
+                                    });
+                                    cx.notify();
+                                },
+                            ))
+                            .child(segment(
+                                "Raster",
+                                preset == nook_core::settings::PdfPreset::Raster,
+                                cx,
+                                |_, _, cx| {
+                                    nook_core::settings::tweak_app_settings(|s| {
+                                        s.file_actions.pdf_preset =
+                                            nook_core::settings::PdfPreset::Raster;
+                                    });
+                                    cx.notify();
+                                },
+                            )),
+                    )
+                    .into_any_element(),
+                settings_row("ffmpeg-toggle")
+                    .when(ffmpeg_present, |d| {
+                        d.cursor(CursorStyle::PointingHand).on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|_, _, _, cx| {
+                                nook_core::settings::tweak_app_settings(|s| {
+                                    s.file_actions.use_ffmpeg = !s.file_actions.use_ffmpeg;
+                                });
+                                cx.notify();
+                            }),
+                        )
+                    })
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(1.))
+                            .child(label("Extended formats (ffmpeg)", theme::BODY, true))
+                            .child(label(
+                                if ffmpeg_present {
+                                    "User-installed ffmpeg on PATH"
+                                } else {
+                                    "Install ffmpeg yourself — Nook will not download it"
+                                },
+                                theme::SUBHEADLINE,
+                                false,
+                            )),
+                    )
+                    .child(toggle_knob(ffmpeg_on))
+                    .into_any_element(),
+            ]),
+            Some(
+                "Convert, target-size, PDF compress, background removal, and OCR. No MP3/Opus encode, mkv read, or webm/av1 write without your own ffmpeg. Target-size is ABR ±5%. Background removal is persons-only on macOS 12–13.",
+            ),
+        )
+    }
+
+    fn render_sharing(
+        &self,
+        settings: &AppSettings,
+        alias_focused: bool,
+        pin_focused: bool,
+        share_a_focused: bool,
+        share_b_focused: bool,
+        share_c_focused: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let backend = settings.share.link_backend;
+        let mut rows = vec![
+            field_row(
+                "share-alias",
+                "Alias",
+                if self.alias_draft.is_empty() {
+                    "openNook"
+                } else {
+                    &self.alias_draft
+                },
+                self.alias_draft.is_empty(),
+                alias_focused,
+                &self.alias_focus,
+                cx,
+                |this, event, cx| {
+                    if Self::apply_key(&mut this.alias_draft, event, cx) {
+                        this.persist_share_alias();
+                        cx.notify();
+                    }
+                },
+            )
+            .into_any_element(),
+            toggle_row(
+                "Receive LocalSend",
+                settings.share.localsend_receive,
+                cx,
+                |s| s.share.localsend_receive = !s.share.localsend_receive,
+            )
+            .into_any_element(),
+            field_row(
+                "share-pin",
+                "PIN",
+                if self.pin_draft.is_empty() {
+                    "optional"
+                } else {
+                    &self.pin_draft
+                },
+                self.pin_draft.is_empty(),
+                pin_focused,
+                &self.pin_focus,
+                cx,
+                |this, event, cx| {
+                    if Self::apply_key(&mut this.pin_draft, event, cx) {
+                        this.persist_share_pin();
+                        cx.notify();
+                    }
+                },
+            )
+            .into_any_element(),
+            settings_row("share-backend")
+                .child(label("Link host", theme::BODY, true))
+                .child(
+                    segmented_group()
+                        .child(segment(
+                            "0x0.st",
+                            backend == LinkBackendKind::ZeroXZero,
+                            cx,
+                            |this, _, cx| {
+                                nook_core::settings::tweak_app_settings(|s| {
+                                    s.share.link_backend = LinkBackendKind::ZeroXZero
+                                });
+                                let settings = nook_core::settings::get_app_settings();
+                                this.share_a_draft = share_field_a(&settings);
+                                this.share_b_draft = share_field_b(&settings);
+                                this.share_c_draft = share_field_c(&settings);
+                                cx.notify();
+                            },
+                        ))
+                        .child(segment(
+                            "WebDAV",
+                            backend == LinkBackendKind::WebDav,
+                            cx,
+                            |this, _, cx| {
+                                nook_core::settings::tweak_app_settings(|s| {
+                                    s.share.link_backend = LinkBackendKind::WebDav
+                                });
+                                let settings = nook_core::settings::get_app_settings();
+                                this.share_a_draft = share_field_a(&settings);
+                                this.share_b_draft = share_field_b(&settings);
+                                this.share_c_draft = share_field_c(&settings);
+                                cx.notify();
+                            },
+                        ))
+                        .child(segment(
+                            "S3",
+                            backend == LinkBackendKind::S3,
+                            cx,
+                            |this, _, cx| {
+                                nook_core::settings::tweak_app_settings(|s| {
+                                    s.share.link_backend = LinkBackendKind::S3
+                                });
+                                let settings = nook_core::settings::get_app_settings();
+                                this.share_a_draft = share_field_a(&settings);
+                                this.share_b_draft = share_field_b(&settings);
+                                this.share_c_draft = share_field_c(&settings);
+                                cx.notify();
+                            },
+                        )),
+                )
+                .into_any_element(),
+        ];
+        match backend {
+            LinkBackendKind::ZeroXZero => {}
+            LinkBackendKind::WebDav => {
+                rows.push(self.share_cred_row(
+                    "share-url",
+                    "URL",
+                    &self.share_a_draft,
+                    "https://dav.example/public",
+                    share_a_focused,
+                    &self.share_a_focus,
+                    cx,
+                    |this, event, cx| {
+                        if Self::apply_key(&mut this.share_a_draft, event, cx) {
+                            this.persist_share_creds();
+                            cx.notify();
+                        }
+                    },
+                ));
+                rows.push(self.share_cred_row(
+                    "share-user",
+                    "User",
+                    &self.share_b_draft,
+                    "optional",
+                    share_b_focused,
+                    &self.share_b_focus,
+                    cx,
+                    |this, event, cx| {
+                        if Self::apply_key(&mut this.share_b_draft, event, cx) {
+                            this.persist_share_creds();
+                            cx.notify();
+                        }
+                    },
+                ));
+                rows.push(self.share_cred_row(
+                    "share-pass",
+                    "Pass",
+                    if share_c_focused {
+                        &self.share_c_draft
+                    } else if self.share_c_draft.is_empty() {
+                        "Keychain"
+                    } else {
+                        "••••••••"
+                    },
+                    "Keychain",
+                    share_c_focused,
+                    &self.share_c_focus,
+                    cx,
+                    |this, event, cx| {
+                        if Self::apply_key(&mut this.share_c_draft, event, cx) {
+                            this.persist_share_creds();
+                            cx.notify();
+                        }
+                    },
+                ));
+            }
+            LinkBackendKind::S3 => {
+                rows.push(self.share_cred_row(
+                    "share-bucket",
+                    "Bucket",
+                    &self.share_a_draft,
+                    "bucket",
+                    share_a_focused,
+                    &self.share_a_focus,
+                    cx,
+                    |this, event, cx| {
+                        if Self::apply_key(&mut this.share_a_draft, event, cx) {
+                            this.persist_share_creds();
+                            cx.notify();
+                        }
+                    },
+                ));
+                rows.push(self.share_cred_row(
+                    "share-access",
+                    "Key",
+                    &self.share_b_draft,
+                    "access key",
+                    share_b_focused,
+                    &self.share_b_focus,
+                    cx,
+                    |this, event, cx| {
+                        if Self::apply_key(&mut this.share_b_draft, event, cx) {
+                            this.persist_share_creds();
+                            cx.notify();
+                        }
+                    },
+                ));
+                rows.push(self.share_cred_row(
+                    "share-secret",
+                    "Secret",
+                    if share_c_focused {
+                        &self.share_c_draft
+                    } else if self.share_c_draft.is_empty() {
+                        "Keychain"
+                    } else {
+                        "••••••••"
+                    },
+                    "Keychain",
+                    share_c_focused,
+                    &self.share_c_focus,
+                    cx,
+                    |this, event, cx| {
+                        if Self::apply_key(&mut this.share_c_draft, event, cx) {
+                            this.persist_share_creds();
+                            cx.notify();
+                        }
+                    },
+                ));
+            }
+        }
+        section(
+            "Sharing",
+            settings_group(rows),
+            Some(share_blurb(backend, settings.share.localsend_receive)),
+        )
+    }
+
+    fn share_cred_row(
+        &self,
+        id: &'static str,
+        title: &'static str,
+        value: &str,
+        placeholder: &str,
+        focused: bool,
+        focus: &FocusHandle,
+        cx: &mut Context<Self>,
+        on_key: impl Fn(&mut SettingsView, &KeyDownEvent, &mut Context<SettingsView>) + 'static,
+    ) -> AnyElement {
+        let empty = value.is_empty();
+        field_row(
+            id,
+            title,
+            if empty { placeholder } else { value },
+            empty,
+            focused,
+            focus,
+            cx,
+            on_key,
+        )
+        .into_any_element()
+    }
+
+
+    fn render_keyboard(&self, settings: &AppSettings, cx: &mut Context<Self>) -> impl IntoElement {
+        let listen = nook_core::eventtap::input_monitoring_status();
+        let packs = nook_core::keysounds::list_packs();
+        let mut pack_rows = Vec::new();
+        for pack in packs {
+            let selected = settings.keysound_pack == pack.id;
+            let id = pack.id.clone();
+            pack_rows.push(
+                settings_row(SharedString::from(format!("pack-{}", pack.id)))
+                    .cursor(CursorStyle::PointingHand)
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |_, _, _, cx| {
+                            let id = id.clone();
+                            nook_core::settings::tweak_app_settings(|s| s.keysound_pack = id);
+                            cx.notify();
+                        }),
+                    )
+                    .child(label(pack.name, theme::BODY, true))
+                    .child(label(
+                        if selected { "Selected" } else { " " },
+                        theme::SUBHEADLINE,
+                        false,
+                    ))
+                    .into_any_element(),
+            );
+        }
+        Self::pane(
+            "Keyboard Sounds",
+            div()
+                .id("keyboard-pane")
+                .flex()
+                .flex_col()
+                .gap(px(16.))
+                .child(section(
+                    "Mechey",
+                    settings_group(vec![
+                        toggle_row(
+                            "Play sounds while typing",
+                            settings.keysounds_enabled,
+                            cx,
+                            |s| {
+                                s.keysounds_enabled = !s.keysounds_enabled;
+                                if s.keysounds_enabled
+                                    && !nook_core::eventtap::input_monitoring_status().granted()
+                                {
+                                    nook_core::eventtap::request_input_monitoring();
+                                }
+                            },
+                        )
+                        .into_any_element(),
+                        permission_row("Input Monitoring", listen).into_any_element(),
+                        action_row(
+                            "listen-prompt",
+                            "Request Input Monitoring",
+                            "Prompt",
+                            cx,
+                            |_, _, cx| {
+                                nook_core::eventtap::request_input_monitoring();
+                                cx.notify();
+                            },
+                        )
+                        .into_any_element(),
+                        action_row(
+                            "listen-open",
+                            "Privacy settings",
+                            "Open",
+                            cx,
+                            |_, _, _| {
+                                nook_core::eventtap::open_input_monitoring_settings();
+                            },
+                        )
+                        .into_any_element(),
+                    ]),
+                    Some("Opt-in. The key tap is created only while this is on. Password fields stay silent (secure input). Ad-hoc signing can drop the grant after each rebuild."),
+                ))
+                .child(section(
+                    "Pack",
+                    settings_group({
+                        let mut rows = pack_rows;
+                        rows.push(
+                            self.float_slider_row(
+                                "keysound-volume",
+                                "Volume",
+                                settings.keysound_volume,
+                                &self.volume_slider,
+                                format!("{:.0}%", settings.keysound_volume * 100.0),
+                            )
+                            .into_any_element(),
+                        );
+                        rows.push(
+                            action_row("keysound-test", "Preview this pack", "Test", cx, |_, _, cx| {
+                                nook_core::keysounds::play_test();
+                                cx.notify();
+                            })
+                            .into_any_element(),
+                        );
+                        rows
+                    }),
+                    Some("Drop Mechvibes packs (config.json + OGG) into Application Support/openNook-gpui/soundpacks. Builtin clicks are original CC0 tones, not switch recordings."),
                 )),
         )
+    }
+
+    fn render_scrolling(
+        &self,
+        settings: &AppSettings,
+        exclude_focused: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let ax = nook_core::eventtap::accessibility_status();
+        let conflicts = nook_core::eventtap::running_conflict_ids();
+        let mut rows = vec![
+            toggle_row(
+                "Smooth scrolling for mice",
+                settings.smooth_scroll_enabled,
+                cx,
+                |s| {
+                    s.smooth_scroll_enabled = !s.smooth_scroll_enabled;
+                    if s.smooth_scroll_enabled
+                        && !nook_core::eventtap::accessibility_status().granted()
+                    {
+                        nook_core::eventtap::request_accessibility();
+                    }
+                },
+            )
+            .into_any_element(),
+            toggle_row(
+                "Reverse mouse wheel",
+                settings.reverse_mouse_scroll,
+                cx,
+                |s| {
+                    s.reverse_mouse_scroll = !s.reverse_mouse_scroll;
+                    if s.reverse_mouse_scroll
+                        && !nook_core::eventtap::accessibility_status().granted()
+                    {
+                        nook_core::eventtap::request_accessibility();
+                    }
+                },
+            )
+            .into_any_element(),
+            permission_row("Accessibility", ax).into_any_element(),
+            action_row(
+                "scroll-ax-prompt",
+                "Request Accessibility",
+                "Prompt",
+                cx,
+                |_, _, cx| {
+                    nook_core::eventtap::request_accessibility();
+                    cx.notify();
+                },
+            )
+            .into_any_element(),
+            action_row(
+                "scroll-ax-open",
+                "Privacy settings",
+                "Open",
+                cx,
+                |_, _, _| {
+                    nook_core::eventtap::open_accessibility_settings();
+                },
+            )
+            .into_any_element(),
+            self.float_slider_row(
+                "scroll-speed",
+                "Speed",
+                settings.scroll_speed,
+                &self.scroll_speed_slider,
+                format!("{:.2}×", settings.scroll_speed),
+            )
+            .into_any_element(),
+            self.float_slider_row(
+                "scroll-duration",
+                "Coast",
+                settings.scroll_duration,
+                &self.scroll_duration_slider,
+                format!("{:.0} ms", settings.scroll_duration * 1000.0),
+            )
+            .into_any_element(),
+        ];
+        if !conflicts.is_empty() {
+            rows.push(
+                status_row(
+                    "Also running",
+                    "Mos / LinearMouse / similar — expect conflicts",
+                )
+                .into_any_element(),
+            );
+        }
+        let mut exclude_rows = vec![field_row(
+            "scroll-exclude",
+            "Add",
+            if self.exclude_draft.is_empty() {
+                "com.example.app"
+            } else {
+                &self.exclude_draft
+            },
+            self.exclude_draft.is_empty(),
+            exclude_focused,
+            &self.exclude_focus,
+            cx,
+            |this, event, cx| {
+                if Self::apply_key(&mut this.exclude_draft, event, cx) {
+                    cx.notify();
+                }
+                if event.keystroke.key == "enter" {
+                    let id = this.exclude_draft.trim().to_string();
+                    if !id.is_empty() {
+                        nook_core::settings::tweak_app_settings(|s| {
+                            if !s.scroll_excluded_apps.iter().any(|item| item == &id) {
+                                s.scroll_excluded_apps.push(id);
+                            }
+                        });
+                        this.exclude_draft.clear();
+                    }
+                    cx.notify();
+                }
+            },
+        )
+        .into_any_element()];
+        for bundle in &settings.scroll_excluded_apps {
+            let id = bundle.clone();
+            exclude_rows.push(
+                settings_row(SharedString::from(format!("ex-{id}")))
+                    .child(label(id.clone(), theme::BODY, true))
+                    .child(push_button(
+                        SharedString::from(format!("rm-{id}")),
+                        "Remove",
+                        cx,
+                        move |_, _, cx| {
+                            let id = id.clone();
+                            nook_core::settings::tweak_app_settings(|s| {
+                                s.scroll_excluded_apps.retain(|item| item != &id);
+                            });
+                            cx.notify();
+                        },
+                    ))
+                    .into_any_element(),
+            );
+        }
+
+        Self::pane(
+            "Scrolling",
+            div()
+                .id("scrolling-pane")
+                .flex()
+                .flex_col()
+                .gap(px(16.))
+                .child(section(
+                    "LiquidMouse",
+                    settings_group(rows),
+                    Some("Trackpads pass through (IsContinuous). Wheel mice get pixel momentum. The tap exists only while a toggle is on. Per-device overrides are not shipped — they need private sender IDs."),
+                ))
+                .child(section(
+                    "Excluded apps",
+                    settings_group(exclude_rows),
+                    Some("Games, VMs, and remotes should stay on the raw wheel. Built-in defaults already cover UTM, VMware, Parallels, VirtualBox, Steam, and Screen Sharing."),
+                )),
+        )
+    }
+
+    fn float_slider_row(
+        &self,
+        id: &'static str,
+        title: &'static str,
+        value: f32,
+        slider: &Entity<SliderState>,
+        caption: String,
+    ) -> impl IntoElement {
+        let _ = value;
+        settings_row(id)
+            .child(label(title, theme::BODY, true))
+            .child(
+                div()
+                    .id(SharedString::from(format!("{id}-slider")))
+                    .flex_1()
+                    .h(px(theme::HIT_MIN))
+                    .px(px(8.))
+                    .flex()
+                    .items_center()
+                    .child(
+                        Slider::new(slider)
+                            .bg(theme::accent())
+                            .text_color(rgb(0xffffff)),
+                    ),
+            )
+            .child(
+                div().w(px(52.)).flex().justify_end().child(
+                    div()
+                        .text_size(px(theme::BODY.size))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(theme::SECONDARY_LABEL)
+                        .child(caption),
+                ),
+            )
+    }
+
+
+    fn render_search_settings(
+        &self,
+        settings: &AppSettings,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let exclude = if self.exclude_draft.is_empty() {
+            "com.apple.Safari, com.1password.1password"
+        } else {
+            self.exclude_draft.as_str()
+        };
+        Self::pane(
+            "Search",
+            div()
+                .id("search-settings-pane")
+                .flex()
+                .flex_col()
+                .gap(px(16.))
+                .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+                    if this.capture_hotkey(event, cx) {
+                        cx.stop_propagation();
+                    }
+                }))
+                .child(section(
+                    "Hotkey",
+                    settings_group(vec![
+                        toggle_row("Enable search hotkey", settings.search.enabled, cx, |s| {
+                            s.search.enabled = !s.search.enabled;
+                        })
+                        .into_any_element(),
+                        self.hotkey_row(settings, cx).into_any_element(),
+                        toggle_row(
+                            "Magnifier on compact island",
+                            settings.search.show_magnifier,
+                            cx,
+                            |s| s.search.show_magnifier = !s.search.show_magnifier,
+                        )
+                        .into_any_element(),
+                    ]),
+                    Some("Carbon hotkey — no Accessibility prompt. Default is Option-Space."),
+                ))
+                .child(section(
+                    "Clipboard history",
+                    settings_group(vec![
+                        toggle_row(
+                            "Save clipboard history",
+                            settings.search.clipboard_history,
+                            cx,
+                            |s| s.search.clipboard_history = !s.search.clipboard_history,
+                        )
+                        .into_any_element(),
+                        self.history_size_row(settings, cx).into_any_element(),
+                        toggle_row(
+                            "Paste automatically (needs Accessibility)",
+                            settings.search.auto_paste,
+                            cx,
+                            |s| s.search.auto_paste = !s.search.auto_paste,
+                        )
+                        .into_any_element(),
+                    ]),
+                    Some("Off by default. Skips password-manager Concealed/Transient items. Auto-paste stays off until you grant Accessibility."),
+                ))
+                .child(section(
+                    "Exclude apps",
+                    settings_group(vec![self.exclude_row(exclude, cx).into_any_element()]),
+                    Some("Comma-separated bundle IDs. Frontmost app at copy time is the heuristic."),
+                )),
+        )
+    }
+
+    fn hotkey_row(&self, settings: &AppSettings, cx: &mut Context<Self>) -> impl IntoElement {
+        let label_text = if self.recording_hotkey {
+            "Press a shortcut…".to_string()
+        } else {
+            settings.search.hotkey.label()
+        };
+        settings_row("search-hotkey")
+            .cursor(CursorStyle::PointingHand)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    this.recording_hotkey = !this.recording_hotkey;
+                    cx.notify();
+                }),
+            )
+            .child(label("Summon shortcut", theme::BODY, true))
+            .child(label(label_text, theme::CALLOUT, true))
+    }
+
+    fn history_size_row(&self, settings: &AppSettings, cx: &mut Context<Self>) -> impl IntoElement {
+        let current = settings.search.clipboard_history_size;
+        let mut chips = div().flex().items_center().gap(px(6.));
+        for size in [100u32, 250, 500] {
+            let on = current == size;
+            chips = chips.child(
+                div()
+                    .id(SharedString::from(format!("clip-cap-{size}")))
+                    .h(px(24.))
+                    .px(px(8.))
+                    .rounded(px(6.))
+                    .bg(if on { theme::FILL_SECONDARY } else { theme::FILL })
+                    .cursor(CursorStyle::PointingHand)
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |_, _, _, cx| {
+                            nook_core::settings::tweak_app_settings(|s| {
+                                s.search.clipboard_history_size = size;
+                            });
+                            cx.notify();
+                        }),
+                    )
+                    .child(label(size.to_string(), theme::CALLOUT, true)),
+            );
+        }
+        settings_row("clipboard-size")
+            .child(label("History size", theme::BODY, true))
+            .child(chips)
+    }
+
+    fn exclude_row(&self, value: &str, cx: &mut Context<Self>) -> impl IntoElement {
+        let placeholder = self.exclude_draft.is_empty();
+        settings_row("clip-exclude")
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(0.))
+                    .flex()
+                    .flex_col()
+                    .gap(px(1.))
+                    .child(label("Excluded bundle IDs", theme::BODY, true))
+                    .child(
+                        div()
+                            .id("clip-exclude-field")
+                            .w_full()
+                            .text_size(px(theme::SUBHEADLINE.size))
+                            .text_color(if placeholder {
+                                theme::TERTIARY_LABEL
+                            } else {
+                                theme::SECONDARY_LABEL
+                            })
+                            .child(SharedString::from(value.to_string())),
+                    ),
+            )
+            .child(push_button(
+                "clip-exclude-save",
+                "Edit",
+                cx,
+                |this, window, cx| {
+                    window.focus(&this.query_focus);
+                    this.recording_hotkey = false;
+                    cx.notify();
+                },
+            ))
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+                if this.recording_hotkey {
+                    return;
+                }
+                if Self::apply_key(&mut this.exclude_draft, event, cx) {
+                    let apps: Vec<String> = this
+                        .exclude_draft
+                        .split(',')
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect();
+                    nook_core::settings::tweak_app_settings(|s| {
+                        s.search.clipboard_exclude_apps = apps;
+                    });
+                    cx.notify();
+                }
+            }))
+    }
+
+    fn capture_hotkey(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) -> bool {
+        if !self.recording_hotkey {
+            return false;
+        }
+        let ks = &event.keystroke;
+        if ks.key == "escape" {
+            self.recording_hotkey = false;
+            cx.notify();
+            return true;
+        }
+        if matches!(
+            ks.key.as_str(),
+            "control" | "shift" | "alt" | "option" | "command" | "cmd" | "super" | "meta"
+        ) {
+            return true;
+        }
+        let hotkey = nook_core::settings::SearchHotkey {
+            alt: ks.modifiers.alt,
+            ctrl: ks.modifiers.control,
+            meta: ks.modifiers.platform,
+            shift: ks.modifiers.shift,
+            key: hotkey_key_name(&ks.key),
+        };
+        if !hotkey.alt && !hotkey.ctrl && !hotkey.meta {
+            return true;
+        }
+        nook_core::settings::tweak_app_settings(|s| s.search.hotkey = hotkey);
+        self.recording_hotkey = false;
+        cx.notify();
+        true
     }
 
     fn color_row(&self, settings: &AppSettings, cx: &mut Context<Self>) -> impl IntoElement {
@@ -694,6 +2289,10 @@ impl SettingsView {
         url_focused: bool,
         token_focused: bool,
         query_focused: bool,
+        heading_focused: bool,
+        city_focused: bool,
+        ignore_focused: bool,
+        client_id_focused: bool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let remaining = settings.remaining_cells();
@@ -708,6 +2307,9 @@ impl SettingsView {
 
         let mut list = Vec::new();
         for module in settings.ordered_widgets() {
+            if module == WidgetModule::Mixer && !nook_core::mixer::is_available() {
+                continue;
+            }
             list.push(self.widget_row(module, settings, cx).into_any_element());
         }
 
@@ -733,6 +2335,10 @@ impl SettingsView {
                     url_focused,
                     token_focused,
                     query_focused,
+                    heading_focused,
+                    city_focused,
+                    ignore_focused,
+                    client_id_focused,
                     cx,
                 )),
         )
@@ -794,7 +2400,15 @@ impl SettingsView {
                 MouseButton::Left,
                 cx.listener(move |this, _, _, cx| {
                     this.module = module;
+                    if module == WidgetModule::Vpn {
+                        this.ignore_draft = nook_core::vpn::format_ignore_list(
+                            &nook_core::settings::get_app_settings().vpn_ignore_interfaces,
+                        );
+                    }
                     this.persist_nav();
+                    if module == WidgetModule::Timers {
+                        this.fetch_shortcuts(cx);
+                    }
                     cx.notify();
                 }),
             )
@@ -954,13 +2568,43 @@ impl SettingsView {
         url_focused: bool,
         token_focused: bool,
         query_focused: bool,
+        heading_focused: bool,
+        city_focused: bool,
+        ignore_focused: bool,
+        client_id_focused: bool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let name = self.module.name();
         let enabled = self.module.enabled(settings);
         let mut rows = vec![self.width_slider(settings, cx).into_any_element()];
         match self.module {
+            WidgetModule::Music => {
+                rows.push(
+                    toggle_row("Show lyrics", settings.show_lyrics, cx, |s| {
+                        s.show_lyrics = !s.show_lyrics;
+                }
+                    toggle_row(
+                        "Animated album art (Apple Music)",
+                        settings.animated_album_art,
+                        cx,
+                        |s| s.animated_album_art = !s.animated_album_art,
+                    )
+                    .into_any_element(),
+                );
+                rows.push(
+                    toggle_row("Ambient art glow", settings.ambient_art_glow, cx, |s| {
+                        s.ambient_art_glow = !s.ambient_art_glow
+                    })
+                    .into_any_element(),
+                );
+            }
             WidgetModule::Calendar => {
+                rows.push(
+                    toggle_row("Quick add", settings.quick_add, cx, |s| {
+                        s.quick_add = !s.quick_add;
+                    })
+                    .into_any_element(),
+                );
                 rows.push(
                     action_row(
                         "calendar-app",
@@ -971,6 +2615,14 @@ impl SettingsView {
                             crate::platform::open_calendar();
                         },
                     )
+                    .into_any_element(),
+                );
+            }
+            WidgetModule::Reminders => {
+                rows.push(
+                    toggle_row("Quick add", settings.quick_add, cx, |s| {
+                        s.quick_add = !s.quick_add;
+                    })
                     .into_any_element(),
                 );
             }
@@ -998,6 +2650,214 @@ impl SettingsView {
                     .into_any_element(),
                 );
             }
+            WidgetModule::Battery => {
+                rows.push(threshold_row(settings.battery_alert_threshold, cx).into_any_element());
+                rows.push(
+                    action_row(
+                        "lpm-shortcut",
+                        "Low Power Mode",
+                        "Install shortcut",
+                        cx,
+                        |_, _, _| {
+                            if let Err(err) = nook_core::power::install_lpm_shortcut() {
+                                log::warn!("install LPM shortcut: {err}");
+        }
+    }
+}
+            WidgetModule::Messages => {
+                let fda = nook_core::messages::fda_status();
+                let status = match fda {
+                    nook_core::messages::FdaStatus::Granted => "On",
+                    nook_core::messages::FdaStatus::Denied => "Off",
+                    nook_core::messages::FdaStatus::Unavailable => "Unavailable",
+                };
+                rows.push(
+                    settings_row("msg-fda-status")
+                        .child(label("Full Disk Access", theme::BODY, true))
+                        .child(label(status, theme::BODY, false))
+        }
+            WidgetModule::Obsidian => {
+                let vault_label = settings
+                    .obsidian_vault
+                    .as_ref()
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_else(|| "None".into());
+                rows.push(
+                    settings_row("obsidian-path")
+                        .child(label("Vault", theme::BODY, true))
+                        .child(label(vault_label, theme::SUBHEADLINE, false))
+        }
+            WidgetModule::Mixer => {
+                rows.push(
+                    settings_row("mixer-permission")
+                        .child(label("Permission", theme::BODY, true))
+                        .child(label(
+                            nook_core::mixer::capture_status_label(
+                                nook_core::mixer::capture_status(),
+                            ),
+                            theme::SUBHEADLINE,
+                            false,
+                        ))
+                        .into_any_element(),
+                );
+                rows.push(
+                    action_row(
+                        "msg-fda-open",
+                        "Privacy settings",
+                        "Open Full Disk Access",
+                        cx,
+                        |_, _, _| {
+                            if let Err(err) = nook_core::messages::open_fda_settings() {
+                                log::warn!("open FDA settings: {err}");
+        }
+    }
+}
+            WidgetModule::Timers => {
+                rows.push(
+                    toggle_row(
+                        "Apple Clock timers",
+                        settings.sync_clock_timers,
+                        cx,
+                        |s| s.sync_clock_timers = !s.sync_clock_timers,
+                    )
+                    .into_any_element(),
+                );
+                rows.push(
+                    action_row(
+                        "clock-shortcuts",
+                        "Clock shortcuts",
+                        "Install…",
+                        cx,
+                        |_, _, _| {
+                            if let Err(err) = nook_core::shortcuts::import_bundled_shortcuts() {
+                                log::info!("clock shortcuts: {err}");
+                    }
+                }
+                        "obsidian-folder",
+                        "Folder",
+                        "Choose Folder…",
+                        cx,
+                        |_, _, cx| {
+                            if let Some(path) = crate::platform::choose_directory() {
+                                nook_core::settings::tweak_app_settings(|s| {
+                                    s.obsidian_vault = Some(path);
+                                });
+        }
+    }
+}
+            WidgetModule::Vpn => {
+                rows.push(
+                    toggle_row(
+                        "Timer on compact face",
+                        settings.vpn_show_timer,
+                        cx,
+                        |s| {
+                            s.vpn_show_timer = !s.vpn_show_timer;
+                        },
+                    )
+                    .into_any_element(),
+                );
+                let ignore_placeholder = self.ignore_draft.is_empty();
+                let ignore_text = if ignore_placeholder {
+                    "utun3, ipsec0"
+                } else {
+                    self.ignore_draft.as_str()
+                };
+                rows.push(
+                    field_row(
+                        "vpn-ignore",
+                        "Ignore",
+                        ignore_text,
+                        ignore_placeholder,
+                        ignore_focused,
+                        &self.ignore_focus,
+                        cx,
+                        |this, event, cx| {
+                            let persist = SettingsView::apply_key(&mut this.ignore_draft, event, cx)
+                                || event.keystroke.key == "enter";
+                            if persist {
+                                this.persist_ignore();
+                                cx.notify();
+                            }
+                        },
+                    )
+                    .into_any_element(),
+                );
+                rows.push(
+                    toggle_row(
+                        "Experimental WhatsApp auto-send",
+                        settings.experimental_whatsapp_autosend,
+                        cx,
+                        |s| {
+                            s.experimental_whatsapp_autosend = !s.experimental_whatsapp_autosend;
+                        },
+                if settings.obsidian_vault.is_some() {
+                    rows.push(
+                        action_row("obsidian-clear", "Vault", "Clear", cx, |_, _, cx| {
+                            nook_core::settings::tweak_app_settings(|s| {
+                                s.obsidian_vault = None;
+                            });
+                            cx.notify();
+                        })
+                        .into_any_element(),
+                    );
+                }
+                rows.push(
+                    toggle_row(
+                        "Capture via Obsidian URI",
+                        settings.obsidian_uri_capture,
+                        cx,
+                        |s| s.obsidian_uri_capture = !s.obsidian_uri_capture,
+                        "mixer-reset",
+                        "Volumes",
+                        "Reset All",
+                        cx,
+                        |_, _, cx| {
+                            nook_core::mixer::reset_all();
+                            nook_core::mixer::pump();
+                            cx.notify();
+        }
+    }
+            WidgetModule::Meeting => {
+                rows.push(
+                    toggle_row("Zoom", settings.meetings.zoom, cx, |s| {
+                        s.meetings.zoom = !s.meetings.zoom;
+                    })
+                    .into_any_element(),
+                );
+                rows.push(
+                    toggle_row("Microsoft Teams", settings.meetings.teams, cx, |s| {
+                        s.meetings.teams = !s.meetings.teams;
+                    })
+                    .into_any_element(),
+                );
+                rows.push(
+                    toggle_row("Google Meet", settings.meetings.meet, cx, |s| {
+                        s.meetings.meet = !s.meetings.meet;
+                    })
+                    .into_any_element(),
+                );
+                rows.push(
+                    action_row(
+                        "meet-mode",
+                        "Meet control",
+                        settings.meetings.meet_mode.caption(),
+                        cx,
+                        |_, _, _| {
+                            nook_core::settings::tweak_app_settings(|s| {
+                                s.meetings.meet_mode = s.meetings.meet_mode.cycle();
+                            });
+                        },
+                    )
+                    .into_any_element(),
+                );
+        }
+            WidgetModule::HighAlert => {
+                rows.extend(high_alert_rows(settings, cx));
+            }
+            WidgetModule::Timers => {
+                rows.extend(pomodoro_rows(settings, &self.catalog, cx));
+            }
             _ => {}
         }
 
@@ -1021,6 +2881,447 @@ impl SettingsView {
                     cx,
                 ))
             })
+            .when(self.module == WidgetModule::Obsidian, |d| {
+                d.child(self.render_obsidian_settings(settings, heading_focused, cx))
+            })
+            .when(self.module == WidgetModule::Weather, |d| {
+                d.child(self.render_weather_settings(settings, city_focused, cx))
+            })
+    }
+
+    fn render_weather_settings(
+        &self,
+        settings: &AppSettings,
+        city_focused: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        use nook_core::weather::{WeatherLocationMode, WeatherUnits};
+
+        let units = settings.weather.units;
+        let mut unit_row = segmented_group();
+        for (caption, value) in [("°C", WeatherUnits::Celsius), ("°F", WeatherUnits::Fahrenheit)] {
+            unit_row = unit_row.child(segment(caption, units == value, cx, move |_, _, cx| {
+                nook_core::settings::tweak_app_settings(|s| s.weather.units = value);
+                nook_core::weather::invalidate();
+                cx.notify();
+            }));
+        }
+
+        let city_text = if self.city_draft.is_empty() {
+            "City name"
+        } else {
+            self.city_draft.as_str()
+        };
+        let mut location_rows = vec![
+            field_row(
+                "weather-city",
+                "City",
+                city_text,
+                self.city_draft.is_empty(),
+                city_focused,
+                &self.city_focus,
+                cx,
+                |this, event, cx| {
+                    if event.keystroke.key == "enter" {
+                        this.search_city(cx);
+                    } else if SettingsView::apply_key(&mut this.city_draft, event, cx) {
+                        cx.notify();
+                    }
+                },
+            )
+            .into_any_element(),
+            settings_row("weather-city-actions")
+                .child(div().flex_1())
+                .child(
+                    div()
+                        .flex()
+                        .gap(px(6.))
+                        .child(push_button(
+                            "weather-search",
+                            if self.geo_loading {
+                                "Searching…"
+                            } else {
+                                "Search"
+                            },
+                            cx,
+                            |this, _, cx| this.search_city(cx),
+                        ))
+                        .child(push_button(
+                            "weather-system",
+                            if self.location_busy {
+                                "Locating…"
+                            } else {
+                                "Use system location"
+                            },
+                            cx,
+                            |this, _, cx| this.use_system_location(cx),
+                        )),
+                )
+                .into_any_element(),
+        ];
+        if let Some(status) = &self.location_status {
+            location_rows.push(
+                settings_row("weather-loc-status")
+                    .child(label(status.clone(), theme::BODY, false))
+                    .into_any_element(),
+            );
+        }
+        if let Some(err) = &self.geo_error {
+            location_rows.push(
+                settings_row("weather-geo-err")
+                    .child(label(err.clone(), theme::BODY, false))
+                    .into_any_element(),
+            );
+        }
+        for (i, place) in self.geo_results.iter().enumerate() {
+            let caption = place.display_name();
+            let picked = place.clone();
+            location_rows.push(
+                settings_row(SharedString::from(format!("weather-hit-{i}")))
+                    .child(label(caption, theme::BODY, true))
+                    .child(push_button(
+                        SharedString::from(format!("weather-pick-{i}")),
+                        "Use",
+                        cx,
+                        move |this, _, cx| this.pick_place(picked.clone(), cx),
+                    ))
+                    .into_any_element(),
+                );
+            }
+            WidgetModule::Recorder => {
+                rows.push(
+                    toggle_row(
+                        "Live transcription",
+                        settings.recorder_transcribe,
+                        cx,
+                        |s| s.recorder_transcribe = !s.recorder_transcribe,
+                let trusted = crate::platform::ax_is_process_trusted();
+                rows.push(
+                    action_row(
+                        "ax-status",
+                        "Accessibility",
+                        if trusted { "Granted" } else { "Denied" },
+                        cx,
+                        |_, _, _| {
+                            crate::platform::ax_prompt_accessibility();
+                            crate::platform::open_accessibility_settings();
+                        },
+                    )
+                    .into_any_element(),
+                );
+            }
+            _ => {}
+        }
+
+        let location_note = match &settings.weather.location {
+            WeatherLocationMode::System { .. } => {
+                "Using a one-shot system fix (city-level). The Location Services grant is keyed to this build's signature and resets after an ad-hoc re-sign."
+            }
+            WeatherLocationMode::Manual { name, .. } if !name.is_empty() => {
+                "Manual city. System location is opt-in and optional."
+            }
+            _ => "Enter a city (no permission prompt). System location is opt-in and resets on re-sign.",
+        };
+
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(16.))
+            .child(section(
+                "Units",
+                settings_group(vec![settings_row("weather-units")
+                    .child(label("Temperature", theme::BODY, true))
+                    .child(unit_row)
+                    .into_any_element()]),
+                None::<SharedString>,
+            ))
+            .child(section(
+                "Location",
+                settings_group(location_rows),
+                Some(location_note),
+            ))
+            .child(section(
+                "Compact face",
+                settings_group(vec![toggle_row(
+                    "Show on idle face",
+                    settings.weather.show_on_compact_face,
+                    cx,
+                    |s| {
+                        s.weather.show_on_compact_face = !s.weather.show_on_compact_face;
+                    },
+                )
+                .into_any_element()]),
+                Some("Temp and condition next to the notch while the island is idle."),
+            ))
+            .child(section(
+                "Attribution",
+                settings_group(vec![settings_row("weather-attr")
+                    .child(label(nook_core::weather::ATTRIBUTION, theme::BODY, false))
+                    .into_any_element()]),
+                Some("Required by Open-Meteo's CC-BY 4.0 license."),
+            ))
+            .when(self.module == WidgetModule::SysStats, |d| {
+                d.child(self.render_sysstats_settings(settings, cx))
+            })
+            .when(self.module == WidgetModule::Music, |d| {
+                d.child(self.render_music_settings(settings, client_id_focused, cx))
+            })
+    }
+
+    fn persist_client_id(&self) {
+        let draft = self.client_id_draft.trim().to_string();
+        if nook_core::settings::get_app_settings().spotify_client_id == draft {
+            return;
+        }
+        nook_core::settings::tweak_app_settings(|s| s.spotify_client_id = draft);
+    }
+
+    fn render_music_settings(
+        &self,
+        settings: &AppSettings,
+        client_id_focused: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        if !client_id_focused {
+            self.persist_client_id();
+        }
+        use nook_core::spotify::SpotifyStatus;
+        let status = nook_core::spotify::status();
+        let status_text = match &status {
+            SpotifyStatus::Disconnected => "Not connected".to_string(),
+            SpotifyStatus::Connecting => "Waiting for Spotify login…".to_string(),
+            SpotifyStatus::Connected => "Connected".to_string(),
+            SpotifyStatus::NeedsClientId => "Add a client ID first".to_string(),
+            SpotifyStatus::PremiumRequired => {
+                "Spotify Premium is required for queue control".to_string()
+            }
+            SpotifyStatus::Error(err) => err.clone(),
+        };
+        let connected = matches!(
+            status,
+            SpotifyStatus::Connected | SpotifyStatus::PremiumRequired
+        );
+        let client_placeholder = self.client_id_draft.is_empty();
+        let client_value = if client_placeholder {
+            "Paste your Spotify client ID"
+        } else {
+            self.client_id_draft.as_str()
+        };
+        let mut rows = vec![
+            toggle_row("Show Up Next", settings.show_media_queue, cx, |s| {
+                s.show_media_queue = !s.show_media_queue;
+            })
+            .into_any_element(),
+            field_row(
+                "spotify-client-id",
+                "Client ID",
+                client_value,
+                client_placeholder,
+                client_id_focused,
+                &self.client_id_focus,
+                cx,
+                |this, event, cx| {
+                    if event.keystroke.key == "enter" {
+                        this.persist_client_id();
+                        cx.notify();
+                    } else if SettingsView::apply_key(&mut this.client_id_draft, event, cx) {
+                        cx.notify();
+                    }
+                },
+            )
+            .into_any_element(),
+            settings_row("spotify-status")
+                .child(label("Spotify", theme::BODY, true))
+                .child(label(status_text, theme::SUBHEADLINE, false))
+                .into_any_element(),
+        ];
+        if connected {
+            rows.push(
+                action_row(
+                    "spotify-disconnect",
+                    "Account",
+                    "Disconnect",
+                    cx,
+                    |_, _, cx| {
+                        nook_core::spotify::disconnect();
+                        cx.notify();
+                    },
+                )
+                .into_any_element(),
+            );
+        } else {
+            rows.push(
+                action_row(
+                    "spotify-connect",
+                    "Account",
+                    "Connect Spotify",
+                    cx,
+                    |this, _, cx| {
+                        this.persist_client_id();
+                        cx.spawn(async move |this, cx| {
+                            let result = cx
+                                .background_executor()
+                                .spawn(async {
+                                    nook_core::runtime().block_on(nook_core::spotify::connect())
+                                })
+                                .await;
+                            this.update(cx, |_, cx| {
+                                if let Err(err) = result {
+                                    log::warn!("spotify connect: {err}");
+                                }
+                                cx.notify();
+                            })
+                            .ok();
+                        })
+                        .detach();
+                        cx.notify();
+                    },
+                )
+                .into_any_element(),
+            );
+        }
+        if nook_core::queue::music_automation_denied() {
+            rows.push(
+                settings_row("music-tcc")
+                    .child(label(
+                        "Music Automation was denied. Grant it in System Settings → Privacy & Security → Automation to show Up Next in playlist.",
+                        theme::SUBHEADLINE,
+                        false,
+                    ))
+                    .into_any_element(),
+            );
+            WidgetModule::Notifications => {
+                rows.extend(notification_permission_rows(cx));
+            }
+            _ => {}
+        }
+
+        section(
+            "Playing Next",
+            settings_group(rows),
+            Some(format!(
+                "Register redirect URI {} on your Spotify developer app. No client secret is used. Apple Music shows upcoming tracks from the current playlist — not the real Playing Next queue — and hides the list when shuffle or radio is on.",
+                nook_core::spotify::REDIRECT_URI
+            )),
+        )
+    }
+
+    fn render_sysstats_settings(
+        &self,
+        settings: &AppSettings,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        section(
+            "Readouts",
+            settings_group(vec![
+                toggle_row("CPU", settings.sysstats.show_cpu, cx, |s| {
+                    s.sysstats.show_cpu = !s.sysstats.show_cpu;
+                })
+                .into_any_element(),
+                toggle_row("Memory", settings.sysstats.show_mem, cx, |s| {
+                    s.sysstats.show_mem = !s.sysstats.show_mem;
+                })
+                .into_any_element(),
+                toggle_row("Network", settings.sysstats.show_net, cx, |s| {
+                    s.sysstats.show_net = !s.sysstats.show_net;
+                })
+                .into_any_element(),
+                toggle_row("Disk", settings.sysstats.show_disk, cx, |s| {
+                    s.sysstats.show_disk = !s.sysstats.show_disk;
+                })
+                .into_any_element(),
+                toggle_row(
+                    "Physical interfaces only",
+                    settings.sysstats.physical_nics,
+                    cx,
+                    |s| s.sysstats.physical_nics = !s.sysstats.physical_nics,
+                )
+                .into_any_element(),
+            ]),
+            Some("Samples only while the expanded card is visible. CPU and network need two ticks; a collapse longer than a few minutes resets the rates."),
+        )
+                ))
+            })
+            .when(self.module == WidgetModule::Notifications, |d| {
+                d.child(self.render_notification_settings(settings, cx))
+            })
+    }
+
+    fn render_notification_settings(
+        &self,
+        settings: &AppSettings,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let mut filter_rows = Vec::new();
+        let apps = nook_core::notifications::known_apps();
+        if apps.is_empty() {
+            filter_rows.push(
+                settings_row("notify-apps-empty")
+                    .child(label(
+                        "Apps appear here after a notification is captured.",
+                        theme::BODY,
+                        false,
+                    ))
+                    .into_any_element(),
+            );
+        } else {
+            for (id, name) in apps {
+                let blocked = settings.notification_app_blocked(&id);
+                let toggle_id = id.clone();
+                filter_rows.push(
+                    settings_row(SharedString::from(format!("notify-app-{id}")))
+                        .cursor(CursorStyle::PointingHand)
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |_, _, _, cx| {
+                                cx.stop_propagation();
+                                nook_core::settings::tweak_app_settings(|s| {
+                                    s.toggle_notification_app(&toggle_id);
+                                });
+                                cx.notify();
+                            }),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w(px(0.))
+                                .flex()
+                                .flex_col()
+                                .gap(px(1.))
+                                .child(label(name, theme::BODY, true))
+                                .child(label(id, theme::SUBHEADLINE, false)),
+                        )
+                        .child(label(
+                            if blocked { "Hidden" } else { "Shown" },
+                            theme::SUBHEADLINE,
+                            false,
+                        ))
+                        .child(toggle_knob(!blocked))
+                        .into_any_element(),
+                );
+            }
+        }
+
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(16.))
+            .child(section(
+                "Full Disk Access",
+                settings_group(vec![toggle_row(
+                    "Read notification history",
+                    settings.notification_fda_opt_in,
+                    cx,
+                    |s| s.notification_fda_opt_in = !s.notification_fda_opt_in,
+                )
+                .into_any_element()]),
+                Some("Backfills banners the Accessibility scrape missed. You must add openNook in System Settings › Privacy & Security › Full Disk Access — there is no prompt."),
+            ))
+            .child(section(
+                "Per-app filter",
+                settings_group(filter_rows),
+                Some("Hidden apps never enter the shelf."),
+            ))
     }
 
     fn render_observe_settings(
@@ -1334,28 +3635,195 @@ impl SettingsView {
                 ))
             })
     }
+
+    fn persist_heading(&self) {
+        let draft = self.heading_draft.trim().to_string();
+        let heading = if draft.is_empty() { None } else { Some(draft) };
+        nook_core::settings::tweak_app_settings(|s| {
+            s.obsidian_capture_heading = heading;
+        });
+    }
+
+    fn render_obsidian_settings(
+        &self,
+        settings: &AppSettings,
+        heading_focused: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let known = nook_core::obsidian::discover_vaults();
+        let mut vault_rows = Vec::new();
+        if known.is_empty() {
+            vault_rows.push(
+                settings_row("obs-known-empty")
+                    .child(label("No vaults in Obsidian yet", theme::BODY, false))
+                    .into_any_element(),
+            );
+        } else {
+            for vault in &known {
+                let path = vault.path.clone();
+                let selected = settings.obsidian_vault.as_ref() == Some(&vault.path);
+                let name = vault.name.clone();
+                let open = vault.open;
+                vault_rows.push(
+                    div()
+                        .id(SharedString::from(format!("obs-vault-{}", vault.id)))
+                        .px(px(GROUP_PAD))
+                        .min_h(px(ROW_H))
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .gap(px(8.))
+                        .when(selected, |d| d.bg(theme::FILL_TERTIARY))
+                        .hover(|s| s.bg(theme::FILL_TERTIARY))
+                        .cursor(CursorStyle::PointingHand)
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |_, _, _, cx| {
+                                cx.stop_propagation();
+                                let path = path.clone();
+                                nook_core::settings::tweak_app_settings(|s| {
+                                    s.obsidian_vault = Some(path);
+                                });
+                                cx.notify();
+                            }),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w(px(0.))
+                                .flex()
+                                .flex_col()
+                                .child(label(name, theme::BODY, true))
+                                .child(label(
+                                    if open { "Open in Obsidian" } else { "Registered" },
+                                    theme::SUBHEADLINE,
+                                    false,
+                                )),
+                        )
+                        .into_any_element(),
+                );
+            }
+        }
+
+        let heading_placeholder = self.heading_draft.is_empty();
+        let heading_text = if heading_placeholder {
+            "Inbox (optional)"
+        } else {
+            self.heading_draft.as_str()
+        };
+
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(16.))
+            .child(section(
+                "Known Vaults",
+                settings_group(vault_rows),
+                Some("Read from Obsidian’s vault registry. Choose Folder if yours is not listed."),
+            ))
+            .child(section(
+                "Capture",
+                settings_group(vec![field_row(
+                    "obs-heading",
+                    "Heading",
+                    heading_text,
+                    heading_placeholder,
+                    heading_focused,
+                    &self.heading_focus,
+                    cx,
+                    |this, event, cx| {
+                        let persist = SettingsView::apply_key(&mut this.heading_draft, event, cx)
+                            || event.keystroke.key == "enter";
+                        if persist {
+                            this.persist_heading();
+                            cx.notify();
+                        }
+                    },
+                )
+                .into_any_element()]),
+                Some("Daily-note capture appends under this heading, or at the end of the file if empty."),
+            ))
+    }
+}
+
+fn hud_caption(settings: &AppSettings) -> SharedString {
+    if settings.replace_system_hud {
+        "Hides the system volume, brightness, caps-lock, and keyboard-backlight bezels while openNook is running. If OSDUIHelper is missing, the island HUD still appears beside the system bezel.".into()
+    } else {
+        "Volume and brightness keys still show the system bezel. Turn on replacement to hide it — that also hides caps-lock and keyboard-backlight bezels.".into()
+    }
 }
 
 fn module_blurb(module: WidgetModule) -> SharedString {
     match module {
         WidgetModule::Calendar => {
-            "Week strip is today ± 3 days. EventKit includes every calendar the system allows — there is no per-calendar filter yet.".into()
+            "Week strip is today ± 3 days. Type a line like “lunch tomorrow 12:30” to add an event.".into()
         }
         WidgetModule::Notes => "Scratchpad on the island. Edit here or in the expanded card.".into(),
         WidgetModule::Observe => {
             "Pinned metrics on the compact island and the expanded card.".into()
         }
+            WidgetModule::Music => {
+            "Now Playing from MediaRemote. Optional time-synced lyrics from LRCLIB — opt-in, fetched at runtime, never bundled.".into()
+        }
         WidgetModule::Music => {
-            "Now Playing from MediaRemote on macOS, with an AppleScript fallback.".into()
+            "Now Playing from MediaRemote on macOS. The output picker lists CoreAudio devices; it cannot start AirPlay to a HomePod or Apple TV.".into()
+            "Now Playing from MediaRemote. Optional Apple Music motion art is opt-in and fails silent to static covers; the glow uses local artwork colors.".into()
+            "Now Playing from MediaRemote on macOS, with an AppleScript fallback. Up Next lists the current Music playlist (unshuffled) or the Spotify Web API queue.".into()
         }
         WidgetModule::Files => "Drop zone and tray live on the Tray tab of the expanded island.".into(),
+        WidgetModule::Timers => {
+            "Island countdowns plus Apple Clock timers (read from mobiletimerd). Import the bundled Nook Clock shortcuts once to pause, resume, or cancel from the island.".into()
+        }
+        WidgetModule::Files => {
+            "Drop zone and tray live on the Tray tab. Drag onto LocalSend or Get a link.".into()
+        }
         WidgetModule::Timers => "Countdown presets and a compact ring while a timer is running.".into(),
+        WidgetModule::Reminders => {
+            "Incomplete reminders from EventKit. Type “remind me to …” to add one.".into()
+        }
+            "Countdown presets, a Pomodoro work/break cycle, and an optional Focus shortcut.".into()
+        }
         WidgetModule::Reminders => "Incomplete reminders from EventKit, same store as Calendar.".into(),
         WidgetModule::Speed => "Cloudflare (then OVH) download probe. Runs from the island card.".into(),
         WidgetModule::Agents => {
             "Working coding-agent sessions on the compact face and expanded card.".into()
         }
         WidgetModule::Mirror => "A live camera preview that opens when you click the Mirror card.".into(),
+        WidgetModule::Battery => {
+            "Low-battery takeover on the compact face. Low Power Mode uses a one-time Shortcuts import, then falls back to an admin prompt.".into()
+    }
+        WidgetModule::Messages => {
+            "iMessage read + send from chat.db. WhatsApp is notify + prefill only — the Mac app cannot auto-send. Full Disk Access is required to read messages.".into()
+    }
+        WidgetModule::Obsidian => {
+            "Vault notes on the shelf. FSEvents keeps the list current; capture appends to today's daily note.".into()
+        }
+        WidgetModule::Mixer => nook_core::mixer::TCC_PREPROMPT.into(),
+        WidgetModule::Weather => {
+            "Current conditions and a short hourly strip from Open-Meteo. Manual city by default.".into()
+    }
+        WidgetModule::Vpn => {
+            "Live utun/ipsec/ppp status. The compact face flashes on connect and disconnect; the card shows the session clock. Ignore listed interfaces to hide helpers that look like a VPN.".into()
+    }
+        WidgetModule::HighAlert => {
+            "IOPM keep-awake. Timed chips expire in powerd — lid-close sleep is not prevented.".into()
+    }
+        WidgetModule::SysStats => {
+            "Live CPU, memory, network, and disk capacity. Idle cost is zero — sampling starts on expand and stops on collapse.".into()
+    }
+        WidgetModule::Recorder => {
+            "Record from the island. Transcription uses Apple's on-device Speech model when available; turn it off for long recordings.".into()
+    }
+        WidgetModule::Meeting => {
+            "Mute and leave from the island. Zoom reads mute from the Meeting menu. Teams is a blind shortcut (the localhost API is gone). Meet focuses the tab unless you enable Apple Events JS.".into()
+    }
+        WidgetModule::Notifications => {
+            "Captures other apps' banners via Accessibility. Optional usernoted backfill needs a manual Full Disk Access grant. Misses Focus / Do Not Disturb / 'None' styles.".into()
+    }
+        WidgetModule::Process => {
+            "Convert, target-size, PDF compress, background removal, and OCR for files on the tray.".into()
+        }
     }
 }
 
@@ -1393,6 +3861,200 @@ fn caption_text(text: impl Into<SharedString>) -> impl IntoElement {
         .child(text.into())
 }
 
+fn high_alert_rows(
+    settings: &AppSettings,
+    cx: &mut Context<SettingsView>,
+) -> Vec<AnyElement> {
+    let duration = settings.high_alert_default_duration_secs;
+    let kind = settings.high_alert_kind;
+    let battery = settings.low_battery_release_pct;
+    vec![
+        chip_row(
+            "Default duration",
+            &[
+                ("15m", duration == 15 * 60),
+                ("30m", duration == 30 * 60),
+                ("1h", duration == 60 * 60),
+                ("On", duration == 0),
+            ],
+            cx,
+            |caption, s| {
+                s.high_alert_default_duration_secs = match caption {
+                    "15m" => 15 * 60,
+                    "1h" => 60 * 60,
+                    "On" => 0,
+                    _ => 30 * 60,
+                };
+            },
+        )
+        .into_any_element(),
+        chip_row(
+            "Keep awake",
+            &[
+                ("Display", kind == HighAlertKind::Display),
+                ("System", kind == HighAlertKind::System),
+            ],
+            cx,
+            |caption, s| {
+                s.high_alert_kind = if caption == "System" {
+                    HighAlertKind::System
+                } else {
+                    HighAlertKind::Display
+                };
+            },
+        )
+        .into_any_element(),
+        chip_row(
+            "Release below",
+            &[
+                ("Off", battery == 0),
+                ("10%", battery == 10),
+                ("20%", battery == 20),
+            ],
+            cx,
+            |caption, s| {
+                s.low_battery_release_pct = match caption {
+                    "Off" => 0,
+                    "20%" => 20,
+                    _ => 10,
+                };
+            },
+        )
+        .into_any_element(),
+    ]
+}
+
+fn pomodoro_rows(
+    settings: &AppSettings,
+    catalog: &[String],
+    cx: &mut Context<SettingsView>,
+) -> Vec<AnyElement> {
+    let work = settings.pomodoro_work_secs;
+    let brk = settings.pomodoro_break_secs;
+    let long = settings.pomodoro_long_break_secs;
+    let cycles = settings.pomodoro_cycles_per_long;
+    let work_name = settings
+        .focus_shortcut_work
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .unwrap_or("None")
+        .to_string();
+    let break_name = settings
+        .focus_shortcut_break
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .unwrap_or("None")
+        .to_string();
+    let listed: Vec<String> = catalog.to_vec();
+    vec![
+        chip_row(
+            "Work",
+            &[("25m", work == 25 * 60), ("50m", work == 50 * 60)],
+            cx,
+            |caption, s| {
+                s.pomodoro_work_secs = if caption == "50m" { 50 * 60 } else { 25 * 60 };
+            },
+        )
+        .into_any_element(),
+        chip_row(
+            "Break",
+            &[("5m", brk == 5 * 60), ("10m", brk == 10 * 60)],
+            cx,
+            |caption, s| {
+                s.pomodoro_break_secs = if caption == "10m" { 10 * 60 } else { 5 * 60 };
+            },
+        )
+        .into_any_element(),
+        chip_row(
+            "Long break",
+            &[("15m", long == 15 * 60), ("20m", long == 20 * 60)],
+            cx,
+            |caption, s| {
+                s.pomodoro_long_break_secs = if caption == "20m" { 20 * 60 } else { 15 * 60 };
+            },
+        )
+        .into_any_element(),
+        chip_row(
+            "Cycles",
+            &[("3", cycles == 3), ("4", cycles == 4)],
+            cx,
+            |caption, s| {
+                s.pomodoro_cycles_per_long = if caption == "3" { 3 } else { 4 };
+            },
+        )
+        .into_any_element(),
+        toggle_row(
+            "Auto-advance phases",
+            settings.pomodoro_auto_advance,
+            cx,
+            |s| s.pomodoro_auto_advance = !s.pomodoro_auto_advance,
+        )
+        .into_any_element(),
+        toggle_row(
+            "Keep awake on work",
+            settings.pomodoro_keep_awake,
+            cx,
+            |s| s.pomodoro_keep_awake = !s.pomodoro_keep_awake,
+        )
+        .into_any_element(),
+        action_row(
+            "focus-work",
+            "Work shortcut",
+            work_name,
+            cx,
+            move |_, _, cx| {
+                let next = nook_core::focus::cycle_shortcut(
+                    nook_core::settings::get_app_settings()
+                        .focus_shortcut_work
+                        .as_deref(),
+                    &listed,
+                );
+                nook_core::settings::tweak_app_settings(|s| s.focus_shortcut_work = next);
+                cx.notify();
+            },
+        )
+        .into_any_element(),
+        action_row(
+            "focus-break",
+            "Break shortcut",
+            break_name,
+            cx,
+            {
+                let listed = catalog.to_vec();
+                move |_, _, cx| {
+                    let next = nook_core::focus::cycle_shortcut(
+                        nook_core::settings::get_app_settings()
+                            .focus_shortcut_break
+                            .as_deref(),
+                        &listed,
+                    );
+                    nook_core::settings::tweak_app_settings(|s| s.focus_shortcut_break = next);
+                    cx.notify();
+                }
+            },
+        )
+        .into_any_element(),
+    ]
+}
+
+fn chip_row(
+    title: &'static str,
+    chips: &[(&'static str, bool)],
+    cx: &mut Context<SettingsView>,
+    tweak: impl Fn(&'static str, &mut AppSettings) + Copy + 'static,
+) -> impl IntoElement {
+    let mut group = segmented_group();
+    for (caption, selected) in chips.iter().copied() {
+        group = group.child(segment(caption, selected, cx, move |_, _, cx| {
+            nook_core::settings::tweak_app_settings(|s| tweak(caption, s));
+            cx.notify();
+        }));
+    }
+    settings_row(title)
+        .child(label(title, theme::BODY, true))
+        .child(group)
+}
+
 fn settings_group(rows: Vec<AnyElement>) -> impl IntoElement {
     let mut group = div()
         .flex()
@@ -1423,7 +4085,7 @@ fn settings_row(id: impl Into<SharedString>) -> gpui::Stateful<gpui::Div> {
 fn action_row(
     id: &'static str,
     title: &'static str,
-    caption: &'static str,
+    caption: impl Into<SharedString>,
     cx: &mut Context<SettingsView>,
     on_click: impl Fn(&mut SettingsView, &mut Window, &mut Context<SettingsView>) + 'static,
 ) -> impl IntoElement {
@@ -1435,6 +4097,103 @@ fn action_row(
             cx,
             on_click,
         ))
+}
+
+fn threshold_row(value: u8, cx: &mut Context<SettingsView>) -> impl IntoElement {
+    let value = nook_core::power::clamp_alert_threshold(value);
+    settings_row("battery-threshold")
+        .child(label("Alert below", theme::BODY, true))
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .child(stepper_btn("thr-dec", "−", cx, move |_, _, cx| {
+                    nook_core::settings::tweak_app_settings(|s| {
+                        s.battery_alert_threshold =
+                            nook_core::power::clamp_alert_threshold(
+                                s.battery_alert_threshold.saturating_sub(5),
+                            );
+                    });
+                    cx.notify();
+                }))
+                .child(
+                    div()
+                        .w(px(44.))
+                        .flex()
+                        .justify_center()
+                        .child(label(format!("{value}%"), theme::BODY, true)),
+                )
+                .child(stepper_btn("thr-inc", "+", cx, move |_, _, cx| {
+                    nook_core::settings::tweak_app_settings(|s| {
+                        s.battery_alert_threshold =
+                            nook_core::power::clamp_alert_threshold(
+                                s.battery_alert_threshold.saturating_add(5),
+                            );
+                    });
+                    cx.notify();
+                })),
+        )
+}
+
+fn stepper_btn(
+    id: &'static str,
+    caption: &'static str,
+    cx: &mut Context<SettingsView>,
+    on_click: impl Fn(&mut SettingsView, &mut Window, &mut Context<SettingsView>) + 'static,
+) -> impl IntoElement {
+    div()
+        .id(id)
+        .size(px(theme::HIT_MIN))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(6.))
+        .bg(theme::FILL)
+        .hover(|s| s.bg(theme::FILL_SECONDARY))
+        .active(|s| s.opacity(0.85))
+        .cursor(CursorStyle::PointingHand)
+        .child(label(caption, theme::BODY, true))
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, _, window, cx| {
+                cx.stop_propagation();
+                on_click(this, window, cx);
+            }),
+        )
+}
+fn status_row(title: &'static str, value: &'static str) -> impl IntoElement {
+    settings_row(title)
+        .child(label(title, theme::BODY, true))
+        .child(label(value, theme::SUBHEADLINE, false))
+}
+
+fn shortcut_row(title: &'static str, keys: String) -> impl IntoElement {
+    settings_row(SharedString::from(title))
+        .child(label(title, theme::BODY, true))
+        .child(label(keys, theme::SUBHEADLINE, false))
+}
+fn permission_row(title: &'static str, status: nook_core::eventtap::PermissionStatus) -> impl IntoElement {
+    let (text, color) = match status {
+        nook_core::eventtap::PermissionStatus::Granted => ("Granted", theme::SUCCESS),
+        nook_core::eventtap::PermissionStatus::Denied => ("Not granted", theme::DESTRUCTIVE),
+        nook_core::eventtap::PermissionStatus::Unsupported => ("macOS only", theme::TERTIARY_LABEL),
+    };
+    settings_row(title)
+        .child(label(title, theme::BODY, true))
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(6.))
+                .child(div().size(px(7.)).rounded_full().bg(color))
+                .child(
+                    div()
+                        .text_size(px(theme::SUBHEADLINE.size))
+                        .text_color(color)
+                        .child(text),
+                ),
+        )
 }
 
 fn toggle_row(
@@ -1674,6 +4433,17 @@ fn field_row(
         )
 }
 
+fn hotkey_key_name(key: &str) -> String {
+    match key.to_ascii_lowercase().as_str() {
+        "space" => "Space".into(),
+        "tab" => "Tab".into(),
+        "enter" | "return" => "Enter".into(),
+        "escape" | "esc" => "Escape".into(),
+        other if other.len() == 1 => other.to_ascii_uppercase(),
+        other => other.to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1696,6 +4466,21 @@ mod tests {
     }
 
     #[test]
+    fn weather_subtitle_uses_the_saved_city() {
+        let mut settings = AppSettings::default();
+        assert_eq!(
+            WidgetModule::Weather.subtitle(&settings).as_ref(),
+            "Open-Meteo"
+        );
+        settings.weather.location = nook_core::weather::WeatherLocationMode::Manual {
+            name: "Oslo".into(),
+            lat: 59.91,
+            lon: 10.75,
+        };
+        assert_eq!(WidgetModule::Weather.subtitle(&settings).as_ref(), "Oslo");
+    }
+
+    #[test]
     fn calendar_subtitle_uses_the_week_strip_count() {
         let settings = AppSettings::default();
         assert_eq!(
@@ -1705,10 +4490,66 @@ mod tests {
     }
 
     #[test]
+    fn battery_subtitle_shows_the_alert_threshold() {
+        let mut settings = AppSettings::default();
+        assert_eq!(
+            WidgetModule::Battery.subtitle(&settings).as_ref(),
+            "Alert at 20%"
+        );
+        settings.battery_alert_threshold = 5;
+        assert_eq!(
+            WidgetModule::Battery.subtitle(&settings).as_ref(),
+            "Alert at 5%"
+}
+    fn timers_subtitle_mentions_clock_when_sync_is_on() {
+        let mut settings = AppSettings::default();
+        assert_eq!(
+            WidgetModule::Timers.subtitle(&settings).as_ref(),
+            "Island + Clock"
+        );
+        settings.sync_clock_timers = false;
+        assert_eq!(
+            WidgetModule::Timers.subtitle(&settings).as_ref(),
+            "Countdown"
+}
+    fn sysstats_subtitle_counts_enabled_readouts() {
+        let mut settings = AppSettings::default();
+        assert_eq!(
+            WidgetModule::SysStats.subtitle(&settings).as_ref(),
+            "4 readouts"
+        );
+        settings.sysstats.show_disk = false;
+        settings.sysstats.show_net = false;
+        settings.sysstats.show_mem = false;
+        assert_eq!(
+            WidgetModule::SysStats.subtitle(&settings).as_ref(),
+            "1 readout"
+        );
+        settings.sysstats.show_cpu = false;
+        assert_eq!(
+            WidgetModule::SysStats.subtitle(&settings).as_ref(),
+            "Hidden"
+}
+    fn notifications_subtitle_is_honest_when_off() {
+        let settings = AppSettings::default();
+        assert!(!settings.show_notifications);
+        assert_eq!(
+            WidgetModule::Notifications.subtitle(&settings).as_ref(),
+            "Off"
+        );
+    }
+
+    #[test]
     fn observe_subtitle_counts_pinned_metrics() {
         assert_eq!(observe_subtitle(0).as_ref(), "Prometheus");
         assert_eq!(observe_subtitle(1).as_ref(), "1 metric");
         assert_eq!(observe_subtitle(5).as_ref(), "5 metrics");
+    }
+
+    #[test]
+    fn vpn_subtitle_follows_the_timer_toggle() {
+        assert_eq!(vpn_subtitle(true).as_ref(), "Session timer");
+        assert_eq!(vpn_subtitle(false).as_ref(), "Status");
     }
 
     #[test]
@@ -1727,6 +4568,18 @@ mod tests {
                 "Speed Test",
                 "Agents",
                 "Mirror",
+                "Battery",
+                "Messages",
+                "Obsidian",
+                "Mixer",
+                "Weather",
+                "VPN",
+                "High Alert",
+                "Stats",
+                "Voice",
+                "Meetings",
+                "Notifications",
+                "Process",
             ]
         );
         assert!(!names
@@ -1735,12 +4588,37 @@ mod tests {
     }
 
     #[test]
+    fn window_snap_hotkeys_are_listed() {
+        let rows: Vec<_> = nook_core::hotkeys::default_bindings()
+            .into_iter()
+            .map(|(kind, hotkey)| (kind.label(), hotkey.display()))
+            .collect();
+        assert_eq!(rows.len(), 9);
+        assert!(rows.iter().any(|(n, k)| *n == "Left half" && k.contains('←')));
+    }
+
+    #[test]
     fn nav_enums_round_trip() {
         assert_eq!(SettingsCategory::from_u8(1), SettingsCategory::Widgets);
+        assert_eq!(SettingsCategory::from_u8(2), SettingsCategory::Keyboard);
+        assert_eq!(SettingsCategory::from_u8(3), SettingsCategory::Scrolling);
+        assert_eq!(SettingsCategory::from_u8(2), SettingsCategory::Search);
         assert_eq!(SettingsCategory::from_u8(0), SettingsCategory::General);
         assert_eq!(SettingsCategory::from_u8(99), SettingsCategory::General);
+        assert_eq!(SettingsCategory::Keyboard.title(), "Keyboard");
+        assert_eq!(SettingsCategory::Scrolling.title(), "Scrolling");
         assert_eq!(WidgetModule::from_u8(0), WidgetModule::Calendar);
         assert_eq!(WidgetModule::from_u8(99), WidgetModule::Calendar);
+    }
+
+    #[test]
+    fn hud_caption_explains_bezel_suppression() {
+        let off = AppSettings::default();
+        assert!(!off.replace_system_hud);
+        assert!(hud_caption(&off).as_ref().contains("system bezel"));
+        let mut on = AppSettings::default();
+        on.replace_system_hud = true;
+        assert!(hud_caption(&on).as_ref().contains("caps-lock"));
     }
 
     #[test]

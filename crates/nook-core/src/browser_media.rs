@@ -7,9 +7,64 @@
 
 use crate::utils::{base64_encode, read_response_limited};
 
+/// Bundle IDs that can report a tab URL via AppleScript.
+pub const BROWSER_BUNDLE_IDS: &[&str] = &[
+    "com.apple.Safari",
+    "com.apple.Safari.WebApp",
+    "com.apple.WebKit.GPU",
+    "com.google.Chrome",
+    "com.google.Chrome.canary",
+    "com.brave.Browser",
+    "com.microsoft.edgemac",
+    "company.thebrowser.Browser",
+    "com.operasoftware.Opera",
+    "com.vivaldi.Vivaldi",
+];
+
 /// Chrome-family and Safari bundle IDs that can report a tab URL.
 pub fn is_browser(app_name: Option<&str>, bundle_id: Option<&str>) -> bool {
     applescript_app(app_name, bundle_id).is_some()
+}
+
+/// True for a browser app or one of its helpers (`com.google.Chrome.helper`).
+pub fn is_browser_bundle(id: &str) -> bool {
+    BROWSER_BUNDLE_IDS
+        .iter()
+        .any(|known| id == *known || id.starts_with(&format!("{known}.")))
+}
+
+/// `https://meet.google.com/xxx-xxxx-xxx` (and the same host with a longer code).
+pub fn is_meet_url(url: &str) -> bool {
+    let Ok(parsed) = reqwest::Url::parse(url) else {
+        return false;
+    };
+    if parsed.scheme() != "http" && parsed.scheme() != "https" {
+        return false;
+    }
+    let host = parsed.host_str().unwrap_or("").trim_start_matches("www.");
+    if !host.eq_ignore_ascii_case("meet.google.com") {
+        return false;
+    }
+    let mut segs = match parsed.path_segments() {
+        Some(s) => s,
+        None => return false,
+    };
+    let code = segs.next().unwrap_or("");
+    is_meet_code(code)
+}
+
+fn is_meet_code(code: &str) -> bool {
+    let parts: Vec<&str> = code.split('-').collect();
+    (2..=4).contains(&parts.len())
+        && parts.iter().all(|p| {
+            (3..=4).contains(&p.len()) && p.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+        })
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MeetTab {
+    pub app: String,
+    pub url: String,
 }
 
 pub fn youtube_video_id(input: &str) -> Option<String> {
@@ -66,7 +121,7 @@ fn valid_video_id(id: &str) -> Option<String> {
     }
 }
 
-fn applescript_app<'a>(app_name: Option<&'a str>, bundle_id: Option<&str>) -> Option<&'a str> {
+pub fn applescript_app<'a>(app_name: Option<&'a str>, bundle_id: Option<&str>) -> Option<&'a str> {
     if let Some(id) = bundle_id {
         let name = match id {
             "com.apple.Safari" | "com.apple.Safari.WebApp" | "com.apple.WebKit.GPU" => "Safari",
@@ -262,6 +317,243 @@ async fn run_osascript(script: &str) -> Option<String> {
     Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
+const MEET_JS_MUTE: &str = r#"(function(){var b=document.querySelector('[data-is-muted]')||document.querySelector('button[aria-label*="microphone" i]');if(!b)return 'missing';b.click();return b.getAttribute('data-is-muted')||'clicked';})()"#;
+const MEET_JS_LEAVE: &str = r#"(function(){var b=document.querySelector('[aria-label*="Leave call" i]')||document.querySelector('button[aria-label*="leave" i]');if(!b)return 'missing';b.click();return 'clicked';})()"#;
+
+fn meet_find_script(app: &str) -> String {
+    if app == "Safari" {
+        r#"tell application "Safari"
+  if (count of windows) is 0 then return ""
+  repeat with w in windows
+    repeat with t in tabs of w
+      try
+        set u to URL of t
+        if u contains "meet.google.com/" then return u
+      end try
+    end repeat
+  end repeat
+  return ""
+end tell"#
+            .into()
+    } else {
+        format!(
+            r#"tell application "{app}"
+  if (count of windows) is 0 then return ""
+  repeat with w in windows
+    repeat with t in tabs of w
+      try
+        set u to URL of t
+        if u contains "meet.google.com/" then return u
+      end try
+    end repeat
+  end repeat
+  return ""
+end tell"#
+        )
+    }
+}
+
+fn meet_activate_script(app: &str) -> String {
+    if app == "Safari" {
+        r#"tell application "Safari"
+  repeat with w in windows
+    repeat with t in tabs of w
+      try
+        if (URL of t) contains "meet.google.com/" then
+          set current tab of w to t
+          set index of w to 1
+          activate
+          return "ok"
+        end if
+      end try
+    end repeat
+  end repeat
+  return ""
+end tell"#
+            .into()
+    } else {
+        format!(
+            r#"tell application "{app}"
+  repeat with w in windows
+    set i to 0
+    repeat with t in tabs of w
+      set i to i + 1
+      try
+        if (URL of t) contains "meet.google.com/" then
+          set active tab index of w to i
+          set index of w to 1
+          activate
+          return "ok"
+        end if
+      end try
+    end repeat
+  end repeat
+  return ""
+end tell"#
+        )
+    }
+}
+
+fn meet_js_script(app: &str, js: &str) -> String {
+    let escaped = applescript_escape(js);
+    if app == "Safari" {
+        format!(
+            r#"tell application "Safari"
+  repeat with w in windows
+    repeat with t in tabs of w
+      try
+        if (URL of t) contains "meet.google.com/" then
+          tell t to do JavaScript "{escaped}"
+          return result as string
+        end if
+      end try
+    end repeat
+  end repeat
+  return ""
+end tell"#
+        )
+    } else {
+        format!(
+            r#"tell application "{app}"
+  repeat with w in windows
+    repeat with t in tabs of w
+      try
+        if (URL of t) contains "meet.google.com/" then
+          tell t to execute javascript "{escaped}"
+          return result as string
+        end if
+      end try
+    end repeat
+  end repeat
+  return ""
+end tell"#
+        )
+    }
+}
+
+fn meet_app_names() -> &'static [&'static str] {
+    &[
+        "Safari",
+        "Google Chrome",
+        "Google Chrome Canary",
+        "Brave Browser",
+        "Microsoft Edge",
+        "Arc",
+        "Opera",
+        "Vivaldi",
+    ]
+}
+
+/// Blocking osascript. Safe inside the Core Tokio runtime (no nested `block_on`).
+pub fn run_osascript_blocking(script: &str) -> Option<String> {
+    #[cfg(target_os = "macos")]
+    {
+        let output = std::process::Command::new("/usr/bin/osascript")
+            .arg("-e")
+            .arg(script)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            log::debug!(
+                "osascript failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return None;
+        }
+        let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if text.is_empty() {
+            None
+        } else {
+            Some(text)
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = script;
+        None
+    }
+}
+
+pub fn find_meet_tab_blocking() -> Option<MeetTab> {
+    for app in meet_app_names() {
+        if let Some(url) = run_osascript_blocking(&meet_find_script(app)) {
+            if is_meet_url(&url) {
+                return Some(MeetTab {
+                    app: (*app).to_string(),
+                    url,
+                });
+            }
+        }
+    }
+    None
+}
+
+pub async fn find_meet_tab() -> Option<MeetTab> {
+    #[cfg(target_os = "macos")]
+    {
+        for app in meet_app_names() {
+            if let Some(url) = run_osascript(&meet_find_script(app)).await {
+                if is_meet_url(&url) {
+                    return Some(MeetTab {
+                        app: (*app).to_string(),
+                        url,
+                    });
+                }
+            }
+        }
+        None
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        None
+    }
+}
+
+pub fn activate_meet_tab_blocking() -> bool {
+    if let Some(tab) = find_meet_tab_blocking() {
+        return run_osascript_blocking(&meet_activate_script(&tab.app))
+            .is_some_and(|s| s == "ok");
+    }
+    false
+}
+
+pub async fn activate_meet_tab() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        if let Some(tab) = find_meet_tab().await {
+            return run_osascript(&meet_activate_script(&tab.app))
+                .await
+                .is_some_and(|s| s == "ok");
+        }
+        false
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        false
+    }
+}
+
+/// Opt-in: Chrome/Safari "Allow JavaScript from Apple Events".
+pub fn meet_click_mute_js() -> Option<String> {
+    let tab = find_meet_tab_blocking()?;
+    let out = run_osascript_blocking(&meet_js_script(&tab.app, MEET_JS_MUTE))?;
+    if out == "missing" || out.is_empty() {
+        None
+    } else {
+        Some(out)
+    }
+}
+
+pub fn meet_click_leave_js() -> bool {
+    let Some(tab) = find_meet_tab_blocking() else {
+        return false;
+    };
+    run_osascript_blocking(&meet_js_script(&tab.app, MEET_JS_LEAVE))
+        .is_some_and(|s| s == "clicked")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -312,5 +604,18 @@ mod tests {
         assert!(is_browser(Some("Safari"), None));
         assert!(!is_browser(Some("Spotify"), Some("com.spotify.client")));
         assert!(!is_browser(None, None));
+        assert!(is_browser_bundle("com.google.Chrome"));
+        assert!(is_browser_bundle("com.google.Chrome.helper"));
+        assert!(!is_browser_bundle("us.zoom.xos"));
+    }
+
+    #[test]
+    fn meet_urls_require_the_code_path() {
+        assert!(is_meet_url("https://meet.google.com/abc-defg-hij"));
+        assert!(is_meet_url("https://www.meet.google.com/aaa-bbbb-ccc"));
+        assert!(!is_meet_url("https://meet.google.com/landing"));
+        assert!(!is_meet_url("https://meet.google.com/"));
+        assert!(!is_meet_url("https://zoom.us/j/123"));
+        assert!(!is_meet_url("https://evil.example/meet.google.com/abc-defg-hij"));
     }
 }

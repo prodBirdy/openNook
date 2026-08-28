@@ -9,6 +9,10 @@ description = "openNook — Dynamic Island client, native GPUI frontend"
 name = "nook"
 path = "src/main.rs"
 
+[[bin]]
+name = "nook-cli"
+path = "src/bin/nook.rs"
+
 [dependencies]
 nook-core.workspace = true
 gpui.workspace = true
@@ -25,4 +29,14 @@ pulldown-cmark.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
+objc2-foundation = "0.3"
+objc2-user-notifications = { version = "0.3", features = [
+    "UNUserNotificationCenter",
+    "UNNotificationRequest",
+    "UNNotificationContent",
+    "UNNotificationTrigger",
+    "UNNotificationSound",
+    "block2",
+] }
 block2 = "0.6"
+global-hotkey = "0.7"

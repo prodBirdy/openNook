@@ -1,0 +1,74 @@
+# GPUI 0.3.x Linux binary. Not the Tauri 0.0.2a AppImage / deb line.
+# Does not attach assets to v0.3.0 (macOS dmg). Publishes v<version>-linux.
+name: linux-release
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*-linux"
+
+permissions:
+  contents: write
+
+jobs:
+  linux:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Linux GPUI build deps
+        run: ./scripts/linux-deps.sh
+
+      - name: Build release binary
+        run: cargo build --release -p nook
+        env:
+          CARGO_TERM_COLOR: always
+
+      - name: Package tarball
+        id: pack
+        run: |
+          set -euo pipefail
+          version="$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n1)"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          dest="openNook-${version}-x86_64-unknown-linux-gnu"
+          mkdir -p "target/${dest}"
+          install -m 0755 target/release/nook "target/${dest}/nook"
+          sed "s/0\\.3\\.0/${version}/g" resources/LINUX.txt > "target/${dest}/LINUX.txt"
+          shopt -s nullglob
+          for shot in docs/linux-72-*.png; do
+            cp "$shot" "target/${dest}/"
+          done
+          tar -C target -czf "target/${dest}.tar.gz" "${dest}"
+          echo "tarball=target/${dest}.tar.gz" >> "$GITHUB_OUTPUT"
+          echo "asset=${dest}.tar.gz" >> "$GITHUB_OUTPUT"
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.pack.outputs.asset }}
+          path: ${{ steps.pack.outputs.tarball }}
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_type == 'tag' && github.ref_name || format('v{0}-linux', steps.pack.outputs.version) }}
+          name: openNook ${{ steps.pack.outputs.version }} Linux (GPUI)
+          make_latest: false
+          body: |
+            GPUI ${{ steps.pack.outputs.version }} Linux build; macOS notch/Metal features unavailable; not the old Tauri 0.0.2a line.
+
+            Artifact: `openNook-${{ steps.pack.outputs.version }}-x86_64-unknown-linux-gnu.tar.gz` (`nook` binary).
+
+            This is `cargo build --release -p nook` of the current GPUI product (`crates/nook`). It is not a republish of `openNook_0.1.0` AppImage/deb from tag `0.0.2a`, and it is not a Linux dmg. This release does not attach to or rewrite macOS `v0.3.0`.
+
+            Compact has no app title, is top-center (Idle housing wrap), and has no window-manager decorations (no title bar / min / max / close). Screen size is X11 `DisplayWidth` / `DisplayHeight`. Settings, expanded island, and the file tray have been proven on Linux.
+
+            **Unavailable on Linux:** Metal / `scripts/with-metal.sh`, camera-housing notch, MediaRemote, Liquid Glass, menu-bar extra, camera Mirror, AirDrop, AppKit file drag-out, EventKit, hide-when-maximized, `installer.dmg`. Hover polling is still stubbed — click or scroll the painted island. Use Ctrl+, for Settings and Ctrl+Q to quit.
+
+            Runtime: Vulkan driver, libxkbcommon, Wayland or X11.
+          files: ${{ steps.pack.outputs.tarball }}
+          fail_on_unmatched_files: true
+          target_commitish: ${{ github.sha }}

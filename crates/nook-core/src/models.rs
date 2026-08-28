@@ -41,4 +41,87 @@ pub struct NowPlayingData {
     /// Bundle identifier of that app, used to load its icon.
     #[serde(default)]
     pub bundle_id: Option<String>,
+    /// Apple Music editorialVideo HLS loop, when the catalog has one.
+    #[serde(default)]
+    pub motion_artwork_url: Option<String>,
+}
+
+/// One timed line from an LRC file.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LyricLine {
+    pub time_ms: u64,
+    pub text: String,
+}
+
+/// Lyrics for the current track. `lines` is empty when only plain text (or
+/// an instrumental) is available. Text is fetched at runtime and never bundled.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct SyncedLyrics {
+    #[serde(default)]
+    pub lines: Vec<LyricLine>,
+    #[serde(default)]
+    pub plain: Option<String>,
+    #[serde(default)]
+    pub instrumental: bool,
+    #[serde(default)]
+    pub source: String,
+}
+
+/// Where an Up Next row came from. Kept off [`NowPlayingData`] so the hot
+/// now-playing path stays a single track snapshot.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum QueueSource {
+    MusicPlaylist,
+    Spotify,
+}
+
+/// Why the island hides the upcoming list. Music's real Playing Next queue
+/// is unreadable; shuffle/radio is the honest fallback.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum QueueHidden {
+    Shuffle,
+    Radio,
+    Idle,
+    NeedsSpotifyAuth,
+    PremiumRequired,
+    AutomationDenied,
+}
+
+/// Handle used by [`crate::audio::media_jump_to_queue_item`].
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum QueueJump {
+    /// 1-based `play track i of current playlist` in Music.app.
+    MusicTrack { index: u32 },
+    /// Sequential `POST /v1/me/player/next` count, plus the track uri so we
+    /// can try `PUT /v1/me/player/play` with context+offset first.
+    Spotify {
+        skip_count: u32,
+        uri: String,
+    },
+}
+
+/// One upcoming row. Artwork stays optional: Spotify uses a 64px URL (lazy),
+/// Music rows may ship without art.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct QueueItem {
+    pub id: String,
+    pub title: String,
+    pub artist: String,
+    pub artwork_url: Option<String>,
+    pub artwork_base64: Option<String>,
+    pub source: QueueSource,
+    pub jump: QueueJump,
+}
+
+/// Separate fetch from now-playing. Empty `items` + no `hidden` means "nothing
+/// to show", not an error.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct PlaybackQueue {
+    pub source: Option<QueueSource>,
+    pub label: String,
+    pub items: Vec<QueueItem>,
+    pub hidden: Option<QueueHidden>,
+    pub context_uri: Option<String>,
 }

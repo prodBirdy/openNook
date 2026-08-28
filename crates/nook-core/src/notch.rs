@@ -149,8 +149,41 @@ fn read_screen_info() -> (f64, f64, f64, f64) {
 
     #[cfg(target_os = "linux")]
     {
-        let notch_width = calculate_dynamic_notch_width(1920.0);
-        (1920.0, 1080.0, 0.0, notch_width)
+        let (width, height) = linux_root_display_size().unwrap_or((1920.0, 1080.0));
+        let notch_width = calculate_dynamic_notch_width(width);
+        (width, height, 0.0, notch_width)
+    }
+}
+
+/// Primary display in logical pixels. `has_notch` stays false — this only
+/// sizes the overlay so `island_origin` can centre the stub housing wrap.
+#[cfg(target_os = "linux")]
+fn linux_root_display_size() -> Option<(f64, f64)> {
+    use std::os::raw::{c_char, c_int, c_void};
+
+    #[link(name = "X11")]
+    unsafe extern "C" {
+        fn XOpenDisplay(display: *const c_char) -> *mut c_void;
+        fn XCloseDisplay(display: *mut c_void) -> c_int;
+        fn XDefaultScreen(display: *mut c_void) -> c_int;
+        fn XDisplayWidth(display: *mut c_void, screen_number: c_int) -> c_int;
+        fn XDisplayHeight(display: *mut c_void, screen_number: c_int) -> c_int;
+    }
+
+    unsafe {
+        let dpy = XOpenDisplay(std::ptr::null());
+        if dpy.is_null() {
+            return None;
+        }
+        let screen = XDefaultScreen(dpy);
+        let width = XDisplayWidth(dpy, screen);
+        let height = XDisplayHeight(dpy, screen);
+        XCloseDisplay(dpy);
+        if width > 0 && height > 0 {
+            Some((width as f64, height as f64))
+        } else {
+            None
+        }
     }
 }
 
@@ -269,5 +302,28 @@ mod tests {
         assert_eq!(overlay_window_size().1, screen_h);
         set_overlay_height(0.0);
         assert_eq!(overlay_window_size().1, OVERLAY_MIN.min(screen_h));
+    }
+
+    #[test]
+    fn stub_notch_width_follows_the_real_screen() {
+        assert_eq!(calculate_dynamic_notch_width(1280.0), 200.0);
+        assert_eq!(calculate_dynamic_notch_width(1920.0), 200.0);
+        assert_eq!(calculate_dynamic_notch_width(3000.0), 260.0);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_screen_has_no_notch() {
+        let info = get_notch_info();
+        assert!(!info.has_notch, "Linux must not invent a camera notch");
+        assert_eq!(info.notch_height, 0.0);
+        assert_eq!(
+            info.notch_width,
+            calculate_dynamic_notch_width(info.screen_width)
+        );
+        if let Some((w, h)) = linux_root_display_size() {
+            assert_eq!(info.screen_width, w);
+            assert_eq!(info.screen_height, h);
+        }
     }
 }

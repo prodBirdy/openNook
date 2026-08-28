@@ -3,14 +3,19 @@
 use crate::island::ui::{nook_display, nook_empty, nook_icon_btn, nook_pane, nook_row};
 use crate::island::Island;
 use crate::theme;
+use crate::widgets::QuickAdd;
 use chrono::{Local, TimeZone};
 use gpui::{
-    div, prelude::*, px, rgba, Context, CursorStyle, FontWeight, MouseButton, MouseDownEvent,
-    SharedString,
+    div, prelude::*, px, rgba, Context, CursorStyle, Entity, FontWeight, MouseButton,
+    MouseDownEvent, SharedString,
 };
 use nook_core::calendar::Reminder;
 
-pub(crate) fn reminders_card(reminders: &[Reminder], cx: &mut Context<Island>) -> impl IntoElement {
+pub(crate) fn reminders_card(
+    reminders: &[Reminder],
+    quick_add: Option<Entity<QuickAdd>>,
+    cx: &mut Context<Island>,
+) -> impl IntoElement {
     let open: Vec<_> = reminders.iter().filter(|r| !r.is_completed).collect();
     let count = open.len();
 
@@ -40,6 +45,7 @@ pub(crate) fn reminders_card(reminders: &[Reminder], cx: &mut Context<Island>) -
 
     nook_pane("nook-reminders")
         .w_full()
+        .when_some(quick_add, |d, field| d.child(field).child(div().h(px(6.))))
         .when(count > 0, |d| {
             d.child(
                 div()
