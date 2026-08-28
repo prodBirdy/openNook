@@ -7,6 +7,8 @@
 //! Screen Recording (Ice-bar capture is a later flag).
 
 use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(target_os = "macos")]
+use std::sync::atomic::AtomicPtr;
 
 /// `NSStatusItem` length that shoves left-side extras off the display.
 pub const HIDDEN_LENGTH: f64 = 10_000.0;
@@ -63,9 +65,6 @@ static SEPARATOR: AtomicPtr<objc2::runtime::AnyObject> =
 
 #[cfg(target_os = "macos")]
 fn sync_macos() {
-    use objc2::runtime::AnyObject;
-    use objc2::*;
-
     let settings = crate::settings::get_app_settings();
     if !settings.thaw_enabled {
         remove_item();

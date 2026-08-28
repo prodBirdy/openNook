@@ -147,13 +147,17 @@ fn register(kind: SnapKind, hotkey: Hotkey) {
         );
         return;
     }
-    HOTKEYS.lock().unwrap_or_else(|e| e.into_inner()).push(href);
+    HOTKEYS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .push(href as usize);
 }
 
 #[cfg(target_os = "macos")]
 fn unregister_all() {
     let mut refs = HOTKEYS.lock().unwrap_or_else(|e| e.into_inner());
     for href in refs.drain(..) {
+        let href = href as EventHotKeyRef;
         if !href.is_null() {
             unsafe {
                 let _ = UnregisterEventHotKey(href);
@@ -283,8 +287,10 @@ extern "C" {
 
 #[cfg(target_os = "macos")]
 static HANDLER: std::sync::Once = std::sync::Once::new();
+/// Carbon `EventHotKeyRef` stored as `usize` so the static is `Sync`
+/// (`*mut c_void` is not `Send`).
 #[cfg(target_os = "macos")]
-static HOTKEYS: std::sync::Mutex<Vec<EventHotKeyRef>> = std::sync::Mutex::new(Vec::new());
+static HOTKEYS: std::sync::Mutex<Vec<usize>> = std::sync::Mutex::new(Vec::new());
 
 #[cfg(test)]
 mod tests {
