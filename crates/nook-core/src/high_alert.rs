@@ -91,7 +91,14 @@ pub fn acquire(
         );
     }
     OWNERS.fetch_or(owner.bit(), Ordering::SeqCst);
-    apply_assertion()
+    if let Err(e) = apply_assertion() {
+        // Failed native create must not leave a ghost owner; remaining
+        // holders keep the assertion.
+        OWNERS.fetch_and(!owner.bit(), Ordering::SeqCst);
+        let _ = apply_assertion();
+        return Err(e);
+    }
+    Ok(())
 }
 
 pub fn release(owner: HighAlertOwner) {
@@ -143,41 +150,41 @@ fn apply_assertion() -> Result<(), String> {
     Ok(())
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(any(test, not(target_os = "macos")))]
 fn native_acquire(_kind: HighAlertKind, _timeout: Option<Duration>) -> Result<(), String> {
     Ok(())
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(any(test, not(target_os = "macos")))]
 fn native_release() {}
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(any(test, not(target_os = "macos")))]
 fn start_battery_watch() {}
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(any(test, not(target_os = "macos")))]
 fn stop_battery_watch() {}
 
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", not(test)))]
 fn native_acquire(kind: HighAlertKind, timeout: Option<Duration>) -> Result<(), String> {
     macos::acquire(kind, timeout)
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", not(test)))]
 fn native_release() {
     macos::release();
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", not(test)))]
 fn start_battery_watch() {
     macos::start_battery_watch();
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", not(test)))]
 fn stop_battery_watch() {
     macos::stop_battery_watch();
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", not(test)))]
 mod macos {
     use super::*;
     use std::ffi::CStr;
@@ -460,25 +467,56 @@ mod macos {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, MutexGuard};
+
+    /// `OWNERS` / `TIMEOUT_SECS` are process-global.
+    static LOCK: Mutex<()> = Mutex::new(());
+
+    fn lock() -> MutexGuard<'static, ()> {
+        LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
 
     fn reset() {
         release_all();
+        set_low_battery_release_pct(0);
         UI_STALE.store(false, Ordering::SeqCst);
     }
 
     #[test]
     fn owners_refcount_manual_and_pomodoro() {
+        let _guard = lock();
         reset();
         assert!(!is_active());
-        acquire(HighAlertOwner::Manual, HighAlertKind::Display, Some(Duration::from_secs(60)))
-            .unwrap();
+        acquire(
+            HighAlertOwner::Manual,
+            HighAlertKind::Display,
+            Some(Duration::from_secs(60)),
+        )
+        .unwrap();
         assert!(is_active());
         assert!(is_held_by(HighAlertOwner::Manual));
+        assert!(!is_held_by(HighAlertOwner::Pomodoro));
+        assert_eq!(
+            TIMEOUT_SECS.load(Ordering::Relaxed),
+            60,
+            "manual hold is timed — never the forever default"
+        );
+
         acquire(HighAlertOwner::Pomodoro, HighAlertKind::Display, None).unwrap();
         assert!(is_held_by(HighAlertOwner::Pomodoro));
+        assert!(is_held_by(HighAlertOwner::Manual));
+        assert_eq!(OWNERS.load(Ordering::SeqCst), OWNER_MANUAL | OWNER_POMODORO);
+        assert_eq!(
+            TIMEOUT_SECS.load(Ordering::Relaxed),
+            60,
+            "pomodoro must not clear the manual timeout"
+        );
+
         release(HighAlertOwner::Manual);
         assert!(is_active(), "pomodoro hold survives manual off");
         assert!(!is_held_by(HighAlertOwner::Manual));
+        assert!(is_held_by(HighAlertOwner::Pomodoro));
+
         release(HighAlertOwner::Pomodoro);
         assert!(!is_active());
         reset();
@@ -486,12 +524,19 @@ mod tests {
 
     #[test]
     fn release_all_clears_every_owner() {
+        let _guard = lock();
         reset();
-        let _ = acquire(HighAlertOwner::Manual, HighAlertKind::System, None);
-        let _ = acquire(HighAlertOwner::Pomodoro, HighAlertKind::System, None);
+        acquire(
+            HighAlertOwner::Manual,
+            HighAlertKind::System,
+            Some(Duration::from_secs(30 * 60)),
+        )
+        .unwrap();
+        acquire(HighAlertOwner::Pomodoro, HighAlertKind::System, None).unwrap();
         release_all();
         assert!(!is_active());
         assert!(!is_held_by(HighAlertOwner::Manual));
         assert!(!is_held_by(HighAlertOwner::Pomodoro));
+        assert_eq!(TIMEOUT_SECS.load(Ordering::Relaxed), 0);
     }
 }
