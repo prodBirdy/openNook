@@ -22,6 +22,9 @@ sysinfo = "0.37"
 objc2 = "0.6"
 objc2-foundation = "0.3"
 objc2-event-kit = { version = "0.3", features = ["EKEventStore", "EKEvent", "EKReminder", "EKCalendar"] }
+objc2-avf-audio = { version = "0.3", features = ["AVAudioEngine", "AVAudioFile", "AVAudioPlayer", "AVAudioPCMBuffer", "AVAudioFormat", "AVAudioNode", "AVAudioIONode"] }
+objc2-speech = { version = "0.3", features = ["SFSpeechRecognizer"] }
+objc2-av-foundation = { version = "0.3", features = ["AVCaptureDevice"] }
 block2 = "0.6"
 security-framework = "3.7"
 

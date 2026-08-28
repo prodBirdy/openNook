@@ -131,6 +131,7 @@ impl WidgetModuleExt for WidgetModule {
             Self::Speed => "Speed Test",
             Self::Agents => "Agents",
             Self::Mirror => "Mirror",
+            Self::Recorder => "Voice",
         }
     }
 
@@ -146,6 +147,7 @@ impl WidgetModuleExt for WidgetModule {
             Self::Speed => "gauge",
             Self::Agents => "bot",
             Self::Mirror => "webcam",
+            Self::Recorder => "mic",
         }
     }
 
@@ -161,6 +163,13 @@ impl WidgetModuleExt for WidgetModule {
             Self::Speed => "Cloudflare".into(),
             Self::Agents => "Sessions".into(),
             Self::Mirror => "Camera".into(),
+            Self::Recorder => {
+                if settings.recorder_transcribe {
+                    "Live transcript".into()
+                } else {
+                    "Record only".into()
+                }
+            }
         }
     }
 
@@ -184,6 +193,7 @@ impl WidgetModuleExt for WidgetModule {
             Self::Speed => "Speed",
             Self::Agents => "Agents",
             Self::Mirror => "Mirror",
+            Self::Recorder => "Voice",
         }
     }
 }
@@ -998,6 +1008,17 @@ impl SettingsView {
                     .into_any_element(),
                 );
             }
+            WidgetModule::Recorder => {
+                rows.push(
+                    toggle_row(
+                        "Live transcription",
+                        settings.recorder_transcribe,
+                        cx,
+                        |s| s.recorder_transcribe = !s.recorder_transcribe,
+                    )
+                    .into_any_element(),
+                );
+            }
             _ => {}
         }
 
@@ -1356,6 +1377,9 @@ fn module_blurb(module: WidgetModule) -> SharedString {
             "Working coding-agent sessions on the compact face and expanded card.".into()
         }
         WidgetModule::Mirror => "A live camera preview that opens when you click the Mirror card.".into(),
+        WidgetModule::Recorder => {
+            "Record from the island. Transcription uses Apple's on-device Speech model when available; turn it off for long recordings.".into()
+        }
     }
 }
 
@@ -1727,6 +1751,7 @@ mod tests {
                 "Speed Test",
                 "Agents",
                 "Mirror",
+                "Voice",
             ]
         );
         assert!(!names

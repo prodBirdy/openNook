@@ -38,6 +38,7 @@ pub enum CompactMode {
     Files,
     Timer,
     Observe,
+    Recording,
     Onboard,
 }
 
@@ -158,6 +159,14 @@ pub struct Island {
     pub(crate) mirror_on: bool,
     mirror_gen: u64,
     pub(crate) mirror_frame: Option<std::sync::Arc<gpui::RenderImage>>,
+    pub recording: bool,
+    pub recording_started: Option<Instant>,
+    pub live_transcript: String,
+    pub recordings: Vec<nook_core::recorder::RecordingItem>,
+    pub recorder_level: f32,
+    pub recorder_error: Option<String>,
+    pub playing_recording: Option<i64>,
+    recorder_last_notify: Instant,
 }
 
 struct PendingFileDrag {
@@ -256,6 +265,14 @@ impl Island {
             mirror_on: false,
             mirror_gen: 0,
             mirror_frame: None,
+            recording: false,
+            recording_started: None,
+            live_transcript: String::new(),
+            recordings: nook_core::recorder::list(),
+            recorder_level: 0.0,
+            recorder_error: None,
+            playing_recording: None,
+            recorder_last_notify: Instant::now(),
         };
         // Start at the compact idle size so the first paint isn't a jump.
         let (w, h) = this.target_size();
@@ -461,6 +478,37 @@ impl Island {
                                 }
                             }
                         }
+                        if this.recording {
+                            dirty = true;
+                        }
+                    }
+                    if this.settings.show_recorder && nook_core::recorder::is_live() {
+                        nook_core::recorder::pump();
+                        let snap = nook_core::recorder::snapshot();
+                        this.recording = true;
+                        this.recording_started = snap.started;
+                        this.recorder_level = snap.level;
+                        if this.preferred.is_none() {
+                            this.preferred = Some(CompactMode::Recording);
+                        }
+                        if this.expanded
+                            && snap.transcript != this.live_transcript
+                            && this.recorder_last_notify.elapsed() >= Duration::from_millis(250)
+                        {
+                            this.live_transcript = snap.transcript;
+                            this.recorder_last_notify = Instant::now();
+                            dirty = true;
+                        }
+                    } else if this.recording {
+                        this.recording = false;
+                        this.recording_started = None;
+                        this.recorder_level = 0.0;
+                        this.recordings = nook_core::recorder::list();
+                        this.live_transcript = nook_core::recorder::snapshot().transcript;
+                        if this.preferred == Some(CompactMode::Recording) {
+                            this.preferred = None;
+                        }
+                        dirty = true;
                     }
                     let levels = nook_core::audio::get_audio_levels();
                     if this.now_playing.audio_levels.as_deref() != Some(levels.as_slice()) {
@@ -862,6 +910,9 @@ impl Island {
 
     fn available_modes(&self) -> Vec<CompactMode> {
         let mut modes = Vec::new();
+        if self.settings.show_recorder && self.recording {
+            modes.push(CompactMode::Recording);
+        }
         if self.has_observe_outage() {
             modes.push(CompactMode::Observe);
         }
@@ -1494,6 +1545,14 @@ mod tests {
             mirror_on: false,
             mirror_gen: 0,
             mirror_frame: None,
+            recording: false,
+            recording_started: None,
+            live_transcript: String::new(),
+            recordings: Vec::new(),
+            recorder_level: 0.0,
+            recorder_error: None,
+            playing_recording: None,
+            recorder_last_notify: Instant::now(),
         }
     }
 
@@ -1739,6 +1798,21 @@ mod tests {
         );
         assert_eq!(island.mode(), CompactMode::Agents);
         island.settings.show_agents = false;
+        assert_eq!(island.available_modes(), vec![CompactMode::Idle]);
+    }
+
+    #[test]
+    fn available_modes_includes_recording() {
+        let mut island = test_island();
+        island.settings.show_recorder = true;
+        assert_eq!(island.available_modes(), vec![CompactMode::Idle]);
+        island.recording = true;
+        assert_eq!(
+            island.available_modes(),
+            vec![CompactMode::Recording, CompactMode::Idle]
+        );
+        assert_eq!(island.mode(), CompactMode::Recording);
+        island.settings.show_recorder = false;
         assert_eq!(island.available_modes(), vec![CompactMode::Idle]);
     }
 

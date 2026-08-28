@@ -63,6 +63,7 @@ impl Island {
             CompactMode::Observe => {
                 lucide("triangle-alert", theme::COMPACT_FACE).into_any_element()
             }
+            CompactMode::Recording => rec_dot().into_any_element(),
             CompactMode::Onboard => label("openNook", theme::BODY, true).into_any_element(),
             CompactMode::Idle => div().into_any_element(),
         }
@@ -104,6 +105,13 @@ impl Island {
                     _ => self.observe.firing_count().to_string(),
                 };
                 label(text, theme::BODY, true).into_any_element()
+            }
+            CompactMode::Recording => {
+                let text = super::ui::format_timer_compact(self.recording_elapsed_secs());
+                timer_text(text, theme::BODY)
+                    .min_w(px(40.))
+                    .text_right()
+                    .into_any_element()
             }
             CompactMode::Onboard if hovered => div()
                 .id("github")
@@ -147,6 +155,7 @@ impl Island {
                 CompactMode::Files => "files",
                 CompactMode::Timer => "timer",
                 CompactMode::Observe => "observe",
+                CompactMode::Recording => "recording",
                 CompactMode::Onboard => "onboard",
             };
             row = row.child(
@@ -182,4 +191,12 @@ impl Island {
         }
         row.into_any_element()
     }
+}
+
+fn rec_dot() -> gpui::Div {
+    div()
+        .size(px(8.))
+        .rounded_full()
+        .flex_shrink_0()
+        .bg(theme::DESTRUCTIVE)
 }

@@ -74,6 +74,17 @@ fn migrate(conn: &Connection) -> Result<()> {
         [],
     )?;
 
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS recordings (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            path TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            duration_ms INTEGER NOT NULL,
+            transcript TEXT NOT NULL DEFAULT ''
+        )",
+        [],
+    )?;
+
     Ok(())
 }
 
