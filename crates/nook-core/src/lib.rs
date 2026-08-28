@@ -12,6 +12,7 @@ pub mod files;
 pub mod haptics;
 #[cfg(target_os = "macos")]
 mod mediaremote;
+pub mod messages;
 pub mod models;
 pub mod mouse;
 pub mod notch;
@@ -63,5 +64,6 @@ pub fn init() {
         audio::init_audio_state();
         audio::setup_audio_monitoring();
         mouse::start_polling();
+        messages::start_watchers();
     });
 }

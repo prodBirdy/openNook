@@ -17,10 +17,11 @@ pub enum WidgetModule {
     Speed = 7,
     Agents = 8,
     Mirror = 9,
+    Messages = 10,
 }
 
 impl WidgetModule {
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 11] = [
         Self::Calendar,
         Self::Music,
         Self::Files,
@@ -31,6 +32,7 @@ impl WidgetModule {
         Self::Speed,
         Self::Agents,
         Self::Mirror,
+        Self::Messages,
     ];
 
     pub fn from_u8(value: u8) -> Self {
@@ -44,7 +46,9 @@ impl WidgetModule {
     pub fn default_cells(self) -> u8 {
         match self {
             Self::Calendar | Self::Music => 5,
-            Self::Files | Self::Notes | Self::Observe | Self::Reminders | Self::Agents => 4,
+            Self::Files | Self::Notes | Self::Observe | Self::Reminders | Self::Agents | Self::Messages => {
+                4
+            }
             Self::Timers | Self::Speed | Self::Mirror => 3,
         }
     }
@@ -52,7 +56,9 @@ impl WidgetModule {
     pub fn min_cells(self) -> u8 {
         match self {
             Self::Calendar => 4,
-            Self::Music | Self::Files | Self::Observe | Self::Reminders | Self::Mirror => 3,
+            Self::Music | Self::Files | Self::Observe | Self::Reminders | Self::Mirror | Self::Messages => {
+                3
+            }
             Self::Notes | Self::Timers | Self::Speed | Self::Agents => 2,
         }
     }
@@ -82,6 +88,7 @@ fn default_widget_order() -> Vec<WidgetModule> {
         WidgetModule::Timers,
         WidgetModule::Notes,
         WidgetModule::Speed,
+        WidgetModule::Messages,
     ]
 }
 
@@ -142,6 +149,11 @@ pub struct AppSettings {
     pub show_files: bool,
     #[serde(default = "default_true")]
     pub show_mirror: bool,
+    #[serde(default = "default_true")]
+    pub show_messages: bool,
+    /// Fragile Accessibility CGEvent Return after opening `whatsapp://`.
+    #[serde(default)]
+    pub experimental_whatsapp_autosend: bool,
     #[serde(default)]
     pub observe: ObserveConfig,
     #[serde(default)]
@@ -231,6 +243,8 @@ impl Default for AppSettings {
             show_speed: true,
             show_files: true,
             show_mirror: true,
+            show_messages: true,
+            experimental_whatsapp_autosend: false,
             observe: ObserveConfig::default(),
             liquid_glass_mode: false,
             non_notch_mode: false,
@@ -276,6 +290,7 @@ impl AppSettings {
             WidgetModule::Speed => self.show_speed,
             WidgetModule::Agents => self.show_agents,
             WidgetModule::Mirror => self.show_mirror,
+            WidgetModule::Messages => self.show_messages,
         }
     }
 
@@ -291,6 +306,10 @@ impl AppSettings {
             WidgetModule::Speed => self.show_speed = !self.show_speed,
             WidgetModule::Agents => self.show_agents = !self.show_agents,
             WidgetModule::Mirror => self.show_mirror = !self.show_mirror,
+            WidgetModule::Messages => {
+                self.show_messages = !self.show_messages;
+                crate::messages::request_refresh();
+            }
         }
     }
 
@@ -611,6 +630,8 @@ mod tests {
         assert!(parsed.show_speed);
         assert!(parsed.show_files);
         assert!(parsed.show_mirror);
+        assert!(parsed.show_messages);
+        assert!(!parsed.experimental_whatsapp_autosend);
         assert!(parsed.liquid_glass_mode);
         assert!(!parsed.non_notch_mode);
         assert!((parsed.island_x - 0.5).abs() < f32::EPSILON);
@@ -696,6 +717,7 @@ mod tests {
         settings.show_speed = false;
         settings.show_agents = false;
         settings.show_mirror = false;
+        settings.show_messages = false;
         settings.set_cells(WidgetModule::Music, 5);
         assert_eq!(settings.used_cells(), 5);
         assert_eq!(settings.remaining_cells(), AppSettings::TOTAL_CELLS - 5);

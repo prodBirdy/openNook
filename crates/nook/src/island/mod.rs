@@ -25,6 +25,7 @@ use nook_core::calendar::{CalendarEvent, Reminder};
 use nook_core::files::FileTrayItem;
 use nook_core::models::NowPlayingData;
 use nook_core::notch;
+use nook_core::messages::MessagesSnapshot;
 use nook_core::observe::{MetricHistory, ObserveSnapshot};
 use nook_core::settings::AppSettings;
 use settings::SettingsView;
@@ -39,6 +40,7 @@ pub enum CompactMode {
     Timer,
     Observe,
     Onboard,
+    Messages,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -85,6 +87,10 @@ pub struct Island {
     pub timer_composer: bool,
     pub observe: ObserveSnapshot,
     observe_history: MetricHistory,
+    pub messages: MessagesSnapshot,
+    pub message_draft: String,
+    pub selected_conversation: Option<String>,
+    pub(crate) message_focus: Option<gpui::FocusHandle>,
     pub(crate) observe_hover: Option<crate::widgets::ObserveHover>,
     pub settings: AppSettings,
     pub first_run: bool,
@@ -212,6 +218,10 @@ impl Island {
             timer_composer: false,
             observe: ObserveSnapshot::default(),
             observe_history: nook_core::observe::load_history(),
+            messages: MessagesSnapshot::default(),
+            message_draft: String::new(),
+            selected_conversation: None,
+            message_focus: None,
             observe_hover: None,
             settings,
             first_run,
@@ -690,6 +700,57 @@ impl Island {
                 .await;
         })
         .detach();
+
+        cx.spawn(async move |this, cx| {
+            let mut rx = nook_core::messages::subscribe();
+            loop {
+                let enabled = nook_core::settings::get_app_settings().show_messages;
+                let snapshot = if enabled {
+                    cx.background_executor()
+                        .spawn(async { nook_core::messages::snapshot() })
+                        .await
+                } else {
+                    MessagesSnapshot::default()
+                };
+                if this
+                    .update(cx, |this, cx| {
+                        let was_quiet = this.messages.incoming.is_none();
+                        let incoming_id = snapshot
+                            .incoming
+                            .as_ref()
+                            .map(|p| p.conversation_id.clone());
+                        this.messages = snapshot;
+                        if was_quiet && this.messages.incoming.is_some() {
+                            this.preferred = Some(CompactMode::Messages);
+                            nook_core::haptics::trigger(None);
+                        }
+                        if let Some(id) = incoming_id {
+                            if this.selected_conversation.as_deref() == Some(id.as_str()) {
+                                if let Some(conv) = this
+                                    .messages
+                                    .conversations
+                                    .iter()
+                                    .find(|c| c.id == id)
+                                {
+                                    nook_core::messages::mark_conversation_seen(
+                                        &id,
+                                        conv.last_rowid,
+                                    );
+                                }
+                            }
+                        }
+                        cx.notify();
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+                if rx.changed().await.is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
     }
 
     /// Merge a fresh poll into the island: extend the local sample history and
@@ -860,10 +921,17 @@ impl Island {
         self.settings.show_observe && self.observe.has_outage()
     }
 
+    fn has_incoming_message(&self) -> bool {
+        self.settings.show_messages && self.messages.incoming.is_some()
+    }
+
     fn available_modes(&self) -> Vec<CompactMode> {
         let mut modes = Vec::new();
         if self.has_observe_outage() {
             modes.push(CompactMode::Observe);
+        }
+        if self.has_incoming_message() {
+            modes.push(CompactMode::Messages);
         }
         if self.has_media() {
             modes.push(CompactMode::Media);
@@ -1451,6 +1519,10 @@ mod tests {
             timer_composer: false,
             observe: ObserveSnapshot::default(),
             observe_history: HashMap::new(),
+            messages: MessagesSnapshot::default(),
+            message_draft: String::new(),
+            selected_conversation: None,
+            message_focus: None,
             observe_hover: None,
             settings: AppSettings::default(),
             first_run: false,
@@ -1739,6 +1811,24 @@ mod tests {
         );
         assert_eq!(island.mode(), CompactMode::Agents);
         island.settings.show_agents = false;
+        assert_eq!(island.available_modes(), vec![CompactMode::Idle]);
+    }
+
+    #[test]
+    fn available_modes_includes_incoming_messages() {
+        let mut island = test_island();
+        island.messages.incoming = Some(nook_core::messages::IncomingPeek {
+            conversation_id: "iMessage;-;+1".into(),
+            sender: "Ada".into(),
+            snippet: "hi".into(),
+            service: nook_core::messages::MessageService::IMessage,
+        });
+        assert_eq!(
+            island.available_modes(),
+            vec![CompactMode::Messages, CompactMode::Idle]
+        );
+        assert_eq!(island.mode(), CompactMode::Messages);
+        island.settings.show_messages = false;
         assert_eq!(island.available_modes(), vec![CompactMode::Idle]);
     }
 

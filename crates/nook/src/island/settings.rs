@@ -131,6 +131,7 @@ impl WidgetModuleExt for WidgetModule {
             Self::Speed => "Speed Test",
             Self::Agents => "Agents",
             Self::Mirror => "Mirror",
+            Self::Messages => "Messages",
         }
     }
 
@@ -146,6 +147,7 @@ impl WidgetModuleExt for WidgetModule {
             Self::Speed => "gauge",
             Self::Agents => "bot",
             Self::Mirror => "webcam",
+            Self::Messages => "message-circle",
         }
     }
 
@@ -161,6 +163,7 @@ impl WidgetModuleExt for WidgetModule {
             Self::Speed => "Cloudflare".into(),
             Self::Agents => "Sessions".into(),
             Self::Mirror => "Camera".into(),
+            Self::Messages => "iMessage".into(),
         }
     }
 
@@ -184,6 +187,7 @@ impl WidgetModuleExt for WidgetModule {
             Self::Speed => "Speed",
             Self::Agents => "Agents",
             Self::Mirror => "Mirror",
+            Self::Messages => "Messages",
         }
     }
 }
@@ -998,6 +1002,45 @@ impl SettingsView {
                     .into_any_element(),
                 );
             }
+            WidgetModule::Messages => {
+                let fda = nook_core::messages::fda_status();
+                let status = match fda {
+                    nook_core::messages::FdaStatus::Granted => "On",
+                    nook_core::messages::FdaStatus::Denied => "Off",
+                    nook_core::messages::FdaStatus::Unavailable => "Unavailable",
+                };
+                rows.push(
+                    settings_row("msg-fda-status")
+                        .child(label("Full Disk Access", theme::BODY, true))
+                        .child(label(status, theme::BODY, false))
+                        .into_any_element(),
+                );
+                rows.push(
+                    action_row(
+                        "msg-fda-open",
+                        "Privacy settings",
+                        "Open Full Disk Access",
+                        cx,
+                        |_, _, _| {
+                            if let Err(err) = nook_core::messages::open_fda_settings() {
+                                log::warn!("open FDA settings: {err}");
+                            }
+                        },
+                    )
+                    .into_any_element(),
+                );
+                rows.push(
+                    toggle_row(
+                        "Experimental WhatsApp auto-send",
+                        settings.experimental_whatsapp_autosend,
+                        cx,
+                        |s| {
+                            s.experimental_whatsapp_autosend = !s.experimental_whatsapp_autosend;
+                        },
+                    )
+                    .into_any_element(),
+                );
+            }
             _ => {}
         }
 
@@ -1356,6 +1399,9 @@ fn module_blurb(module: WidgetModule) -> SharedString {
             "Working coding-agent sessions on the compact face and expanded card.".into()
         }
         WidgetModule::Mirror => "A live camera preview that opens when you click the Mirror card.".into(),
+        WidgetModule::Messages => {
+            "iMessage read + send from chat.db. WhatsApp is notify + prefill only — the Mac app cannot auto-send. Full Disk Access is required to read messages.".into()
+        }
     }
 }
 
@@ -1727,6 +1773,7 @@ mod tests {
                 "Speed Test",
                 "Agents",
                 "Mirror",
+                "Messages",
             ]
         );
         assert!(!names
