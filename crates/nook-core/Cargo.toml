@@ -22,6 +22,9 @@ sysinfo = "0.37"
 objc2 = "0.6"
 objc2-foundation = "0.3"
 objc2-event-kit = { version = "0.3", features = ["EKEventStore", "EKEvent", "EKReminder", "EKCalendar"] }
+objc2-core-audio = { version = "0.3.2", features = ["AudioHardware", "objc2", "objc2-foundation", "block2"] }
+objc2-core-audio-types = "0.3.2"
+objc2-core-foundation = { version = "0.3.2", features = ["CFDictionary", "CFString"] }
 block2 = "0.6"
 security-framework = "3.7"
 

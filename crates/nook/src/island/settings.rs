@@ -131,6 +131,7 @@ impl WidgetModuleExt for WidgetModule {
             Self::Speed => "Speed Test",
             Self::Agents => "Agents",
             Self::Mirror => "Mirror",
+            Self::Mixer => "Mixer",
         }
     }
 
@@ -146,6 +147,7 @@ impl WidgetModuleExt for WidgetModule {
             Self::Speed => "gauge",
             Self::Agents => "bot",
             Self::Mirror => "webcam",
+            Self::Mixer => "volume-2",
         }
     }
 
@@ -161,6 +163,7 @@ impl WidgetModuleExt for WidgetModule {
             Self::Speed => "Cloudflare".into(),
             Self::Agents => "Sessions".into(),
             Self::Mirror => "Camera".into(),
+            Self::Mixer => "Per-app volume".into(),
         }
     }
 
@@ -184,6 +187,7 @@ impl WidgetModuleExt for WidgetModule {
             Self::Speed => "Speed",
             Self::Agents => "Agents",
             Self::Mirror => "Mirror",
+            Self::Mixer => "Mixer",
         }
     }
 }
@@ -244,7 +248,10 @@ pub(super) struct SettingsView {
 impl SettingsView {
     pub(super) fn new(cx: &mut Context<Self>) -> Self {
         let settings = nook_core::settings::get_app_settings();
-        let module = WidgetModule::from_u8(LAST_MODULE.load(Ordering::Relaxed));
+        let mut module = WidgetModule::from_u8(LAST_MODULE.load(Ordering::Relaxed));
+        if module == WidgetModule::Mixer && !nook_core::mixer::is_available() {
+            module = WidgetModule::Calendar;
+        }
         let min = module.min_cells();
         let max = settings.max_cells_for(module).max(min);
         let (width_slider, width_slider_subscription) = create_width_slider(module, &settings, cx);
@@ -708,6 +715,9 @@ impl SettingsView {
 
         let mut list = Vec::new();
         for module in settings.ordered_widgets() {
+            if module == WidgetModule::Mixer && !nook_core::mixer::is_available() {
+                continue;
+            }
             list.push(self.widget_row(module, settings, cx).into_any_element());
         }
 
@@ -993,6 +1003,34 @@ impl SettingsView {
                         cx,
                         |this, _, cx| {
                             this.browse_metrics(cx);
+                        },
+                    )
+                    .into_any_element(),
+                );
+            }
+            WidgetModule::Mixer => {
+                rows.push(
+                    settings_row("mixer-permission")
+                        .child(label("Permission", theme::BODY, true))
+                        .child(label(
+                            nook_core::mixer::capture_status_label(
+                                nook_core::mixer::capture_status(),
+                            ),
+                            theme::SUBHEADLINE,
+                            false,
+                        ))
+                        .into_any_element(),
+                );
+                rows.push(
+                    action_row(
+                        "mixer-reset",
+                        "Volumes",
+                        "Reset All",
+                        cx,
+                        |_, _, cx| {
+                            nook_core::mixer::reset_all();
+                            nook_core::mixer::pump();
+                            cx.notify();
                         },
                     )
                     .into_any_element(),
@@ -1356,6 +1394,7 @@ fn module_blurb(module: WidgetModule) -> SharedString {
             "Working coding-agent sessions on the compact face and expanded card.".into()
         }
         WidgetModule::Mirror => "A live camera preview that opens when you click the Mirror card.".into(),
+        WidgetModule::Mixer => nook_core::mixer::TCC_PREPROMPT.into(),
     }
 }
 
@@ -1727,6 +1766,7 @@ mod tests {
                 "Speed Test",
                 "Agents",
                 "Mirror",
+                "Mixer",
             ]
         );
         assert!(!names

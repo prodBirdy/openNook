@@ -357,7 +357,7 @@ fn app_badge(bundle_id: Option<&str>, app_name: Option<&str>) -> AnyElement {
         .into_any_element()
 }
 
-fn app_icon_image(
+pub(crate) fn app_icon_image(
     bundle_id: Option<&str>,
     app_name: Option<&str>,
 ) -> Option<std::sync::Arc<Image>> {

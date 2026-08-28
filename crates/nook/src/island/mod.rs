@@ -5,7 +5,7 @@ mod compact;
 mod expanded;
 mod files;
 mod marquee;
-mod media;
+pub(crate) mod media;
 mod render;
 mod settings;
 pub(crate) mod ui;
@@ -94,6 +94,10 @@ pub struct Island {
     /// Bumped on start and on Stop so an in-flight test cannot apply after it
     /// was cancelled (Stop then Run would otherwise take the old result).
     pub speed_gen: u64,
+    pub mixer_apps: Vec<nook_core::mixer::MixerApp>,
+    /// Pending slider value waiting on the TCC pre-prompt.
+    pub mixer_prompt: Option<(String, f32)>,
+    pub(crate) mixer_gen: u64,
     pub last_tick: Instant,
     last_frame: Instant,
     /// Last seen `nook_core::settings::settings_generation()`; the tick loop
@@ -219,6 +223,9 @@ impl Island {
             speed_progress: 0.0,
             speed_running: false,
             speed_gen: 0,
+            mixer_apps: Vec::new(),
+            mixer_prompt: None,
+            mixer_gen: 0,
             last_tick: Instant::now(),
             last_frame: Instant::now(),
             settings_gen: nook_core::settings::settings_generation(),
@@ -330,6 +337,24 @@ impl Island {
                             this.settings = settings;
                         }
                         dirty = true;
+                    }
+                    let mixer_on = this
+                        .settings
+                        .is_enabled(nook_core::settings::WidgetModule::Mixer);
+                    nook_core::mixer::set_enabled(mixer_on);
+                    nook_core::mixer::set_card_visible(
+                        this.expanded && mixer_on && this.tab == Tab::Widgets,
+                    );
+                    nook_core::mixer::pump();
+                    let mixer_gen = nook_core::mixer::generation();
+                    if this.mixer_gen != mixer_gen {
+                        this.mixer_gen = mixer_gen;
+                        this.mixer_apps = nook_core::mixer::snapshot();
+                        dirty = true;
+                    } else if this.expanded && mixer_on && this.tab == Tab::Widgets {
+                        if nook_core::mixer::copy_levels(&mut this.mixer_apps) {
+                            dirty = true;
+                        }
                     }
                     if this.repositioning {
                         this.apply_reposition(mx as f32, my as f32);
@@ -1458,6 +1483,9 @@ mod tests {
             speed_progress: 0.0,
             speed_running: false,
             speed_gen: 0,
+            mixer_apps: Vec::new(),
+            mixer_prompt: None,
+            mixer_gen: 0,
             last_tick: Instant::now(),
             last_frame: Instant::now(),
             settings_gen: 0,
