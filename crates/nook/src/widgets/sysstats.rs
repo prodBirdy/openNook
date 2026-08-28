@@ -153,7 +153,7 @@ fn core_strip(cores: &[f32]) -> impl IntoElement {
         let t = (*pct / 100.0).clamp(0.08, 1.0);
         row = row.child(
             div()
-                .id(format!("sys-core-{i}"))
+                .id(("sys-core", i))
                 .flex_1()
                 .h(relative(t))
                 .rounded(px(1.))
