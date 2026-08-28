@@ -17,10 +17,11 @@ pub enum WidgetModule {
     Speed = 7,
     Agents = 8,
     Mirror = 9,
+    Battery = 10,
 }
 
 impl WidgetModule {
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 11] = [
         Self::Calendar,
         Self::Music,
         Self::Files,
@@ -31,6 +32,7 @@ impl WidgetModule {
         Self::Speed,
         Self::Agents,
         Self::Mirror,
+        Self::Battery,
     ];
 
     pub fn from_u8(value: u8) -> Self {
@@ -45,7 +47,7 @@ impl WidgetModule {
         match self {
             Self::Calendar | Self::Music => 5,
             Self::Files | Self::Notes | Self::Observe | Self::Reminders | Self::Agents => 4,
-            Self::Timers | Self::Speed | Self::Mirror => 3,
+            Self::Timers | Self::Speed | Self::Mirror | Self::Battery => 3,
         }
     }
 
@@ -53,13 +55,13 @@ impl WidgetModule {
         match self {
             Self::Calendar => 4,
             Self::Music | Self::Files | Self::Observe | Self::Reminders | Self::Mirror => 3,
-            Self::Notes | Self::Timers | Self::Speed | Self::Agents => 2,
+            Self::Notes | Self::Timers | Self::Speed | Self::Agents | Self::Battery => 2,
         }
     }
 
     pub fn max_cells(self) -> u8 {
         match self {
-            Self::Timers | Self::Speed | Self::Agents | Self::Mirror => 6,
+            Self::Timers | Self::Speed | Self::Agents | Self::Mirror | Self::Battery => 6,
             _ => 8,
         }
     }
@@ -82,6 +84,7 @@ fn default_widget_order() -> Vec<WidgetModule> {
         WidgetModule::Timers,
         WidgetModule::Notes,
         WidgetModule::Speed,
+        WidgetModule::Battery,
     ]
 }
 
@@ -142,6 +145,15 @@ pub struct AppSettings {
     pub show_files: bool,
     #[serde(default = "default_true")]
     pub show_mirror: bool,
+    #[serde(default = "default_true")]
+    pub show_battery: bool,
+    /// Percent at or below which the compact face takes over while discharging.
+    #[serde(default = "default_battery_alert_threshold")]
+    pub battery_alert_threshold: u8,
+    /// Shortcuts.app name for the one-tap LPM toggle. `None` or a missing
+    /// shortcut falls back to the osascript-admin prompt.
+    #[serde(default = "default_lpm_shortcut_name")]
+    pub lpm_shortcut_name: Option<String>,
     #[serde(default)]
     pub observe: ObserveConfig,
     #[serde(default)]
@@ -217,6 +229,14 @@ fn default_true() -> bool {
     true
 }
 
+fn default_battery_alert_threshold() -> u8 {
+    20
+}
+
+fn default_lpm_shortcut_name() -> Option<String> {
+    Some(crate::power::default_lpm_shortcut_name().into())
+}
+
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
@@ -231,6 +251,9 @@ impl Default for AppSettings {
             show_speed: true,
             show_files: true,
             show_mirror: true,
+            show_battery: true,
+            battery_alert_threshold: default_battery_alert_threshold(),
+            lpm_shortcut_name: default_lpm_shortcut_name(),
             observe: ObserveConfig::default(),
             liquid_glass_mode: false,
             non_notch_mode: false,
@@ -276,6 +299,7 @@ impl AppSettings {
             WidgetModule::Speed => self.show_speed,
             WidgetModule::Agents => self.show_agents,
             WidgetModule::Mirror => self.show_mirror,
+            WidgetModule::Battery => self.show_battery,
         }
     }
 
@@ -291,6 +315,7 @@ impl AppSettings {
             WidgetModule::Speed => self.show_speed = !self.show_speed,
             WidgetModule::Agents => self.show_agents = !self.show_agents,
             WidgetModule::Mirror => self.show_mirror = !self.show_mirror,
+            WidgetModule::Battery => self.show_battery = !self.show_battery,
         }
     }
 
@@ -611,6 +636,12 @@ mod tests {
         assert!(parsed.show_speed);
         assert!(parsed.show_files);
         assert!(parsed.show_mirror);
+        assert!(parsed.show_battery);
+        assert_eq!(parsed.battery_alert_threshold, 20);
+        assert_eq!(
+            parsed.lpm_shortcut_name.as_deref(),
+            Some(crate::power::default_lpm_shortcut_name())
+        );
         assert!(parsed.liquid_glass_mode);
         assert!(!parsed.non_notch_mode);
         assert!((parsed.island_x - 0.5).abs() < f32::EPSILON);
@@ -696,6 +727,7 @@ mod tests {
         settings.show_speed = false;
         settings.show_agents = false;
         settings.show_mirror = false;
+        settings.show_battery = false;
         settings.set_cells(WidgetModule::Music, 5);
         assert_eq!(settings.used_cells(), 5);
         assert_eq!(settings.remaining_cells(), AppSettings::TOTAL_CELLS - 5);

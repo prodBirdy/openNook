@@ -131,6 +131,7 @@ impl WidgetModuleExt for WidgetModule {
             Self::Speed => "Speed Test",
             Self::Agents => "Agents",
             Self::Mirror => "Mirror",
+            Self::Battery => "Battery",
         }
     }
 
@@ -146,6 +147,7 @@ impl WidgetModuleExt for WidgetModule {
             Self::Speed => "gauge",
             Self::Agents => "bot",
             Self::Mirror => "webcam",
+            Self::Battery => "battery",
         }
     }
 
@@ -161,6 +163,11 @@ impl WidgetModuleExt for WidgetModule {
             Self::Speed => "Cloudflare".into(),
             Self::Agents => "Sessions".into(),
             Self::Mirror => "Camera".into(),
+            Self::Battery => format!(
+                "Alert at {}%",
+                nook_core::power::clamp_alert_threshold(settings.battery_alert_threshold)
+            )
+            .into(),
         }
     }
 
@@ -184,6 +191,7 @@ impl WidgetModuleExt for WidgetModule {
             Self::Speed => "Speed",
             Self::Agents => "Agents",
             Self::Mirror => "Mirror",
+            Self::Battery => "Battery",
         }
     }
 }
@@ -998,6 +1006,23 @@ impl SettingsView {
                     .into_any_element(),
                 );
             }
+            WidgetModule::Battery => {
+                rows.push(threshold_row(settings.battery_alert_threshold, cx).into_any_element());
+                rows.push(
+                    action_row(
+                        "lpm-shortcut",
+                        "Low Power Mode",
+                        "Install shortcut",
+                        cx,
+                        |_, _, _| {
+                            if let Err(err) = nook_core::power::install_lpm_shortcut() {
+                                log::warn!("install LPM shortcut: {err}");
+                            }
+                        },
+                    )
+                    .into_any_element(),
+                );
+            }
             _ => {}
         }
 
@@ -1356,6 +1381,9 @@ fn module_blurb(module: WidgetModule) -> SharedString {
             "Working coding-agent sessions on the compact face and expanded card.".into()
         }
         WidgetModule::Mirror => "A live camera preview that opens when you click the Mirror card.".into(),
+        WidgetModule::Battery => {
+            "Low-battery takeover on the compact face. Low Power Mode uses a one-time Shortcuts import, then falls back to an admin prompt.".into()
+        }
     }
 }
 
@@ -1435,6 +1463,70 @@ fn action_row(
             cx,
             on_click,
         ))
+}
+
+fn threshold_row(value: u8, cx: &mut Context<SettingsView>) -> impl IntoElement {
+    let value = nook_core::power::clamp_alert_threshold(value);
+    settings_row("battery-threshold")
+        .child(label("Alert below", theme::BODY, true))
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .child(stepper_btn("thr-dec", "−", cx, move |_, _, cx| {
+                    nook_core::settings::tweak_app_settings(|s| {
+                        s.battery_alert_threshold =
+                            nook_core::power::clamp_alert_threshold(
+                                s.battery_alert_threshold.saturating_sub(5),
+                            );
+                    });
+                    cx.notify();
+                }))
+                .child(
+                    div()
+                        .w(px(44.))
+                        .flex()
+                        .justify_center()
+                        .child(label(format!("{value}%"), theme::BODY, true)),
+                )
+                .child(stepper_btn("thr-inc", "+", cx, move |_, _, cx| {
+                    nook_core::settings::tweak_app_settings(|s| {
+                        s.battery_alert_threshold =
+                            nook_core::power::clamp_alert_threshold(
+                                s.battery_alert_threshold.saturating_add(5),
+                            );
+                    });
+                    cx.notify();
+                })),
+        )
+}
+
+fn stepper_btn(
+    id: &'static str,
+    caption: &'static str,
+    cx: &mut Context<SettingsView>,
+    on_click: impl Fn(&mut SettingsView, &mut Window, &mut Context<SettingsView>) + 'static,
+) -> impl IntoElement {
+    div()
+        .id(id)
+        .size(px(theme::HIT_MIN))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(6.))
+        .bg(theme::FILL)
+        .hover(|s| s.bg(theme::FILL_SECONDARY))
+        .active(|s| s.opacity(0.85))
+        .cursor(CursorStyle::PointingHand)
+        .child(label(caption, theme::BODY, true))
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, _, window, cx| {
+                cx.stop_propagation();
+                on_click(this, window, cx);
+            }),
+        )
 }
 
 fn toggle_row(
@@ -1705,6 +1797,20 @@ mod tests {
     }
 
     #[test]
+    fn battery_subtitle_shows_the_alert_threshold() {
+        let mut settings = AppSettings::default();
+        assert_eq!(
+            WidgetModule::Battery.subtitle(&settings).as_ref(),
+            "Alert at 20%"
+        );
+        settings.battery_alert_threshold = 5;
+        assert_eq!(
+            WidgetModule::Battery.subtitle(&settings).as_ref(),
+            "Alert at 5%"
+        );
+    }
+
+    #[test]
     fn observe_subtitle_counts_pinned_metrics() {
         assert_eq!(observe_subtitle(0).as_ref(), "Prometheus");
         assert_eq!(observe_subtitle(1).as_ref(), "1 metric");
@@ -1727,6 +1833,7 @@ mod tests {
                 "Speed Test",
                 "Agents",
                 "Mirror",
+                "Battery",
             ]
         );
         assert!(!names

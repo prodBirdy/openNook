@@ -1,6 +1,7 @@
 //! Expanded widget cards. One file per widget so each can be edited on its own.
 
 mod agents;
+mod battery;
 mod calendar;
 mod notes;
 mod notes_editor;
@@ -12,6 +13,7 @@ mod timers;
 pub(crate) use agents::{
     agents_card, compact_left as agents_compact_left, compact_right as agents_compact_right,
 };
+pub(crate) use battery::battery_card;
 pub(crate) use calendar::calendar_card;
 pub(crate) use notes::notes_card;
 pub(crate) use notes_editor::{NotesEditor, NotesEditorEvent};

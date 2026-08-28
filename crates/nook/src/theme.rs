@@ -122,7 +122,13 @@ pub const DESTRUCTIVE: Rgba = Rgba {
     b: 0.227,
     a: 1.0,
 };
-#[allow(dead_code)]
+/// Dark-mode systemOrange for low-battery (not yet critical) compact faces.
+pub const SYSTEM_ORANGE: Rgba = Rgba {
+    r: 1.0,
+    g: 0.584,
+    b: 0.0,
+    a: 1.0,
+};
 pub const SUCCESS: Rgba = Rgba {
     r: 0.188,
     g: 0.820,

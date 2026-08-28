@@ -26,6 +26,7 @@ use nook_core::files::FileTrayItem;
 use nook_core::models::NowPlayingData;
 use nook_core::notch;
 use nook_core::observe::{MetricHistory, ObserveSnapshot};
+use nook_core::power::PowerSnapshot;
 use nook_core::settings::AppSettings;
 use settings::SettingsView;
 use std::time::{Duration, Instant};
@@ -38,6 +39,7 @@ pub enum CompactMode {
     Files,
     Timer,
     Observe,
+    Battery,
     Onboard,
 }
 
@@ -86,6 +88,9 @@ pub struct Island {
     pub observe: ObserveSnapshot,
     observe_history: MetricHistory,
     pub(crate) observe_hover: Option<crate::widgets::ObserveHover>,
+    pub power: PowerSnapshot,
+    pub(crate) lpm_pending: bool,
+    pub(crate) lpm_error: Option<String>,
     pub settings: AppSettings,
     pub first_run: bool,
     pub speed_mbps: Option<f64>,
@@ -213,6 +218,9 @@ impl Island {
             observe: ObserveSnapshot::default(),
             observe_history: nook_core::observe::load_history(),
             observe_hover: None,
+            power: nook_core::power::current(),
+            lpm_pending: false,
+            lpm_error: None,
             settings,
             first_run,
             speed_mbps: None,
@@ -690,6 +698,81 @@ impl Island {
                 .await;
         })
         .detach();
+
+        // Power is push-based: the watch fires on IOKit / LPM notifications.
+        cx.spawn(async move |this, cx| {
+            let mut rx = nook_core::power::subscribe();
+            loop {
+                let snap = *rx.borrow();
+                if this
+                    .update(cx, |this, cx| {
+                        this.apply_power_snapshot(snap, cx);
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+                let (alive, next_rx) = cx
+                    .background_executor()
+                    .spawn(async move {
+                        let ok = nook_core::runtime().block_on(rx.changed()).is_ok();
+                        (ok, rx)
+                    })
+                    .await;
+                rx = next_rx;
+                if !alive {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
+    fn apply_power_snapshot(&mut self, snap: PowerSnapshot, cx: &mut Context<Self>) {
+        let was_alert = self.has_battery_alert();
+        self.power = snap;
+        let now_alert = self.has_battery_alert();
+        if !was_alert && now_alert {
+            self.preferred = Some(CompactMode::Battery);
+            nook_core::haptics::trigger(None);
+        } else if was_alert && !now_alert && self.preferred == Some(CompactMode::Battery) {
+            self.preferred = None;
+        }
+        nook_core::power::set_detail_watch(self.expanded && self.settings.show_battery);
+        cx.notify();
+    }
+
+    pub(crate) fn has_battery_alert(&self) -> bool {
+        self.settings.show_battery
+            && self.power.is_alerting(nook_core::power::clamp_alert_threshold(
+                self.settings.battery_alert_threshold,
+            ))
+    }
+
+    pub(crate) fn toggle_low_power_mode(&mut self, cx: &mut Context<Self>) {
+        if self.lpm_pending {
+            return;
+        }
+        self.lpm_pending = true;
+        self.lpm_error = None;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async { nook_core::runtime().block_on(nook_core::power::toggle_low_power_mode()) })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.lpm_pending = false;
+                match result {
+                    Ok(_) => this.lpm_error = None,
+                    Err(err) => this.lpm_error = Some(err),
+                }
+                this.power = nook_core::power::current();
+                nook_core::power::set_detail_watch(this.expanded && this.settings.show_battery);
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// Merge a fresh poll into the island: extend the local sample history and
@@ -862,6 +945,9 @@ impl Island {
 
     fn available_modes(&self) -> Vec<CompactMode> {
         let mut modes = Vec::new();
+        if self.has_battery_alert() {
+            modes.push(CompactMode::Battery);
+        }
         if self.has_observe_outage() {
             modes.push(CompactMode::Observe);
         }
@@ -1082,6 +1168,7 @@ impl Island {
             self.close_notes_editor(cx);
             self.stop_mirror(cx);
         }
+        nook_core::power::set_detail_watch(self.expanded && self.settings.show_battery);
         nook_core::haptics::trigger(None);
         cx.notify();
     }
@@ -1155,10 +1242,12 @@ impl Island {
         } else if !self.expanded && ay > 0.0 {
             // AppKit scrollingDeltaY: two-finger swipe *down* is positive.
             self.expanded = true;
+            nook_core::power::set_detail_watch(self.settings.show_battery);
             nook_core::haptics::trigger(None);
             true
         } else if self.expanded && ay < 0.0 {
             self.expanded = false;
+            nook_core::power::set_detail_watch(false);
             nook_core::haptics::trigger(None);
             true
         } else {
@@ -1452,6 +1541,9 @@ mod tests {
             observe: ObserveSnapshot::default(),
             observe_history: HashMap::new(),
             observe_hover: None,
+            power: PowerSnapshot::default(),
+            lpm_pending: false,
+            lpm_error: None,
             settings: AppSettings::default(),
             first_run: false,
             speed_mbps: None,
@@ -1758,6 +1850,42 @@ mod tests {
         );
         assert_eq!(island.mode(), CompactMode::Observe);
         island.settings.show_observe = false;
+        assert_eq!(island.available_modes(), vec![CompactMode::Idle]);
+    }
+
+    #[test]
+    fn available_modes_battery_only_while_alerting() {
+        let mut island = test_island();
+        island.settings.show_battery = true;
+        island.settings.battery_alert_threshold = 20;
+        assert_eq!(island.available_modes(), vec![CompactMode::Idle]);
+        island.power = PowerSnapshot {
+            percent: Some(12),
+            is_charging: false,
+            on_ac: false,
+            time_to_empty_min: Some(40),
+            warning_level: nook_core::power::BatteryWarning::None,
+            low_power_mode: false,
+            has_battery: true,
+        };
+        assert_eq!(
+            island.available_modes(),
+            vec![CompactMode::Battery, CompactMode::Idle]
+        );
+        assert_eq!(island.mode(), CompactMode::Battery);
+        island.power.is_charging = true;
+        island.power.on_ac = true;
+        assert_eq!(island.available_modes(), vec![CompactMode::Idle]);
+        island.power.is_charging = false;
+        island.power.on_ac = false;
+        island.power.has_battery = false;
+        assert_eq!(
+            island.available_modes(),
+            vec![CompactMode::Idle],
+            "desktop Macs hide the compact battery face"
+        );
+        island.power.has_battery = true;
+        island.settings.show_battery = false;
         assert_eq!(island.available_modes(), vec![CompactMode::Idle]);
     }
 

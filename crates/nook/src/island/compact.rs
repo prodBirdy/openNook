@@ -3,7 +3,7 @@
 use super::media::{album_chip, visualizer};
 use super::ui::{label, timer_text};
 use super::{CompactMode, Island};
-use crate::icons::lucide;
+use crate::icons::{lucide, lucide_color};
 use crate::theme;
 use crate::widgets;
 use gpui::{
@@ -63,6 +63,17 @@ impl Island {
             CompactMode::Observe => {
                 lucide("triangle-alert", theme::COMPACT_FACE).into_any_element()
             }
+            CompactMode::Battery => {
+                let critical = self.power.percent.map(|p| p <= 10).unwrap_or(false)
+                    || self.power.warning_level == nook_core::power::BatteryWarning::Final;
+                let color = if critical {
+                    theme::DESTRUCTIVE
+                } else {
+                    theme::SYSTEM_ORANGE
+                };
+                lucide_color(self.power.compact_icon(), theme::COMPACT_FACE, color)
+                    .into_any_element()
+            }
             CompactMode::Onboard => label("openNook", theme::BODY, true).into_any_element(),
             CompactMode::Idle => div().into_any_element(),
         }
@@ -104,6 +115,10 @@ impl Island {
                     _ => self.observe.firing_count().to_string(),
                 };
                 label(text, theme::BODY, true).into_any_element()
+            }
+            CompactMode::Battery => {
+                label(nook_core::power::format_percent(self.power.percent), theme::BODY, true)
+                    .into_any_element()
             }
             CompactMode::Onboard if hovered => div()
                 .id("github")
@@ -147,6 +162,7 @@ impl Island {
                 CompactMode::Files => "files",
                 CompactMode::Timer => "timer",
                 CompactMode::Observe => "observe",
+                CompactMode::Battery => "battery",
                 CompactMode::Onboard => "onboard",
             };
             row = row.child(
