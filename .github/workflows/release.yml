@@ -6,15 +6,6 @@ name: Release
 
 on:
   workflow_dispatch:
-  pull_request:
-    paths:
-      - 'src-tauri/**'
-      - 'src/**'
-      - 'package.json'
-      - 'bun.lock'
-      - 'index.html'
-      - 'vite.config.ts'
-      - '.github/workflows/release.yml'
   push:
     tags:
       - 'v*'
