@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>openNook — C</title>
+  <style>
+    html, body { margin: 0; background: #fff8e8; color: #1a1a1a; }
+    body {
+      min-height: 100vh;
+      font: 13px/1.4 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+      display: grid;
+      grid-template-rows: auto 1fr auto;
+    }
+    .bar {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 0.55rem 0.8rem;
+      background: #1a1a1a;
+      color: #fff8e8;
+    }
+    .bar a {
+      color: #fff8e8;
+      text-decoration: none;
+      border: 1px solid #fff8e8;
+      padding: 0.35rem 0.65rem;
+    }
+    .sheet {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      min-height: 0;
+    }
+    .sheet > * { padding: 1.4rem 1.2rem; }
+    .left { border-right: 1px solid #1a1a1a; }
+    h1 {
+      font-size: 0.75rem;
+      font-weight: 700;
+      letter-spacing: 0.18em;
+      text-transform: uppercase;
+      margin: 0 0 2rem;
+    }
+    .lede { margin: 0; font-size: 1.35rem; line-height: 1.25; max-width: 16ch; }
+    .right {
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+    }
+    .meta { color: #444; }
+    .win {
+      display: block;
+      background: #d84a1b;
+      color: #fff8e8;
+      text-decoration: none;
+      padding: 1rem 0.9rem;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+    }
+    footer {
+      border-top: 1px solid #1a1a1a;
+      padding: 0.55rem 0.8rem;
+    }
+    footer a { color: inherit; }
+    @media (max-width: 640px) {
+      .sheet { grid-template-columns: 1fr; }
+      .left { border-right: 0; border-bottom: 1px solid #1a1a1a; }
+    }
+  </style>
+</head>
+<body>
+  <div class="bar">
+    <span>openNook / C</span>
+    <a href="https://github.com/prodBirdy/openNook/releases/download/0.0.2a/openNook_0.1.0_x64-setup.exe">Download for Windows</a>
+  </div>
+  <div class="sheet">
+    <div class="left">
+      <h1>openNook</h1>
+      <p class="lede">Mac Dynamic Island-style desktop (openNook)</p>
+    </div>
+    <div class="right">
+      <p class="meta">Windows installer first.<br>Release tag 0.0.2a.</p>
+      <a class="win" href="https://github.com/prodBirdy/openNook/releases/download/0.0.2a/openNook_0.1.0_x64-setup.exe">Download for Windows</a>
+    </div>
+  </div>
+  <footer>
+    <a href="https://github.com/prodBirdy/openNook">Source</a>
+    ·
+    <a href="https://github.com/prodBirdy/openNook/releases">Releases</a>
+  </footer>
+</body>
+</html>

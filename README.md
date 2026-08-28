@@ -1,3 +1,5 @@
+**Windows:** [Download and run](https://github.com/prodBirdy/openNook/releases/download/0.0.2a/openNook_0.1.0_x64-setup.exe)
+
 # openNook (GPUI)
 
 Native Dynamic Island client — the same macOS/Windows/Linux island as [openNook](https://github.com/prodBirdy/openNook), with the React/Tauri WebView replaced by [GPUI](https://www.gpui.rs).
