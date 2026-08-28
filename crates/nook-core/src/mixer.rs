@@ -4,6 +4,11 @@
 //! creates a Core Audio process tap (macOS 14.4+), which is a capture object
 //! and triggers the system-audio-recording consent prompt. With every gain at
 //! unity there are no taps, no aggregate device, and no IOProc.
+//!
+//! The tap path uses public HAL + `CATapDescription` APIs from objc2-core-audio
+//! 0.3.2 (objc2 0.6). Nothing private is required. Helper grouping optionally
+//! calls `responsibility_get_pid_responsible_for_pid` via `dlsym` and falls
+//! back to bundle-id heuristics when that symbol is absent.
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -578,19 +583,25 @@ pub fn pump() {
             state.inner.ensure_watchers();
             let procs = state.inner.refresh_processes();
             state.apps = group_playing_apps(&procs, &state.gains);
-            let running_keys: Vec<String> = state.apps.iter().map(|a| a.bundle_id.clone()).collect();
+            let running_keys: Vec<String> =
+                state.apps.iter().map(|a| a.bundle_id.clone()).collect();
             if state.ack {
-                if let Err(err) = state.inner.sync_pipeline(&state.gains, &state.apps) {
+                let MixerState {
+                    inner,
+                    gains,
+                    apps,
+                    denied,
+                    ..
+                } = &mut *state;
+                if let Err(err) = inner.sync_pipeline(gains, apps) {
                     log::warn!("mixer pipeline: {err}");
                     if err.contains("denied") || err.contains("permission") || err.contains("-54") {
-                        state.denied = true;
+                        *denied = true;
                     }
                 }
             }
             if !state.gains.has_active()
-                && !running_keys
-                    .iter()
-                    .any(|id| !is_unity(state.gains.get(id)))
+                && !running_keys.iter().any(|id| !is_unity(state.gains.get(id)))
             {
                 state.inner.teardown_pipeline();
             }
@@ -626,9 +637,17 @@ pub fn copy_levels(apps: &mut [MixerApp]) -> bool {
 
 #[cfg(target_os = "macos")]
 mod macos {
+    //! Core Audio process-tap engine (macOS 14.4+ public APIs only).
+    //!
+    //! Aligned with objc2 0.6 / objc2-core-audio 0.3.2:
+    //! `kAudioObjectSystemObject` is `c_int`; HAL functions take `NonNull` and
+    //! `extern "C-unwind"` listeners. `CATapDescription::alloc` needs `AnyThread`.
+    //! No private entitlements. `responsibility_get_pid_responsible_for_pid` is
+    //! resolved with `dlsym` and ignored when missing.
+
     use super::*;
     use objc2::runtime::AnyObject;
-    use objc2::{class, msg_send};
+    use objc2::{class, msg_send, AnyThread, Encode, Encoding};
     use objc2_core_audio::{
         kAudioAggregateDeviceIsPrivateKey, kAudioAggregateDeviceNameKey,
         kAudioAggregateDeviceSubDeviceListKey, kAudioAggregateDeviceTapAutoStartKey,
@@ -643,9 +662,8 @@ mod macos {
         AudioDeviceDestroyIOProcID, AudioDeviceIOProcID, AudioDeviceStart, AudioDeviceStop,
         AudioHardwareCreateAggregateDevice, AudioHardwareCreateProcessTap,
         AudioHardwareDestroyAggregateDevice, AudioHardwareDestroyProcessTap,
-        AudioObjectAddPropertyListener, AudioObjectGetPropertyData,
-        AudioObjectGetPropertyDataSize, AudioObjectID, AudioObjectPropertyAddress,
-        AudioObjectPropertyListenerProc, AudioObjectRemovePropertyListener,
+        AudioObjectAddPropertyListener, AudioObjectGetPropertyData, AudioObjectGetPropertyDataSize,
+        AudioObjectID, AudioObjectPropertyAddress, AudioObjectRemovePropertyListener,
         AudioObjectSetPropertyData, CATapDescription, CATapMuteBehavior,
     };
     use objc2_core_audio_types::{AudioBufferList, AudioTimeStamp};
@@ -654,6 +672,24 @@ mod macos {
     use std::ffi::{c_void, CStr};
     use std::ptr::NonNull;
     use std::sync::atomic::AtomicU32;
+
+    /// `kAudioObjectSystemObject` is `c_int` in objc2-core-audio 0.3.2.
+    const SYSTEM_OBJECT: AudioObjectID = kAudioObjectSystemObject as AudioObjectID;
+
+    /// Same layout as Foundation's `NSOperatingSystemVersion` (`NSInteger` triple).
+    #[repr(C)]
+    struct NsVer {
+        major: isize,
+        minor: isize,
+        patch: isize,
+    }
+
+    unsafe impl Encode for NsVer {
+        const ENCODING: Encoding = Encoding::Struct(
+            "NSOperatingSystemVersion",
+            &[isize::ENCODING, isize::ENCODING, isize::ENCODING],
+        );
+    }
 
     const MAX_TAPS: usize = 16;
     const AGG_PREFIX: &str = "openNook Mixer";
@@ -701,12 +737,6 @@ mod macos {
             if info.is_null() {
                 return false;
             }
-            #[repr(C)]
-            struct NsVer {
-                major: isize,
-                minor: isize,
-                patch: isize,
-            }
             let ver = NsVer {
                 major: 14,
                 minor: 4,
@@ -718,7 +748,7 @@ mod macos {
     }
 
     pub fn cleanup_orphans() {
-        let devices = property_ids(kAudioObjectSystemObject, kAudioHardwarePropertyDevices);
+        let devices = property_ids(SYSTEM_OBJECT, kAudioHardwarePropertyDevices);
         for id in devices {
             if let Some(name) = read_cf_string(id, kAudioObjectPropertyName) {
                 if name.starts_with(AGG_PREFIX) {
@@ -736,11 +766,8 @@ mod macos {
             if self.watching || !process_taps_supported() {
                 return;
             }
-            add_listener(kAudioObjectSystemObject, kAudioHardwarePropertyProcessObjectList);
-            add_listener(
-                kAudioObjectSystemObject,
-                kAudioHardwarePropertyDefaultOutputDevice,
-            );
+            add_listener(SYSTEM_OBJECT, kAudioHardwarePropertyProcessObjectList);
+            add_listener(SYSTEM_OBJECT, kAudioHardwarePropertyDefaultOutputDevice);
             self.watching = true;
         }
 
@@ -748,11 +775,8 @@ mod macos {
             if !self.watching {
                 return;
             }
-            remove_listener(kAudioObjectSystemObject, kAudioHardwarePropertyProcessObjectList);
-            remove_listener(
-                kAudioObjectSystemObject,
-                kAudioHardwarePropertyDefaultOutputDevice,
-            );
+            remove_listener(SYSTEM_OBJECT, kAudioHardwarePropertyProcessObjectList);
+            remove_listener(SYSTEM_OBJECT, kAudioHardwarePropertyDefaultOutputDevice);
             for id in self.running_listeners.drain(..) {
                 remove_listener(id, kAudioProcessPropertyIsRunningOutput);
             }
@@ -760,7 +784,7 @@ mod macos {
         }
 
         pub fn refresh_processes(&mut self) -> Vec<RawProcess> {
-            let ids = property_ids(kAudioObjectSystemObject, kAudioHardwarePropertyProcessObjectList);
+            let ids = property_ids(SYSTEM_OBJECT, kAudioHardwarePropertyProcessObjectList);
             let mut next_listeners = Vec::new();
             let mut procs = Vec::new();
             for object_id in ids {
@@ -769,8 +793,10 @@ mod macos {
                 }
                 next_listeners.push(object_id);
                 let pid = read_i32(object_id, kAudioProcessPropertyPID).unwrap_or(0);
-                let bundle = read_cf_string(object_id, kAudioProcessPropertyBundleID).unwrap_or_default();
-                let running = read_u32(object_id, kAudioProcessPropertyIsRunningOutput).unwrap_or(0) != 0;
+                let bundle =
+                    read_cf_string(object_id, kAudioProcessPropertyBundleID).unwrap_or_default();
+                let running =
+                    read_u32(object_id, kAudioProcessPropertyIsRunningOutput).unwrap_or(0) != 0;
                 let (name, responsible) = identity_for_pid(pid, &bundle);
                 procs.push(RawProcess {
                     pid,
@@ -870,7 +896,12 @@ mod macos {
 
         let mut proc_id: AudioDeviceIOProcID = None;
         let status = unsafe {
-            AudioDeviceCreateIOProcID(agg, Some(io_proc), std::ptr::null_mut(), &mut proc_id)
+            AudioDeviceCreateIOProcID(
+                agg,
+                Some(io_proc),
+                std::ptr::null_mut(),
+                NonNull::from(&mut proc_id),
+            )
         };
         if status != 0 || proc_id.is_none() {
             unsafe {
@@ -917,9 +948,13 @@ mod macos {
             CATapDescription::initStereoMixdownOfProcesses(CATapDescription::alloc(), &array)
         };
         unsafe {
-            desc.setName(&NSString::from_str(&format!("{AGG_PREFIX} {}", app.bundle_id)));
+            desc.setName(&NSString::from_str(&format!(
+                "{AGG_PREFIX} {}",
+                app.bundle_id
+            )));
             desc.setPrivate(true);
-            desc.setMuteBehavior(CATapMuteBehavior::MutedWhenTapped);
+            // CATapMutedWhenTapped — silence the process while the tap is live.
+            desc.setMuteBehavior(CATapMuteBehavior(2));
         }
         let mut tap: AudioObjectID = 0;
         let status = unsafe { AudioHardwareCreateProcessTap(Some(&desc), &mut tap) };
@@ -980,10 +1015,7 @@ mod macos {
     }
 
     fn default_output_device() -> Option<AudioObjectID> {
-        read_u32(
-            kAudioObjectSystemObject,
-            kAudioHardwarePropertyDefaultOutputDevice,
-        )
+        read_u32(SYSTEM_OBJECT, kAudioHardwarePropertyDefaultOutputDevice)
     }
 
     fn set_buffer_frames(device: AudioObjectID, frames: u32) {
@@ -1049,16 +1081,16 @@ mod macos {
                 std::ptr::write_bytes(buf.mData, 0, buf.mDataByteSize as usize);
             }
             let input = in_data.as_ref();
-            let in_bufs = std::slice::from_raw_parts(
-                input.mBuffers.as_ptr(),
-                input.mNumberBuffers as usize,
-            );
+            let in_bufs =
+                std::slice::from_raw_parts(input.mBuffers.as_ptr(), input.mNumberBuffers as usize);
             let n = TAP_COUNT.load(Ordering::Relaxed) as usize;
             for (i, buf) in in_bufs.iter().enumerate() {
                 if buf.mData.is_null() {
                     continue;
                 }
-                let gain = f32::from_bits(TAP_GAINS[i.min(n.saturating_sub(1).min(MAX_TAPS - 1))].load(Ordering::Relaxed));
+                let gain = f32::from_bits(
+                    TAP_GAINS[i.min(n.saturating_sub(1).min(MAX_TAPS - 1))].load(Ordering::Relaxed),
+                );
                 let count = buf.mDataByteSize as usize / std::mem::size_of::<f32>();
                 let samples = std::slice::from_raw_parts(buf.mData as *const f32, count);
                 let mut peak = 0.0f32;
@@ -1186,7 +1218,12 @@ mod macos {
     fn add_listener(object: AudioObjectID, selector: u32) {
         let addr = address(selector);
         unsafe {
-            AudioObjectAddPropertyListener(object, NonNull::from(&addr), Some(on_property), std::ptr::null_mut());
+            AudioObjectAddPropertyListener(
+                object,
+                NonNull::from(&addr),
+                Some(on_property),
+                std::ptr::null_mut(),
+            );
         }
     }
 
@@ -1202,7 +1239,7 @@ mod macos {
         }
     }
 
-    unsafe extern "C" fn on_property(
+    unsafe extern "C-unwind" fn on_property(
         _object: AudioObjectID,
         _n: u32,
         _addresses: NonNull<AudioObjectPropertyAddress>,
@@ -1237,7 +1274,9 @@ mod macos {
                 0,
                 std::ptr::null(),
                 NonNull::from(&mut size),
-                NonNull::from(ids.as_mut_ptr()).cast::<c_void>(),
+                NonNull::new(ids.as_mut_ptr())
+                    .expect("audio object id buffer")
+                    .cast::<c_void>(),
             )
         };
         if status != 0 {
@@ -1367,7 +1406,10 @@ mod tests {
 
     #[test]
     fn grouping_maps_webkit_and_browser_helpers() {
-        assert_eq!(canonical_bundle_id("com.apple.WebKit.GPU"), "com.apple.Safari");
+        assert_eq!(
+            canonical_bundle_id("com.apple.WebKit.GPU"),
+            "com.apple.Safari"
+        );
         assert_eq!(
             canonical_bundle_id("com.apple.WebKit.WebContent"),
             "com.apple.Safari"
@@ -1384,7 +1426,10 @@ mod tests {
             canonical_bundle_id("com.google.Chrome.canary.helper"),
             "com.google.Chrome.canary"
         );
-        assert_eq!(canonical_bundle_id("com.spotify.client"), "com.spotify.client");
+        assert_eq!(
+            canonical_bundle_id("com.spotify.client"),
+            "com.spotify.client"
+        );
         assert!(is_helper_bundle("com.apple.WebKit.GPU"));
         assert!(!is_helper_bundle("com.apple.Safari"));
     }
@@ -1396,10 +1441,7 @@ mod tests {
             "com.apple.Safari"
         );
         assert_eq!(
-            group_key(
-                "com.figma.Desktop.helper",
-                Some("com.figma.Desktop")
-            ),
+            group_key("com.figma.Desktop.helper", Some("com.figma.Desktop")),
             "com.figma.Desktop"
         );
         assert_eq!(
@@ -1410,10 +1452,7 @@ mod tests {
 
     #[test]
     fn grouping_merges_helper_pids_into_one_row() {
-        let gains = GainMap::from_persist(BTreeMap::from([(
-            "com.apple.Safari".into(),
-            0.5,
-        )]));
+        let gains = GainMap::from_persist(BTreeMap::from([("com.apple.Safari".into(), 0.5)]));
         let apps = group_playing_apps(
             &[
                 RawProcess {
