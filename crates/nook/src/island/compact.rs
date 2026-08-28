@@ -53,6 +53,9 @@ impl Island {
     }
 
     fn compact_left(&self, mode: CompactMode, cx: &mut Context<Self>) -> AnyElement {
+        if let Some(name) = self.output_hud_label() {
+            return label(name.to_string(), theme::BODY, true).into_any_element();
+        }
         match mode {
             CompactMode::Media => {
                 album_chip(&self.now_playing, self.overlay_fade.value, cx).into_any_element()

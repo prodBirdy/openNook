@@ -569,6 +569,17 @@ impl SettingsView {
                         .into_any_element(),
                     ]),
                     Some("Hover the island to expand. Settings and Quit are in the menu bar extra."),
+                ))
+                .child(section(
+                    "Sound",
+                    settings_group(vec![toggle_row(
+                        "Output picker on the media card",
+                        settings.audio_output_picker,
+                        cx,
+                        |s| s.audio_output_picker = !s.audio_output_picker,
+                    )
+                    .into_any_element()]),
+                    Some(nook_core::audio_devices::AIRPLAY_INITIATE_NOTE),
                 )),
         )
     }
@@ -1346,7 +1357,7 @@ fn module_blurb(module: WidgetModule) -> SharedString {
             "Pinned metrics on the compact island and the expanded card.".into()
         }
         WidgetModule::Music => {
-            "Now Playing from MediaRemote on macOS, with an AppleScript fallback.".into()
+            "Now Playing from MediaRemote on macOS. The output picker lists CoreAudio devices; it cannot start AirPlay to a HomePod or Apple TV.".into()
         }
         WidgetModule::Files => "Drop zone and tray live on the Tray tab of the expanded island.".into(),
         WidgetModule::Timers => "Countdown presets and a compact ring while a timer is running.".into(),

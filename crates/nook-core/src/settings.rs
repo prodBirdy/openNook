@@ -167,6 +167,10 @@ pub struct AppSettings {
     /// Per-widget widths in Nook cells. Missing entries use [`WidgetModule::default_cells`].
     #[serde(default)]
     pub widget_widths: Vec<(WidgetModule, u8)>,
+    /// AirPlay / output-device picker on the expanded media card. CoreAudio
+    /// HAL only — cannot initiate a new AirPlay route to a HomePod / Apple TV.
+    #[serde(default = "default_true")]
+    pub audio_output_picker: bool,
     #[serde(default)]
     pub window: WindowSettings,
 }
@@ -239,6 +243,7 @@ impl Default for AppSettings {
             hide_when_maximized: false,
             island_color: None,
             widget_widths: Vec::new(),
+            audio_output_picker: true,
             window: WindowSettings::default(),
         }
     }
@@ -725,5 +730,15 @@ mod tests {
         let legacy: AppSettings =
             serde_json::from_str(r#"{"observe":{"metrics_token":"legacy-secret"}}"#).unwrap();
         assert_eq!(legacy.observe.metrics_token, "legacy-secret");
+    }
+
+    #[test]
+    fn audio_output_picker_defaults_on() {
+        let parsed: AppSettings = serde_json::from_str("{}").unwrap();
+        assert!(parsed.audio_output_picker);
+        assert_eq!(
+            parsed.audio_output_picker,
+            AppSettings::default().audio_output_picker
+        );
     }
 }

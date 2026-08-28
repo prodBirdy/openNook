@@ -97,10 +97,7 @@ impl Island {
             match module {
                 WidgetModule::Music if self.settings.show_media => add(
                     &mut kids,
-                    cell_pane(
-                        self.settings.cells_for(module),
-                        nook_media_pane(&self.now_playing, cx),
-                    ),
+                    cell_pane(self.settings.cells_for(module), nook_media_pane(self, cx)),
                 ),
                 WidgetModule::Calendar if self.settings.show_calendar => add(
                     &mut kids,
