@@ -569,6 +569,31 @@ impl SettingsView {
                         .into_any_element(),
                     ]),
                     Some("Hover the island to expand. Settings and Quit are in the menu bar extra."),
+                ))
+                .child(section(
+                    "HUD",
+                    settings_group(vec![
+                        toggle_row(
+                            "Show volume & brightness HUD",
+                            settings.show_volume_brightness_hud,
+                            cx,
+                            |s| {
+                                s.show_volume_brightness_hud = !s.show_volume_brightness_hud;
+                            },
+                        )
+                        .into_any_element(),
+                        toggle_row(
+                            "Replace system volume/brightness HUD",
+                            settings.replace_system_hud,
+                            cx,
+                            |s| {
+                                s.replace_system_hud = !s.replace_system_hud;
+                                nook_core::osd::apply(s.replace_system_hud);
+                            },
+                        )
+                        .into_any_element(),
+                    ]),
+                    Some(hud_caption(settings)),
                 )),
         )
     }
@@ -1336,6 +1361,14 @@ impl SettingsView {
     }
 }
 
+fn hud_caption(settings: &AppSettings) -> SharedString {
+    if settings.replace_system_hud {
+        "Hides the system volume, brightness, caps-lock, and keyboard-backlight bezels while openNook is running. If OSDUIHelper is missing, the island HUD still appears beside the system bezel.".into()
+    } else {
+        "Volume and brightness keys still show the system bezel. Turn on replacement to hide it — that also hides caps-lock and keyboard-backlight bezels.".into()
+    }
+}
+
 fn module_blurb(module: WidgetModule) -> SharedString {
     match module {
         WidgetModule::Calendar => {
@@ -1741,6 +1774,16 @@ mod tests {
         assert_eq!(SettingsCategory::from_u8(99), SettingsCategory::General);
         assert_eq!(WidgetModule::from_u8(0), WidgetModule::Calendar);
         assert_eq!(WidgetModule::from_u8(99), WidgetModule::Calendar);
+    }
+
+    #[test]
+    fn hud_caption_explains_bezel_suppression() {
+        let off = AppSettings::default();
+        assert!(!off.replace_system_hud);
+        assert!(hud_caption(&off).as_ref().contains("system bezel"));
+        let mut on = AppSettings::default();
+        on.replace_system_hud = true;
+        assert!(hud_caption(&on).as_ref().contains("caps-lock"));
     }
 
     #[test]

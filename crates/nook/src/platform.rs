@@ -1433,6 +1433,44 @@ pub fn install_media_observers() {
     }
 }
 
+/// Re-assert OSDUIHelper suppression after sleep — launchd can respawn it.
+pub fn install_osd_wake_observer() {
+    #[cfg(target_os = "macos")]
+    unsafe {
+        use block2::RcBlock;
+        use objc2::runtime::AnyObject;
+        use objc2::*;
+
+        static INSTALLED: Once = Once::new();
+        INSTALLED.call_once(|| {
+            let workspace: *mut AnyObject = msg_send![class!(NSWorkspace), sharedWorkspace];
+            if workspace.is_null() {
+                return;
+            }
+            let center: *mut AnyObject = msg_send![workspace, notificationCenter];
+            if center.is_null() {
+                return;
+            }
+            let name: *mut AnyObject = msg_send![
+                class!(NSString),
+                stringWithUTF8String: c"NSWorkspaceDidWakeNotification".as_ptr()
+            ];
+            let block = RcBlock::new(move |_note: *mut AnyObject| {
+                nook_core::osd::apply_from_settings();
+            });
+            let token: *mut AnyObject = msg_send![
+                center,
+                addObserverForName: name,
+                object: std::ptr::null_mut::<AnyObject>(),
+                queue: std::ptr::null_mut::<AnyObject>(),
+                usingBlock: &*block
+            ];
+            std::mem::forget(block);
+            let _ = token;
+        });
+    }
+}
+
 /// GPUI-space island rect (origin top-left) for the native glass underlay.
 #[derive(Clone, Copy, Debug)]
 pub struct IslandGlass {

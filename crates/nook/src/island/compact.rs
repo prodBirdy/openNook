@@ -7,9 +7,10 @@ use crate::icons::lucide;
 use crate::theme;
 use crate::widgets;
 use gpui::{
-    div, prelude::*, px, AnyElement, Context, CursorStyle, MouseButton, MouseDownEvent,
-    SharedString,
+    div, prelude::*, px, relative, rgb, rgba, AnyElement, Context, CursorStyle, MouseButton,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, SharedString,
 };
+use nook_core::sysvol::HudKind;
 
 impl Island {
     pub(super) fn render_compact(
@@ -53,6 +54,10 @@ impl Island {
     }
 
     fn compact_left(&self, mode: CompactMode, cx: &mut Context<Self>) -> AnyElement {
+        if self.hud_active() {
+            return lucide(hud_icon(self.hud.unwrap().kind), theme::COMPACT_FACE)
+                .into_any_element();
+        }
         match mode {
             CompactMode::Media => {
                 album_chip(&self.now_playing, self.overlay_fade.value, cx).into_any_element()
@@ -74,6 +79,9 @@ impl Island {
         hovered: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        if self.hud_active() {
+            return self.hud_slider(cx);
+        }
         match mode {
             CompactMode::Media => visualizer(
                 self.now_playing
@@ -123,7 +131,73 @@ impl Island {
         }
     }
 
+    fn hud_slider(&self, cx: &mut Context<Self>) -> AnyElement {
+        const SEGMENTS: u32 = 20;
+        let fill = self.hud_fill.value.clamp(0.0, 1.0);
+        let mut hits = div()
+            .absolute()
+            .inset_0()
+            .flex()
+            .cursor(CursorStyle::PointingHand);
+        for i in 0..SEGMENTS {
+            let ratio = (i as f32 + 0.5) / SEGMENTS as f32;
+            hits = hits.child(
+                div()
+                    .id(SharedString::from(format!("hud-seg-{i}")))
+                    .flex_1()
+                    .h_full()
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                            cx.stop_propagation();
+                            this.apply_hud_slider(ratio, cx);
+                        }),
+                    )
+                    .on_mouse_move(cx.listener(move |this, _: &MouseMoveEvent, _, cx| {
+                        if this.hud_dragging {
+                            cx.stop_propagation();
+                            this.apply_hud_slider(ratio, cx);
+                        }
+                    })),
+            );
+        }
+        div()
+            .id("hud-slider")
+            .w_full()
+            .max_w(px(72.))
+            .h(px(theme::HIT_MIN.min(18.0)))
+            .flex()
+            .items_center()
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _: &MouseUpEvent, _, cx| {
+                    this.end_hud_drag();
+                    cx.notify();
+                }),
+            )
+            .child(
+                div()
+                    .relative()
+                    .w_full()
+                    .h(px(4.))
+                    .rounded(px(2.))
+                    .bg(rgba(0xffffff26))
+                    .child(
+                        div()
+                            .h_full()
+                            .w(relative(fill))
+                            .rounded(px(2.))
+                            .bg(rgb(0xffffff)),
+                    )
+                    .child(hits),
+            )
+            .into_any_element()
+    }
+
     pub(super) fn mode_dots(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.hud_active() {
+            return div().into_any_element();
+        }
         let modes = self.available_modes();
         let current = self.mode();
         if modes.len() <= 1 {
@@ -181,5 +255,26 @@ impl Island {
             );
         }
         row.into_any_element()
+    }
+}
+
+fn hud_icon(kind: HudKind) -> &'static str {
+    match kind {
+        HudKind::Volume => "volume-2",
+        HudKind::Mute => "volume-x",
+        HudKind::Brightness => "sun",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::hud_icon;
+    use nook_core::sysvol::HudKind;
+
+    #[test]
+    fn hud_icons_match_kind() {
+        assert_eq!(hud_icon(HudKind::Volume), "volume-2");
+        assert_eq!(hud_icon(HudKind::Mute), "volume-x");
+        assert_eq!(hud_icon(HudKind::Brightness), "sun");
     }
 }

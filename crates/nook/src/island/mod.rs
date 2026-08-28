@@ -27,8 +27,30 @@ use nook_core::models::NowPlayingData;
 use nook_core::notch;
 use nook_core::observe::{MetricHistory, ObserveSnapshot};
 use nook_core::settings::AppSettings;
+use nook_core::sysvol::{self, HudEvent, HudKind, HUD_TTL};
 use settings::SettingsView;
 use std::time::{Duration, Instant};
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct HudState {
+    pub kind: HudKind,
+    pub value: f32,
+    pub shown_at: Instant,
+    pub gen: u64,
+}
+
+impl HudState {
+    pub fn display_value(self) -> f32 {
+        match self.kind {
+            HudKind::Mute => 0.0,
+            HudKind::Volume | HudKind::Brightness => sysvol::clamp_unit(self.value),
+        }
+    }
+
+    pub fn expired(self, now: Instant, dragging: bool) -> bool {
+        !dragging && now.duration_since(self.shown_at) >= HUD_TTL
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CompactMode {
@@ -158,6 +180,9 @@ pub struct Island {
     pub(crate) mirror_on: bool,
     mirror_gen: u64,
     pub(crate) mirror_frame: Option<std::sync::Arc<gpui::RenderImage>>,
+    pub(super) hud: Option<HudState>,
+    hud_fill: SpringValue,
+    hud_dragging: bool,
 }
 
 struct PendingFileDrag {
@@ -256,6 +281,9 @@ impl Island {
             mirror_on: false,
             mirror_gen: 0,
             mirror_frame: None,
+            hud: None,
+            hud_fill: SpringValue::at(0.0),
+            hud_dragging: false,
         };
         // Start at the compact idle size so the first paint isn't a jump.
         let (w, h) = this.target_size();
@@ -263,6 +291,7 @@ impl Island {
         this.anim_h.set(h);
 
         platform::install_media_observers();
+        platform::install_osd_wake_observer();
         nook_core::runtime().spawn(async {
             let _ = nook_core::calendar::request_calendar_access().await;
         });
@@ -328,6 +357,11 @@ impl Island {
                             this.settings.island_y = y;
                         } else {
                             this.settings = settings;
+                        }
+                        nook_core::osd::apply_from_settings();
+                        if !this.settings.show_volume_brightness_hud {
+                            this.hud = None;
+                            this.hud_dragging = false;
                         }
                         dirty = true;
                     }
@@ -490,6 +524,12 @@ impl Island {
                             }
                         }
                     }
+                    if let Some(hud) = this.hud {
+                        if hud.expired(now, this.hud_dragging) {
+                            this.hud = None;
+                            dirty = true;
+                        }
+                    }
                     if dirty {
                         cx.notify();
                     }
@@ -501,7 +541,8 @@ impl Island {
                         || this.pending_file_drag.is_some()
                         || this.mirror_on
                         || this.settings_open
-                        || any_working;
+                        || any_working
+                        || this.hud_active();
                     // Media playing promotes itself through `dirty` (the
                     // visualizer levels change every frame), so it needs no
                     // term of its own here.
@@ -688,6 +729,42 @@ impl Island {
             cx.background_executor()
                 .timer(Duration::from_secs(wait))
                 .await;
+        })
+        .detach();
+
+        cx.spawn(async move |this, cx| {
+            let mut rx = nook_core::sysvol::subscribe();
+            loop {
+                if rx.changed().await.is_err() {
+                    break;
+                }
+                let event = *rx.borrow_and_update();
+                if event.is_initial() {
+                    continue;
+                }
+                let Ok(gen) = this.update(cx, |this, cx| this.apply_hud_event(event, cx)) else {
+                    break;
+                };
+                if gen == 0 {
+                    continue;
+                }
+                let this2 = this.clone();
+                cx.spawn(async move |_, cx| {
+                    cx.background_executor().timer(HUD_TTL).await;
+                    this2
+                        .update(cx, |this, cx| {
+                            if this
+                                .hud
+                                .is_some_and(|hud| hud.gen == gen && !this.hud_dragging)
+                            {
+                                this.hud = None;
+                                cx.notify();
+                            }
+                        })
+                        .ok();
+                })
+                .detach();
+            }
         })
         .detach();
     }
@@ -884,6 +961,75 @@ impl Island {
         modes
     }
 
+    pub(super) fn hud_enabled(&self) -> bool {
+        self.settings.show_volume_brightness_hud
+    }
+
+    pub(super) fn hud_active(&self) -> bool {
+        self.hud_enabled() && self.hud.is_some()
+    }
+
+    fn apply_hud_event(&mut self, event: HudEvent, cx: &mut Context<Self>) -> u64 {
+        if !self.hud_enabled() {
+            return 0;
+        }
+        let first = self.hud.is_none();
+        let gen = self.hud.map(|h| h.gen.saturating_add(1)).unwrap_or(1);
+        self.hud = Some(HudState {
+            kind: event.kind,
+            value: event.value,
+            shown_at: Instant::now(),
+            gen,
+        });
+        if first {
+            if self.reduce_motion {
+                self.hud_fill.set(event.display_value());
+            }
+            nook_core::haptics::trigger(None);
+        }
+        cx.notify();
+        gen
+    }
+
+    pub(super) fn apply_hud_slider(&mut self, ratio: f32, cx: &mut Context<Self>) {
+        let Some(kind) = self.hud.map(|h| h.kind) else {
+            return;
+        };
+        let value = sysvol::clamp_unit(ratio);
+        self.hud_dragging = true;
+        match kind {
+            HudKind::Volume | HudKind::Mute => {
+                sysvol::set_volume(value);
+                self.hud = Some(HudState {
+                    kind: HudKind::Volume,
+                    value,
+                    shown_at: Instant::now(),
+                    gen: self.hud.map(|h| h.gen.saturating_add(1)).unwrap_or(1),
+                });
+            }
+            HudKind::Brightness => {
+                nook_core::brightness::set_brightness(value);
+                self.hud = Some(HudState {
+                    kind: HudKind::Brightness,
+                    value,
+                    shown_at: Instant::now(),
+                    gen: self.hud.map(|h| h.gen.saturating_add(1)).unwrap_or(1),
+                });
+            }
+        }
+        cx.notify();
+    }
+
+    pub(super) fn end_hud_drag(&mut self) {
+        if !self.hud_dragging {
+            return;
+        }
+        self.hud_dragging = false;
+        if let Some(hud) = &mut self.hud {
+            hud.shown_at = Instant::now();
+        }
+    }
+
     fn target_size(&self) -> (f32, f32) {
         let base_w = self.notch_width.max(180.0);
         let base_h = self.notch_height.max(32.0);
@@ -900,6 +1046,9 @@ impl Island {
         }
         if self.hovered {
             return (base_w + 125.0, base_h + 15.0);
+        }
+        if self.hud_active() {
+            return (base_w + 120.0, base_h + theme::COMPACT_HEIGHT_OVERFLOW);
         }
         if self.mode() == CompactMode::Idle {
             let h = if self.settings.non_notch_mode {
@@ -1019,6 +1168,18 @@ impl Island {
         moving |= self
             .overlay_fade
             .step(motion::REVEAL, overlay, dt, motion::REST_ALPHA);
+        let hud_target = self
+            .hud
+            .filter(|_| self.hud_enabled())
+            .map(|h| h.display_value())
+            .unwrap_or(0.0);
+        if self.reduce_motion {
+            self.hud_fill.set(hud_target);
+        } else {
+            moving |= self
+                .hud_fill
+                .step(motion::REVEAL, hud_target, dt, motion::REST_ALPHA);
+        }
 
         if self.reduce_motion {
             self.blur = 0.0;
@@ -1494,6 +1655,9 @@ mod tests {
             mirror_on: false,
             mirror_gen: 0,
             mirror_frame: None,
+            hud: None,
+            hud_fill: SpringValue::at(0.0),
+            hud_dragging: false,
         }
     }
 
@@ -1683,6 +1847,53 @@ mod tests {
         let (w, h) = island.target_size();
         assert!(w >= 180.0);
         assert!(h >= 1.0);
+    }
+
+    #[test]
+    fn hud_takeover_expands_idle_island_and_respects_the_toggle() {
+        let mut island = test_island();
+        let idle = island.target_size();
+        let event = HudEvent {
+            kind: HudKind::Volume,
+            value: 0.6,
+            seq: 1,
+        };
+        // apply_hud_event needs a Context; drive the same fields the spawn path sets.
+        island.hud = Some(HudState {
+            kind: event.kind,
+            value: event.value,
+            shown_at: Instant::now(),
+            gen: 1,
+        });
+        island.hud_fill.set(event.display_value());
+        assert!(island.hud_active());
+        let live = island.target_size();
+        assert!(live.0 > idle.0, "HUD should widen the idle sliver");
+        assert!(live.1 > idle.1, "HUD should grow the idle sliver");
+        assert!((island.hud.unwrap().display_value() - 0.6).abs() < f32::EPSILON);
+
+        island.settings.show_volume_brightness_hud = false;
+        assert!(!island.hud_active());
+        assert_eq!(island.target_size(), idle);
+    }
+
+    #[test]
+    fn hud_expires_after_ttl_unless_dragging() {
+        let mut island = test_island();
+        island.hud = Some(HudState {
+            kind: HudKind::Brightness,
+            value: 0.2,
+            shown_at: Instant::now() - HUD_TTL - Duration::from_millis(10),
+            gen: 3,
+        });
+        assert!(island.hud.unwrap().expired(Instant::now(), false));
+        assert!(!island.hud.unwrap().expired(Instant::now(), true));
+        island.hud_dragging = true;
+        island.end_hud_drag();
+        assert!(!island.hud_dragging);
+        assert!(
+            Instant::now().duration_since(island.hud.unwrap().shown_at) < Duration::from_millis(50)
+        );
     }
 
     #[test]

@@ -5,6 +5,7 @@
 
 pub mod agents;
 pub mod audio;
+pub mod brightness;
 pub mod browser_media;
 pub mod calendar;
 pub mod database;
@@ -18,7 +19,9 @@ pub mod notch;
 pub mod notes;
 pub mod observe;
 pub mod occupancy;
+pub mod osd;
 pub mod settings;
+pub mod sysvol;
 pub mod utils;
 pub mod widgets;
 
@@ -63,5 +66,8 @@ pub fn init() {
         audio::init_audio_state();
         audio::setup_audio_monitoring();
         mouse::start_polling();
+        sysvol::start();
+        brightness::start();
+        osd::install();
     });
 }
