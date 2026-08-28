@@ -6,6 +6,7 @@
 //! the island runs them with `/usr/bin/shortcuts`.
 
 use std::path::PathBuf;
+#[cfg(target_os = "macos")]
 use std::process::Command;
 use std::sync::{Mutex, OnceLock};
 

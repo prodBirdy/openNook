@@ -493,7 +493,6 @@ impl Island {
                             dirty = true;
                         }
                     }
-                    }
                     let levels = nook_core::audio::get_audio_levels();
                     if this.now_playing.audio_levels.as_deref() != Some(levels.as_slice()) {
                         this.now_playing.audio_levels = Some(levels);
