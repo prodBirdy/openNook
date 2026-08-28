@@ -857,13 +857,15 @@ impl Island {
         self.disarm_lyrics_timer();
         let album = self.now_playing.album.clone();
         let duration = self.now_playing.duration;
+        let artist = key.1.clone();
+        let title = key.0.clone();
         cx.spawn(async move |this, cx| {
             let fetched = cx
                 .background_executor()
                 .spawn(async move {
                     nook_core::runtime().block_on(nook_core::lyrics::fetch_for_track(
-                        &key.1,
-                        &key.0,
+                        &artist,
+                        &title,
                         album.as_deref(),
                         duration,
                     ))
