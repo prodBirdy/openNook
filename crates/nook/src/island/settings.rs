@@ -1788,6 +1788,7 @@ mod tests {
         );
     }
 
+    #[test]
     fn observe_subtitle_counts_pinned_metrics() {
         assert_eq!(observe_subtitle(0).as_ref(), "Prometheus");
         assert_eq!(observe_subtitle(1).as_ref(), "1 metric");
