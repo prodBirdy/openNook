@@ -139,7 +139,12 @@ impl Island {
                     &mut kids,
                     cell_pane(
                         self.settings.cells_for(module),
-                        agents_card(&self.agents, self.pixel_t, cx),
+                        agents_card(
+                            &self.agents,
+                            self.pixel_t,
+                            theme::island_fill(self.settings.island_color),
+                            cx,
+                        ),
                     ),
                 ),
                 WidgetModule::Meeting if self.settings.is_enabled(module) => add(

@@ -9,6 +9,7 @@ use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, UdpSocket};
@@ -18,6 +19,25 @@ pub const MULTICAST_ADDR: Ipv4Addr = Ipv4Addr::new(224, 0, 0, 167);
 pub const DEFAULT_PORT: u16 = 53317;
 pub const PROTOCOL_VERSION: &str = "2.1";
 pub const DISCOVER_WINDOW: Duration = Duration::from_secs(3);
+pub const BUNDLE_ID: &str = "org.localsend.localsendApp";
+pub const BUNDLE_IDS: &[&str] = &[BUNDLE_ID, "org.localsend.localsend_app"];
+
+/// True when the LocalSend app is present. The tray drop target is hidden
+/// otherwise — sending needs a LocalSend receiver, and this Mac having the
+/// app is the signal the user actually uses it.
+pub fn app_installed() -> bool {
+    if crate::apps::any_installed(BUNDLE_IDS) {
+        return true;
+    }
+    binary_on_path("localsend") || binary_on_path("localsend-cli")
+}
+
+fn binary_on_path(name: &str) -> bool {
+    let Some(path) = std::env::var_os("PATH") else {
+        return false;
+    };
+    std::env::split_paths(&path).any(|dir| dir.join(name).is_file())
+}
 
 const API: &str = "/api/localsend/v2";
 
@@ -251,11 +271,18 @@ pub fn merge_peer(peers: &mut Vec<DeviceInfo>, mut peer: DeviceInfo, self_fp: &s
 }
 
 /// Bind UDP + a short-lived HTTP register listener, announce, collect peers.
+///
+/// Multicast is best-effort. The protocol's HTTP legacy scan (POST `/register`
+/// to every host on each local /24) is what finds receivers when the LocalSend
+/// *app* is not installed on this machine — we never need a local LocalSend
+/// process, only a peer that is already listening on 53317.
 pub async fn discover_peers(alias: &str, window: Duration) -> Result<Vec<DeviceInfo>, String> {
     let fingerprint = random_fingerprint();
-    let udp = bind_discovery_udp().await?;
+    let local_ips = local_ipv4s();
+    let udp = bind_discovery_udp(&local_ips).await.ok();
     let local_port = udp
-        .local_addr()
+        .as_ref()
+        .and_then(|socket| socket.local_addr().ok())
         .map(|addr| addr.port())
         .unwrap_or(DEFAULT_PORT);
     let mut us = DeviceInfo::local(alias, fingerprint, local_port);
@@ -263,18 +290,32 @@ pub async fn discover_peers(alias: &str, window: Duration) -> Result<Vec<DeviceI
 
     let listener = bind_register_listener(local_port).await;
     let payload = encode_announce(&us)?;
-    udp.send_to(&payload, (MULTICAST_ADDR, DEFAULT_PORT))
-        .await
-        .map_err(|err| err.to_string())?;
+    if let Some(udp) = udp.as_ref() {
+        let _ = udp.send_to(&payload, (MULTICAST_ADDR, DEFAULT_PORT)).await;
+    }
+    announce_on_interfaces(&payload, &local_ips).await;
 
+    let us_scan = us.clone();
+    let ips_scan = local_ips.clone();
+    let collect_fut = async {
+        let mut peers = Vec::new();
+        if let Some(udp) = udp.as_ref() {
+            collect_discovery(udp, listener.as_ref(), &us, window, &mut peers).await;
+        }
+        peers
+    };
+    let (from_udp, from_http) = tokio::join!(collect_fut, http_scan(us_scan, ips_scan, window));
     let mut peers = Vec::new();
-    collect_discovery(&udp, listener.as_ref(), &us, window, &mut peers).await;
+    for peer in from_udp.into_iter().chain(from_http) {
+        merge_peer(&mut peers, peer, &us.fingerprint);
+    }
+    peers.retain(|peer| local_ips.iter().all(|ip| peer.ip != ip.to_string()));
     drop(udp);
     drop(listener);
     Ok(peers)
 }
 
-async fn bind_discovery_udp() -> Result<UdpSocket, String> {
+async fn bind_discovery_udp(ifaces: &[Ipv4Addr]) -> Result<UdpSocket, String> {
     let socket = match UdpSocket::bind((Ipv4Addr::UNSPECIFIED, DEFAULT_PORT)).await {
         Ok(socket) => socket,
         Err(_) => UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))
@@ -283,10 +324,27 @@ async fn bind_discovery_udp() -> Result<UdpSocket, String> {
     };
     let _ = socket.set_broadcast(true);
     let _ = socket.set_multicast_loop_v4(true);
-    socket
-        .join_multicast_v4(MULTICAST_ADDR, Ipv4Addr::UNSPECIFIED)
-        .map_err(|err| err.to_string())?;
+    let mut joined = false;
+    for ip in ifaces {
+        if socket.join_multicast_v4(MULTICAST_ADDR, *ip).is_ok() {
+            joined = true;
+        }
+    }
+    if !joined {
+        let _ = socket.join_multicast_v4(MULTICAST_ADDR, Ipv4Addr::UNSPECIFIED);
+    }
     Ok(socket)
+}
+
+async fn announce_on_interfaces(payload: &[u8], ifaces: &[Ipv4Addr]) {
+    for ip in ifaces {
+        if let Ok(socket) = UdpSocket::bind((*ip, 0)).await {
+            let _ = socket.set_multicast_ttl_v4(4);
+            let _ = socket
+                .send_to(payload, (MULTICAST_ADDR, DEFAULT_PORT))
+                .await;
+        }
+    }
 }
 
 async fn bind_register_listener(port: u16) -> Option<TcpListener> {
@@ -566,6 +624,247 @@ pub fn urlencode(value: &str) -> String {
     out
 }
 
+pub fn url_decode(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'%' if i + 2 < bytes.len() => {
+                if let Ok(byte) =
+                    u8::from_str_radix(std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or(""), 16)
+                {
+                    out.push(byte);
+                    i += 3;
+                    continue;
+                }
+                out.push(b'%');
+                i += 1;
+            }
+            b'+' => {
+                out.push(b' ');
+                i += 1;
+            }
+            b => {
+                out.push(b);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// RFC1918 + Tailscale CGNAT. HTTP scan never walks a public /24.
+pub fn is_private_v4(ip: Ipv4Addr) -> bool {
+    let o = ip.octets();
+    o[0] == 10
+        || (o[0] == 172 && (16..=31).contains(&o[1]))
+        || (o[0] == 192 && o[1] == 168)
+        || (o[0] == 100 && (64..128).contains(&o[1]))
+}
+
+pub fn is_usable_lan_ip(ip: Ipv4Addr) -> bool {
+    !ip.is_unspecified()
+        && !ip.is_loopback()
+        && !ip.is_link_local()
+        && !ip.is_multicast()
+        && !ip.is_broadcast()
+}
+
+/// Hosts on each local /24, minus network, broadcast, and this machine.
+pub fn scan_targets(local_ips: &[Ipv4Addr]) -> Vec<Ipv4Addr> {
+    let mut out = Vec::new();
+    for ip in local_ips {
+        if !is_usable_lan_ip(*ip) || !is_private_v4(*ip) {
+            continue;
+        }
+        let o = ip.octets();
+        for host in 1..=254u8 {
+            let candidate = Ipv4Addr::new(o[0], o[1], o[2], host);
+            if candidate != *ip {
+                out.push(candidate);
+            }
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+pub fn preferred_lan_ip(local_ips: &[Ipv4Addr]) -> Option<Ipv4Addr> {
+    let usable: Vec<Ipv4Addr> = local_ips
+        .iter()
+        .copied()
+        .filter(|ip| is_usable_lan_ip(*ip) && is_private_v4(*ip))
+        .collect();
+    usable
+        .iter()
+        .copied()
+        .find(|ip| ip.octets()[0] == 192 && ip.octets()[1] == 168)
+        .or_else(|| usable.iter().copied().find(|ip| ip.octets()[0] == 10))
+        .or_else(|| usable.iter().copied().find(|ip| ip.octets()[0] == 172))
+        .or_else(|| usable.first().copied())
+}
+
+pub fn local_ipv4s() -> Vec<Ipv4Addr> {
+    #[cfg(unix)]
+    {
+        unix_ipv4s()
+    }
+    #[cfg(not(unix))]
+    {
+        fallback_ipv4s()
+    }
+}
+
+#[cfg(unix)]
+fn unix_ipv4s() -> Vec<Ipv4Addr> {
+    use std::ffi::CStr;
+    let mut ips = Vec::new();
+    unsafe {
+        let mut ifap: *mut libc::ifaddrs = std::ptr::null_mut();
+        if libc::getifaddrs(&mut ifap) != 0 {
+            return fallback_ipv4s();
+        }
+        let mut ptr = ifap;
+        while !ptr.is_null() {
+            let entry = &*ptr;
+            if !entry.ifa_addr.is_null() {
+                let family = (*entry.ifa_addr).sa_family as i32;
+                if family == libc::AF_INET {
+                    let name = if entry.ifa_name.is_null() {
+                        String::new()
+                    } else {
+                        CStr::from_ptr(entry.ifa_name)
+                            .to_string_lossy()
+                            .into_owned()
+                    };
+                    let skip = name.starts_with("lo")
+                        || name.starts_with("awdl")
+                        || name.starts_with("llw")
+                        || name.starts_with("bridge")
+                        || name.starts_with("vmenet")
+                        || name.starts_with("docker")
+                        || name.starts_with("veth");
+                    if !skip {
+                        let sin = &*(entry.ifa_addr as *const libc::sockaddr_in);
+                        let ip = Ipv4Addr::from(u32::from_be(sin.sin_addr.s_addr));
+                        if is_usable_lan_ip(ip) {
+                            ips.push(ip);
+                        }
+                    }
+                }
+            }
+            ptr = entry.ifa_next;
+        }
+        libc::freeifaddrs(ifap);
+    }
+    ips.sort();
+    ips.dedup();
+    if ips.is_empty() {
+        fallback_ipv4s()
+    } else {
+        ips
+    }
+}
+
+fn fallback_ipv4s() -> Vec<Ipv4Addr> {
+    let Ok(socket) = std::net::UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)) else {
+        return Vec::new();
+    };
+    if socket.connect((Ipv4Addr::new(1, 1, 1, 1), 53)).is_err() {
+        return Vec::new();
+    }
+    match socket.local_addr() {
+        Ok(SocketAddr::V4(addr)) if is_usable_lan_ip(*addr.ip()) => vec![*addr.ip()],
+        _ => Vec::new(),
+    }
+}
+
+fn scan_client() -> Result<reqwest::Client, String> {
+    reqwest::Client::builder()
+        .danger_accept_invalid_certs(true)
+        .danger_accept_invalid_hostnames(true)
+        .timeout(Duration::from_millis(400))
+        .connect_timeout(Duration::from_millis(250))
+        .no_proxy()
+        .build()
+        .map_err(|err| err.to_string())
+}
+
+async fn probe_peer(client: &reqwest::Client, us: &DeviceInfo, ip: Ipv4Addr) -> Option<DeviceInfo> {
+    let body = DeviceInfo {
+        ip: String::new(),
+        announce: false,
+        ..us.clone()
+    };
+    for https in [true, false] {
+        let scheme = if https { "https" } else { "http" };
+        let url = format!("{scheme}://{ip}:{DEFAULT_PORT}{API}/register");
+        let Ok(response) = client.post(&url).json(&body).send().await else {
+            continue;
+        };
+        if !response.status().is_success() {
+            continue;
+        }
+        let Ok(mut peer) = response.json::<DeviceInfo>().await else {
+            continue;
+        };
+        if peer.ip.is_empty() {
+            peer.ip = ip.to_string();
+        }
+        if peer.port == 0 {
+            peer.port = DEFAULT_PORT;
+        }
+        peer.protocol = scheme.into();
+        return Some(peer);
+    }
+    None
+}
+
+async fn http_scan(us: DeviceInfo, local_ips: Vec<Ipv4Addr>, window: Duration) -> Vec<DeviceInfo> {
+    let targets = scan_targets(&local_ips);
+    if targets.is_empty() {
+        return Vec::new();
+    }
+    let Ok(client) = scan_client() else {
+        return Vec::new();
+    };
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let sem = Arc::new(tokio::sync::Semaphore::new(48));
+    for ip in targets {
+        let sem = sem.clone();
+        let client = client.clone();
+        let us = us.clone();
+        let tx = tx.clone();
+        tokio::spawn(async move {
+            let Ok(_permit) = sem.acquire_owned().await else {
+                return;
+            };
+            if let Some(peer) = probe_peer(&client, &us, ip).await {
+                let _ = tx.send(peer);
+            }
+        });
+    }
+    drop(tx);
+    let deadline = tokio::time::Instant::now() + window;
+    let mut peers = Vec::new();
+    loop {
+        let remain = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remain.is_zero() {
+            break;
+        }
+        match tokio::time::timeout(remain, rx.recv()).await {
+            Ok(Some(peer)) => {
+                merge_peer(&mut peers, peer, &us.fingerprint);
+            }
+            Ok(None) => break,
+            Err(_) => break,
+        }
+    }
+    peers
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -737,5 +1036,46 @@ mod tests {
                 .abs()
                 < f32::EPSILON
         );
+    }
+
+    #[test]
+    fn scan_targets_walks_slash24_minus_self() {
+        let self_ip = Ipv4Addr::new(192, 168, 1, 20);
+        let targets = scan_targets(&[self_ip]);
+        assert_eq!(targets.len(), 253);
+        assert!(!targets.contains(&self_ip));
+        assert!(targets.contains(&Ipv4Addr::new(192, 168, 1, 1)));
+        assert!(targets.contains(&Ipv4Addr::new(192, 168, 1, 254)));
+        assert!(!targets.contains(&Ipv4Addr::new(192, 168, 1, 0)));
+        assert!(!targets.contains(&Ipv4Addr::new(192, 168, 1, 255)));
+    }
+
+    #[test]
+    fn scan_targets_skips_loopback_and_public() {
+        assert!(scan_targets(&[Ipv4Addr::LOCALHOST]).is_empty());
+        assert!(scan_targets(&[Ipv4Addr::new(8, 8, 8, 8)]).is_empty());
+        assert!(scan_targets(&[Ipv4Addr::new(169, 254, 1, 1)]).is_empty());
+    }
+
+    #[test]
+    fn preferred_lan_ip_picks_wifi_over_cgnat() {
+        let ips = [
+            Ipv4Addr::new(100, 64, 0, 2),
+            Ipv4Addr::new(192, 168, 4, 18),
+            Ipv4Addr::LOCALHOST,
+        ];
+        assert_eq!(preferred_lan_ip(&ips), Some(Ipv4Addr::new(192, 168, 4, 18)));
+    }
+
+    #[test]
+    fn url_decode_reverses_urlencode() {
+        assert_eq!(url_decode(&urlencode("a b/c")), "a b/c");
+        assert_eq!(url_decode("hello%20world"), "hello world");
+    }
+
+    #[test]
+    fn official_bundle_id_is_listed() {
+        assert_eq!(BUNDLE_ID, "org.localsend.localsendApp");
+        assert!(BUNDLE_IDS.contains(&BUNDLE_ID));
     }
 }

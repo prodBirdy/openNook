@@ -16,6 +16,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Term tab aborted on wheel-scroll (and when collapsing the island while
+  scrolled): vt100 subtracted `rows - scrollback_offset` and overflowed
+  once the viewport moved more than one screen into history.
+- The LocalSend drop target is hidden when the LocalSend app is not installed,
+  so the tray does not offer a share path that cannot run.
 - Hovering a Finder file over the island did not open the file tray: the mouse
   thread sampled NSPasteboard off the main thread and could poison the drag
   baseline, so inbound drags never armed the dropzone.
@@ -26,7 +31,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - Coding-agent faces use each agent's logo as a mask over a Magic UI glyph
-  matrix (`01·•+*/\<>=`), tinted with that agent's brand color.
+  matrix (`01·•+*/\<>=`), tinted with that agent's brand color. The island
+  border uses the same brand on the compact Agents face and while expanded.
+- Detects the Pi coding-agent harness (`pi` / `pi-coding-agent`).
 - Now Playing blooms a darkened, radially faded blur of the album artwork
   behind the cover, so grayscale tracks don't turn the pane into a gray card.
 - Termi-Notch is a real login-shell PTY instead of the one-shot command field,

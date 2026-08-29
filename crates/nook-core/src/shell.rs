@@ -666,6 +666,52 @@ mod tests {
         assert_eq!(super::resolve_color(vt100::Color::Rgb(1, 2, 3), true), Some([1, 2, 3]));
     }
 
+    fn fill_lines(parser: &mut vt100::Parser, n: usize) {
+        for i in 0..n {
+            parser.process(format!("line{i}\r\n").as_bytes());
+        }
+    }
+
+    /// vt100 0.15.2 panics in `Grid::visible_rows` (`rows_len - scrollback_offset`)
+    /// when the viewport is scrolled further than one screen. Termi-Notch hits
+    /// this from wheel-scroll and from shrinking the pane while scrolled.
+    #[test]
+    fn styled_rows_survives_scrollback_past_one_screen() {
+        let mut parser = vt100::Parser::new(4, 20, 100);
+        fill_lines(&mut parser, 20);
+        parser.set_scrollback(10);
+        let rows = super::styled_rows(parser.screen());
+        assert_eq!(rows.len(), 4);
+        let _ = parser.screen().contents();
+    }
+
+    #[test]
+    fn styled_rows_survives_shrink_while_scrolled() {
+        let mut parser = vt100::Parser::new(10, 20, 100);
+        fill_lines(&mut parser, 20);
+        parser.set_scrollback(8);
+        parser.set_size(3, 20);
+        let rows = super::styled_rows(parser.screen());
+        assert_eq!(rows.len(), 3);
+        let _ = parser.screen().contents();
+    }
+
+    #[test]
+    fn session_scroll_and_shrink_does_not_panic() {
+        let job = SessionHandle::new(20, 8);
+        {
+            let mut parser = job.inner.parser.lock().unwrap();
+            fill_lines(&mut parser, 40);
+            parser.set_scrollback(20);
+            publish_screen(&job.inner, &parser);
+        }
+        job.scroll_lines(5);
+        job.resize(20, 3);
+        let snap = job.snapshot();
+        assert_eq!(snap.rows, 3);
+        assert_eq!(snap.styled.len(), 3);
+    }
+
     use super::*;
     use std::time::{Duration, Instant};
 

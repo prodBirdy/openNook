@@ -1,6 +1,6 @@
 //! Overlay window paint: chrome, motion-blur stack, compact vs expanded dispatch.
 
-use super::chrome::{hitbox_debug, island_chrome, COMPACT_WING, WING};
+use super::chrome::{hitbox_debug, island_chrome, COMPACT_WING, GLOW_PAD, WING};
 use super::files::drop_veil;
 use super::{CompactMode, Island};
 use crate::platform;
@@ -116,11 +116,35 @@ impl gpui::Render for Island {
         } else {
             theme::island_fill(self.settings.island_color)
         };
-        let agent_border = self
-            .agents
-            .iter()
-            .any(|agent| agent.status.is_working())
-            .then(theme::accent);
+        let face = crate::widgets::face_agent(&self.agents);
+        let brand_border = face.map(|agent| {
+            crate::dotmatrix::led_color_on(
+                agent.kind,
+                theme::island_fill(self.settings.island_color),
+            )
+        });
+        let agent_border = if expanded || mode == CompactMode::Agents {
+            brand_border
+        } else {
+            self.agents
+                .iter()
+                .any(|agent| agent.status.is_working())
+                .then(theme::accent)
+        };
+        let agent_working = face.is_some_and(|agent| agent.status.is_working());
+        let border_glow = if agent_border.is_none() {
+            0.0
+        } else if expanded || mode == CompactMode::Agents {
+            if agent_working {
+                0.70 + 0.30 * ((self.pixel_t * 2.2).sin() * 0.5 + 0.5)
+            } else {
+                0.48
+            }
+        } else {
+            0.72
+        };
+        let glow_pad = if border_glow > 0.02 { GLOW_PAD } else { 0.0 };
+        let glow_top = if attached { 0.0 } else { glow_pad };
         let debug_hitbox = hitbox_debug();
         let content_radius = if expanded {
             theme::EXPANDED_RADIUS
@@ -182,15 +206,35 @@ impl gpui::Render for Island {
             root.child(
                 div()
                     .absolute()
-                    .top(px(body_top))
-                    .left(px(chrome_left))
-                    .w(px(chrome_w))
-                    .h(px(chrome_h))
+                    .top(px(body_top - glow_top))
+                    .left(px(chrome_left - glow_pad))
+                    .w(px(chrome_w + glow_pad * 2.0))
+                    .h(px(chrome_h + glow_pad + glow_top))
+                    .child(
+                        div()
+                            .absolute()
+                            .inset_0()
+                            .child(island_chrome(
+                                // Native glass draws no wings — NSGlassEffectView is a
+                                // plain rounded rect spanning the full chrome width — so
+                                // trace the accent border along that glass edge instead
+                                // of the winged silhouette the painted fills use.
+                                if native_glass { chrome_w } else { tw.max(1.0) },
+                                th.max(1.0),
+                                if native_glass { 0.0 } else { wing },
+                                island_bg,
+                                agent_border,
+                                border_glow,
+                                attached,
+                            )),
+                    )
                     .child(
                         self.accept_file_drop(
                             div()
                                 .id("island")
-                                .relative()
+                                .absolute()
+                                .top(px(glow_top))
+                                .left(px(glow_pad))
                                 .w(px(chrome_w))
                                 .h(px(chrome_h))
                                 .overflow_hidden()
@@ -210,18 +254,6 @@ impl gpui::Render for Island {
                         .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _, cx| {
                             this.on_wheel(event, cx);
                         }))
-                        .child(div().absolute().inset_0().child(island_chrome(
-                            // Native glass draws no wings — NSGlassEffectView is a
-                            // plain rounded rect spanning the full chrome width — so
-                            // trace the accent border along that glass edge instead
-                            // of the winged silhouette the painted fills use.
-                            if native_glass { chrome_w } else { tw.max(1.0) },
-                            th.max(1.0),
-                            if native_glass { 0.0 } else { wing },
-                            island_bg,
-                            agent_border,
-                            attached,
-                        )))
                         .child(
                             div()
                                 .absolute()

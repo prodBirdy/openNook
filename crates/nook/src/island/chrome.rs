@@ -1,10 +1,12 @@
 //! Island silhouette: flat top, concave wings, rounded bottom.
 
 use crate::theme;
-use gpui::{canvas, point, prelude::*, px, PathBuilder};
+use gpui::{canvas, point, prelude::*, px, PathBuilder, Rgba};
 
 pub(super) const WING: f32 = 6.0;
 pub(super) const COMPACT_WING: f32 = 14.0;
+/// Extra canvas around the silhouette so the brand glow is not clipped.
+pub(super) const GLOW_PAD: f32 = 14.0;
 
 /// Whether to outline the mouse hit regions. Off unless `NOOK_DEBUG_HITBOX=1`.
 pub(super) fn hitbox_debug() -> bool {
@@ -26,13 +28,23 @@ pub(super) fn island_chrome(
     wing: f32,
     color: gpui::Rgba,
     border_color: Option<gpui::Rgba>,
+    glow: f32,
     attached: bool,
 ) -> impl IntoElement {
+    let glow = glow.clamp(0.0, 1.0);
+    let pad = if border_color.is_some() && glow > 0.02 {
+        GLOW_PAD
+    } else {
+        0.0
+    };
+    let top_pad = if attached { 0.0 } else { pad };
     canvas(
         |bounds, _, _| bounds,
         move |bounds, _, window, _| {
             let ox: f32 = bounds.origin.x.into();
             let oy: f32 = bounds.origin.y.into();
+            let ox = ox + pad;
+            let oy = oy + top_pad;
             let g = if attached { wing } else { 0.0 };
             let w = body_w;
             let h = body_h;
@@ -95,45 +107,77 @@ pub(super) fn island_chrome(
             }
 
             if let Some(border_color) = border_color {
-                let mut border = PathBuilder::stroke(px(1.0));
-                if attached {
-                    // The screen edge is the attached island's top edge, so leave
-                    // that edge open instead of drawing an accent line across it.
-                    border.move_to(p(g + w + g, 0.0));
-                    if g > 0.5 {
-                        let kk = k * g;
+                let stroke_edge = |path: &mut PathBuilder| {
+                    if attached {
+                        // The screen edge is the attached island's top edge, so leave
+                        // that edge open instead of drawing an accent line across it.
+                        path.move_to(p(g + w + g, 0.0));
+                        if g > 0.5 {
+                            let kk = k * g;
+                            cubic(
+                                path,
+                                (g + w, g),
+                                (g + w + g - kk, 0.0),
+                                (g + w, g - kk),
+                            );
+                        }
+                        path.line_to(p(g + w, h - r));
+                        let rk = k * r;
                         cubic(
-                            &mut border,
-                            (g + w, g),
-                            (g + w + g - kk, 0.0),
-                            (g + w, g - kk),
+                            path,
+                            (g + w - r, h),
+                            (g + w, h - r + rk),
+                            (g + w - r + rk, h),
                         );
+                        path.line_to(p(g + r, h));
+                        cubic(path, (g, h - r), (g + r - rk, h), (g, h - r + rk));
+                        path.line_to(p(g, g.max(0.0)));
+                        if g > 0.5 {
+                            let kk = k * g;
+                            cubic(path, (0.0, 0.0), (g, g - kk), (kk, 0.0));
+                        }
+                    } else {
+                        append_silhouette(path);
                     }
-                    border.line_to(p(g + w, h - r));
-                    let rk = k * r;
-                    cubic(
-                        &mut border,
-                        (g + w - r, h),
-                        (g + w, h - r + rk),
-                        (g + w - r + rk, h),
-                    );
-                    border.line_to(p(g + r, h));
-                    cubic(&mut border, (g, h - r), (g + r - rk, h), (g, h - r + rk));
-                    border.line_to(p(g, g.max(0.0)));
-                    if g > 0.5 {
-                        let kk = k * g;
-                        cubic(&mut border, (0.0, 0.0), (g, g - kk), (kk, 0.0));
-                    }
+                };
+                // Soft radiation, wide to tight, then a crisp 1px core.
+                let bands: &[(f32, f32)] = if glow > 0.02 {
+                    &[
+                        (16.0, 0.05),
+                        (11.0, 0.08),
+                        (7.0, 0.12),
+                        (4.0, 0.20),
+                        (2.2, 0.38),
+                        (1.15, 0.92),
+                    ]
                 } else {
-                    append_silhouette(&mut border);
-                }
-                match border.build() {
-                    Ok(built) => window.paint_path(built, border_color),
-                    Err(err) => log::warn!("island border path: {err}"),
+                    &[(1.0, 1.0)]
+                };
+                for &(width, a) in bands {
+                    let mut border = PathBuilder::stroke(px(width));
+                    stroke_edge(&mut border);
+                    match border.build() {
+                        Ok(built) => {
+                            window.paint_path(
+                                built,
+                                with_alpha(border_color, a * if glow > 0.02 { glow } else { 1.0 }),
+                            )
+                        }
+                        Err(err) => log::warn!("island border path: {err}"),
+                    }
                 }
             }
         },
     )
-    .w(px(body_w + if attached { wing * 2.0 } else { 0.0 }))
-    .h(px(body_h))
+    .w(px(
+        body_w + if attached { wing * 2.0 } else { 0.0 } + pad * 2.0
+    ))
+    .h(px(body_h + pad + top_pad))
+}
+
+fn with_alpha(color: Rgba, a: f32) -> Rgba {
+    Rgba {
+        a: (color.a * a).clamp(0.0, 1.0),
+        ..color
+    }
 }

@@ -34,3 +34,9 @@ pulldown-cmark = { version = "0.13", default-features = false }
 lto = true
 codegen-units = 1
 strip = true
+
+# vt100 0.15.2 panics in Grid::visible_rows when scrollback_offset > rows
+# (`rows_len - offset` overflows). Termi-Notch hits this on wheel-scroll
+# and when the island shrinks while the viewport is scrolled back.
+[patch.crates-io]
+vt100 = { path = "third_party/vt100" }

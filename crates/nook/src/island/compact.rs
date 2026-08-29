@@ -39,7 +39,7 @@ impl Island {
                         .h_full()
                         .flex()
                         .items_center()
-                        .justify_center()
+                        .justify_start()
                         .overflow_hidden()
                         .child(self.compact_left(mode, cx))
                         .when(mode != CompactMode::Idle && self.high_alert_active(), |d| {
@@ -58,7 +58,7 @@ impl Island {
                         .h_full()
                         .flex()
                         .items_center()
-                        .justify_center()
+                        .justify_end()
                         .overflow_hidden()
                         .child(self.compact_right(mode, hovered, cx)),
                 ),
@@ -80,7 +80,11 @@ impl Island {
             CompactMode::Media => {
                 album_chip(&self.now_playing, self.overlay_fade.value, cx).into_any_element()
             }
-            CompactMode::Agents => widgets::agents_compact_left(&self.agents, self.pixel_t),
+            CompactMode::Agents => widgets::agents_compact_left(
+                &self.agents,
+                self.pixel_t,
+                theme::island_fill(self.settings.island_color),
+            ),
             CompactMode::Files => super::files::compact_left(&self.files),
             CompactMode::Timer => widgets::timer_compact_left(self, cx),
             CompactMode::Observe => {

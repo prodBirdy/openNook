@@ -259,10 +259,10 @@ pub const FOOTNOTE: Text = Text {
     emphasized: FontWeight::SEMIBOLD,
 };
 
-/// Compact Live Activity face — album chip, mode icons, timer ring, loader.
-pub const COMPACT_FACE: f32 = 26.0;
+/// Compact Live Activity face — lucide glyphs, HUD marks, avatars, file thumbs.
+pub const COMPACT_FACE: f32 = 20.0;
 /// Inset from the compact capsule edge to the leading/trailing glyph.
-/// Past the 12pt corner so a 26pt face does not sit on the curve.
+/// Past the 14pt corner so a 20pt face does not sit on the curve.
 pub const COMPACT_INSET: f32 = 8.0;
 /// Expanded Nook Mirror circle. Fills `NOOK_BODY` minus the pane inset.
 pub const MIRROR_FACE: f32 = 112.0;

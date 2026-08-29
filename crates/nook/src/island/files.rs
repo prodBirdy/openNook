@@ -21,7 +21,7 @@ const TRAY_PREVIEW: f32 = 48.0;
 const TRAY_PAD: f32 = 16.0;
 const TRAY_ZONE_RADIUS: f32 = 22.0;
 const AIRDROP_W: f32 = 132.0;
-/// Same face as the compact album chip.
+/// Same face as compact lucide glyphs.
 const COMPACT_PREVIEW: f32 = theme::COMPACT_FACE;
 const COMPACT_PREVIEW_RADIUS: f32 = 5.0;
 const COMPACT_STACK_MAX: usize = 3;
@@ -96,8 +96,8 @@ fn compact_stack_card(file: &FileTrayItem, size: f32, x: f32, y: f32) -> impl In
         })
 }
 
-/// Compact Live Activity face: one 26pt thumbnail, or a small fanned stack
-/// when the tray holds more than one file.
+/// Compact Live Activity face: one thumbnail at [`theme::COMPACT_FACE`], or a
+/// small fanned stack when the tray holds more than one file.
 pub(super) fn compact_left(files: &[FileTrayItem]) -> AnyElement {
     let items = compact_stack_items(files);
     if items.is_empty() {
@@ -326,7 +326,7 @@ fn file_card(file: &FileTrayItem, cx: &mut Context<Island>) -> impl IntoElement 
                 let paths = vec![PathBuf::from(path_send.clone())];
                 if event.modifiers.secondary() {
                     this.start_link_upload(paths, cx);
-                } else {
+                } else if share::localsend::app_installed() {
                     this.start_localsend(paths, cx);
                 }
             }),
@@ -413,10 +413,11 @@ impl Island {
 
         let mut pane = div().flex().size_full().gap(px(12.)).child(zone);
         if hot {
-            pane = pane
-                .child(airdrop_target(cx))
-                .child(localsend_target(cx))
-                .child(get_link_target(cx));
+            pane = pane.child(airdrop_target(cx));
+            if share::localsend::app_installed() {
+                pane = pane.child(localsend_target(cx));
+            }
+            pane = pane.child(get_link_target(cx));
         }
         pane
     }
@@ -562,6 +563,9 @@ impl Island {
     }
 
     pub(crate) fn start_localsend(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
+        if !share::localsend::app_installed() {
+            return;
+        }
         let paths: Vec<PathBuf> = paths.into_iter().filter(|path| path.is_file()).collect();
         if paths.is_empty() {
             return;

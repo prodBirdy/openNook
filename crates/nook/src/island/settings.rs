@@ -3657,7 +3657,8 @@ fn module_blurb(module: WidgetModule) -> SharedString {
             "Now Playing from MediaRemote. Optional extras are all opt-in: time-synced lyrics from LRCLIB (fetched at runtime, never bundled), Apple Music motion art (fails silent to static covers; the glow uses local artwork colors), and Up Next from the current Music playlist or the Spotify Web API queue. The output picker lists CoreAudio devices; it cannot start AirPlay to a HomePod or Apple TV.".into()
         }
         WidgetModule::Files => {
-            "Drop zone and tray live on the Tray tab. Drag onto LocalSend or Get a link.".into()
+            "Drop zone and tray live on the Tray tab. Drag onto AirDrop, LocalSend if it is installed, or Get a link."
+                .into()
         }
         WidgetModule::Timers => {
             "Island countdowns plus Apple Clock timers (read from mobiletimerd) — import the bundled Nook Clock shortcuts once to pause, resume, or cancel from the island. Includes a Pomodoro work/break cycle and an optional Focus shortcut.".into()

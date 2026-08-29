@@ -6,20 +6,26 @@ use crate::island::ui::{label, nook_empty, nook_pane, nook_row, scroll_body, sli
 use crate::island::Island;
 use crate::theme;
 use gpui::{
-    div, prelude::*, px, rgba, AnyElement, Context, CursorStyle, MouseButton, MouseDownEvent,
+    div, prelude::*, px, rgba, AnyElement, Context, CursorStyle, MouseButton, MouseDownEvent, Rgba,
     SharedString,
 };
 use nook_core::agents::{AgentKind, AgentSession};
 
-pub(crate) fn compact_left(agents: &[AgentSession], pixel_t: f32) -> AnyElement {
-    let agent = agents
+/// The agent the compact face shows: a working session if any, else the first.
+pub(crate) fn face_agent(agents: &[AgentSession]) -> Option<&AgentSession> {
+    agents
         .iter()
         .find(|a| a.status.is_working())
-        .or(agents.first());
+        .or(agents.first())
+}
+
+pub(crate) fn compact_left(agents: &[AgentSession], pixel_t: f32, on: Rgba) -> AnyElement {
+    let agent = face_agent(agents);
     let working = agent.is_some_and(|a| a.status.is_working());
     let kind = agent.map(|a| a.kind).unwrap_or(AgentKind::Grok);
     let seed = agent.map(|a| a.pid).unwrap_or(0);
-    dotmatrix::brand_element(kind, seed, pixel_t, working, theme::COMPACT_FACE).into_any_element()
+    dotmatrix::brand_element(kind, seed, pixel_t, working, theme::COMPACT_FACE, on)
+        .into_any_element()
 }
 
 /// Running count, or a pause glyph when every session is waiting.
@@ -39,6 +45,7 @@ fn running_count(agents: &[AgentSession]) -> usize {
 pub(crate) fn agents_card(
     agents: &[AgentSession],
     now: f32,
+    on: Rgba,
     cx: &mut Context<Island>,
 ) -> impl IntoElement {
     let body = if agents.is_empty() {
@@ -46,14 +53,19 @@ pub(crate) fn agents_card(
     } else {
         let mut col = div().flex().flex_col().w_full();
         for agent in agents {
-            col = col.child(agent_row(agent, now, cx));
+            col = col.child(agent_row(agent, now, on, cx));
         }
         scroll_body("agents-scroll", col).into_any_element()
     };
     nook_pane("nook-agents").w_full().child(body)
 }
 
-fn agent_row(agent: &AgentSession, now: f32, cx: &mut Context<Island>) -> impl IntoElement {
+fn agent_row(
+    agent: &AgentSession,
+    now: f32,
+    on: Rgba,
+    cx: &mut Context<Island>,
+) -> impl IntoElement {
     let pid = agent.pid;
     let cwd = agent.cwd.clone();
     let working = agent.status.is_working();
@@ -82,6 +94,7 @@ fn agent_row(agent: &AgentSession, now: f32, cx: &mut Context<Island>) -> impl I
                     now,
                     working,
                     theme::HIT_MIN,
+                    on,
                 )),
         )
         .child(

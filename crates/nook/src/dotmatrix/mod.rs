@@ -15,7 +15,7 @@ mod grid3;
 
 use engine::{bloom_level, Ctx, N};
 
-pub use brand::element as brand_element;
+pub use brand::{element as brand_element, led_color_on};
 use gpui::{canvas, fill, point, prelude::*, px, Bounds, IntoElement, Pixels, Rgba, Window};
 
 pub use grid3::Kind;
@@ -25,7 +25,7 @@ pub use grid3::Kind;
 /// cadence reads as frantic in the notch, so the port runs it at half rate.
 pub const SPEED: f32 = 0.6;
 /// Upstream pins `dotSize` 4 in a 16px box (1px gap). Compact and the widget
-/// row both use that cluster; scaling it to the 26px notch face made 7px dots
+/// row both use that cluster; scaling it to the compact face made 7px dots
 /// that filled the compact island.
 const DOT_RATIO: f32 = 4.0 / 16.0;
 const GAP_RATIO: f32 = 1.0 / 4.0;
@@ -35,7 +35,7 @@ const IDLE_ALPHA: f32 = 0.45;
 /// RGB is used — `IDLE_ALPHA` sets the alpha — and only a working agent is
 /// tinted with the accent.
 pub(super) const IDLE_TINT: Rgba = crate::theme::SECONDARY_LABEL;
-/// Upstream `size={16}` / `dotSize={4}` cluster (14px span), not the 26px face.
+/// Upstream `size={16}` / `dotSize={4}` cluster (14px span), not the compact face.
 pub const COMPACT_SIZE: f32 = 16.0;
 pub const WIDGET_SIZE: f32 = 16.0;
 

@@ -2,8 +2,8 @@
 //!
 //! Binary matching, process-tree walks, and the Claude / Codex / OpenCode
 //! fingerprints follow [abtop](https://github.com/graykode/abtop)
-//! (MIT License, Copyright (c) 2026 Tae Hwan Jung). Grok and Cursor Agent
-//! workers are matched the same way.
+//! (MIT License, Copyright (c) 2026 Tae Hwan Jung). Grok, Cursor Agent, and
+//! Pi workers are matched the same way.
 
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
@@ -43,6 +43,7 @@ pub enum AgentKind {
     Cursor,
     Aider,
     Gemini,
+    Pi,
 }
 
 impl AgentKind {
@@ -56,6 +57,7 @@ impl AgentKind {
             AgentKind::Cursor => "Cursor",
             AgentKind::Aider => "Aider",
             AgentKind::Gemini => "Gemini",
+            AgentKind::Pi => "Pi",
         }
     }
 
@@ -69,6 +71,7 @@ impl AgentKind {
             AgentKind::Cursor => &["cursor-agent"],
             AgentKind::Aider => &["aider"],
             AgentKind::Gemini => &["gemini"],
+            AgentKind::Pi => &["pi"],
         }
     }
 }
@@ -595,6 +598,7 @@ fn is_scan_seed(path: &str, comm: &str) -> bool {
         AgentKind::Grok,
         AgentKind::Aider,
         AgentKind::Gemini,
+        AgentKind::Pi,
     ]
     .into_iter()
     .any(|kind| {
@@ -859,6 +863,9 @@ fn classify_process(name: &str, argv: &[String], exe: Option<&Path>) -> Option<A
     if is_grok_process(name, argv, exe) {
         return Some(AgentKind::Grok);
     }
+    if is_pi_process(name, argv, exe) {
+        return Some(AgentKind::Pi);
+    }
 
     [
         AgentKind::Cursor,
@@ -869,6 +876,7 @@ fn classify_process(name: &str, argv: &[String], exe: Option<&Path>) -> Option<A
         AgentKind::Grok,
         AgentKind::Aider,
         AgentKind::Gemini,
+        AgentKind::Pi,
     ]
     .into_iter()
     .find(|kind| {
@@ -893,6 +901,26 @@ fn is_grok_process(name: &str, argv: &[String], exe: Option<&Path>) -> bool {
 
 fn grok_cli_token(tok: &str) -> bool {
     grok_install_path(tok) || grok_versioned_binary(tok)
+}
+
+/// Pi (`@earendil-works/pi-coding-agent`) is the `pi` binary, or a node/bun
+/// wrapper whose argv points at `pi-coding-agent`. Basename `pi` is exact so
+/// `pip` / `pihole` do not match.
+fn is_pi_process(name: &str, argv: &[String], exe: Option<&Path>) -> bool {
+    if token_has_binary(name, "pi") {
+        return true;
+    }
+    if exe.is_some_and(|p| pi_cli_token(&p.to_string_lossy())) {
+        return true;
+    }
+    argv.iter().take(3).any(|tok| pi_cli_token(tok))
+}
+
+fn pi_cli_token(tok: &str) -> bool {
+    token_has_binary(tok, "pi")
+        || tok.contains("pi-coding-agent")
+        || tok.contains("@earendil-works/pi")
+        || tok.contains("@mariozechner/pi-coding-agent")
 }
 
 fn grok_install_path(s: &str) -> bool {
@@ -1587,6 +1615,25 @@ mod tests {
             ),
             Some(AgentKind::Cursor)
         );
+        assert_eq!(
+            classify_process("pi", &["/usr/local/bin/pi".into()], None),
+            Some(AgentKind::Pi)
+        );
+        assert_eq!(
+            classify_process(
+                "node",
+                &[
+                    "node".into(),
+                    "/Users/a/.nvm/versions/node/v22/lib/node_modules/@earendil-works/pi-coding-agent/dist/cli.js".into(),
+                ],
+                None,
+            ),
+            Some(AgentKind::Pi)
+        );
+        assert_eq!(
+            classify_process("pip", &["/usr/bin/pip".into()], None),
+            None
+        );
     }
 
     #[test]
@@ -1597,6 +1644,7 @@ mod tests {
             "claude"
         ));
         assert!(is_scan_seed("/bin/cursor-agent", "cursor-agent"));
+        assert!(is_scan_seed("/usr/local/bin/pi", "pi"));
         assert!(is_scan_seed("/opt/homebrew/bin/node", "node"));
         assert!(is_scan_seed("/usr/bin/python3.12", "Python"));
         assert!(is_scan_seed("/Users/a/.grok/bin/agent", "agent"));

@@ -23,6 +23,7 @@ mod weather;
 
 pub(crate) use agents::{
     agents_card, compact_left as agents_compact_left, compact_right as agents_compact_right,
+    face_agent,
 };
 pub(crate) use battery::battery_card;
 pub(crate) use calendar::calendar_card;
