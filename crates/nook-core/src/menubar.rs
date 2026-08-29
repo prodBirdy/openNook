@@ -6,9 +6,9 @@
 //! the screen edge. Show restores a few points. No TCC, no idle work, no
 //! Screen Recording (Ice-bar capture is a later flag).
 
-use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(target_os = "macos")]
 use std::sync::atomic::AtomicPtr;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// `NSStatusItem` length that shoves left-side extras off the display.
 pub const HIDDEN_LENGTH: f64 = 10_000.0;
@@ -45,7 +45,10 @@ pub fn sync() {
     #[cfg(not(target_os = "macos"))]
     {
         let settings = crate::settings::get_app_settings();
-        HIDDEN.store(settings.thaw_enabled && settings.thaw_hidden, Ordering::Relaxed);
+        HIDDEN.store(
+            settings.thaw_enabled && settings.thaw_hidden,
+            Ordering::Relaxed,
+        );
         INSTALLED.store(settings.thaw_enabled, Ordering::Relaxed);
     }
 }
@@ -60,8 +63,7 @@ pub fn toggle() {
 }
 
 #[cfg(target_os = "macos")]
-static SEPARATOR: AtomicPtr<objc2::runtime::AnyObject> =
-    AtomicPtr::new(std::ptr::null_mut());
+static SEPARATOR: AtomicPtr<objc2::runtime::AnyObject> = AtomicPtr::new(std::ptr::null_mut());
 
 #[cfg(target_os = "macos")]
 fn sync_macos() {

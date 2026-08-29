@@ -57,7 +57,9 @@ fn is_meet_code(code: &str) -> bool {
     let parts: Vec<&str> = code.split('-').collect();
     (2..=4).contains(&parts.len())
         && parts.iter().all(|p| {
-            (3..=4).contains(&p.len()) && p.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+            (3..=4).contains(&p.len())
+                && p.chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
         })
 }
 
@@ -513,8 +515,7 @@ pub async fn find_meet_tab() -> Option<MeetTab> {
 
 pub fn activate_meet_tab_blocking() -> bool {
     if let Some(tab) = find_meet_tab_blocking() {
-        return run_osascript_blocking(&meet_activate_script(&tab.app))
-            .is_some_and(|s| s == "ok");
+        return run_osascript_blocking(&meet_activate_script(&tab.app)).is_some_and(|s| s == "ok");
     }
     false
 }
@@ -550,8 +551,7 @@ pub fn meet_click_leave_js() -> bool {
     let Some(tab) = find_meet_tab_blocking() else {
         return false;
     };
-    run_osascript_blocking(&meet_js_script(&tab.app, MEET_JS_LEAVE))
-        .is_some_and(|s| s == "clicked")
+    run_osascript_blocking(&meet_js_script(&tab.app, MEET_JS_LEAVE)).is_some_and(|s| s == "clicked")
 }
 
 #[cfg(test)]
@@ -616,6 +616,8 @@ mod tests {
         assert!(!is_meet_url("https://meet.google.com/landing"));
         assert!(!is_meet_url("https://meet.google.com/"));
         assert!(!is_meet_url("https://zoom.us/j/123"));
-        assert!(!is_meet_url("https://evil.example/meet.google.com/abc-defg-hij"));
+        assert!(!is_meet_url(
+            "https://evil.example/meet.google.com/abc-defg-hij"
+        ));
     }
 }

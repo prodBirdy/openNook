@@ -760,11 +760,7 @@ mod tests {
             r#"{"type":"data","diff":false,"payload":{"title":"A","playing":true,"elapsedTime":10,"duration":100,"bundleIdentifier":"com.spotify.client"}}"#,
         );
         std::thread::sleep(Duration::from_millis(40));
-        let elapsed = latest_now_playing()
-            .unwrap()
-            .unwrap()
-            .elapsed_time
-            .unwrap();
+        let elapsed = latest_now_playing().unwrap().unwrap().elapsed_time.unwrap();
         assert!(elapsed >= 10.03, "elapsed={elapsed}");
         assert!(elapsed < 11.0, "elapsed={elapsed}");
     }

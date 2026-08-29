@@ -1,13 +1,13 @@
 //! Overlay window paint: chrome, motion-blur stack, compact vs expanded dispatch.
 
-use super::chrome::{hitbox_debug, island_chrome, WING};
+use super::chrome::{hitbox_debug, island_chrome, COMPACT_WING, WING};
 use super::files::drop_veil;
 use super::{CompactMode, Island};
 use crate::platform;
 use crate::theme;
 use gpui::{
-    div, point, prelude::*, px, rgba, AnyElement, App, Bounds, Context, CursorStyle, Focusable,
-    ExternalPaths, FontFallbacks, FontWeight, MouseButton, MouseDownEvent, MouseMoveEvent,
+    div, point, prelude::*, px, rgba, AnyElement, App, Bounds, Context, CursorStyle, ExternalPaths,
+    Focusable, FontFallbacks, FontWeight, MouseButton, MouseDownEvent, MouseMoveEvent,
     MouseUpEvent, ScrollWheelEvent, Window, WindowBackgroundAppearance, WindowBounds,
     WindowDecorations, WindowKind, WindowOptions,
 };
@@ -57,24 +57,38 @@ impl gpui::Render for Island {
         let hovered = self.hovered;
         let notch_w = self.notch_width.max(1.0);
         let dropping = self.file_drag && (self.hovered || self.expanded);
+        // HIG › Materials: Liquid Glass must yield to Reduce Transparency.
+        // Native glass sits behind Metal; a transparent fill lets it show.
+        let want_glass = platform::island_glass_setting_on() && !self.suppressed;
         // Idle collapsed is a 1px wrap around the camera; the 6px ears would
         // stick out into the menu bar. They come back on hover, Live Activity,
         // and expand — those silhouettes are already wider than the housing.
         let show_wings = attached && th > 4.0 && (hovered || expanded || mode != CompactMode::Idle);
 
-        let wing = if show_wings { WING } else { 0.0 };
+        let mut wing = if show_wings {
+            if expanded {
+                COMPACT_WING
+            } else {
+                COMPACT_WING
+            }
+        } else {
+            COMPACT_WING
+        };
+
+        if (want_glass) {
+            wing = 0.00
+        }
         let chrome_w = tw.max(1.0) + wing * 2.0;
         let chrome_h = th.max(1.0);
+
         let chrome_left = (body_left - wing).max(0.0);
         let radius = if chrome_h > 80.0 {
             theme::EXPANDED_RADIUS
         } else {
-            theme::COMPACT_RADIUS
+            theme::EXPANDED_RADIUS
         }
         .min(chrome_h * 0.5);
-        // HIG › Materials: Liquid Glass must yield to Reduce Transparency.
-        // Native glass sits behind Metal; a transparent fill lets it show.
-        let want_glass = platform::island_glass_setting_on() && !self.suppressed;
+
         let tint = self.settings.island_color.map(|rgb| {
             let c = theme::rgba_from_u32(rgb, 1.0);
             (c.r, c.g, c.b)
@@ -146,7 +160,7 @@ impl gpui::Render for Island {
                 cx.listener(|this, _: &MouseUpEvent, _, cx| {
                     let moved = this.finish_reposition();
                     let file = this.finish_file_press();
-                    let seek = this.finish_scrubber();
+                    let seek = this.finish_scrubber(cx);
                     if moved || file || seek {
                         cx.notify();
                     }
@@ -193,13 +207,9 @@ impl gpui::Render for Island {
                                 this.on_island_press(event, cx);
                             }),
                         )
-                        .when(!expanded, |d| {
-                            d.on_scroll_wheel(cx.listener(
-                                |this, event: &ScrollWheelEvent, _, cx| {
-                                    this.on_wheel(event, cx);
-                                },
-                            ))
-                        })
+                        .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _, cx| {
+                            this.on_wheel(event, cx);
+                        }))
                         .child(div().absolute().inset_0().child(island_chrome(
                             // Native glass draws no wings — NSGlassEffectView is a
                             // plain rounded rect spanning the full chrome width — so
@@ -227,7 +237,7 @@ impl gpui::Render for Island {
                                 .when(!attached, |d| d.rounded(px(content_radius)))
                                 .child(self.content_stack(expanded, mode, hovered, notch_w, cx))
                                 .when(dropping && !expanded, |d| d.child(drop_veil()))
-                                .when(!expanded, |d| d.child(self.mode_dots(cx))),
+                                .when(!expanded && hovered, |d| d.child(self.mode_dots(cx))),
                         ),
                     ),
             )

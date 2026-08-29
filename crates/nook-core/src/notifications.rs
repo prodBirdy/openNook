@@ -1131,7 +1131,6 @@ static GEN: OnceLock<watch::Sender<u64>> = OnceLock::new();
 
 #[cfg(target_os = "macos")]
 mod ax {
-    use super::*;
     use objc2::runtime::AnyObject;
     use objc2::*;
     use std::ffi::{c_char, c_void, CStr, CString};

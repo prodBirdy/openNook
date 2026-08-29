@@ -276,7 +276,11 @@ fn pop_action() -> Option<ExternalAction> {
 pub fn ingest_service_paths(paths: Vec<PathBuf>) {
     let valid: Vec<PathBuf> = paths
         .into_iter()
-        .filter_map(|path| validate_tray_path(&path.to_string_lossy()).ok().map(PathBuf::from))
+        .filter_map(|path| {
+            validate_tray_path(&path.to_string_lossy())
+                .ok()
+                .map(PathBuf::from)
+        })
         .collect();
     if !valid.is_empty() {
         push_action(ExternalAction::TrayAdd(valid));
@@ -368,11 +372,7 @@ mod tests {
             "opennook://zsh?c=id",
             "opennook://tray/add/shell?path=/tmp",
         ] {
-            assert_eq!(
-                parse_opennook_url(url),
-                Err(UrlError::Forbidden),
-                "{url}"
-            );
+            assert_eq!(parse_opennook_url(url), Err(UrlError::Forbidden), "{url}");
         }
     }
 

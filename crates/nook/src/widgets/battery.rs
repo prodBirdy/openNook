@@ -4,7 +4,9 @@ use crate::icons::lucide_color;
 use crate::island::ui::{nook_display, nook_pane};
 use crate::island::Island;
 use crate::theme;
-use gpui::{div, prelude::*, px, rgba, Context, CursorStyle, FontWeight, MouseButton, MouseDownEvent};
+use gpui::{
+    div, prelude::*, px, rgba, Context, CursorStyle, FontWeight, MouseButton, MouseDownEvent,
+};
 use nook_core::power::{self, PowerSnapshot};
 
 pub(crate) fn battery_card(island: &Island, cx: &mut Context<Island>) -> impl IntoElement {
@@ -57,9 +59,7 @@ fn gauge(snap: PowerSnapshot) -> impl IntoElement {
         .flex()
         .items_end()
         .gap(px(8.))
-        .child(
-            nook_display(power::format_percent(snap.percent)).text_color(tint),
-        )
+        .child(nook_display(power::format_percent(snap.percent)).text_color(tint))
         .child(
             div()
                 .pb(px(4.))

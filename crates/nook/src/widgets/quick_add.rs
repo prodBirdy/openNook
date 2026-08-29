@@ -114,7 +114,7 @@ impl QuickAdd {
 
     fn reparse(&mut self) {
         self.confirmed = None;
-        self.parsed = nl_parse::parse_as(&self.text, chrono::Local::now(), self.default_kind);
+        self.parsed = nl_parse::parse_now_as(&self.text, self.default_kind);
     }
 
     fn splice(&mut self, cx: &mut Context<Self>, range: Range<usize>, insertion: &str) {
@@ -169,9 +169,7 @@ impl QuickAdd {
                     this.parsed = None;
                     cx.emit(QuickAddEvent::Saved);
                     cx.spawn(async move |this, cx| {
-                        cx.background_executor()
-                            .timer(Duration::from_secs(2))
-                            .await;
+                        cx.background_executor().timer(Duration::from_secs(2)).await;
                         let _ = this.update(cx, |this, cx| {
                             this.confirmed = None;
                             cx.notify();
@@ -222,10 +220,14 @@ impl QuickAdd {
                 self.head = self.text.len();
             }
             "c" if cmd => {
-                cx.write_to_clipboard(ClipboardItem::new_string(self.text[sel.clone()].to_string()));
+                cx.write_to_clipboard(ClipboardItem::new_string(
+                    self.text[sel.clone()].to_string(),
+                ));
             }
             "x" if cmd => {
-                cx.write_to_clipboard(ClipboardItem::new_string(self.text[sel.clone()].to_string()));
+                cx.write_to_clipboard(ClipboardItem::new_string(
+                    self.text[sel.clone()].to_string(),
+                ));
                 self.splice(cx, sel, "");
             }
             "v" if cmd => {
@@ -483,7 +485,8 @@ fn paint_field(
                     origin: point(bounds.origin.x + a.x, bounds.origin.y),
                     size: size(px((x1 - x0).max(1.5)), px(LINE_HEIGHT)),
                 };
-                window.paint_quad(gpui::fill(highlight, theme::FILL_SECONDARY).corner_radii(px(2.)));
+                window
+                    .paint_quad(gpui::fill(highlight, theme::FILL_SECONDARY).corner_radii(px(2.)));
             }
             if let Some(caret) = line.position_for_index(entity.read(cx).head, px(LINE_HEIGHT)) {
                 let caret_bounds = Bounds {
@@ -496,13 +499,17 @@ fn paint_field(
     }
 
     if let Some(line) = shaped.as_ref() {
-        let _ = line.paint(bounds.origin, px(LINE_HEIGHT), TextAlign::Left, None, window, cx);
+        let _ = line.paint(
+            bounds.origin,
+            px(LINE_HEIGHT),
+            TextAlign::Left,
+            None,
+            window,
+            cx,
+        );
     }
 
-    *layout_cell.borrow_mut() = Some(ShapedLine {
-        line: shaped,
-        text,
-    });
+    *layout_cell.borrow_mut() = Some(ShapedLine { line: shaped, text });
     window.handle_input(focus, ElementInputHandler::new(bounds, entity.clone()), cx);
 }
 
@@ -512,10 +519,11 @@ impl Render for QuickAdd {
         let focus = self.focus.clone();
         let layout_cell = self.layout.clone();
         let bounds_cell = self.bounds.clone();
-        let chip = self
-            .confirmed
-            .clone()
-            .or_else(|| self.parsed.as_ref().map(|e| format!("→ {}", e.preview_label())));
+        let chip = self.confirmed.clone().or_else(|| {
+            self.parsed
+                .as_ref()
+                .map(|e| format!("→ {}", e.preview_label()))
+        });
 
         div()
             .id("quick-add")

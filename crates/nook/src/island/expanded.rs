@@ -1,36 +1,19 @@
 //! Expanded island: Nook (media / calendar / mirror) vs Tray (files).
 
 use super::media::nook_media_pane;
-use super::{Island, Tab};
+use super::{CompactMode, Island, Tab};
 use crate::icons::lucide_color;
 use crate::theme;
 use crate::widgets::{
-    agents_card, battery_card, calendar_card, notes_card, observe_card, reminders_card, speed_card,
-    agents_card, calendar_card, messages_card, notes_card, observe_card, reminders_card, speed_card,
-    agents_card, calendar_card, notes_card, observe_card, obsidian_card, reminders_card, speed_card,
-    agents_card, calendar_card, mixer_card, notes_card, observe_card, reminders_card, speed_card,
-    timer_card,
-    agents_card, calendar_card, notes_card, observe_card, reminders_card, speed_card, timer_card,
-    weather_card,
-    vpn_card,
-    agents_card, calendar_card, high_alert_card, notes_card, observe_card, reminders_card,
-    speed_card, timer_card,
-    agents_card, calendar_card, notes_card, observe_card, reminders_card, speed_card, terminal_card,
-    timer_card,
-    agents_card, calendar_card, notes_card, observe_card, reminders_card, speed_card,
-    sysstats_card, timer_card,
-    agents_card, calendar_card, notes_card, observe_card, recorder_card, reminders_card, speed_card,
-    agents_card, calendar_card, meeting_card, notes_card, observe_card, reminders_card, speed_card,
-    timer_card,
-    agents_card, calendar_card, notes_card, notifications_card, observe_card, reminders_card,
-    speed_card, timer_card,
-    agents_card, calendar_card, notes_card, observe_card, process_card, reminders_card, speed_card,
-    timer_card,
+    agents_card, battery_card, calendar_card, high_alert_card, meeting_card, messages_card,
+    notes_card, notifications_card, observe_card, obsidian_card, recorder_card, reminders_card,
+    speed_card, sysstats_card, terminal_card, timer_card, vpn_card, weather_card,
 };
 use gpui::{
     div, img, prelude::*, px, rgba, AnyElement, Context, CursorStyle, FontWeight, MouseButton,
     MouseDownEvent, ObjectFit, RenderImage, ScrollWheelEvent,
 };
+use nook_core::messages::FdaStatus;
 use nook_core::settings::WidgetModule;
 
 impl Island {
@@ -54,25 +37,16 @@ impl Island {
             .overflow_hidden()
             .child(self.render_topbar(notch_w, cx))
             .child(
-                div()
-                    .flex_1()
-                    .w_full()
-                    .overflow_hidden()
-                    .child(match tab {
-                        Tab::Widgets => self.render_nook(cx).into_any_element(),
-                        Tab::Files => div()
-                            .size_full()
-                            .px(px(theme::EXPANDED_PAD))
-                            .pb(px(theme::EXPANDED_PAD))
-                            .child(self.render_files(cx))
-                            .into_any_element(),
-                        Tab::Terminal => div()
-                            .size_full()
-                            .px(px(theme::EXPANDED_PAD))
-                            .pb(px(theme::EXPANDED_PAD))
-                            .child(terminal_card(self, cx))
-                            .into_any_element(),
-                    }),
+                div().flex_1().w_full().overflow_hidden().child(match tab {
+                    Tab::Widgets => self.render_nook(cx).into_any_element(),
+                    Tab::Files => div()
+                        .size_full()
+                        .px(px(theme::EXPANDED_PAD))
+                        .pb(px(theme::EXPANDED_PAD))
+                        .child(self.render_files(cx))
+                        .into_any_element(),
+                    Tab::Terminal => terminal_card(self, cx).into_any_element(),
+                }),
             )
             .into_any_element()
     }
@@ -113,13 +87,25 @@ impl Island {
     }
 
     fn render_nook(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
-        let show_qa = self.settings.quick_add;
-        let calendar_qa = if show_qa && self.settings.show_calendar {
-            Some(self.ensure_calendar_quick_add(cx))
-        } else {
-            None
-        };
-        let reminders_qa = if show_qa && self.settings.show_reminders {
+        if self.has_incoming_message() && self.mode() == CompactMode::Messages {
+            return div()
+                .id("nook-row")
+                .size_full()
+                .px(px(theme::NOOK_INSET))
+                .pb(px(theme::NOOK_INSET))
+                .child(messages_card(self, cx))
+                .into_any_element();
+        }
+        if self.settings.show_recorder && self.mode() == CompactMode::Recording {
+            return div()
+                .id("nook-row")
+                .size_full()
+                .px(px(theme::NOOK_INSET))
+                .pb(px(theme::NOOK_INSET))
+                .child(recorder_card(self, cx))
+                .into_any_element();
+        }
+        let reminders_qa = if self.settings.quick_add && self.settings.show_reminders {
             Some(self.ensure_reminders_quick_add(cx))
         } else {
             None
@@ -136,17 +122,13 @@ impl Island {
             match module {
                 WidgetModule::Music if self.settings.show_media => add(
                     &mut kids,
-                    cell_pane(
-                        self.settings.cells_for(module),
-                        nook_media_pane(self, cx),
-                    ),
                     cell_pane(self.settings.cells_for(module), nook_media_pane(self, cx)),
                 ),
                 WidgetModule::Calendar if self.settings.show_calendar => add(
                     &mut kids,
                     cell_pane(
                         self.settings.cells_for(module),
-                        calendar_card(&self.events, self.calendar_day, calendar_qa.clone(), cx),
+                        calendar_card(&self.events, self.calendar_day, cx),
                     ),
                 ),
                 WidgetModule::Mirror if self.settings.show_mirror => add(
@@ -160,7 +142,7 @@ impl Island {
                         agents_card(&self.agents, self.pixel_t, cx),
                     ),
                 ),
-                WidgetModule::Meeting if self.settings.show_meetings => add(
+                WidgetModule::Meeting if self.settings.is_enabled(module) => add(
                     &mut kids,
                     cell_pane(
                         self.settings.cells_for(module),
@@ -188,16 +170,13 @@ impl Island {
                 ),
                 WidgetModule::Timers if self.settings.show_timers => add(
                     &mut kids,
-                    cell_pane(
-                        self.settings.cells_for(module),
-                        timer_card(self, cx),
-                    ),
+                    cell_pane(self.settings.cells_for(module), timer_card(self, cx)),
                 ),
                 WidgetModule::Notes if self.settings.show_notes => add(
                     &mut kids,
                     cell_pane(self.settings.cells_for(module), notes_card(self, cx)),
                 ),
-                WidgetModule::Obsidian if self.settings.show_obsidian => add(
+                WidgetModule::Obsidian if self.settings.is_enabled(module) => add(
                     &mut kids,
                     cell_pane(self.settings.cells_for(module), obsidian_card(self, cx)),
                 ),
@@ -212,17 +191,16 @@ impl Island {
                     &mut kids,
                     cell_pane(self.settings.cells_for(module), battery_card(self, cx)),
                 ),
-                WidgetModule::Messages if self.settings.show_messages => add(
-                    &mut kids,
-                    cell_pane(
-                        self.settings.cells_for(module),
-                        messages_card(self, cx),
-                    ),
-                ),
-                WidgetModule::Mixer if self.settings.is_enabled(WidgetModule::Mixer) => add(
-                    &mut kids,
-                    cell_pane(self.settings.cells_for(module), mixer_card(self, cx)),
-                ),
+                WidgetModule::Messages
+                    if self.settings.show_messages
+                        && (self.messages.incoming.is_some()
+                            || self.messages.fda != FdaStatus::Granted) =>
+                {
+                    add(
+                        &mut kids,
+                        cell_pane(self.settings.cells_for(module), messages_card(self, cx)),
+                    )
+                }
                 WidgetModule::Weather if self.settings.weather.enabled => add(
                     &mut kids,
                     cell_pane(self.settings.cells_for(module), weather_card(self, cx)),
@@ -233,10 +211,7 @@ impl Island {
                 ),
                 WidgetModule::HighAlert if self.settings.show_high_alert => add(
                     &mut kids,
-                    cell_pane(
-                        self.settings.cells_for(module),
-                        high_alert_card(self, cx),
-                    ),
+                    cell_pane(self.settings.cells_for(module), high_alert_card(self, cx)),
                 ),
                 WidgetModule::SysStats if self.settings.show_sysstats => add(
                     &mut kids,
@@ -244,10 +219,7 @@ impl Island {
                 ),
                 WidgetModule::Recorder if self.settings.show_recorder => add(
                     &mut kids,
-                    cell_pane(
-                        self.settings.cells_for(module),
-                        recorder_card(self, cx),
-                    ),
+                    cell_pane(self.settings.cells_for(module), recorder_card(self, cx)),
                 ),
                 WidgetModule::Notifications if self.settings.show_notifications => add(
                     &mut kids,
@@ -256,17 +228,6 @@ impl Island {
                         notifications_card(&self.notifications, cx),
                     ),
                 ),
-                WidgetModule::Process
-                    if self.settings.show_process && self.settings.file_actions.enabled =>
-                {
-                    add(
-                        &mut kids,
-                        cell_pane(
-                            self.settings.cells_for(module),
-                            process_card(self, cx),
-                        ),
-                    )
-                }
                 _ => {}
             }
         }
@@ -275,28 +236,30 @@ impl Island {
             .id("nook-row")
             .flex()
             .flex_row()
+            .w_full()
             .h_full()
             .px(px(theme::NOOK_INSET))
             .pb(px(theme::NOOK_INSET))
-            .overflow_x_scroll()
-            .on_scroll_wheel(cx.listener(|_, _: &ScrollWheelEvent, _, cx| {
-                cx.stop_propagation();
+            .overflow_hidden()
+            .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _, cx| {
+                this.on_wheel(event, cx);
             }));
         for child in kids {
             row = row.child(child);
         }
-        row
+        row.into_any_element()
     }
 }
 
 fn cell_pane(cells: u8, child: impl IntoElement) -> AnyElement {
-    div()
+    let mut pane = div()
         .w(px(cells as f32 * theme::NOOK_CELL))
         .h_full()
-        .flex_shrink_0()
+        .min_w(px(0.))
         .overflow_hidden()
-        .child(child)
-        .into_any_element()
+        .child(child);
+    pane.style().flex_shrink = Some(cells.max(1) as f32);
+    pane.into_any_element()
 }
 
 fn pane_divider() -> impl IntoElement {

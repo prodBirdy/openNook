@@ -286,9 +286,8 @@ pub async fn jump_to_item(item: &QueueItem, context_uri: Option<&str>) -> Result
 fn jump_music(index: u32) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
-        let script = format!(
-            r#"tell application "Music" to play track {index} of current playlist"#
-        );
+        let script =
+            format!(r#"tell application "Music" to play track {index} of current playlist"#);
         run_osascript(&script).map(|_| ())
     }
     #[cfg(not(target_os = "macos"))]
@@ -310,10 +309,7 @@ mod tests {
         let items = music_window(7, &tracks, false, false, 10).unwrap();
         assert_eq!(items.len(), 10);
         assert_eq!(items[0].title, "t8");
-        assert_eq!(
-            items[0].jump,
-            QueueJump::MusicTrack { index: 8 }
-        );
+        assert_eq!(items[0].jump, QueueJump::MusicTrack { index: 8 });
         assert_eq!(items[9].title, "t17");
     }
 

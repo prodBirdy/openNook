@@ -128,7 +128,11 @@ pub fn snapshot() -> LiveSnapshot {
         level: f32::from_bits(LEVEL_BITS.load(Ordering::Relaxed)),
         transcribing: recording && transcribe && TRANSCRIBING.load(Ordering::Relaxed),
         error,
-        playing_id: if playing == 0 { None } else { Some(playing as i64) },
+        playing_id: if playing == 0 {
+            None
+        } else {
+            Some(playing as i64)
+        },
     }
 }
 
@@ -170,7 +174,12 @@ fn insert_on(conn: &rusqlite::Connection, item: &RecordingItem) -> Result<i64, S
     log_sql(sql);
     conn.execute(
         sql,
-        rusqlite::params![item.path, item.created_at, item.duration_ms, item.transcript],
+        rusqlite::params![
+            item.path,
+            item.created_at,
+            item.duration_ms,
+            item.transcript
+        ],
     )
     .map_err(|e| e.to_string())?;
     Ok(conn.last_insert_rowid())
@@ -180,9 +189,7 @@ pub fn delete(id: i64) -> Result<(), String> {
     let conn = get_connection().map_err(|e| e.to_string())?;
     let sql = "SELECT path FROM recordings WHERE id = ?1";
     log_sql(sql);
-    let path: Option<String> = conn
-        .query_row(sql, [id], |row| row.get(0))
-        .ok();
+    let path: Option<String> = conn.query_row(sql, [id], |row| row.get(0)).ok();
     let sql = "DELETE FROM recordings WHERE id = ?1";
     log_sql(sql);
     conn.execute(sql, [id]).map_err(|e| e.to_string())?;
@@ -308,9 +315,9 @@ fn persist_current(duration_ms: i64) -> Result<Option<RecordingItem>, String> {
 mod macos {
     use super::*;
     use block2::RcBlock;
+    use objc2::msg_send;
     use objc2::rc::Retained;
     use objc2::runtime::{AnyClass, AnyObject, Bool};
-    use objc2::msg_send;
     use objc2_foundation::NSString;
     use std::ffi::c_void;
     use std::ptr;
@@ -337,14 +344,19 @@ mod macos {
         _result: Option<TapKeep>,
     }
 
-    // RcBlock must stay alive for the tap / result handler.
-    struct TapKeep(Box<dyn Send + Sync>);
+    // RcBlock must stay alive for the tap / result handler. RcBlock itself is
+    // neither Send nor Sync, but we only hold it to keep the block alive while
+    // AVFoundation/Speech invoke it from their own threads.
+    struct TapKeep(Box<dyn std::any::Any>);
+    unsafe impl Send for TapKeep {}
+    unsafe impl Sync for TapKeep {}
 
     static ENGINE: Mutex<Option<Engine>> = Mutex::new(None);
     static PLAYER: Mutex<Option<SyncObj>> = Mutex::new(None);
 
     fn class(name: &str) -> Result<&'static AnyClass, String> {
-        AnyClass::get(name).ok_or_else(|| format!("missing {name}"))
+        let cname = std::ffi::CString::new(name).map_err(|e| e.to_string())?;
+        AnyClass::get(&cname).ok_or_else(|| format!("missing {name}"))
     }
 
     fn ns_string(s: &str) -> Retained<NSString> {
@@ -369,9 +381,7 @@ mod macos {
 
     pub fn stop() -> Result<Option<RecordingItem>, String> {
         let started = shared().lock().ok().and_then(|g| g.started);
-        let duration_ms = started
-            .map(|t| t.elapsed().as_millis() as i64)
-            .unwrap_or(0);
+        let duration_ms = started.map(|t| t.elapsed().as_millis() as i64).unwrap_or(0);
         teardown_engine();
         LIVE.store(false, Ordering::SeqCst);
         TRANSCRIBING.store(false, Ordering::Relaxed);
@@ -386,7 +396,9 @@ mod macos {
         let mut err: *mut AnyObject = ptr::null_mut();
         let player: Option<Retained<AnyObject>> = unsafe {
             let alloc: *mut AnyObject = msg_send![cls, alloc];
-            msg_send![alloc, initWithContentsOfURL: &*url, error: &mut err]
+            let ptr: *mut AnyObject =
+                msg_send![alloc, initWithContentsOfURL: &*url, error: &mut err];
+            Retained::from_raw(ptr)
         };
         let Some(player) = player else {
             return Err(ns_error(err).unwrap_or_else(|| "AVAudioPlayer failed".into()));
@@ -449,23 +461,28 @@ mod macos {
             }
             _ => {}
         }
-        let cls = class("AVCaptureDevice")?;
-        let media = ns_string("soun");
         let (tx, rx) = oneshot::channel::<bool>();
-        let tx = Mutex::new(Some(tx));
-        let handler = RcBlock::new(move |granted: Bool| {
-            if let Ok(mut slot) = tx.lock() {
-                if let Some(tx) = slot.take() {
-                    let _ = tx.send(granted.as_bool());
+        // Scope every ObjC value (class ref, NSString, RcBlock) so none of
+        // them lives across the await: they are !Send and would make this
+        // future !Send. The runtime copies the completion block.
+        {
+            let cls = class("AVCaptureDevice")?;
+            let media = ns_string("soun");
+            let tx = Mutex::new(Some(tx));
+            let handler = RcBlock::new(move |granted: Bool| {
+                if let Ok(mut slot) = tx.lock() {
+                    if let Some(tx) = slot.take() {
+                        let _ = tx.send(granted.as_bool());
+                    }
                 }
+            });
+            unsafe {
+                let _: () = msg_send![
+                    cls,
+                    requestAccessForMediaType: &*media,
+                    completionHandler: &*handler
+                ];
             }
-        });
-        unsafe {
-            let _: () = msg_send![
-                cls,
-                requestAccessForMediaType: &*media,
-                completionHandler: &*handler
-            ];
         }
         match rx.await {
             Ok(true) => Ok(()),
@@ -475,24 +492,30 @@ mod macos {
     }
 
     async fn request_speech() -> Result<bool, String> {
-        let cls = class("SFSpeechRecognizer")?;
-        let status: isize = unsafe { msg_send![cls, authorizationStatus] };
+        let status: isize = {
+            let cls = class("SFSpeechRecognizer")?;
+            unsafe { msg_send![cls, authorizationStatus] }
+        };
         match status {
             3 => return Ok(true),
             1 | 2 => return Ok(false),
             _ => {}
         }
         let (tx, rx) = oneshot::channel::<isize>();
-        let tx = Mutex::new(Some(tx));
-        let handler = RcBlock::new(move |status: isize| {
-            if let Ok(mut slot) = tx.lock() {
-                if let Some(tx) = slot.take() {
-                    let _ = tx.send(status);
+        // Scoped for the same !Send reason as request_mic above.
+        {
+            let cls = class("SFSpeechRecognizer")?;
+            let tx = Mutex::new(Some(tx));
+            let handler = RcBlock::new(move |status: isize| {
+                if let Ok(mut slot) = tx.lock() {
+                    if let Some(tx) = slot.take() {
+                        let _ = tx.send(status);
+                    }
                 }
+            });
+            unsafe {
+                let _: () = msg_send![cls, requestAuthorization: &*handler];
             }
-        });
-        unsafe {
-            let _: () = msg_send![cls, requestAuthorization: &*handler];
         }
         match rx.await {
             Ok(3) => Ok(true),
@@ -514,14 +537,16 @@ mod macos {
         let mut err: *mut AnyObject = ptr::null_mut();
         let file: Option<Retained<AnyObject>> = unsafe {
             let alloc: *mut AnyObject = msg_send![file_cls, alloc];
-            msg_send![
+            let ptr: *mut AnyObject = msg_send![
                 alloc,
                 initForWriting: &*url,
                 settings: &*settings,
                 error: &mut err
-            ]
+            ];
+            Retained::from_raw(ptr)
         };
-        let file = file.ok_or_else(|| ns_error(err).unwrap_or_else(|| "AVAudioFile failed".into()))?;
+        let file =
+            file.ok_or_else(|| ns_error(err).unwrap_or_else(|| "AVAudioFile failed".into()))?;
 
         let (request, recognizer, result_keep) = if transcribe {
             match start_recognition() {
@@ -680,7 +705,7 @@ mod macos {
                 drop(session.file);
             }
         }
-        if let Ok(mut g) = shared().lock() {
+        if let Ok(g) = shared().lock() {
             if let Some(started) = g.started {
                 STARTED_MS.store(started.elapsed().as_millis() as u64, Ordering::Relaxed);
             }
@@ -690,8 +715,7 @@ mod macos {
     fn file_url(path: &str) -> Result<Retained<AnyObject>, String> {
         let cls = class("NSURL")?;
         let ns = ns_string(path);
-        let url: Option<Retained<AnyObject>> =
-            unsafe { msg_send![cls, fileURLWithPath: &*ns] };
+        let url: Option<Retained<AnyObject>> = unsafe { msg_send![cls, fileURLWithPath: &*ns] };
         url.ok_or_else(|| "NSURL failed".into())
     }
 
@@ -699,8 +723,7 @@ mod macos {
         if err.is_null() {
             return None;
         }
-        let localized: Retained<NSString> =
-            unsafe { msg_send![&*err, localizedDescription] };
+        let localized: Retained<NSString> = unsafe { msg_send![&*err, localizedDescription] };
         Some(localized.to_string())
     }
 

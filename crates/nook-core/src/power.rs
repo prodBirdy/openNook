@@ -565,7 +565,10 @@ mod macos {
             {
                 return None;
             }
-            CStr::from_ptr(buf.as_ptr()).to_str().ok().map(str::to_string)
+            CStr::from_ptr(buf.as_ptr())
+                .to_str()
+                .ok()
+                .map(str::to_string)
         }
     }
 
@@ -611,8 +614,9 @@ mod macos {
 
     async fn run_osascript_admin(on: bool) -> Result<(), String> {
         let flag = if on { "1" } else { "0" };
-        let script =
-            format!(r#"do shell script "pmset -a lowpowermode {flag}" with administrator privileges"#);
+        let script = format!(
+            r#"do shell script "pmset -a lowpowermode {flag}" with administrator privileges"#
+        );
         let output = tokio::process::Command::new("/usr/bin/osascript")
             .arg("-e")
             .arg(script)
@@ -644,7 +648,9 @@ mod macos {
         match super::lpm_route(name.as_deref(), &listed) {
             LpmRoute::Shortcut(name) => {
                 if let Err(err) = run_shortcut(&name).await {
-                    log::warn!("shortcuts run '{name}' failed ({err}); falling back to admin prompt");
+                    log::warn!(
+                        "shortcuts run '{name}' failed ({err}); falling back to admin prompt"
+                    );
                     run_osascript_admin(!before).await?;
                 }
             }
@@ -668,7 +674,10 @@ mod macos {
         if super::current().low_power_mode != before {
             return Ok(super::current().low_power_mode);
         }
-        Err("Low Power Mode did not change. Import the shortcut or approve the admin prompt.".into())
+        Err(
+            "Low Power Mode did not change. Import the shortcut or approve the admin prompt."
+                .into(),
+        )
     }
 
     pub fn install_lpm_shortcut() -> Result<(), String> {
@@ -679,7 +688,13 @@ mod macos {
             .unwrap_or_else(|| super::default_lpm_shortcut_name().into());
         let safe: String = name
             .chars()
-            .map(|ch| if ch.is_ascii_alphanumeric() || ch == ' ' { ch } else { '_' })
+            .map(|ch| {
+                if ch.is_ascii_alphanumeric() || ch == ' ' {
+                    ch
+                } else {
+                    '_'
+                }
+            })
             .collect();
         let path = std::env::temp_dir().join(format!("{safe}.shortcut"));
         std::fs::write(&path, SHORTCUT).map_err(|err| err.to_string())?;

@@ -206,9 +206,8 @@ pub fn is_routable_ipv6(addr: Ipv6Addr) -> bool {
 }
 
 pub fn has_routable_address(ipv4: Option<Ipv4Addr>, ipv6: &[Ipv6Addr]) -> bool {
-    let v4 = ipv4.is_some_and(|addr| {
-        !addr.is_unspecified() && !addr.is_loopback() && !addr.is_link_local()
-    });
+    let v4 = ipv4
+        .is_some_and(|addr| !addr.is_unspecified() && !addr.is_loopback() && !addr.is_link_local());
     v4 || ipv6.iter().copied().any(is_routable_ipv6)
 }
 
@@ -259,11 +258,7 @@ pub fn format_elapsed(secs: u64) -> String {
     format!("{h}:{m:02}:{s:02}")
 }
 
-pub fn compact_right_text(
-    name: &str,
-    elapsed: Option<(u64, bool)>,
-    show_timer: bool,
-) -> String {
+pub fn compact_right_text(name: &str, elapsed: Option<(u64, bool)>, show_timer: bool) -> String {
     match (show_timer, elapsed) {
         (true, Some((secs, true))) => format!("{name} · ≥ {}", format_elapsed(secs)),
         (true, Some((secs, false))) => format!("{name} · {}", format_elapsed(secs)),
@@ -461,11 +456,14 @@ fn collect_ifaddrs() -> Vec<IfAddr> {
 #[cfg(target_os = "macos")]
 mod macos {
     use super::{parse_scutil_connect_time, parse_scutil_nc_list};
-    use core_foundation::array::CFArray;
-    use core_foundation::runloop::{kCFRunLoopCommonModes, CFRunLoop};
-    use core_foundation::string::CFString;
     use std::process::Command;
     use std::time::SystemTime;
+    // Use the core_foundation re-exported by system-configuration — the
+    // standalone core-foundation dep is a different major version, and its
+    // CFArray/CFString are incompatible types.
+    use system_configuration::core_foundation::array::CFArray;
+    use system_configuration::core_foundation::runloop::{kCFRunLoopCommonModes, CFRunLoop};
+    use system_configuration::core_foundation::string::CFString;
     use system_configuration::dynamic_store::{
         SCDynamicStore, SCDynamicStoreBuilder, SCDynamicStoreCallBackContext,
     };
@@ -483,13 +481,9 @@ mod macos {
             callout: on_change,
             info: (),
         };
-        let Some(store) = SCDynamicStoreBuilder::new("openNook-vpn")
+        let store = SCDynamicStoreBuilder::new("openNook-vpn")
             .callback_context(context)
-            .build()
-        else {
-            log::warn!("SCDynamicStoreCreate failed");
-            return;
-        };
+            .build();
         let patterns = CFArray::from_CFTypes(
             &PATTERNS
                 .iter()
@@ -504,7 +498,7 @@ mod macos {
         let source = store.create_run_loop_source();
         let rl = CFRunLoop::get_current();
         rl.add_source(&source, unsafe { kCFRunLoopCommonModes });
-        CFRunLoop::run();
+        CFRunLoop::run_current();
     }
 
     fn on_change(_store: SCDynamicStore, _changed: CFArray<CFString>, _info: &mut ()) {
@@ -567,13 +561,7 @@ mod tests {
 
     #[test]
     fn link_local_only_utun_is_not_a_vpn() {
-        let system = utun(
-            "utun0",
-            None,
-            &["fe80::1"],
-            true,
-            true,
-        );
+        let system = utun("utun0", None, &["fe80::1"], true, true);
         assert!(!has_routable_address(system.ipv4, &system.ipv6));
         assert!(classify_vpn_interfaces(&[system], &[]).is_empty());
     }
@@ -581,13 +569,7 @@ mod tests {
     #[test]
     fn routable_v4_or_global_v6_counts() {
         let tailscale = utun("utun4", Some(Ipv4Addr::new(100, 64, 0, 2)), &[], true, true);
-        let wg = utun(
-            "utun5",
-            None,
-            &["fd7a:115c:a1e0::1"],
-            true,
-            true,
-        );
+        let wg = utun("utun5", None, &["fd7a:115c:a1e0::1"], true, true);
         assert!(is_active_vpn(&tailscale, &[]));
         assert!(is_active_vpn(&wg, &[]));
         assert_eq!(classify_vpn_interfaces(&[tailscale, wg], &[]).len(), 2);
@@ -603,11 +585,20 @@ mod tests {
 
     #[test]
     fn ignore_list_filters_false_positives() {
-        let helper = utun("utun3", Some(Ipv4Addr::new(192, 168, 64, 1)), &[], true, true);
+        let helper = utun(
+            "utun3",
+            Some(Ipv4Addr::new(192, 168, 64, 1)),
+            &[],
+            true,
+            true,
+        );
         assert!(is_active_vpn(&helper, &[]));
         assert!(!is_active_vpn(&helper, &["utun3".into()]));
         assert!(!is_active_vpn(&helper, &["UTUN3".into()]));
-        assert_eq!(parse_ignore_list("utun3, ipsec0  ppp1"), vec!["utun3", "ipsec0", "ppp1"]);
+        assert_eq!(
+            parse_ignore_list("utun3, ipsec0  ppp1"),
+            vec!["utun3", "ipsec0", "ppp1"]
+        );
         assert_eq!(format_ignore_list(&["utun3".into()]), "utun3");
     }
 
@@ -615,7 +606,10 @@ mod tests {
     fn loopback_and_unspecified_are_not_routable() {
         assert!(!has_routable_address(Some(Ipv4Addr::UNSPECIFIED), &[]));
         assert!(!has_routable_address(Some(Ipv4Addr::LOCALHOST), &[]));
-        assert!(!has_routable_address(Some(Ipv4Addr::new(169, 254, 1, 1)), &[]));
+        assert!(!has_routable_address(
+            Some(Ipv4Addr::new(169, 254, 1, 1)),
+            &[]
+        ));
         assert!(!is_routable_ipv6(Ipv6Addr::LOCALHOST));
         assert!(!is_routable_ipv6("fe80::abcd".parse().unwrap()));
         assert!(is_routable_ipv6("2001:db8::1".parse().unwrap()));
@@ -680,7 +674,13 @@ Available network connection services in the current set (* = enabled):
             snap: VpnSnapshot::default(),
             primed: false,
         };
-        let first = build_snapshot(&[&iface], &["Tailscale".into()], None, &cold, SystemTime::UNIX_EPOCH);
+        let first = build_snapshot(
+            &[&iface],
+            &["Tailscale".into()],
+            None,
+            &cold,
+            SystemTime::UNIX_EPOCH,
+        );
         assert!(first.connected);
         assert!(first.since_estimated);
         assert_eq!(first.service_name, "Tailscale");
@@ -694,7 +694,16 @@ Available network connection services in the current set (* = enabled):
         assert!(edge.connected);
         assert!(!edge.since_estimated);
 
-        let down = build_snapshot(&[], &[], None, &MonitorState { snap: first.clone(), primed: true }, SystemTime::UNIX_EPOCH);
+        let down = build_snapshot(
+            &[],
+            &[],
+            None,
+            &MonitorState {
+                snap: first.clone(),
+                primed: true,
+            },
+            SystemTime::UNIX_EPOCH,
+        );
         assert!(!down.connected);
         assert_eq!(down.service_name, "Tailscale");
         assert!(down.since.is_none());
@@ -711,10 +720,7 @@ Available network connection services in the current set (* = enabled):
             tunnel_count: 1,
         };
         let now = SystemTime::UNIX_EPOCH + Duration::from_secs(12);
-        assert_eq!(
-            snap.compact_right(true, now),
-            "Tailscale · ≥ 0:00:12"
-        );
+        assert_eq!(snap.compact_right(true, now), "Tailscale · ≥ 0:00:12");
         assert_eq!(snap.compact_right(false, now), "Tailscale");
         assert_eq!(snap.elapsed_label(now).as_deref(), Some("≥ 0:00:12"));
     }

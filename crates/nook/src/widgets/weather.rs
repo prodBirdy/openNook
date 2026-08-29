@@ -34,7 +34,12 @@ fn forecast_body(snap: &WeatherSnapshot) -> impl IntoElement {
         ),
         _ => snap.label().to_string(),
     };
-    let mut hours = div().flex().items_end().justify_between().w_full().gap(px(6.));
+    let mut hours = div()
+        .flex()
+        .items_end()
+        .justify_between()
+        .w_full()
+        .gap(px(6.));
     for (i, hour) in snap.hourly.iter().take(6).enumerate() {
         hours = hours.child(hour_col(i, hour));
     }

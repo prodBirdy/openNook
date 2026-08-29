@@ -155,13 +155,7 @@ pub fn insert_capture(
     conn.execute(
         "INSERT INTO clipboard_items (kind, text, image, app_bundle_id, copied_at, pinned)
          VALUES (?1, ?2, ?3, ?4, ?5, 0)",
-        rusqlite::params![
-            kind.as_str(),
-            text,
-            image,
-            app_bundle_id,
-            now,
-        ],
+        rusqlite::params![kind.as_str(), text, image, app_bundle_id, now,],
     )
     .map_err(|e| e.to_string())?;
     trim_fifo(&conn, cap.max(1))?;
@@ -228,9 +222,7 @@ fn consecutive_duplicate(
     text: &str,
 ) -> Result<bool, String> {
     let mut stmt = conn
-        .prepare(
-            "SELECT kind, text FROM clipboard_items ORDER BY id DESC LIMIT 1",
-        )
+        .prepare("SELECT kind, text FROM clipboard_items ORDER BY id DESC LIMIT 1")
         .map_err(|e| e.to_string())?;
     let row = stmt.query_row([], |row| {
         Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
@@ -332,8 +324,8 @@ fn capture_macos(exclude_apps: &[String], cap: u32) -> bool {
         let text = pasteboard_string(pb, "public.utf8-plain-text")
             .or_else(|| pasteboard_string(pb, "public.utf16-plain-text"));
         let file = pasteboard_string(pb, "public.file-url");
-        let image = pasteboard_data(pb, "public.png")
-            .or_else(|| pasteboard_data(pb, "public.tiff"));
+        let image =
+            pasteboard_data(pb, "public.png").or_else(|| pasteboard_data(pb, "public.tiff"));
 
         if let Some(file) = file.filter(|s| !s.is_empty()) {
             let path = file_url_to_path(&file).unwrap_or(file);
@@ -374,7 +366,8 @@ fn write_text_macos(text: &str) -> bool {
         if ns.is_null() {
             return false;
         }
-        let ok: bool = msg_send![pb, setString: ns, forType: rust_to_nsstring("public.utf8-plain-text")];
+        let ok: bool =
+            msg_send![pb, setString: ns, forType: rust_to_nsstring("public.utf8-plain-text")];
         let count = macos_change_count();
         if count != i64::MIN {
             LAST_CHANGE_COUNT.store(count, Ordering::Relaxed);
@@ -444,7 +437,8 @@ fn percent_decode(input: &str) -> String {
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] == b'%' && i + 2 < bytes.len() {
-            if let Ok(v) = u8::from_str_radix(std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or(""), 16)
+            if let Ok(v) =
+                u8::from_str_radix(std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or(""), 16)
             {
                 out.push(v);
                 i += 3;
@@ -478,7 +472,11 @@ fn nsstring_to_rust(s: *mut objc2::runtime::AnyObject) -> Option<String> {
         if cstr.is_null() {
             return None;
         }
-        Some(std::ffi::CStr::from_ptr(cstr).to_string_lossy().into_owned())
+        Some(
+            std::ffi::CStr::from_ptr(cstr)
+                .to_string_lossy()
+                .into_owned(),
+        )
     }
 }
 
@@ -491,13 +489,18 @@ mod tests {
         assert!(is_private_type(TRANSIENT_TYPE));
         assert!(is_private_type(CONCEALED_TYPE));
         assert!(is_private_type(AUTO_GENERATED_TYPE));
-        assert!(is_private_type("com.apple.pasteboard.promised-file-content-type"));
+        assert!(is_private_type(
+            "com.apple.pasteboard.promised-file-content-type"
+        ));
         assert!(!is_private_type("public.utf8-plain-text"));
         assert!(should_skip_types(&[
             "public.utf8-plain-text",
             CONCEALED_TYPE
         ]));
-        assert!(!should_skip_types(&["public.utf8-plain-text", "public.png"]));
+        assert!(!should_skip_types(&[
+            "public.utf8-plain-text",
+            "public.png"
+        ]));
     }
 
     #[test]

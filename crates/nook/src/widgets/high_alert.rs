@@ -49,13 +49,11 @@ pub(crate) fn high_alert_card(island: &Island, cx: &mut Context<Island>) -> impl
                 .child(toggle_btn(active, cx)),
         )
         .child(
-            div()
-                .flex()
-                .items_center()
-                .gap(px(6.))
-                .children(CHIPS.iter().map(|(label, secs)| {
-                    chip(*label, *secs, selected == *secs && active, cx)
-                })),
+            div().flex().items_center().gap(px(6.)).children(
+                CHIPS
+                    .iter()
+                    .map(|(label, secs)| chip(*label, *secs, selected == *secs && active, cx)),
+            ),
         )
         .child(
             div()
@@ -90,19 +88,17 @@ fn toggle_btn(active: bool, cx: &mut Context<Island>) -> impl IntoElement {
         .child(lucide_color(
             "sun",
             16.0,
-            if active {
-                theme::SUCCESS
-            } else {
-                theme::LABEL
-            },
+            if active { theme::SUCCESS } else { theme::LABEL },
         ))
         .on_mouse_down(
             MouseButton::Left,
             cx.listener(move |this, _: &MouseDownEvent, _, cx| {
                 cx.stop_propagation();
-                if this.high_alert_active() && nook_core::high_alert::is_held_by(
-                    nook_core::high_alert::HighAlertOwner::Manual,
-                ) {
+                if this.high_alert_active()
+                    && nook_core::high_alert::is_held_by(
+                        nook_core::high_alert::HighAlertOwner::Manual,
+                    )
+                {
                     this.set_high_alert(false, None);
                 } else {
                     let secs = this.settings.high_alert_default_duration_secs;

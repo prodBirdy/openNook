@@ -61,7 +61,7 @@ impl Spring {
         let omega = 2.0 * PI / duration;
         Self {
             stiffness: omega * omega,
-            damping: 2.0 * (1.0 - bounce) * omega,
+            damping: 2.0 * (0.8 - bounce) * omega,
         }
     }
 
@@ -242,7 +242,10 @@ mod tests {
         for i in 0..3 {
             for t in [0.0, 3.0, 11.0] {
                 let (x, y) = aura_blob_offset(i, t);
-                assert!(x.abs() < 50.0 && y.abs() < 40.0, "blob {i} escaped: {x},{y}");
+                assert!(
+                    x.abs() < 50.0 && y.abs() < 40.0,
+                    "blob {i} escaped: {x},{y}"
+                );
             }
         }
         let a = aura_blob_offset(0, 1.0);

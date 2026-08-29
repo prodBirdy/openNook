@@ -345,7 +345,8 @@ unsafe fn prompt_trust_macos() -> bool {
     if key.is_null() || yes.is_null() {
         return AXIsProcessTrusted();
     }
-    let options: *mut AnyObject = msg_send![class!(NSDictionary), dictionaryWithObject: yes, forKey: key];
+    let options: *mut AnyObject =
+        msg_send![class!(NSDictionary), dictionaryWithObject: yes, forKey: key];
     if options.is_null() {
         return AXIsProcessTrusted();
     }
@@ -496,7 +497,11 @@ unsafe fn ax_bool(element: *mut std::ffi::c_void, attr: *const std::ffi::c_void)
 
 #[cfg(target_os = "macos")]
 unsafe fn ax_set_bool(element: *mut std::ffi::c_void, attr: *const std::ffi::c_void, value: bool) {
-    let cf = if value { kCFBooleanTrue } else { kCFBooleanFalse };
+    let cf = if value {
+        kCFBooleanTrue
+    } else {
+        kCFBooleanFalse
+    };
     let _ = AXUIElementSetAttributeValue(element, attr, cf);
 }
 
@@ -504,7 +509,10 @@ unsafe fn ax_set_bool(element: *mut std::ffi::c_void, attr: *const std::ffi::c_v
 unsafe fn ax_set_point(element: *mut std::ffi::c_void, x: f64, y: f64) -> bool {
     use crate::notch::CGPoint;
     let point = CGPoint { x, y };
-    let value = AXValueCreate(AX_VALUE_CGPOINT, &point as *const CGPoint as *const std::ffi::c_void);
+    let value = AXValueCreate(
+        AX_VALUE_CGPOINT,
+        &point as *const CGPoint as *const std::ffi::c_void,
+    );
     if value.is_null() {
         return false;
     }
@@ -520,7 +528,10 @@ unsafe fn ax_set_size(element: *mut std::ffi::c_void, w: f64, h: f64) -> bool {
         width: w,
         height: h,
     };
-    let value = AXValueCreate(AX_VALUE_CGSIZE, &size as *const CGSize as *const std::ffi::c_void);
+    let value = AXValueCreate(
+        AX_VALUE_CGSIZE,
+        &size as *const CGSize as *const std::ffi::c_void,
+    );
     if value.is_null() {
         return false;
     }

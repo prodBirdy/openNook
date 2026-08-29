@@ -201,10 +201,14 @@ impl SearchEditor {
                 self.head = self.text.len();
             }
             "c" if cmd => {
-                cx.write_to_clipboard(ClipboardItem::new_string(self.text[sel.clone()].to_string()));
+                cx.write_to_clipboard(ClipboardItem::new_string(
+                    self.text[sel.clone()].to_string(),
+                ));
             }
             "x" if cmd => {
-                cx.write_to_clipboard(ClipboardItem::new_string(self.text[sel.clone()].to_string()));
+                cx.write_to_clipboard(ClipboardItem::new_string(
+                    self.text[sel.clone()].to_string(),
+                ));
                 self.splice(cx, sel, "");
             }
             "v" if cmd => {
@@ -300,7 +304,8 @@ impl EntityInputHandler for SearchEditor {
         let start = range.start;
         self.splice(cx, range, new_text);
         let inserted = new_text.replace(['\n', '\r'], "").len();
-        self.marked_range = Some(utf8_to_utf16(&self.text, start)..utf8_to_utf16(&self.text, start + inserted));
+        self.marked_range =
+            Some(utf8_to_utf16(&self.text, start)..utf8_to_utf16(&self.text, start + inserted));
         if let Some(sel) = new_selected_range {
             let base = utf8_to_utf16(&self.text, start);
             self.anchor = utf16_to_utf8(&self.text, base + sel.start);
@@ -382,7 +387,16 @@ impl Render for SearchEditor {
                         *bounds_cell.borrow_mut() = Some(bounds);
                     },
                     move |bounds, _, window, cx| {
-                        paint_query(bounds, &entity, &focus, &text, head, sel.clone(), window, cx);
+                        paint_query(
+                            bounds,
+                            &entity,
+                            &focus,
+                            &text,
+                            head,
+                            sel.clone(),
+                            window,
+                            cx,
+                        );
                     },
                 )
                 .w_full()
@@ -444,7 +458,8 @@ fn paint_query(
             let origin = point(bounds.origin.x, bounds.origin.y + px(8.));
             let _ = line.paint(origin, px(LINE_HEIGHT), TextAlign::Left, None, window, cx);
             if focus.is_focused(window) && !text.is_empty() {
-                if let Some(caret) = line.position_for_index(head.min(text.len()), px(LINE_HEIGHT)) {
+                if let Some(caret) = line.position_for_index(head.min(text.len()), px(LINE_HEIGHT))
+                {
                     window.paint_quad(gpui::fill(
                         Bounds {
                             origin: point(origin.x + caret.x, origin.y),
@@ -616,7 +631,8 @@ impl Island {
             }
             SearchResult::Clipboard(item) => {
                 nook_core::clipboard::write_text(&item.text);
-                let auto = self.settings.search.auto_paste && crate::platform::accessibility_trusted();
+                let auto =
+                    self.settings.search.auto_paste && crate::platform::accessibility_trusted();
                 self.close_search(cx);
                 if auto {
                     let _ = crate::platform::auto_paste_cmd_v();

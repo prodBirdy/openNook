@@ -25,9 +25,17 @@ const API: &str = "/api/localsend/v2";
 pub struct DeviceInfo {
     pub alias: String,
     pub version: String,
-    #[serde(default, skip_serializing_if = "Option::is_none", rename = "deviceModel")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "deviceModel"
+    )]
     pub device_model: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none", rename = "deviceType")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "deviceType"
+    )]
     pub device_type: Option<String>,
     pub fingerprint: String,
     #[serde(default = "default_port")]
@@ -215,7 +223,8 @@ pub fn encode_announce(info: &DeviceInfo) -> Result<Vec<u8>, String> {
 }
 
 pub fn merge_peer(peers: &mut Vec<DeviceInfo>, mut peer: DeviceInfo, self_fp: &str) -> bool {
-    if peer.fingerprint.is_empty() || normalize_fingerprint(&peer.fingerprint) == normalize_fingerprint(self_fp)
+    if peer.fingerprint.is_empty()
+        || normalize_fingerprint(&peer.fingerprint) == normalize_fingerprint(self_fp)
     {
         return false;
     }
@@ -245,7 +254,10 @@ pub fn merge_peer(peers: &mut Vec<DeviceInfo>, mut peer: DeviceInfo, self_fp: &s
 pub async fn discover_peers(alias: &str, window: Duration) -> Result<Vec<DeviceInfo>, String> {
     let fingerprint = random_fingerprint();
     let udp = bind_discovery_udp().await?;
-    let local_port = udp.local_addr().map(|addr| addr.port()).unwrap_or(DEFAULT_PORT);
+    let local_port = udp
+        .local_addr()
+        .map(|addr| addr.port())
+        .unwrap_or(DEFAULT_PORT);
     let mut us = DeviceInfo::local(alias, fingerprint, local_port);
     us.announce = true;
 
@@ -670,11 +682,7 @@ mod tests {
                 sha256: None,
             },
         );
-        let json = serde_json::to_value(PrepareUploadRequest {
-            info: us,
-            files,
-        })
-        .unwrap();
+        let json = serde_json::to_value(PrepareUploadRequest { info: us, files }).unwrap();
         assert_eq!(json["info"]["alias"], "Desk");
         assert_eq!(json["files"]["id-1"]["fileName"], "shot.png");
         assert_eq!(json["files"]["id-1"]["size"], 12);
@@ -682,10 +690,9 @@ mod tests {
 
     #[test]
     fn prepare_upload_response_parses_tokens() {
-        let parsed: PrepareUploadResponse = serde_json::from_str(
-            r#"{"sessionId":"sess","files":{"id-1":"tok-1","id-2":"tok-2"}}"#,
-        )
-        .unwrap();
+        let parsed: PrepareUploadResponse =
+            serde_json::from_str(r#"{"sessionId":"sess","files":{"id-1":"tok-1","id-2":"tok-2"}}"#)
+                .unwrap();
         assert_eq!(parsed.session_id, "sess");
         assert_eq!(parsed.files.get("id-1").map(String::as_str), Some("tok-1"));
     }
@@ -718,15 +725,17 @@ mod tests {
             .fraction(),
             1.0
         );
-        assert!((TransferProgress {
-            file_index: 0,
-            file_count: 2,
-            bytes_sent: 25,
-            bytes_total: 100
-        }
-        .fraction()
-            - 0.25)
-            .abs()
-            < f32::EPSILON);
+        assert!(
+            (TransferProgress {
+                file_index: 0,
+                file_count: 2,
+                bytes_sent: 25,
+                bytes_total: 100
+            }
+            .fraction()
+                - 0.25)
+                .abs()
+                < f32::EPSILON
+        );
     }
 }

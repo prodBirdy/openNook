@@ -7,6 +7,8 @@
 
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
+use std::fs::File;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
@@ -335,33 +337,39 @@ fn scan_processes_macos() -> HashMap<u32, ProcInfo> {
             .map(|p| p.cpu_usage())
             .unwrap_or(0.0);
         if let Some(hit) = hits.get(&pid) {
-            map.insert(
+            let mut info = ProcInfo {
                 pid,
-                ProcInfo {
-                    pid,
-                    ppid,
-                    cpu_pct,
-                    name: hit.name.clone(),
-                    argv: hit.argv.clone(),
-                    cwd: hit.cwd.clone(),
-                    exe: hit.exe.clone(),
-                    start_time: hit.start_time,
-                },
-            );
+                ppid,
+                cpu_pct,
+                name: hit.name.clone(),
+                argv: hit.argv.clone(),
+                cwd: hit.cwd.clone(),
+                exe: hit.exe.clone(),
+                start_time: hit.start_time,
+            };
+            apply_stage1(&mut info, stage);
+            map.insert(pid, info);
             continue;
         }
-        let Some(proc_) = sys.process(Pid::from_u32(pid)) else {
-            continue;
+        let mut info = match sys
+            .process(Pid::from_u32(pid))
+            .and_then(|p| proc_from_sysinfo(pid, p))
+        {
+            Some(mut info) => {
+                if info.start_time == 0 {
+                    info.start_time = start;
+                }
+                if info.ppid == 0 {
+                    info.ppid = ppid;
+                }
+                info
+            }
+            None => match stage {
+                Some(stage) => proc_from_stage1(stage, cpu_pct),
+                None => continue,
+            },
         };
-        let Some(mut info) = proc_from_sysinfo(pid, proc_) else {
-            continue;
-        };
-        if info.start_time == 0 {
-            info.start_time = start;
-        }
-        if info.ppid == 0 {
-            info.ppid = ppid;
-        }
+        apply_stage1(&mut info, stage);
         cache.insert(
             pid,
             CachedDetail {
@@ -519,10 +527,60 @@ fn list_stage1() -> Vec<Stage1> {
         .collect()
 }
 
+/// Fill exe/name from the cheap `proc_pidpath` / BSD `comm` when sysinfo
+/// omitted them. Grok's on-disk name is `grok-1.0.5-macos-aarch64`; without
+/// this path the two-stage scan can seed the pid and then drop it.
+#[cfg(target_os = "macos")]
+fn apply_stage1(info: &mut ProcInfo, stage: Option<&Stage1>) {
+    let Some(stage) = stage else {
+        return;
+    };
+    if info.exe.is_none() && !stage.path.is_empty() {
+        info.exe = Some(PathBuf::from(&stage.path));
+    }
+    if info.name.is_empty() && !stage.comm.is_empty() {
+        info.name = stage.comm.clone();
+    }
+    if info.argv.is_empty() {
+        let argv0 = if !stage.path.is_empty() {
+            stage.path.clone()
+        } else {
+            stage.comm.clone()
+        };
+        if !argv0.is_empty() {
+            info.argv = vec![argv0];
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn proc_from_stage1(stage: &Stage1, cpu_pct: f32) -> ProcInfo {
+    let exe = (!stage.path.is_empty()).then(|| PathBuf::from(&stage.path));
+    let argv0 = if !stage.path.is_empty() {
+        stage.path.clone()
+    } else {
+        stage.comm.clone()
+    };
+    ProcInfo {
+        pid: stage.pid,
+        ppid: stage.ppid,
+        cpu_pct,
+        name: stage.comm.clone(),
+        argv: if argv0.is_empty() {
+            Vec::new()
+        } else {
+            vec![argv0]
+        },
+        cwd: None,
+        exe,
+        start_time: stage.start_time,
+    }
+}
+
 /// Stage-1 filter: exe path or `comm` looks like an agent or a wrapper that
 /// may hide the real binary in argv (`node …/claude`).
 fn is_scan_seed(path: &str, comm: &str) -> bool {
-    if grok_install_path(path) {
+    if grok_install_path(path) || grok_versioned_binary(path) || grok_versioned_binary(comm) {
         return true;
     }
     if is_wrapper_comm(comm) || is_wrapper_comm(path.rsplit('/').next().unwrap_or(path)) {
@@ -547,7 +605,9 @@ fn is_scan_seed(path: &str, comm: &str) -> bool {
 }
 
 fn is_wrapper_comm(name: &str) -> bool {
-    const WRAPPERS: &[&str] = &["node", "bun", "deno", "ruby", "perl", "npx", "python", "python3"];
+    const WRAPPERS: &[&str] = &[
+        "node", "bun", "deno", "ruby", "perl", "npx", "python", "python3",
+    ];
     let base = name.rsplit(['/', '\\']).next().unwrap_or(name);
     let base = base.strip_suffix(".exe").unwrap_or(base);
     let lower = base.to_ascii_lowercase();
@@ -722,6 +782,9 @@ fn assemble_inner(
                 .get(&pid)
                 .and_then(|s| s.status.as_deref())
                 .map(|s| !s.eq_ignore_ascii_case("idle")),
+            AgentKind::Grok => grok_meta
+                .get(&pid)
+                .and_then(|s| grok_session_busy(&s.cwd, &s.session_id)),
             _ => None,
         };
 
@@ -791,8 +854,8 @@ fn classify_process(name: &str, argv: &[String], exe: Option<&Path>) -> Option<A
         return None;
     }
 
-    // Live Grok TUI rewrites argv0 to `agent`; the path only survives on `exe`
-    // (`~/.grok/bin/agent` or `~/.grok/downloads/grok-*`).
+    // Live Grok TUI: argv0 is `grok` or `agent`; the on-disk name is the
+    // versioned build (`grok-1.0.5-macos-aarch64`) under `~/.grok/`.
     if is_grok_process(name, argv, exe) {
         return Some(AgentKind::Grok);
     }
@@ -818,16 +881,34 @@ fn classify_process(name: &str, argv: &[String], exe: Option<&Path>) -> Option<A
 }
 
 fn is_grok_process(name: &str, argv: &[String], exe: Option<&Path>) -> bool {
-    if exe.is_some_and(|p| grok_install_path(&p.to_string_lossy())) {
+    if exe.is_some_and(|p| grok_cli_token(&p.to_string_lossy())) {
         return true;
     }
-    argv.iter().take(2).any(|tok| {
-        grok_install_path(tok) && (token_has_binary(tok, "agent") || token_has_binary(tok, "grok"))
-    }) || (token_has_binary(name, "agent") && argv.iter().any(|tok| grok_install_path(tok)))
+    if grok_versioned_binary(name) {
+        return true;
+    }
+    argv.iter().take(2).any(|tok| grok_cli_token(tok))
+        || (token_has_binary(name, "agent") && argv.iter().any(|tok| grok_install_path(tok)))
+}
+
+fn grok_cli_token(tok: &str) -> bool {
+    grok_install_path(tok) || grok_versioned_binary(tok)
 }
 
 fn grok_install_path(s: &str) -> bool {
     s.contains("/.grok/") || s.contains("\\.grok\\")
+}
+
+/// Grok CLI ships as `grok-<version>-<os>-<arch>` (comm is that basename, or
+/// the 16-byte truncated `pbi_comm`). Same idea as Claude's `claude/versions/`
+/// autoupdater layout: the running name is not the `grok` symlink.
+fn grok_versioned_binary(tok: &str) -> bool {
+    let base = tok.rsplit(['/', '\\']).next().unwrap_or(tok);
+    let base = base.strip_suffix(".exe").unwrap_or(base);
+    let Some(rest) = base.strip_prefix("grok-") else {
+        return false;
+    };
+    rest.starts_with(|c: char| c.is_ascii_digit())
 }
 
 fn is_excluded(name: &str, argv: &[String]) -> bool {
@@ -1067,6 +1148,76 @@ fn grok_sessions() -> HashMap<u32, GrokActive> {
         return HashMap::new();
     };
     rows.into_iter().map(|row| (row.pid, row)).collect()
+}
+
+#[derive(Deserialize)]
+struct GrokEvent {
+    #[serde(rename = "type", default)]
+    kind: String,
+    #[serde(default)]
+    phase: Option<String>,
+}
+
+fn grok_session_busy(cwd: &str, session_id: &str) -> Option<bool> {
+    let path = grok_session_dir(cwd, session_id).join("events.jsonl");
+    grok_events_busy(&read_file_tail(&path, 64 * 1024)?)
+}
+
+/// Last `turn_started` / `turn_ended` in a Grok `events.jsonl` tail, with
+/// in-progress phases as a fallback when a long turn has aged the start
+/// event out of the window. Claude's sidecar `status` is the same signal.
+fn grok_events_busy(text: &str) -> Option<bool> {
+    let mut last_turn: Option<bool> = None;
+    let mut saw_working_phase = false;
+    for line in text.lines() {
+        let Ok(ev) = serde_json::from_str::<GrokEvent>(line) else {
+            continue;
+        };
+        match ev.kind.as_str() {
+            "turn_started" => {
+                last_turn = Some(true);
+                saw_working_phase = false;
+            }
+            "turn_ended" => {
+                last_turn = Some(false);
+                saw_working_phase = false;
+            }
+            "phase_changed" if grok_working_phase(ev.phase.as_deref()) => {
+                saw_working_phase = true;
+            }
+            _ => {}
+        }
+    }
+    last_turn.or(saw_working_phase.then_some(true))
+}
+
+fn grok_working_phase(phase: Option<&str>) -> bool {
+    matches!(
+        phase,
+        Some(
+            "streaming_reasoning"
+                | "streaming_text"
+                | "tool_execution"
+                | "permission_prompt"
+                | "waiting_for_model"
+        )
+    )
+}
+
+fn read_file_tail(path: &Path, max: u64) -> Option<String> {
+    let mut file = File::open(path).ok()?;
+    let len = file.metadata().ok()?.len();
+    if len > max {
+        file.seek(SeekFrom::End(-(max as i64))).ok()?;
+    }
+    let mut buf = String::new();
+    file.read_to_string(&mut buf).ok()?;
+    if len > max {
+        if let Some(i) = buf.find('\n') {
+            buf = buf[i + 1..].to_string();
+        }
+    }
+    Some(buf)
 }
 
 #[derive(Clone, Deserialize)]
@@ -1449,8 +1600,17 @@ mod tests {
         assert!(is_scan_seed("/opt/homebrew/bin/node", "node"));
         assert!(is_scan_seed("/usr/bin/python3.12", "Python"));
         assert!(is_scan_seed("/Users/a/.grok/bin/agent", "agent"));
+        assert!(is_scan_seed(
+            "/Users/a/.grok/downloads/grok-1.0.5-macos-aarch64",
+            "grok-1.0.5-macos-aarch64"
+        ));
+        assert!(is_scan_seed("", "grok-1.0.5-macos-aarch64"));
+        assert!(is_scan_seed("", "grok-1.0.5-maco"));
         assert!(!is_scan_seed("/usr/bin/grep", "grep"));
-        assert!(!is_scan_seed("/Applications/Safari.app/Contents/MacOS/Safari", "Safari"));
+        assert!(!is_scan_seed(
+            "/Applications/Safari.app/Contents/MacOS/Safari",
+            "Safari"
+        ));
         assert!(!is_scan_seed("/usr/sbin/syslogd", "syslogd"));
     }
 
@@ -1547,6 +1707,24 @@ mod tests {
             Some(AgentKind::Grok)
         );
         assert_eq!(classify_process("agent", &["agent".into()], None), None);
+        // Versioned on-disk name with no `/.grok/` path — Claude's equivalent
+        // is `claude/versions/2.1.250`. Without this, comm-only Grok is invisible.
+        assert_eq!(
+            classify_process(
+                "grok-1.0.5-macos-aarch64",
+                &["grok-1.0.5-macos-aarch64".into()],
+                None,
+            ),
+            Some(AgentKind::Grok)
+        );
+        assert_eq!(
+            classify_process("grok-1.0.5-maco", &["grok-1.0.5-maco".into()], None),
+            Some(AgentKind::Grok)
+        );
+        assert_eq!(
+            classify_process("grok-launch", &["grok-launch".into()], None),
+            None
+        );
     }
 
     #[test]
@@ -1583,6 +1761,29 @@ mod tests {
         assert_eq!(sessions[0].pid, 77);
         assert_eq!(sessions[0].session_id.as_deref(), Some("abc"));
         assert_eq!(sessions[0].cwd, "/tmp/proj");
+    }
+
+    #[test]
+    fn assemble_detects_versioned_grok_binary_without_install_path() {
+        let mut procs = HashMap::new();
+        procs.insert(
+            42,
+            proc(
+                42,
+                1,
+                "grok-1.0.5-macos-aarch64",
+                &["grok-1.0.5-macos-aarch64"],
+            ),
+        );
+        let sessions = assemble_inner(
+            &procs,
+            &HashMap::new(),
+            &HashMap::new(),
+            &mut HashMap::new(),
+        );
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].kind, AgentKind::Grok);
+        assert_eq!(sessions[0].pid, 42);
     }
 
     fn sidecar(status: Option<&str>, started_at: Option<u64>) -> ClaudeSidecar {
@@ -1682,7 +1883,12 @@ mod tests {
         );
         procs.insert(12, proc(12, 1, "zsh", &["zsh"]));
 
-        let sessions = assemble_inner(&procs, &HashMap::new(), &HashMap::new(), &mut HashMap::new());
+        let sessions = assemble_inner(
+            &procs,
+            &HashMap::new(),
+            &HashMap::new(),
+            &mut HashMap::new(),
+        );
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].pid, 11);
     }
@@ -1800,8 +2006,8 @@ mod tests {
     }
 
     /// Live coding agents listed in Grok/Claude session files must show up in
-    /// `snapshot()`. This is the user-facing miss: a running Grok TUI whose
-    /// argv is just `agent` (no `/.grok/` path) is invisible today.
+    /// `snapshot()`, including a Grok TUI whose comm is the versioned build
+    /// name (`grok-1.0.5-macos-aarch64`) rather than the `grok` symlink.
     #[test]
     fn snapshot_detects_live_session_file_agents() {
         let sessions = snapshot();
@@ -1842,6 +2048,38 @@ mod tests {
         assert_eq!(
             percent_encode_path("/Users/jonasvogel/openNook-gpui"),
             "%2FUsers%2Fjonasvogel%2FopenNook-gpui"
+        );
+    }
+
+    #[test]
+    fn grok_events_busy_follows_turn_markers() {
+        assert_eq!(grok_events_busy(""), None);
+        assert_eq!(
+            grok_events_busy(
+                r#"{"ts":"t0","type":"mcp_init_completed"}
+{"ts":"t1","type":"turn_started","turn_number":0}
+{"ts":"t2","type":"phase_changed","phase":"streaming_text"}
+"#
+            ),
+            Some(true)
+        );
+        assert_eq!(
+            grok_events_busy(
+                r#"{"ts":"t1","type":"turn_started"}
+{"ts":"t2","type":"phase_changed","phase":"streaming_text"}
+{"ts":"t3","type":"turn_ended"}
+"#
+            ),
+            Some(false)
+        );
+        // Long turn: start event aged out of the tail; last phase still working.
+        assert_eq!(
+            grok_events_busy(r#"{"ts":"t9","type":"phase_changed","phase":"tool_execution"}"#),
+            Some(true)
+        );
+        assert_eq!(
+            grok_events_busy(r#"{"ts":"t9","type":"phase_changed","phase":"idle"}"#),
+            None
         );
     }
 

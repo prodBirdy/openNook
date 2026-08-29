@@ -6,7 +6,9 @@
 //! ship tests for. Parsing is keystroke-only: call [`parse`] / [`parse_at`]
 //! from the UI on each edit. No timers, no polling.
 
-use chrono::{DateTime, Datelike, Duration, Local, NaiveDate, NaiveTime, TimeZone, Timelike, Weekday};
+use chrono::{
+    DateTime, Datelike, Duration, Local, NaiveDate, NaiveTime, TimeZone, Timelike, Weekday,
+};
 
 /// Whether the line should become a calendar event or a reminder.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -67,7 +69,24 @@ fn format_clock(dt: DateTime<Local>) -> String {
 
 /// Parse `input` relative to now.
 pub fn parse(input: &str) -> Option<ParsedEntry> {
-    parse_at(input, Local::now())
+    parse_now_as(input, EntryKind::Event)
+}
+
+/// Parse `input` relative to the real current time. On macOS this prefers
+/// NSDataDetector, which is anchored to the system clock and cannot take an
+/// injected `now` — so only the real-now entry points use it.
+pub fn parse_now_as(input: &str, default_kind: EntryKind) -> Option<ParsedEntry> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    #[cfg(target_os = "macos")]
+    if let Some(entry) = macos::parse_with_detector(trimmed, Local::now(), default_kind) {
+        return Some(entry);
+    }
+
+    parse_as(input, Local::now(), default_kind)
 }
 
 /// Parse `input` relative to `now`. Prefer this in tests.
@@ -75,19 +94,13 @@ pub fn parse_at(input: &str, now: DateTime<Local>) -> Option<ParsedEntry> {
     parse_as(input, now, EntryKind::Event)
 }
 
-/// Parse `input`, using `default_kind` unless the line starts with a
-/// remind / todo / task keyword.
+/// Parse `input` with the deterministic heuristic, using `default_kind`
+/// unless the line starts with a remind / todo / task keyword.
 pub fn parse_as(input: &str, now: DateTime<Local>, default_kind: EntryKind) -> Option<ParsedEntry> {
     let trimmed = input.trim();
     if trimmed.is_empty() {
         return None;
     }
-
-    #[cfg(target_os = "macos")]
-    if let Some(entry) = macos::parse_with_detector(trimmed, now, default_kind) {
-        return Some(entry);
-    }
-
     parse_heuristic(trimmed, now, default_kind)
 }
 
@@ -96,7 +109,11 @@ pub fn has_kind_keyword(input: &str) -> bool {
     kind_prefix(input.trim()).is_some()
 }
 
-fn parse_heuristic(input: &str, now: DateTime<Local>, default_kind: EntryKind) -> Option<ParsedEntry> {
+fn parse_heuristic(
+    input: &str,
+    now: DateTime<Local>,
+    default_kind: EntryKind,
+) -> Option<ParsedEntry> {
     let (kind, body) = match kind_prefix(input) {
         Some((_, rest)) => (EntryKind::Reminder, rest),
         None => (default_kind, input),
@@ -314,7 +331,11 @@ fn match_relative(lower: &str, i: usize) -> Option<(usize, i64, i64)> {
         let after = rest[after_n..].trim_start();
         let abs = lower.len() - after.len();
         if after.starts_with("hours") || after.starts_with("hour") {
-            let word = if after.starts_with("hours") { "hours" } else { "hour" };
+            let word = if after.starts_with("hours") {
+                "hours"
+            } else {
+                "hour"
+            };
             return Some((abs + word.len(), n as i64, 0));
         }
         if after.starts_with("minutes") || after.starts_with("minute") || after.starts_with("mins")
@@ -748,10 +769,7 @@ fn local_on(date: NaiveDate, time: NaiveTime) -> DateTime<Local> {
 pub fn strip_date_span(input: &str, utf8_range: std::ops::Range<usize>) -> String {
     let start = utf8_range.start.min(input.len());
     let end = utf8_range.end.min(input.len());
-    let (title, _) = extract_title_location(
-        input,
-        Some(Span { start, end }),
-    );
+    let (title, _) = extract_title_location(input, Some(Span { start, end }));
     clean_title(&title)
 }
 
@@ -795,25 +813,23 @@ mod macos {
             location: 0,
             length: ns.length(),
         };
-        let matches = unsafe {
-            detector.matchesInString_options_range(&ns, NSMatchingOptions::empty(), full)
-        };
+        let matches = detector.matchesInString_options_range(&ns, NSMatchingOptions::empty(), full);
 
         let mut date_span: Option<(f64, f64, std::ops::Range<usize>, bool)> = None;
         let mut location: Option<String> = None;
 
         for result in matches.iter() {
-            let kind = unsafe { result.resultType() };
+            let kind = result.resultType();
             if is_date(kind) {
                 if date_span.is_some() {
                     continue;
                 }
-                let Some(date) = (unsafe { result.date() }) else {
+                let Some(date) = result.date() else {
                     continue;
                 };
                 let start = date.timeIntervalSince1970();
-                let duration = unsafe { result.duration() };
-                let range = unsafe { result.range() };
+                let duration = result.duration();
+                let range = result.range();
                 let utf8 = utf16_range_to_utf8(input, range.location, range.length);
                 let matched = input.get(utf8.clone()).unwrap_or("");
                 let all_day = !has_time_token(matched);
@@ -826,7 +842,7 @@ mod macos {
                 };
                 date_span = Some((start, end, utf8, all_day));
             } else if is_address(kind) {
-                let range = unsafe { result.range() };
+                let range = result.range();
                 let utf8 = utf16_range_to_utf8(input, range.location, range.length);
                 if let Some(place) = input.get(utf8) {
                     let place = place.trim();
@@ -849,12 +865,7 @@ mod macos {
 
         let (start, end, span, all_day) = date_span.unwrap_or_else(|| {
             let start = now.timestamp() as f64;
-            (
-                start,
-                start + 24.0 * 60.0 * 60.0,
-                0..0,
-                true,
-            )
+            (start, start + 24.0 * 60.0 * 60.0, 0..0, true)
         });
 
         let (mut title, heuristic_loc) = extract_title_location(
@@ -923,12 +934,9 @@ mod macos {
             return true;
         }
         // Digit run next to am/pm already covered; a lone hour like "3" is a time.
-        lower.split(|c: char| !c.is_ascii_digit()).any(|d| {
-            !d.is_empty()
-                && d.parse::<u32>()
-                    .ok()
-                    .is_some_and(|n| (1..=23).contains(&n))
-        })
+        lower
+            .split(|c: char| !c.is_ascii_digit())
+            .any(|d| !d.is_empty() && d.parse::<u32>().ok().is_some_and(|n| (1..=23).contains(&n)))
     }
 }
 
@@ -1080,10 +1088,7 @@ mod tests {
 
     #[test]
     fn strip_date_span_drops_prepositions() {
-        assert_eq!(
-            strip_date_span("standup on tomorrow", 11..19),
-            "standup"
-        );
+        assert_eq!(strip_date_span("standup on tomorrow", 11..19), "standup");
     }
 
     #[test]

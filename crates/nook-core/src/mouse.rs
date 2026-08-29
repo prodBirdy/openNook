@@ -230,16 +230,45 @@ fn poll_interval_ms() -> u64 {
     }
 }
 
-/// Read cursor + drag into the atomics. Safe from NSEvent monitor handlers
-/// (main thread) and from the safety-poll thread.
+/// Read cursor + drag into the atomics.
+///
+/// Mouse position is safe from the 250 ms backstop thread. The drag
+/// pasteboard is not: sample it only on the main thread (NSEvent monitors
+/// and the island UI tick). Off-main, we may clear a finished drag when the
+/// button is up, but we must not arm or disarm one while the button is down.
 pub fn sample_now() {
     let (x, y) = read_mouse_logical();
     MOUSE_X.store(x.to_bits(), Ordering::Relaxed);
     MOUSE_Y.store(y.to_bits(), Ordering::Relaxed);
-    let drag = crate::files::file_drag_active();
+    #[cfg(target_os = "macos")]
+    if !on_main_thread() {
+        if !left_button_down() {
+            publish_drag(false);
+        }
+        return;
+    }
+    publish_drag(crate::files::file_drag_active());
+}
+
+fn publish_drag(drag: bool) {
     let was = DRAG_ACTIVE.swap(drag, Ordering::Relaxed);
     if was != drag {
         DRAG_GEN.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn on_main_thread() -> bool {
+    use objc2::*;
+    unsafe { msg_send![class!(NSThread), isMainThread] }
+}
+
+#[cfg(target_os = "macos")]
+fn left_button_down() -> bool {
+    use objc2::*;
+    unsafe {
+        let buttons: usize = msg_send![class!(NSEvent), pressedMouseButtons];
+        buttons & 1 != 0
     }
 }
 
@@ -366,6 +395,19 @@ mod tests {
             "the drag capture strip must not count as hover"
         );
         assert!(hit_test_drag_capture(far_x, 20.0));
+    }
+
+    #[test]
+    fn off_main_sample_never_arms_a_file_drag() {
+        let _guard = lock();
+        DRAG_ACTIVE.store(false, Ordering::Relaxed);
+        std::thread::spawn(sample_now)
+            .join()
+            .expect("mouse sample thread");
+        assert!(
+            !drag_active(),
+            "the mouse thread must not arm inbound file-drag from NSPasteboard"
+        );
     }
 
     #[test]

@@ -205,9 +205,8 @@ pub fn prefs_plist_path() -> Option<PathBuf> {
 }
 
 pub fn sqlite_path() -> Option<PathBuf> {
-    dirs::home_dir().map(|home| {
-        home.join("Library/Group Containers/group.com.apple.mobiletimerd/local.sqlite")
-    })
+    dirs::home_dir()
+        .map(|home| home.join("Library/Group Containers/group.com.apple.mobiletimerd/local.sqlite"))
 }
 
 pub fn sqlite_wal_path() -> Option<PathBuf> {
@@ -283,7 +282,9 @@ fn parse_mt_timer(value: &plist::Value) -> Option<SystemTimer> {
     let remaining = match state {
         MTTimerState::Running => None,
         _ => fire.interval.or_else(|| {
-            fire_date.map(|fd| (fd - unix_now()).max(0.0)).or(Some(duration))
+            fire_date
+                .map(|fd| (fd - unix_now()).max(0.0))
+                .or(Some(duration))
         }),
     };
     Some(SystemTimer {
@@ -314,7 +315,10 @@ pub fn decode_fire_time(value: Option<&plist::Value>) -> FireTime {
             interval: None,
         },
         plist::Value::Real(n) => classify_number(*n),
-        plist::Value::Integer(n) => n.as_signed().map(|i| classify_number(i as f64)).unwrap_or_default(),
+        plist::Value::Integer(n) => n
+            .as_signed()
+            .map(|i| classify_number(i as f64))
+            .unwrap_or_default(),
         plist::Value::Data(bytes) => decode_keyed_archive(bytes)
             .map(|inner| decode_fire_time(Some(&inner)))
             .unwrap_or_default(),
@@ -406,7 +410,9 @@ pub fn classify_number(n: f64) -> FireTime {
 fn decode_keyed_archive(bytes: &[u8]) -> Option<plist::Value> {
     let value = plist::Value::from_reader(std::io::Cursor::new(bytes)).ok()?;
     match &value {
-        plist::Value::Dictionary(dict) if dict.contains_key("$archiver") => resolve_keyed_root(dict),
+        plist::Value::Dictionary(dict) if dict.contains_key("$archiver") => {
+            resolve_keyed_root(dict)
+        }
         _ => Some(value),
     }
 }
@@ -484,11 +490,7 @@ fn plist_date_unix(value: &plist::Value) -> Option<f64> {
 fn system_time_unix(time: SystemTime) -> f64 {
     time.duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs_f64())
-        .or_else(|_| {
-            UNIX_EPOCH
-                .duration_since(time)
-                .map(|d| -(d.as_secs_f64()))
-        })
+        .or_else(|_| UNIX_EPOCH.duration_since(time).map(|d| -(d.as_secs_f64())))
         .unwrap_or(0.0)
 }
 
@@ -512,7 +514,11 @@ pub fn collapse_timers(timers: Vec<SystemTimer>) -> Vec<SystemTimer> {
     out.sort_by(|a, b| {
         state_rank(b.state)
             .cmp(&state_rank(a.state))
-            .then_with(|| a.fire_date.partial_cmp(&b.fire_date).unwrap_or(std::cmp::Ordering::Equal))
+            .then_with(|| {
+                a.fire_date
+                    .partial_cmp(&b.fire_date)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
             .then_with(|| a.id.cmp(&b.id))
     });
     out
@@ -544,10 +550,7 @@ fn read_sqlite_file(path: &Path) -> Vec<SystemTimer> {
     if columns.is_empty() {
         return Vec::new();
     }
-    let sql = format!(
-        "SELECT {} FROM ZMTCDTIMER",
-        columns.join(", ")
-    );
+    let sql = format!("SELECT {} FROM ZMTCDTIMER", columns.join(", "));
     let mut stmt = match conn.prepare(&sql) {
         Ok(stmt) => stmt,
         Err(err) => {
@@ -555,7 +558,11 @@ fn read_sqlite_file(path: &Path) -> Vec<SystemTimer> {
             return Vec::new();
         }
     };
-    let names: Vec<String> = stmt.column_names().into_iter().map(|s| s.to_string()).collect();
+    let names: Vec<String> = stmt
+        .column_names()
+        .into_iter()
+        .map(|s| s.to_string())
+        .collect();
     let mut rows = match stmt.query([]) {
         Ok(rows) => rows,
         Err(_) => return Vec::new(),
@@ -604,17 +611,21 @@ fn timer_from_sqlite_row(row: &rusqlite::Row<'_>, names: &[String]) -> Option<Sy
     };
     let get_f64 = |name: &str| -> Option<f64> {
         let idx = names.iter().position(|n| n.eq_ignore_ascii_case(name))?;
-        row.get::<_, Option<f64>>(idx)
-            .ok()
-            .flatten()
-            .or_else(|| row.get::<_, Option<i64>>(idx).ok().flatten().map(|n| n as f64))
+        row.get::<_, Option<f64>>(idx).ok().flatten().or_else(|| {
+            row.get::<_, Option<i64>>(idx)
+                .ok()
+                .flatten()
+                .map(|n| n as f64)
+        })
     };
     let get_i64 = |name: &str| -> Option<i64> {
         let idx = names.iter().position(|n| n.eq_ignore_ascii_case(name))?;
-        row.get::<_, Option<i64>>(idx)
-            .ok()
-            .flatten()
-            .or_else(|| row.get::<_, Option<f64>>(idx).ok().flatten().map(|n| n as i64))
+        row.get::<_, Option<i64>>(idx).ok().flatten().or_else(|| {
+            row.get::<_, Option<f64>>(idx)
+                .ok()
+                .flatten()
+                .map(|n| n as i64)
+        })
     };
     let get_blob = |name: &str| -> Option<Vec<u8>> {
         let idx = names.iter().position(|n| n.eq_ignore_ascii_case(name))?;
@@ -948,7 +959,10 @@ mod tests {
     #[test]
     fn decode_interval_keyed_object() {
         let mut dict = plist::Dictionary::new();
-        dict.insert("$classname".into(), plist::Value::String("MTTimerTimeInterval".into()));
+        dict.insert(
+            "$classname".into(),
+            plist::Value::String("MTTimerTimeInterval".into()),
+        );
         dict.insert("timeInterval".into(), plist::Value::Real(90.0));
         let fire = decode_fire_time(Some(&plist::Value::Dictionary(dict)));
         assert_eq!(fire.interval, Some(90.0));

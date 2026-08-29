@@ -13,7 +13,10 @@ const ZEROX_MIN_AGE_DAYS: f64 = 30.0;
 const ZEROX_MAX_AGE_DAYS: f64 = 365.0;
 
 pub trait LinkBackend {
-    fn upload(&self, path: &Path) -> impl std::future::Future<Output = Result<UploadResult, String>> + Send;
+    fn upload(
+        &self,
+        path: &Path,
+    ) -> impl std::future::Future<Output = Result<UploadResult, String>> + Send;
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -133,7 +136,10 @@ impl LinkBackend for ZeroXZero {
             .await
             .map_err(|err| err.to_string())?;
         if !response.status().is_success() {
-            return Err(format!("0x0.st rejected the upload ({})", response.status()));
+            return Err(format!(
+                "0x0.st rejected the upload ({})",
+                response.status()
+            ));
         }
         let token = response
             .headers()
@@ -238,7 +244,10 @@ pub fn aws_canonical_request(
 }
 
 pub fn aws_string_to_sign(algorithm: &str, amz_date: &str, scope: &str, canonical: &str) -> String {
-    format!("{algorithm}\n{amz_date}\n{scope}\n{}", sha256_hex(canonical.as_bytes()))
+    format!(
+        "{algorithm}\n{amz_date}\n{scope}\n{}",
+        sha256_hex(canonical.as_bytes())
+    )
 }
 
 pub fn aws_authorization(
@@ -276,7 +285,11 @@ pub fn s3_public_url(settings: &S3, key: &str) -> String {
     if !base.is_empty() {
         return format!("{base}/{}", uri_encode(key, false));
     }
-    format!("https://{}/{}", s3_host(&settings.bucket, &settings.region, &settings.endpoint), uri_encode(key, false))
+    format!(
+        "https://{}/{}",
+        s3_host(&settings.bucket, &settings.region, &settings.endpoint),
+        uri_encode(key, false)
+    )
 }
 
 fn amz_timestamps(now: SystemTime) -> Result<(String, String), String> {
@@ -323,9 +336,8 @@ impl LinkBackend for S3 {
         let canonical_uri = format!("/{}", uri_encode(&key, true));
         let (datestamp, amz_date) = amz_timestamps(SystemTime::now())?;
         let scope = format!("{datestamp}/{}/s3/aws4_request", self.region);
-        let canonical_headers = format!(
-            "host:{host}\nx-amz-content-sha256:{payload_hash}\nx-amz-date:{amz_date}\n"
-        );
+        let canonical_headers =
+            format!("host:{host}\nx-amz-content-sha256:{payload_hash}\nx-amz-date:{amz_date}\n");
         let signed_headers = "host;x-amz-content-sha256;x-amz-date";
         let canonical = aws_canonical_request(
             "PUT",
@@ -446,9 +458,16 @@ mod tests {
         assert!(canonical.starts_with("GET\n/test.txt\n\n"));
         let scope = "20130524/us-east-1/s3/aws4_request";
         let to_sign = aws_string_to_sign("AWS4-HMAC-SHA256", "20130524T000000Z", scope, &canonical);
-        assert!(to_sign.starts_with("AWS4-HMAC-SHA256\n20130524T000000Z\n20130524/us-east-1/s3/aws4_request\n"));
+        assert!(to_sign.starts_with(
+            "AWS4-HMAC-SHA256\n20130524T000000Z\n20130524/us-east-1/s3/aws4_request\n"
+        ));
         assert_eq!(to_sign.lines().count(), 4);
-        let key = aws_signing_key("wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY", "20130524", "us-east-1", "s3");
+        let key = aws_signing_key(
+            "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+            "20130524",
+            "us-east-1",
+            "s3",
+        );
         assert_eq!(key.len(), 32);
         let auth = aws_authorization("AKIA", scope, "host", "abc");
         assert!(auth.contains("Credential=AKIA/20130524/us-east-1/s3/aws4_request"));
@@ -470,10 +489,7 @@ mod tests {
             public_base: String::new(),
             ..s3
         };
-        assert_eq!(
-            s3_public_url(&unset, "x"),
-            "https://b.s3.amazonaws.com/x"
-        );
+        assert_eq!(s3_public_url(&unset, "x"), "https://b.s3.amazonaws.com/x");
     }
 
     #[test]

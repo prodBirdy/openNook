@@ -2,8 +2,8 @@ use crate::database;
 use crate::high_alert::HighAlertKind;
 use crate::observe::ObserveConfig;
 use crate::share::ShareSettings;
-use crate::weather::WeatherSettings;
 use crate::sysstats::SysStatsSettings;
+use crate::weather::WeatherSettings;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::RwLock;
@@ -25,7 +25,6 @@ pub enum WidgetModule {
     Battery = 10,
     Messages = 11,
     Obsidian = 12,
-    Mixer = 13,
     Weather = 14,
     Vpn = 15,
     HighAlert = 16,
@@ -33,11 +32,10 @@ pub enum WidgetModule {
     Recorder = 18,
     Meeting = 19,
     Notifications = 20,
-    Process = 21,
 }
 
 impl WidgetModule {
-    pub const ALL: [Self; 22] = [
+    pub const ALL: [Self; 20] = [
         Self::Calendar,
         Self::Music,
         Self::Files,
@@ -51,7 +49,6 @@ impl WidgetModule {
         Self::Battery,
         Self::Messages,
         Self::Obsidian,
-        Self::Mixer,
         Self::Weather,
         Self::Vpn,
         Self::HighAlert,
@@ -59,7 +56,6 @@ impl WidgetModule {
         Self::Recorder,
         Self::Meeting,
         Self::Notifications,
-        Self::Process,
     ];
 
     pub fn from_u8(value: u8) -> Self {
@@ -78,12 +74,11 @@ impl WidgetModule {
             | Self::Observe
             | Self::Reminders
             | Self::Agents
-            | Self::Messages
             | Self::Obsidian
-            | Self::Mixer
             | Self::SysStats
-            | Self::Recorder
             | Self::Notifications => 4,
+            Self::Recorder => 5,
+            Self::Messages => 6,
             Self::Timers
             | Self::Speed
             | Self::Mirror
@@ -91,8 +86,7 @@ impl WidgetModule {
             | Self::Weather
             | Self::Vpn
             | Self::HighAlert
-            | Self::Meeting
-            | Self::Process => 3,
+            | Self::Meeting => 3,
         }
     }
 
@@ -104,10 +98,9 @@ impl WidgetModule {
             | Self::Observe
             | Self::Reminders
             | Self::Mirror
-            | Self::Messages
-            | Self::Mixer
             | Self::SysStats
             | Self::Notifications => 3,
+            Self::Messages => 4,
             Self::Notes
             | Self::Timers
             | Self::Speed
@@ -117,9 +110,8 @@ impl WidgetModule {
             | Self::Weather
             | Self::Vpn
             | Self::HighAlert
-            | Self::Recorder
-            | Self::Meeting
-            | Self::Process => 2,
+            | Self::Meeting => 2,
+            Self::Recorder => 3,
         }
     }
 
@@ -133,8 +125,7 @@ impl WidgetModule {
             | Self::Weather
             | Self::Vpn
             | Self::HighAlert
-            | Self::Meeting
-            | Self::Process => 6,
+            | Self::Meeting => 6,
             _ => 8,
         }
     }
@@ -143,12 +134,48 @@ impl WidgetModule {
     pub fn occupies_nook_cells(self) -> bool {
         !matches!(self, Self::Files)
     }
+
+    /// Bundle ids of third-party apps this widget wraps. Empty for first-party.
+    pub fn host_apps(self) -> &'static [&'static str] {
+        match self {
+            Self::Obsidian => &[crate::obsidian::BUNDLE_ID],
+            Self::Meeting => &[
+                crate::meetings::ZOOM_BUNDLE,
+                crate::meetings::TEAMS_BUNDLE,
+                crate::meetings::TEAMS_CLASSIC_BUNDLE,
+            ],
+            _ => &[],
+        }
+    }
+
+    /// Host app installed (third-party widgets).
+    pub fn is_available(self) -> bool {
+        self.available_if(crate::apps::is_installed)
+    }
+
+    pub fn available_if(self, installed: impl Fn(&str) -> bool) -> bool {
+        let apps = self.host_apps();
+        apps.is_empty() || apps.iter().copied().any(installed)
+    }
+}
+
+/// Saved orders may name widgets that no longer exist (e.g. the removed
+/// per-app mixer or process widget). Drop those instead of failing the whole
+/// settings load.
+fn lenient_widget_order<'de, D>(deserializer: D) -> Result<Vec<WidgetModule>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw: Vec<serde_json::Value> = serde::Deserialize::deserialize(deserializer)?;
+    Ok(raw
+        .into_iter()
+        .filter_map(|v| serde_json::from_value::<WidgetModule>(v).ok())
+        .collect())
 }
 
 fn default_widget_order() -> Vec<WidgetModule> {
     vec![
         WidgetModule::Music,
-        WidgetModule::Mixer,
         WidgetModule::Calendar,
         WidgetModule::Mirror,
         WidgetModule::Files,
@@ -168,101 +195,7 @@ fn default_widget_order() -> Vec<WidgetModule> {
         WidgetModule::SysStats,
         WidgetModule::Recorder,
         WidgetModule::Notifications,
-        WidgetModule::Process,
     ]
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum PdfPreset {
-    #[default]
-    Screen,
-    Print,
-    Raster,
-}
-
-impl PdfPreset {
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Screen => "Screen",
-            Self::Print => "Print",
-            Self::Raster => "Raster",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct FileActionsSettings {
-    #[serde(default = "default_true")]
-    pub enabled: bool,
-    /// Empty / `None` writes alongside the source.
-    #[serde(default)]
-    pub output_folder: Option<String>,
-    #[serde(default = "default_jpeg_quality")]
-    pub jpeg_quality: u8,
-    #[serde(default)]
-    pub pdf_preset: PdfPreset,
-    /// Only takes effect when a user-installed ffmpeg is on PATH. Never downloads.
-    #[serde(default)]
-    pub use_ffmpeg: bool,
-    #[serde(default = "default_image_format")]
-    pub default_image_format: String,
-    #[serde(default = "default_video_format")]
-    pub default_video_format: String,
-}
-
-fn default_jpeg_quality() -> u8 {
-    80
-}
-
-fn default_image_format() -> String {
-    "jpeg".into()
-}
-
-fn default_video_format() -> String {
-    "mp4".into()
-}
-
-impl Default for FileActionsSettings {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            output_folder: None,
-            jpeg_quality: default_jpeg_quality(),
-            pdf_preset: PdfPreset::Screen,
-            use_ffmpeg: false,
-            default_image_format: default_image_format(),
-            default_video_format: default_video_format(),
-        }
-    }
-}
-
-impl FileActionsSettings {
-    pub fn ffmpeg_enabled(&self) -> bool {
-        self.use_ffmpeg && crate::process::ffmpeg::on_path()
-    }
-
-    pub fn output_is_downloads(&self) -> bool {
-        match self.output_folder.as_deref() {
-            Some(folder) => {
-                dirs::download_dir()
-                    .map(|d| d == std::path::Path::new(folder))
-                    .unwrap_or(false)
-                    || folder.ends_with("Downloads")
-            }
-            None => false,
-        }
-    }
-
-    pub fn set_alongside_source(&mut self) {
-        self.output_folder = None;
-    }
-
-    pub fn set_downloads(&mut self) {
-        self.output_folder = dirs::download_dir()
-            .or_else(dirs::home_dir)
-            .map(|p| p.to_string_lossy().into_owned());
-    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
@@ -300,7 +233,10 @@ impl Default for WindowSettings {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AppSettings {
-    #[serde(default = "default_widget_order")]
+    #[serde(
+        default = "default_widget_order",
+        deserialize_with = "lenient_widget_order"
+    )]
     pub widget_order: Vec<WidgetModule>,
     #[serde(default = "default_true")]
     pub show_media: bool,
@@ -344,6 +280,7 @@ pub struct AppSettings {
     /// shortcut falls back to the osascript-admin prompt.
     #[serde(default = "default_lpm_shortcut_name")]
     pub lpm_shortcut_name: Option<String>,
+    #[serde(default = "default_true")]
     pub show_messages: bool,
     /// Fragile Accessibility CGEvent Return after opening `whatsapp://`.
     #[serde(default)]
@@ -351,6 +288,7 @@ pub struct AppSettings {
     /// Mirror Apple Clock timers in the Timers widget (plist / vnode watch).
     #[serde(default = "default_true")]
     pub sync_clock_timers: bool,
+    #[serde(default = "default_true")]
     pub show_obsidian: bool,
     /// User-chosen vault folder. `None` until Settings picks one.
     #[serde(default)]
@@ -361,9 +299,9 @@ pub struct AppSettings {
     /// Use `obsidian://new?append=true` instead of writing the daily note.
     #[serde(default)]
     pub obsidian_uri_capture: bool,
-    pub show_mixer: bool,
     #[serde(default)]
     pub weather: WeatherSettings,
+    #[serde(default = "default_true")]
     pub show_vpn: bool,
     /// Elapsed session clock on the compact VPN face.
     #[serde(default = "default_true")]
@@ -371,6 +309,7 @@ pub struct AppSettings {
     /// Interface names the classifier must ignore (utun helpers, ZTNA, etc.).
     #[serde(default)]
     pub vpn_ignore_interfaces: Vec<String>,
+    #[serde(default = "default_true")]
     pub show_high_alert: bool,
     /// Seconds; `0` means until turned off. Default is 30 minutes — never forever.
     #[serde(default = "default_high_alert_duration")]
@@ -396,13 +335,16 @@ pub struct AppSettings {
     pub focus_shortcut_work: Option<String>,
     #[serde(default)]
     pub focus_shortcut_break: Option<String>,
+    #[serde(default = "default_true")]
     pub show_sysstats: bool,
     #[serde(default)]
     pub sysstats: SysStatsSettings,
+    #[serde(default = "default_true")]
     pub show_recorder: bool,
     /// On-device Speech while recording. Off = record-only (cheaper).
     #[serde(default = "default_true")]
     pub recorder_transcribe: bool,
+    #[serde(default = "default_true")]
     pub show_meetings: bool,
     #[serde(default)]
     pub meetings: MeetingsConfig,
@@ -417,9 +359,6 @@ pub struct AppSettings {
     /// Bundle IDs (or app names) hidden from the shelf.
     #[serde(default)]
     pub notification_blocked_apps: Vec<String>,
-    pub show_process: bool,
-    #[serde(default)]
-    pub file_actions: FileActionsSettings,
     #[serde(default)]
     pub observe: ObserveConfig,
     #[serde(default)]
@@ -467,16 +406,23 @@ pub struct AppSettings {
     pub snap_drag_to_edge: bool,
     #[serde(default)]
     pub share: ShareSettings,
-    /// Termi-Notch one-shot shell card. Off until the user opts in — this is
-    /// an arbitrary-code-execution surface and must stay unreachable from
-    /// `opennook://` URLs, the CLI, and Finder Services.
+    /// Termi-Notch interactive login-shell card. Off until the user opts in —
+    /// this is an arbitrary-code-execution surface and must stay unreachable
+    /// from `opennook://` URLs, the CLI, and Finder Services.
     #[serde(default)]
     pub terminal_enabled: bool,
-    /// Login shell used for `-lc`. Empty means `$SHELL`.
+    /// Login shell used for `-l`. Empty means `$SHELL`.
     #[serde(default)]
     pub terminal_shell: String,
     #[serde(default = "default_terminal_timeout")]
     pub terminal_timeout_secs: u32,
+    /// Monospace font family for the terminal card. Empty means the built-in
+    /// stack (SF Mono → Menlo → Monaco). Any installed family name works.
+    #[serde(default)]
+    pub terminal_font: String,
+    /// Terminal font size in points.
+    #[serde(default = "default_terminal_font_size")]
+    pub terminal_font_size: f32,
     /// Persist typed commands in the settings DB. Off by default.
     #[serde(default)]
     pub terminal_history: bool,
@@ -624,6 +570,10 @@ impl Default for SearchSettings {
 
 fn default_terminal_timeout() -> u32 {
     30
+}
+
+fn default_terminal_font_size() -> f32 {
+    11.0
 }
 
 fn default_island_x() -> f32 {
@@ -804,7 +754,6 @@ impl Default for AppSettings {
             obsidian_vault: None,
             obsidian_capture_heading: None,
             obsidian_uri_capture: false,
-            show_mixer: true,
             weather: WeatherSettings::default(),
             show_vpn: true,
             vpn_show_timer: true,
@@ -830,8 +779,6 @@ impl Default for AppSettings {
             show_notifications: false,
             notification_fda_opt_in: false,
             notification_blocked_apps: Vec::new(),
-            show_process: true,
-            file_actions: FileActionsSettings::default(),
             observe: ObserveConfig::default(),
             liquid_glass_mode: false,
             non_notch_mode: false,
@@ -850,6 +797,8 @@ impl Default for AppSettings {
             terminal_enabled: false,
             terminal_shell: String::new(),
             terminal_timeout_secs: default_terminal_timeout(),
+            terminal_font: String::new(),
+            terminal_font_size: default_terminal_font_size(),
             terminal_history: false,
             audio_output_picker: true,
             keysounds_enabled: false,
@@ -890,6 +839,9 @@ impl AppSettings {
     pub const TOTAL_CELLS: u8 = 11;
 
     pub fn is_enabled(&self, module: WidgetModule) -> bool {
+        if !module.is_available() {
+            return false;
+        }
         match module {
             WidgetModule::Calendar => self.show_calendar,
             WidgetModule::Music => self.show_media,
@@ -904,7 +856,6 @@ impl AppSettings {
             WidgetModule::Battery => self.show_battery,
             WidgetModule::Messages => self.show_messages,
             WidgetModule::Obsidian => self.show_obsidian,
-            WidgetModule::Mixer => self.show_mixer && crate::mixer::is_available(),
             WidgetModule::Weather => self.weather.enabled,
             WidgetModule::Vpn => self.show_vpn,
             WidgetModule::HighAlert => self.show_high_alert,
@@ -912,7 +863,6 @@ impl AppSettings {
             WidgetModule::Recorder => self.show_recorder,
             WidgetModule::Meeting => self.show_meetings,
             WidgetModule::Notifications => self.show_notifications,
-            WidgetModule::Process => self.show_process,
         }
     }
 
@@ -952,7 +902,6 @@ impl AppSettings {
                 crate::messages::request_refresh();
             }
             WidgetModule::Obsidian => self.show_obsidian = !self.show_obsidian,
-            WidgetModule::Mixer => self.show_mixer = !self.show_mixer,
             WidgetModule::Weather => self.weather.enabled = !self.weather.enabled,
             WidgetModule::Vpn => self.show_vpn = !self.show_vpn,
             WidgetModule::HighAlert => self.show_high_alert = !self.show_high_alert,
@@ -960,7 +909,6 @@ impl AppSettings {
             WidgetModule::Recorder => self.show_recorder = !self.show_recorder,
             WidgetModule::Meeting => self.show_meetings = !self.show_meetings,
             WidgetModule::Notifications => self.show_notifications = !self.show_notifications,
-            WidgetModule::Process => self.show_process = !self.show_process,
         }
     }
 
@@ -987,9 +935,16 @@ impl AppSettings {
         }
     }
 
-    /// Max width available to this widget in the horizontally scrollable Nook row.
+    /// Max width the slider may grow to without overflowing the island.
     pub fn max_cells_for(&self, module: WidgetModule) -> u8 {
-        module.max_cells()
+        let current = self.cells_for(module);
+        if self.is_enabled(module) && module.occupies_nook_cells() {
+            module
+                .max_cells()
+                .min(current.saturating_add(self.remaining_cells()))
+        } else {
+            module.max_cells()
+        }
     }
 
     pub fn used_cells(&self) -> u8 {
@@ -1149,10 +1104,8 @@ fn load_share_secret(account: &str) -> Option<String> {
 #[cfg(target_os = "macos")]
 fn store_share_secret(account: &str, secret: &str) -> Result<(), String> {
     if secret.is_empty() {
-        let _ = security_framework::passwords::delete_generic_password(
-            SHARE_SECRET_SERVICE,
-            account,
-        );
+        let _ =
+            security_framework::passwords::delete_generic_password(SHARE_SECRET_SERVICE, account);
         Ok(())
     } else {
         security_framework::passwords::set_generic_password(
@@ -1386,7 +1339,6 @@ mod tests {
         assert_eq!(parsed.obsidian_vault, None);
         assert_eq!(parsed.obsidian_capture_heading, None);
         assert!(!parsed.obsidian_uri_capture);
-        assert!(parsed.show_mixer);
         assert!(parsed.weather.enabled);
         assert!(parsed.weather.show_on_compact_face);
         assert!(parsed.show_vpn);
@@ -1415,11 +1367,6 @@ mod tests {
         assert!(!parsed.show_notifications);
         assert!(!parsed.notification_fda_opt_in);
         assert!(parsed.notification_blocked_apps.is_empty());
-        assert!(parsed.show_process);
-        assert!(parsed.file_actions.enabled);
-        assert_eq!(parsed.file_actions.jpeg_quality, 80);
-        assert_eq!(parsed.file_actions.pdf_preset, PdfPreset::Screen);
-        assert!(!parsed.file_actions.use_ffmpeg);
         assert!(parsed.liquid_glass_mode);
         assert!(!parsed.non_notch_mode);
         assert!((parsed.island_x - 0.5).abs() < f32::EPSILON);
@@ -1447,8 +1394,14 @@ mod tests {
         let parsed: AppSettings = serde_json::from_str("{}").unwrap();
         assert!(!parsed.animated_album_art);
         assert!(parsed.ambient_art_glow);
-        assert_eq!(parsed.animated_album_art, AppSettings::default().animated_album_art);
-        assert_eq!(parsed.ambient_art_glow, AppSettings::default().ambient_art_glow);
+        assert_eq!(
+            parsed.animated_album_art,
+            AppSettings::default().animated_album_art
+        );
+        assert_eq!(
+            parsed.ambient_art_glow,
+            AppSettings::default().ambient_art_glow
+        );
         assert!(parsed.search.enabled);
         assert!(!parsed.search.clipboard_history);
         assert!(!parsed.search.auto_paste);
@@ -1536,7 +1489,6 @@ mod tests {
         settings.show_battery = false;
         settings.show_messages = false;
         settings.show_obsidian = false;
-        settings.show_mixer = false;
         settings.weather.enabled = false;
         settings.show_vpn = false;
         settings.show_high_alert = false;
@@ -1544,7 +1496,6 @@ mod tests {
         settings.show_recorder = false;
         settings.show_meetings = false;
         settings.show_notifications = false;
-        settings.show_process = false;
         settings.set_cells(WidgetModule::Music, 5);
         assert_eq!(settings.used_cells(), 5);
         assert_eq!(settings.remaining_cells(), AppSettings::TOTAL_CELLS - 5);
@@ -1552,14 +1503,12 @@ mod tests {
     }
 
     #[test]
-    fn enabled_widget_can_grow_when_the_scrollable_row_exceeds_the_cell_budget() {
+    fn enabled_widget_cannot_grow_past_the_island_cell_budget() {
         let settings = AppSettings::default();
         assert_eq!(settings.remaining_cells(), 0);
-        assert_eq!(settings.cells_for(WidgetModule::Music), 5);
-        assert_eq!(
-            settings.max_cells_for(WidgetModule::Music),
-            WidgetModule::Music.max_cells()
-        );
+        let current = settings.cells_for(WidgetModule::Music);
+        assert_eq!(settings.max_cells_for(WidgetModule::Music), current);
+        assert!(current < WidgetModule::Music.max_cells());
     }
 
     #[test]
@@ -1598,7 +1547,7 @@ mod tests {
         assert!(!parsed.thaw_enabled);
         assert!(!parsed.thaw_hidden);
         assert!(!parsed.snap_drag_to_edge);
-}
+    }
     fn audio_output_picker_defaults_on() {
         let parsed: AppSettings = serde_json::from_str("{}").unwrap();
         assert!(parsed.audio_output_picker);
@@ -1606,7 +1555,7 @@ mod tests {
             parsed.audio_output_picker,
             AppSettings::default().audio_output_picker
         );
-}
+    }
     fn input_feel_flags_default_off() {
         let parsed: AppSettings = serde_json::from_str("{}").unwrap();
         assert!(!parsed.keysounds_enabled);
@@ -1618,5 +1567,37 @@ mod tests {
         assert!((parsed.scroll_duration - 0.35).abs() < f32::EPSILON);
         assert!(parsed.scroll_excluded_apps.is_empty());
         assert!(parsed.scroll_device_overrides.is_empty());
+    }
+
+    #[test]
+    fn third_party_widgets_need_their_host_app() {
+        assert_eq!(
+            WidgetModule::Obsidian.host_apps(),
+            &[crate::obsidian::BUNDLE_ID]
+        );
+        assert_eq!(
+            WidgetModule::Meeting.host_apps(),
+            &[
+                crate::meetings::ZOOM_BUNDLE,
+                crate::meetings::TEAMS_BUNDLE,
+                crate::meetings::TEAMS_CLASSIC_BUNDLE,
+            ]
+        );
+        let third_party: Vec<_> = WidgetModule::ALL
+            .iter()
+            .copied()
+            .filter(|module| !module.host_apps().is_empty())
+            .collect();
+        assert_eq!(third_party, [WidgetModule::Obsidian, WidgetModule::Meeting]);
+        for module in WidgetModule::ALL {
+            if module.host_apps().is_empty() {
+                assert!(module.available_if(|_| false));
+            }
+        }
+        assert!(!WidgetModule::Obsidian.available_if(|_| false));
+        assert!(WidgetModule::Obsidian.available_if(|id| id == crate::obsidian::BUNDLE_ID));
+        assert!(!WidgetModule::Meeting.available_if(|_| false));
+        assert!(WidgetModule::Meeting.available_if(|id| id == crate::meetings::ZOOM_BUNDLE));
+        assert!(WidgetModule::Meeting.available_if(|id| id == crate::meetings::TEAMS_BUNDLE));
     }
 }

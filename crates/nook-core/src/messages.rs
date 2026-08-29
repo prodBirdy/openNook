@@ -96,6 +96,8 @@ pub struct IncomingPeek {
     pub sender: String,
     pub snippet: String,
     pub service: MessageService,
+    pub last_date: f64,
+    pub last_rowid: i64,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -214,10 +216,7 @@ pub fn url_encode(s: &str) -> String {
 /// Quote a string for AppleScript (`\` and `"` escaped; newlines become spaces).
 pub fn applescript_literal(s: &str) -> String {
     let flat = s.replace(['\n', '\r'], " ");
-    format!(
-        "\"{}\"",
-        flat.replace('\\', "\\\\").replace('"', "\\\"")
-    )
+    format!("\"{}\"", flat.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
 /// Extract the first NSString payload from an `attributedBody` typedstream.
@@ -345,8 +344,7 @@ fn consider_run(blob: &[u8], start: usize, end: usize, best: &mut Option<String>
     }
     if let Ok(text) = std::str::from_utf8(&blob[start..end]) {
         let text = text.trim();
-        if looks_like_message_text(text)
-            && text.len() > best.as_ref().map(|s| s.len()).unwrap_or(0)
+        if looks_like_message_text(text) && text.len() > best.as_ref().map(|s| s.len()).unwrap_or(0)
         {
             *best = Some(text.to_string());
         }
@@ -539,6 +537,8 @@ pub fn incoming_peek(conversations: &[Conversation]) -> Option<IncomingPeek> {
             sender: c.title.clone(),
             snippet: c.snippet.clone(),
             service: c.service,
+            last_date: c.last_date,
+            last_rowid: c.last_rowid,
         })
 }
 
@@ -823,10 +823,7 @@ fn imessage_row(
     handle: Option<String>,
 ) -> Conversation {
     let parsed = parse_chat_guid(&guid);
-    let is_group = parsed
-        .as_ref()
-        .map(|g| g.is_group)
-        .unwrap_or(style == 43);
+    let is_group = parsed.as_ref().map(|g| g.is_group).unwrap_or(style == 43);
     let service = match parsed
         .as_ref()
         .map(|g| g.service.to_ascii_lowercase())
@@ -1130,10 +1127,19 @@ mod tests {
 
     #[test]
     fn e164_digits_normalizes_handles() {
-        assert_eq!(e164_digits("+49 170 1234567").as_deref(), Some("491701234567"));
-        assert_eq!(e164_digits("whatsapp:+15551234567").as_deref(), Some("15551234567"));
+        assert_eq!(
+            e164_digits("+49 170 1234567").as_deref(),
+            Some("491701234567")
+        );
+        assert_eq!(
+            e164_digits("whatsapp:+15551234567").as_deref(),
+            Some("15551234567")
+        );
         assert_eq!(e164_digits("0015551234567").as_deref(), Some("15551234567"));
-        assert_eq!(e164_digits("tel:+14155552671").as_deref(), Some("14155552671"));
+        assert_eq!(
+            e164_digits("tel:+14155552671").as_deref(),
+            Some("14155552671")
+        );
         assert!(e164_digits("ada@example.com").is_none());
         assert!(e164_digits("01701234567").is_none());
         assert!(e164_digits("chat838492").is_none());
@@ -1143,10 +1149,7 @@ mod tests {
     #[test]
     fn whatsapp_send_url_prefills_without_autosend() {
         let url = whatsapp_send_url("+49 170 1234567", "hello there").unwrap();
-        assert_eq!(
-            url,
-            "whatsapp://send?phone=491701234567&text=hello%20there"
-        );
+        assert_eq!(url, "whatsapp://send?phone=491701234567&text=hello%20there");
         let escaped = whatsapp_send_url("+15551234567", "ok&go=1").unwrap();
         assert!(escaped.contains("text=ok%26go%3D1"));
         assert!(whatsapp_send_url("not-a-phone", "hi").is_none());
@@ -1170,7 +1173,10 @@ mod tests {
         let long_body = "x".repeat(200);
         let long = typedstream_for_text(&long_body);
         assert!(long.contains(&0x81), "200-byte payload uses 0x81 length");
-        assert_eq!(extract_typedstream_text(&long).as_deref(), Some(long_body.as_str()));
+        assert_eq!(
+            extract_typedstream_text(&long).as_deref(),
+            Some(long_body.as_str())
+        );
 
         assert!(extract_typedstream_text(&[]).is_none());
         assert_eq!(
@@ -1226,6 +1232,8 @@ mod tests {
         assert_eq!(peek.sender, "Bea");
         assert_eq!(peek.snippet, "new");
         assert_eq!(peek.service, MessageService::WhatsApp);
+        assert_eq!(peek.last_date, 20.0);
+        assert_eq!(peek.last_rowid, 2);
     }
 
     #[test]
@@ -1237,16 +1245,14 @@ mod tests {
 
         let snap = snapshot_from(Some(&chat), Some(&notes));
         assert_eq!(snap.fda, FdaStatus::Granted);
-        assert!(
-            snap.conversations
-                .iter()
-                .any(|c| c.title == "Ada" && c.snippet == "typed hello" && c.chat_guid.is_some())
-        );
-        assert!(
-            snap.conversations
-                .iter()
-                .any(|c| c.service == MessageService::WhatsApp && c.title == "Bea")
-        );
+        assert!(snap
+            .conversations
+            .iter()
+            .any(|c| c.title == "Ada" && c.snippet == "typed hello" && c.chat_guid.is_some()));
+        assert!(snap
+            .conversations
+            .iter()
+            .any(|c| c.service == MessageService::WhatsApp && c.title == "Bea"));
 
         let _ = fs::remove_file(&chat);
         let _ = fs::remove_file(&notes);
@@ -1256,10 +1262,7 @@ mod tests {
     fn fda_unavailable_when_paths_missing() {
         let missing = std::env::temp_dir().join("nook-wp23-does-not-exist-chat.db");
         let _ = fs::remove_file(&missing);
-        assert_eq!(
-            fda_status_for(&missing, &missing),
-            FdaStatus::Unavailable
-        );
+        assert_eq!(fda_status_for(&missing, &missing), FdaStatus::Unavailable);
     }
 
     #[test]
@@ -1292,18 +1295,15 @@ mod tests {
         fs::write(&path, b"init").unwrap();
 
         let (tx, rx) = std::sync::mpsc::channel();
-        let mut watcher =
-            notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
-                if let Ok(event) = res {
-                    if event_is_message_store(&event) {
-                        let _ = tx.send(());
-                    }
+        let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+            if let Ok(event) = res {
+                if event_is_message_store(&event) {
+                    let _ = tx.send(());
                 }
-            })
-            .unwrap();
-        watcher
-            .watch(&dir, RecursiveMode::NonRecursive)
-            .unwrap();
+            }
+        })
+        .unwrap();
+        watcher.watch(&dir, RecursiveMode::NonRecursive).unwrap();
         fs::write(&path, b"changed").unwrap();
         rx.recv_timeout(Duration::from_secs(3))
             .expect("watcher should wake on WAL write");

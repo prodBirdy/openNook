@@ -17,39 +17,34 @@ use crate::motion::{self, SpringValue};
 use crate::platform;
 use crate::theme;
 use gpui::{
-    prelude::*, px, size, Context, Entity, ExternalPaths, FocusHandle, Focusable, MouseDownEvent,
-    Subscription, TouchPhase, Window, WindowBackgroundAppearance, WindowBounds, WindowHandle,
-    WindowKind, WindowOptions,
+    prelude::*, px, size, Context, Entity, ExternalPaths, Focusable, MouseDownEvent, Subscription,
+    TouchPhase, Window, WindowBackgroundAppearance, WindowBounds, WindowHandle, WindowKind,
+    WindowOptions,
 };
 use nook_core::agents::AgentSession;
+use nook_core::automation::ExternalAction;
 use nook_core::calendar::{CalendarEvent, Reminder};
 use nook_core::files::FileTrayItem;
-use nook_core::models::{NowPlayingData, SyncedLyrics};
-use nook_core::models::{NowPlayingData, PlaybackQueue};
-use nook_core::notch;
-use nook_core::messages::MessagesSnapshot;
+use nook_core::high_alert::HighAlertOwner;
 use nook_core::meetings::MeetingSnapshot;
+use nook_core::messages::MessagesSnapshot;
+use nook_core::models::{NowPlayingData, PlaybackQueue, SyncedLyrics};
+use nook_core::notch;
 use nook_core::notifications::NotificationEvent;
 use nook_core::observe::{MetricHistory, ObserveSnapshot};
-use nook_core::power::PowerSnapshot;
 use nook_core::obsidian::{NoteEntry, VaultWatch};
-use nook_core::high_alert::HighAlertOwner;
 use nook_core::pomodoro::{PomodoroPhase, PomodoroSpec};
+use nook_core::power::PowerSnapshot;
 use nook_core::settings::AppSettings;
 use nook_core::system_timers::{self, SystemTimer};
 use nook_core::sysvol::{self, HudEvent, HudKind, HUD_TTL};
-use nook_core::weather::WeatherSnapshot;
 use nook_core::vpn::VpnSnapshot;
+use nook_core::weather::WeatherSnapshot;
 use settings::SettingsView;
-use std::sync::Arc;
-use nook_core::automation::ExternalAction;
-use nook_core::settings::AppSettings;
-use nook_core::shell::JobHandle;
-use settings::SettingsView;
-use std::path::PathBuf;
 use std::cell::RefCell;
+use std::path::PathBuf;
 use std::rc::Rc;
-use std::time::{Duration, Instant};
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -86,12 +81,9 @@ pub enum CompactMode {
     Recording,
     Meeting,
     Notifications,
-    Process,
     Onboard,
     Messages,
     Share,
-    /// Compact spinner / HUD while a Termi-Notch command is live.
-    Shell,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -198,10 +190,8 @@ pub struct Island {
     pub(crate) obsidian_selected: Option<String>,
     pub(crate) obsidian_body: Option<String>,
     pub(crate) obsidian_flash: Option<String>,
-    /// Quick-add fields, created the first time the expanded card renders.
-    pub(crate) calendar_quick_add: Option<Entity<crate::widgets::QuickAdd>>,
+    /// Quick-add field, created the first time the expanded reminders card renders.
     pub(crate) reminders_quick_add: Option<Entity<crate::widgets::QuickAdd>>,
-    calendar_qa_sub: Option<Subscription>,
     reminders_qa_sub: Option<Subscription>,
     pub timers: Vec<Timer>,
     pub system_timers: Vec<SystemTimer>,
@@ -240,10 +230,7 @@ pub struct Island {
     /// Bumped on start and on Stop so an in-flight test cannot apply after it
     /// was cancelled (Stop then Run would otherwise take the old result).
     pub speed_gen: u64,
-    pub mixer_apps: Vec<nook_core::mixer::MixerApp>,
     /// Pending slider value waiting on the TCC pre-prompt.
-    pub mixer_prompt: Option<(String, f32)>,
-    pub(crate) mixer_gen: u64,
     pub weather: Option<WeatherSnapshot>,
     pub weather_error: Option<String>,
     pub(crate) weather_inflight: bool,
@@ -319,15 +306,11 @@ pub struct Island {
     hud_fill: SpringValue,
     hud_dragging: bool,
     pub(crate) share: nook_core::share::ShareSession,
-    pub shell_input: String,
-    pub shell_output: String,
+    pub(crate) terminal: Option<Entity<crate::widgets::TerminalView>>,
+    terminal_sub: Option<Subscription>,
     pub shell_running: bool,
     pub shell_exit: Option<i32>,
-    pub shell_hud: Option<String>,
     pub shell_focused: bool,
-    pub(crate) shell_focus: Option<FocusHandle>,
-    pub(crate) shell_history_idx: Option<usize>,
-    shell_job: Option<JobHandle>,
     /// Output-device list for the media-card picker. Rebuilt when the HAL dirty flag flips.
     pub(crate) output_devices: Vec<nook_core::audio_devices::OutputDevice>,
     pub(crate) output_picker_open: bool,
@@ -350,11 +333,6 @@ pub struct Island {
     pub search_query: String,
     search_gen: u64,
     search_loading: bool,
-    pub(crate) process_jobs: Vec<nook_core::process::JobSnapshot>,
-    pub(crate) process_hud: Option<(String, Instant)>,
-    pub(crate) process_focus: Option<String>,
-    pub(crate) process_menu: Option<String>,
-    last_process_sig: u64,
 }
 
 struct PendingFileDrag {
@@ -432,9 +410,7 @@ impl Island {
             obsidian_selected: None,
             obsidian_body: None,
             obsidian_flash: None,
-            calendar_quick_add: None,
             reminders_quick_add: None,
-            calendar_qa_sub: None,
             reminders_qa_sub: None,
             timers: Vec::new(),
             system_timers: Vec::new(),
@@ -466,9 +442,6 @@ impl Island {
             speed_progress: 0.0,
             speed_running: false,
             speed_gen: 0,
-            mixer_apps: Vec::new(),
-            mixer_prompt: None,
-            mixer_gen: 0,
             weather: nook_core::weather::cached_snapshot(),
             weather_error: None,
             weather_inflight: false,
@@ -515,15 +488,11 @@ impl Island {
             hud_fill: SpringValue::at(0.0),
             hud_dragging: false,
             share: nook_core::share::ShareSession::default(),
-            shell_input: String::new(),
-            shell_output: String::new(),
+            terminal: None,
+            terminal_sub: None,
             shell_running: false,
             shell_exit: None,
-            shell_hud: None,
             shell_focused: false,
-            shell_focus: Some(cx.focus_handle()),
-            shell_history_idx: None,
-            shell_job: None,
             output_devices: nook_core::audio_devices::snapshot(),
             output_picker_open: false,
             output_hud_name: None,
@@ -545,11 +514,6 @@ impl Island {
             search_query: String::new(),
             search_gen: 0,
             search_loading: false,
-            process_jobs: Vec::new(),
-            process_hud: None,
-            process_focus: None,
-            process_menu: None,
-            last_process_sig: 0,
         };
         // Start at the compact idle size so the first paint isn't a jump.
         let (w, h) = this.target_size();
@@ -619,9 +583,14 @@ impl Island {
                 cx.background_executor()
                     .timer(Duration::from_millis(wait_ms))
                     .await;
-                let (mx, my) = nook_core::mouse::current_mouse_logical();
                 match this
                     .update(cx, |this, cx| {
+                    // Finder's drag-tracking loop often swallows leftMouseDragged
+                    // before our NSEvent monitors see it, and the mouse thread
+                    // must not touch NSPasteboard. Sample here on the main
+                    // thread so an inbound file drag still arms the tray.
+                    nook_core::mouse::sample_now();
+                    let (mx, my) = nook_core::mouse::current_mouse_logical();
                     let inside = nook_core::mouse::hit_test(mx, my);
                     let drag_capture = nook_core::mouse::hit_test_drag_capture(mx, my);
                     let on_ui = nook_core::mouse::hit_test_exact(mx, my);
@@ -651,36 +620,22 @@ impl Island {
                         nook_core::high_alert::set_low_battery_release_pct(
                             this.settings.low_battery_release_pct,
                         );
-                        dirty = true;
-                    }
-                    let mixer_on = this
-                        .settings
-                        .is_enabled(nook_core::settings::WidgetModule::Mixer);
-                    nook_core::mixer::set_enabled(mixer_on);
-                    nook_core::mixer::set_card_visible(
-                        this.expanded && mixer_on && this.tab == Tab::Widgets,
-                    );
-                    nook_core::mixer::pump();
-                    let mixer_gen = nook_core::mixer::generation();
-                    if this.mixer_gen != mixer_gen {
-                        this.mixer_gen = mixer_gen;
-                        this.mixer_apps = nook_core::mixer::snapshot();
+                        if !this.settings.terminal_enabled {
+                            this.close_terminal(cx);
+                        }
+                        // Per-settings-change syncs (VPN, motion art, search hotkey).
                         nook_core::vpn::refresh();
                         this.sync_motion_art_from_settings(cx);
                         platform::sync_search_hotkey(
                             this.settings.search.enabled,
                             &this.settings.search.hotkey,
                         );
+                        nook_core::notifications::sync_backends(&this.settings);
                         dirty = true;
                     }
                     if platform::take_search_hotkey() {
                         this.open_search(None, cx);
-                        nook_core::notifications::sync_backends(&this.settings);
                         dirty = true;
-                    } else if this.expanded && mixer_on && this.tab == Tab::Widgets {
-                        if nook_core::mixer::copy_levels(&mut this.mixer_apps) {
-                            dirty = true;
-                        }
                     }
                     if this.repositioning {
                         this.apply_reposition(mx as f32, my as f32);
@@ -714,6 +669,7 @@ impl Island {
                                 this.close_notes_editor(cx);
                                 this.close_search(cx);
                                 this.stop_mirror(cx);
+                                this.park_terminal();
                             }
                         }
                         dirty = true;
@@ -790,6 +746,7 @@ impl Island {
                         {
                             this.expanded = false;
                             this.close_notes_editor(cx);
+                            this.park_terminal();
                             this.obsidian_typing = false;
                         }
                         dirty = true;
@@ -899,12 +856,12 @@ impl Island {
                         dirty = true;
                     }
                     let any_working = this.agents.iter().any(|a| a.status.is_working());
-                    if any_working || this.shell_running {
+                    if any_working || (!this.expanded && this.shell_running) {
                         // Full-rate on purpose: this repaints the island every
                         // tick while an agent runs, which costs real battery,
                         // but the Dot Matrix loader is the app's signature
                         // animation and smoothness wins here. A live shell
-                        // command is the same class of "something is working".
+                        // on the compact face is the same class of "working".
                         this.pixel_t = now.duration_since(this.pixel_origin).as_secs_f32();
                         dirty = true;
                     }
@@ -921,26 +878,6 @@ impl Island {
                         this.motion_art_bounds = Some(rect);
                     }
                     this.apply_motion_art_layer();
-                    if this.settings.file_actions.enabled {
-                        let jobs = nook_core::process::snapshot_jobs();
-                        let sig = jobs.iter().fold(0u64, |acc, j| {
-                            acc.wrapping_mul(33)
-                                .wrapping_add(j.id)
-                                .wrapping_add(j.progress as u64)
-                                .wrapping_add(j.status as u8 as u64)
-                        });
-                        if sig != this.last_process_sig {
-                            this.last_process_sig = sig;
-                            this.process_jobs = jobs;
-                            dirty = true;
-                        }
-                        if let Some((_, at)) = this.process_hud {
-                            if crate::widgets::process_hud_expired(at) {
-                                this.process_hud = None;
-                                dirty = true;
-                            }
-                        }
-                    }
                     if this.mirror_on {
                         if let Some((gen, bgra)) = platform::mirror_frame(this.mirror_gen) {
                             this.mirror_gen = gen;
@@ -961,7 +898,6 @@ impl Island {
                     if dirty {
                         cx.notify();
                     }
-                    let process_live = this.process_face_active();
                     let active = dirty
                         || this.hovered
                         || this.expanded
@@ -971,11 +907,9 @@ impl Island {
                         || this.mirror_on
                         || this.settings_open
                         || any_working
-                        || this.hud_active();
-                        || this.shell_running;
-                        || this.search_open
-                        || any_working;
-                        || process_live;
+                        || this.hud_active()
+                        || this.shell_running
+                        || this.search_open;
                     // Media playing promotes itself through `dirty` (the
                     // visualizer levels change every frame), so it needs no
                     // term of its own here.
@@ -1037,9 +971,8 @@ impl Island {
                         this.now_playing.artwork_base64.as_deref(),
                     );
                     if art_changed || this.aura_palette.is_none() {
-                        this.aura_palette = media::art_palette(
-                            this.now_playing.artwork_base64.as_deref(),
-                        );
+                        this.aura_palette =
+                            media::art_palette(this.now_playing.artwork_base64.as_deref());
                     }
                     if album_changed {
                         this.motion_art_key = None;
@@ -1054,7 +987,7 @@ impl Island {
                     let fetch = this.maybe_start_queue_fetch();
                     if changed {
                         this.arm_lyrics_line_timer(cx);
-                }
+                    }
                     if changed || album_changed {
                         cx.notify();
                     }
@@ -1251,29 +1184,16 @@ impl Island {
                 if this
                     .update(cx, |this, cx| {
                         let was_quiet = this.messages.incoming.is_none();
-                        let incoming_id = snapshot
-                            .incoming
-                            .as_ref()
-                            .map(|p| p.conversation_id.clone());
                         this.messages = snapshot;
                         if was_quiet && this.messages.incoming.is_some() {
                             this.preferred = Some(CompactMode::Messages);
+                            this.message_draft.clear();
                             nook_core::haptics::trigger(None);
                         }
-                        if let Some(id) = incoming_id {
-                            if this.selected_conversation.as_deref() == Some(id.as_str()) {
-                                if let Some(conv) = this
-                                    .messages
-                                    .conversations
-                                    .iter()
-                                    .find(|c| c.id == id)
-                                {
-                                    nook_core::messages::mark_conversation_seen(
-                                        &id,
-                                        conv.last_rowid,
-                                    );
-                                }
-                            }
+                        if this.messages.incoming.is_none()
+                            && this.preferred == Some(CompactMode::Messages)
+                        {
+                            this.preferred = None;
                         }
                         cx.notify();
                     })
@@ -1297,10 +1217,7 @@ impl Island {
                         if this.system_timers == timers {
                             return;
                         }
-                        let was_running = this
-                            .system_timers
-                            .iter()
-                            .any(|t| t.state.is_running());
+                        let was_running = this.system_timers.iter().any(|t| t.state.is_running());
                         let now_running = timers.iter().any(|t| t.state.is_running());
                         let now_fired = timers
                             .iter()
@@ -1315,10 +1232,12 @@ impl Island {
                                 this.preferred = Some(CompactMode::Timer);
                             }
                             if !was_fired && now_fired {
-                                nook_core::haptics::trigger(Some(nook_core::haptics::HapticConfig {
-                                    pattern: nook_core::haptics::HapticPattern::Success,
-                                    intensity: 1.0,
-                                }));
+                                nook_core::haptics::trigger(Some(
+                                    nook_core::haptics::HapticConfig {
+                                        pattern: nook_core::haptics::HapticPattern::Success,
+                                        intensity: 1.0,
+                                    },
+                                ));
                             }
                         }
                         cx.notify();
@@ -1459,9 +1378,11 @@ impl Island {
 
     pub(crate) fn has_battery_alert(&self) -> bool {
         self.settings.show_battery
-            && self.power.is_alerting(nook_core::power::clamp_alert_threshold(
-                self.settings.battery_alert_threshold,
-            ))
+            && self
+                .power
+                .is_alerting(nook_core::power::clamp_alert_threshold(
+                    self.settings.battery_alert_threshold,
+                ))
     }
 
     pub(crate) fn toggle_low_power_mode(&mut self, cx: &mut Context<Self>) {
@@ -1474,7 +1395,9 @@ impl Island {
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
-                .spawn(async { nook_core::runtime().block_on(nook_core::power::toggle_low_power_mode()) })
+                .spawn(async {
+                    nook_core::runtime().block_on(nook_core::power::toggle_low_power_mode())
+                })
                 .await;
             let _ = this.update(cx, |this, cx| {
                 this.lpm_pending = false;
@@ -1531,9 +1454,8 @@ impl Island {
         if !self.settings.show_vpn || self.vpn.since.is_none() {
             return false;
         }
-        let compact = !self.expanded
-            && self.mode() == CompactMode::Vpn
-            && self.settings.vpn_show_timer;
+        let compact =
+            !self.expanded && self.mode() == CompactMode::Vpn && self.settings.vpn_show_timer;
         let card = self.expanded && self.tab == Tab::Widgets;
         compact || card
     }
@@ -1670,12 +1592,6 @@ impl Island {
             }
         }
         dirty
-}
-    fn process_face_active(&self) -> bool {
-        self.settings.file_actions.enabled
-            && (self.process_jobs.iter().any(|j| j.status.is_live())
-                || self.process_hud.is_some()
-                || nook_core::process::any_live())
     }
 
     pub(crate) fn has_media(&self) -> bool {
@@ -1724,13 +1640,6 @@ impl Island {
         cx.notify();
     }
 
-    pub(crate) fn has_media(&self) -> bool {
-        self.settings.show_media
-            && (self.now_playing.is_playing
-                || self.now_playing.title.is_some()
-                || self.now_playing.artist.is_some())
-    }
-
     /// Interpolated playback position from the last now-playing snapshot.
     pub(crate) fn lyrics_position(&self) -> f64 {
         let extra = if self.now_playing.is_playing {
@@ -1743,7 +1652,7 @@ impl Island {
             Some(duration) if duration > 0.0 => pos.min(duration),
             _ => pos,
         }
-}
+    }
     pub(crate) fn queue_visible(&self) -> bool {
         self.settings.show_media
             && self.settings.show_media_queue
@@ -1820,7 +1729,7 @@ impl Island {
         }
     }
 
-    pub(crate) fn finish_scrubber(&mut self) -> bool {
+    pub(crate) fn finish_scrubber(&mut self, cx: &mut Context<Self>) -> bool {
         let Some(ratio) = self.scrubber_drag.take() else {
             return false;
         };
@@ -1828,9 +1737,10 @@ impl Island {
             return true;
         };
         let position = duration * ratio as f64;
-        self.now_playing.elapsed_time = Some(position);
         self.elapsed_base = Some(position);
         self.elapsed_at = Instant::now();
+        // Re-anchors the lyrics clock and sets now_playing.elapsed_time.
+        self.note_media_seek(position, cx);
         nook_core::runtime().spawn(async move {
             let _ = nook_core::audio::media_seek(position).await;
         });
@@ -1868,12 +1778,16 @@ impl Island {
             && self.settings.show_media
             && self.expanded
             && self.now_playing.is_playing
-            && self.lyrics.as_ref().is_some_and(|lyrics| lyrics.has_synced())
+            && self
+                .lyrics
+                .as_ref()
+                .is_some_and(|lyrics| lyrics.has_synced())
     }
 
     fn disarm_lyrics_timer(&mut self) {
         self.lyrics_timer_gen = self.lyrics_timer_gen.wrapping_add(1);
-}
+    }
+
     pub(crate) fn toggle_mirror(&mut self, cx: &mut Context<Self>) {
         if self.mirror_on {
             self.stop_mirror(cx);
@@ -2072,10 +1986,6 @@ impl Island {
             playing: self.now_playing.is_playing,
         })
     }
-    pub(crate) fn running_timer(&self) -> Option<&Timer> {
-        self.timers.iter().find(|t| t.running)
-    }
-
     fn clock_timers(&self) -> impl Iterator<Item = &SystemTimer> {
         self.system_timers.iter().filter(|t| t.state.is_active())
     }
@@ -2089,7 +1999,9 @@ impl Island {
     fn has_live_timer(&self) -> bool {
         self.running_timer().is_some()
             || (self.settings.sync_clock_timers
-                && self.clock_timers().any(|t| t.state.is_running() || t.state.is_counting()))
+                && self
+                    .clock_timers()
+                    .any(|t| t.state.is_running() || t.state.is_counting()))
     }
 
     fn clock_face(timer: &SystemTimer, now: f64) -> FaceTimer {
@@ -2288,7 +2200,9 @@ impl Island {
 
     fn sync_pomodoro_awake(&mut self) {
         if self.settings.pomodoro_keep_awake && self.running_pomodoro_work() {
-            nook_core::high_alert::set_low_battery_release_pct(self.settings.low_battery_release_pct);
+            nook_core::high_alert::set_low_battery_release_pct(
+                self.settings.low_battery_release_pct,
+            );
             let _ = nook_core::high_alert::acquire(
                 HighAlertOwner::Pomodoro,
                 self.settings.high_alert_kind,
@@ -2317,9 +2231,7 @@ impl Island {
     /// Sync UI with powerd / low-battery release. Cheap atomics; no extra loops.
     pub(crate) fn sync_high_alert_ui(&mut self, now: Instant) -> bool {
         let stale = nook_core::high_alert::take_ui_stale();
-        let expired = self
-            .awake_deadline
-            .is_some_and(|deadline| now >= deadline);
+        let expired = self.awake_deadline.is_some_and(|deadline| now >= deadline);
         if expired && nook_core::high_alert::is_held_by(HighAlertOwner::Manual) {
             nook_core::high_alert::release(HighAlertOwner::Manual);
         }
@@ -2390,16 +2302,6 @@ impl Island {
         platform::activate_app();
         self.notes_editor = Some(editor);
         self.notes_editing = true;
-        cx.notify();
-    }
-
-    pub(crate) fn toggle_mirror(&mut self, cx: &mut Context<Self>) {
-        if self.mirror_on {
-            self.stop_mirror(cx);
-        } else if platform::start_mirror() {
-            self.mirror_on = true;
-            self.expanded = true;
-        }
         cx.notify();
     }
 
@@ -2611,7 +2513,10 @@ impl Island {
     }
 
     fn sync_obsidian_watch(&mut self, cx: &mut Context<Self>) {
-        let want = if self.settings.show_obsidian {
+        let want = if self
+            .settings
+            .is_enabled(nook_core::settings::WidgetModule::Obsidian)
+        {
             self.settings.obsidian_vault.clone()
         } else {
             None
@@ -2676,30 +2581,6 @@ impl Island {
         }
     }
 
-    pub(crate) fn ensure_calendar_quick_add(
-        &mut self,
-        cx: &mut Context<Self>,
-    ) -> Entity<crate::widgets::QuickAdd> {
-        if let Some(entity) = &self.calendar_quick_add {
-            return entity.clone();
-        }
-        let entity = cx.new(|cx| {
-            crate::widgets::QuickAdd::new(
-                nook_core::nl_parse::EntryKind::Event,
-                "Lunch tomorrow 12:30…",
-                cx,
-            )
-        });
-        self.calendar_qa_sub = Some(cx.subscribe(
-            &entity,
-            |this, _, _: &crate::widgets::QuickAddEvent, cx| {
-                this.refresh_calendar(cx);
-            },
-        ));
-        self.calendar_quick_add = Some(entity.clone());
-        entity
-    }
-
     pub(crate) fn ensure_reminders_quick_add(
         &mut self,
         cx: &mut Context<Self>,
@@ -2751,7 +2632,7 @@ impl Island {
         .detach();
     }
 
-    fn mode(&self) -> CompactMode {
+    pub(super) fn mode(&self) -> CompactMode {
         let modes = self.available_modes();
         if let Some(preferred) = self.preferred.filter(|mode| modes.contains(mode)) {
             return preferred;
@@ -2767,9 +2648,9 @@ impl Island {
         self.settings.show_observe && self.observe.has_outage()
     }
 
-    fn has_incoming_message(&self) -> bool {
+    pub(super) fn has_incoming_message(&self) -> bool {
         self.settings.show_messages && self.messages.incoming.is_some()
-}
+    }
     fn has_meeting(&self) -> bool {
         self.settings.show_meetings && self.meeting.in_meeting()
     }
@@ -2821,7 +2702,7 @@ impl Island {
             });
         })
         .detach();
-}
+    }
     fn has_notifications(&self) -> bool {
         self.settings.show_notifications && self.notification_unread > 0
     }
@@ -2835,13 +2716,13 @@ impl Island {
         let mut modes = Vec::new();
         if self.has_battery_alert() {
             modes.push(CompactMode::Battery);
-    }
+        }
         if self.share.is_live() {
             modes.push(CompactMode::Share);
-    }
+        }
         if self.settings.show_recorder && self.recording {
             modes.push(CompactMode::Recording);
-    }
+        }
         if self.has_meeting() {
             modes.push(CompactMode::Meeting);
         }
@@ -2850,10 +2731,10 @@ impl Island {
         }
         if self.has_incoming_message() {
             modes.push(CompactMode::Messages);
-    }
+        }
         if self.has_vpn_face() {
             modes.push(CompactMode::Vpn);
-    }
+        }
         if self.has_notifications() {
             modes.push(CompactMode::Notifications);
         }
@@ -2863,19 +2744,12 @@ impl Island {
         if self.has_agents() {
             modes.push(CompactMode::Agents);
         }
+        if self.settings.show_timers && self.has_live_timer() {}
         if self.settings.show_timers && self.has_live_timer() {
-    }
-        if self.settings.terminal_enabled && (self.shell_running || self.shell_hud.is_some()) {
-            modes.push(CompactMode::Shell);
-        }
-        if self.settings.show_timers && self.running_timer().is_some() {
             modes.push(CompactMode::Timer);
         }
         if self.settings.show_files && !self.files.is_empty() {
             modes.push(CompactMode::Files);
-        }
-        if self.process_face_active() {
-            modes.push(CompactMode::Process);
         }
         if self.first_run {
             modes.push(CompactMode::Onboard);
@@ -2961,8 +2835,33 @@ impl Island {
             return (w, self.notch_height.max(32.0) + self.search_body_height());
         }
         if self.expanded {
+            if self.tab == Tab::Widgets
+                && self.has_incoming_message()
+                && self.mode() == CompactMode::Messages
+            {
+                let w = (self.screen_width - 40.0)
+                    .min(420.0)
+                    .max(self.notch_width.max(180.0) + 120.0);
+                return (
+                    w,
+                    self.notch_height.max(32.0) + theme::NOOK_INSET + theme::NOOK_BODY,
+                );
+            }
+            if self.tab == Tab::Widgets
+                && self.settings.show_recorder
+                && self.mode() == CompactMode::Recording
+            {
+                let w = (self.screen_width - 40.0)
+                    .min(420.0)
+                    .max(self.notch_width.max(180.0) + 120.0);
+                return (w, self.notch_height.max(32.0) + theme::NOOK_INSET + 260.0);
+            }
             let w = self.expanded_width();
-            let body = if self.tab == Tab::Files {
+            let body = if self.tab == Tab::Terminal {
+                // Outer pad lives on the pane so the PTY grid is not sized
+                // through a parent that then clips it. Default 18×14 cells.
+                theme::EXPANDED_PAD + crate::widgets::terminal_pane_min_height()
+            } else if self.tab == Tab::Files {
                 // Tall enough for one full dropzone tile (flush preview + caption)
                 // plus Clear All, so a single file is not clipped behind a scroll.
                 let extra = if self.share.shows_picker() { 88.0 } else { 0.0 };
@@ -2973,7 +2872,7 @@ impl Island {
             return (w, self.notch_height.max(32.0) + body);
         }
         if self.hovered {
-            return (base_w + 125.0, base_h + 15.0);
+            return (base_w + 88.0, base_h + 11.0);
         }
         if self.hud_active() {
             return (base_w + 120.0, base_h + theme::COMPACT_HEIGHT_OVERFLOW);
@@ -2986,7 +2885,7 @@ impl Island {
             };
             return (self.notch_width + theme::IDLE_NOTCH_OVERFLOW, h);
         }
-        (base_w + 120.0, base_h + theme::COMPACT_HEIGHT_OVERFLOW)
+        (base_w + 72.0, base_h + theme::COMPACT_HEIGHT_OVERFLOW)
     }
 
     pub(super) fn expanded_width(&self) -> f32 {
@@ -2999,9 +2898,13 @@ impl Island {
     /// stuttering inside the animation.
     pub(super) fn expanded_bottom(&self) -> f32 {
         let w = self.expanded_width();
-        let mut body = theme::NOOK_INSET + theme::NOOK_BODY + Self::queue_reserve_height(&self.settings);
+        let mut body =
+            theme::NOOK_INSET + theme::NOOK_BODY + Self::queue_reserve_height(&self.settings);
         if self.settings.show_files {
             body = body.max(theme::EXPANDED_PAD * 2.0 + files::files_pane_min_height(w));
+        }
+        if self.settings.terminal_enabled {
+            body = body.max(theme::EXPANDED_PAD + crate::widgets::terminal_pane_min_height());
         }
         if self.search_open || self.settings.search.enabled {
             body = body.max(self.search_body_height());
@@ -3179,11 +3082,12 @@ impl Island {
     fn toggle_expanded(&mut self, cx: &mut Context<Self>) {
         self.expanded = !self.expanded;
         if self.expanded {
-            self.tab = match self.mode() {
-                CompactMode::Files => Tab::Files,
-                CompactMode::Shell if self.settings.terminal_enabled => Tab::Terminal,
-                _ => Tab::Widgets,
-            };
+            if self.tab != Tab::Terminal || !self.settings.terminal_enabled {
+                self.tab = match self.mode() {
+                    CompactMode::Files => Tab::Files,
+                    _ => Tab::Widgets,
+                };
+            }
             nook_core::audio::note_media_event();
             if self.first_run {
                 self.first_run = false;
@@ -3193,6 +3097,7 @@ impl Island {
             self.close_notes_editor(cx);
             self.close_search(cx);
             self.stop_mirror(cx);
+            self.park_terminal();
         }
         nook_core::power::set_detail_watch(self.expanded && self.settings.show_battery);
         nook_core::haptics::trigger(None);
@@ -3222,6 +3127,9 @@ impl Island {
         if self.apply_wheel(delta.x.into(), delta.y.into(), event.touch_phase) {
             if !self.expanded {
                 self.close_notes_editor(cx);
+                self.close_search(cx);
+                self.stop_mirror(cx);
+                self.park_terminal();
             }
             self.arm_lyrics_line_timer(cx);
             cx.notify();
@@ -3509,108 +3417,59 @@ impl Island {
         self.tab = tabs[new_idx];
     }
 
-    /// User-typed command only. Callers must not wire this to a URL.
-    pub(crate) fn run_typed_shell(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
-        if !self.settings.terminal_enabled {
-            return;
+    pub(crate) fn ensure_terminal(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> Entity<crate::widgets::TerminalView> {
+        if let Some(existing) = &self.terminal {
+            return existing.clone();
         }
-        let command = self.shell_input.trim().to_string();
-        if command.is_empty() || command.len() > 8192 {
-            return;
-        }
-        if self.shell_running {
-            self.cancel_shell();
-        }
-        self.shell_output.clear();
-        self.shell_exit = None;
-        self.shell_hud = None;
-        self.shell_running = true;
-        self.shell_history_idx = None;
-        self.preferred = Some(CompactMode::Shell);
-        self.tab = Tab::Terminal;
-        self.expanded = true;
-        nook_core::shell::push_history(&command);
         let shell = nook_core::shell::resolved_shell(&self.settings.terminal_shell);
-        let timeout = Duration::from_secs(self.settings.terminal_timeout_secs.max(1) as u64);
-        let handle = nook_core::shell::spawn_login_command(&shell, &command, timeout);
-        self.shell_job = Some(handle.clone());
-        nook_core::haptics::trigger(None);
-        cx.notify();
-        Self::spawn_shell_watch(handle, cx);
-    }
-
-    fn spawn_shell_watch(handle: JobHandle, cx: &mut Context<Self>) {
-        cx.spawn(async move |this, cx| {
-            loop {
-                let snap = cx
-                    .background_executor()
-                    .spawn({
-                        let handle = handle.clone();
-                        async move { handle.wait_update().await }
-                    })
-                    .await;
-                let done = this
-                    .update(cx, |this, cx| {
-                        this.shell_output = snap.output.clone();
-                        this.shell_running = !snap.done;
-                        this.shell_exit = snap.exit;
-                        if snap.done {
-                            this.shell_job = None;
-                            this.shell_hud = Some(if snap.timed_out {
-                                "timeout".into()
-                            } else {
-                                format!("exit {}", snap.exit.unwrap_or(-1))
-                            });
-                            this.preferred = Some(CompactMode::Shell);
-                        }
-                        cx.notify();
-                        snap.done
-                    })
-                    .unwrap_or(true);
-                if done {
-                    break;
-                }
-            }
-            cx.background_executor()
-                .timer(Duration::from_secs(2))
-                .await;
-            this.update(cx, |this, cx| {
-                this.shell_hud = None;
+        let view = cx.new(|cx| crate::widgets::TerminalView::new(shell, cx));
+        self.terminal_sub = Some(cx.subscribe(&view, |this, _, event, cx| match event {
+            crate::widgets::TerminalEvent::State { running, exit } => {
+                this.shell_running = *running;
+                this.shell_exit = *exit;
                 cx.notify();
-            })
-            .ok();
-        })
-        .detach();
+            }
+            crate::widgets::TerminalEvent::Focus(focused) => {
+                this.shell_focused = *focused;
+                cx.notify();
+            }
+        }));
+        self.shell_running = true;
+        self.shell_exit = None;
+        self.terminal = Some(view.clone());
+        view
     }
 
-    pub(crate) fn cancel_shell(&mut self) {
-        if let Some(job) = self.shell_job.take() {
-            job.cancel();
+    /// Collapse without killing the shell: the session keeps running in the
+    /// background and is shown again on the next expand.
+    pub(crate) fn park_terminal(&mut self) {
+        self.shell_focused = false;
+    }
+
+    pub(crate) fn close_terminal(&mut self, cx: &mut Context<Self>) {
+        self.terminal_sub.take();
+        if let Some(view) = self.terminal.take() {
+            view.update(cx, |view, _| view.shutdown());
         }
         self.shell_running = false;
+        self.shell_focused = false;
     }
 
-    pub(crate) fn history_step(&mut self, delta: isize) {
-        if !self.settings.terminal_history {
-            return;
+    pub(crate) fn restart_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let shell = nook_core::shell::resolved_shell(&self.settings.terminal_shell);
+        if let Some(view) = self.terminal.clone() {
+            view.update(cx, |view, cx| view.restart(shell, cx));
+            window.focus(&view.read(cx).focus_handle(cx));
+            self.shell_running = true;
+            self.shell_exit = None;
+            self.shell_focused = true;
+        } else {
+            let _ = self.ensure_terminal(cx);
         }
-        let history = nook_core::shell::load_history();
-        if history.is_empty() {
-            return;
-        }
-        let next = match self.shell_history_idx {
-            Some(idx) => idx as isize + delta,
-            None if delta < 0 => history.len() as isize - 1,
-            None => return,
-        };
-        if next < 0 {
-            self.shell_history_idx = None;
-            self.shell_input.clear();
-            return;
-        }
-        let next = (next as usize).min(history.len().saturating_sub(1));
-        self.shell_history_idx = Some(next);
-        self.shell_input = history[next].clone();
+        cx.notify();
     }
 
     pub(crate) fn add_timer(&mut self, seconds: u32) {
@@ -3805,9 +3664,7 @@ mod tests {
             obsidian_selected: None,
             obsidian_body: None,
             obsidian_flash: None,
-            calendar_quick_add: None,
             reminders_quick_add: None,
-            calendar_qa_sub: None,
             reminders_qa_sub: None,
             timers: Vec::new(),
             system_timers: Vec::new(),
@@ -3839,9 +3696,6 @@ mod tests {
             speed_progress: 0.0,
             speed_running: false,
             speed_gen: 0,
-            mixer_apps: Vec::new(),
-            mixer_prompt: None,
-            mixer_gen: 0,
             weather: None,
             weather_error: None,
             weather_inflight: false,
@@ -3887,15 +3741,11 @@ mod tests {
             hud_fill: SpringValue::at(0.0),
             hud_dragging: false,
             share: nook_core::share::ShareSession::default(),
-            shell_input: String::new(),
-            shell_output: String::new(),
+            terminal: None,
+            terminal_sub: None,
             shell_running: false,
             shell_exit: None,
-            shell_hud: None,
             shell_focused: false,
-            shell_focus: None,
-            shell_history_idx: None,
-            shell_job: None,
             output_devices: Vec::new(),
             output_picker_open: false,
             output_hud_name: None,
@@ -3917,11 +3767,6 @@ mod tests {
             search_query: String::new(),
             search_gen: 0,
             search_loading: false,
-            process_jobs: Vec::new(),
-            process_hud: None,
-            process_focus: None,
-            process_menu: None,
-            last_process_sig: 0,
         }
     }
 
@@ -4066,7 +3911,10 @@ mod tests {
     #[test]
     fn queue_list_height_is_zero_when_empty_and_caps_visible_rows() {
         assert_eq!(queue_list_height(0), 0.0);
-        assert_eq!(queue_list_height(1), QUEUE_HEADER_H + QUEUE_ROW_H + QUEUE_LIST_PAD);
+        assert_eq!(
+            queue_list_height(1),
+            QUEUE_HEADER_H + QUEUE_ROW_H + QUEUE_LIST_PAD
+        );
         assert_eq!(queue_list_height(4), queue_list_height(12));
     }
 
@@ -4090,7 +3938,7 @@ mod tests {
         island.queue_inflight = false;
         island.expanded = false;
         assert!(!island.maybe_start_queue_fetch());
-}
+    }
     fn search_summon_uses_a_compact_card() {
         let mut island = test_island();
         island.search_open = true;
@@ -4146,15 +3994,17 @@ mod tests {
     fn face_timer_lets_a_running_clock_timer_take_the_compact_face() {
         let mut island = test_island();
         island.settings.sync_clock_timers = true;
-        island.system_timers.push(nook_core::system_timers::SystemTimer {
-            id: "clock-1".into(),
-            title: "Pasta".into(),
-            duration: 600.0,
-            state: nook_core::system_timers::MTTimerState::Running,
-            fire_date: Some(nook_core::system_timers::unix_now() + 120.0),
-            remaining: None,
-            deep_link: "x-apple-clock:timer?id=clock-1".into(),
-        });
+        island
+            .system_timers
+            .push(nook_core::system_timers::SystemTimer {
+                id: "clock-1".into(),
+                title: "Pasta".into(),
+                duration: 600.0,
+                state: nook_core::system_timers::MTTimerState::Running,
+                fire_date: Some(nook_core::system_timers::unix_now() + 120.0),
+                remaining: None,
+                deep_link: "x-apple-clock:timer?id=clock-1".into(),
+            });
         assert!(island.available_modes().contains(&CompactMode::Timer));
         let face = island.face_timer().expect("clock timer on the face");
         assert!(matches!(face.source, FaceTimerSource::Clock(_)));
@@ -4175,20 +4025,26 @@ mod tests {
             remaining: 0,
             total: 60,
             running: false,
+            kind: TimerKind::Countdown,
+            ends_at: None,
         });
-        island.system_timers.push(nook_core::system_timers::SystemTimer {
-            id: "clock-1".into(),
-            title: "Pasta".into(),
-            duration: 600.0,
-            state: nook_core::system_timers::MTTimerState::Running,
-            fire_date: Some(nook_core::system_timers::unix_now() + 30.0),
-            remaining: None,
-            deep_link: "x-apple-clock:timer?id=clock-1".into(),
-        });
+        island
+            .system_timers
+            .push(nook_core::system_timers::SystemTimer {
+                id: "clock-1".into(),
+                title: "Pasta".into(),
+                duration: 600.0,
+                state: nook_core::system_timers::MTTimerState::Running,
+                fire_date: Some(nook_core::system_timers::unix_now() + 30.0),
+                remaining: None,
+                deep_link: "x-apple-clock:timer?id=clock-1".into(),
+            });
         let face = island.face_timer().expect("finished local wins");
         assert!(matches!(face.source, FaceTimerSource::Local(1)));
         assert_eq!(face.remaining, 0);
-}
+    }
+
+    #[test]
     fn output_hud_label_tracks_ttl() {
         let mut island = test_island();
         assert!(island.output_hud_label().is_none());
@@ -4232,7 +4088,10 @@ mod tests {
         island.hud_fill.set(event.display_value());
         assert!(island.hud_active());
         let live = island.target_size();
-        assert!(live.0 > idle.0, "HUD should widen the idle sliver, {live:?} vs {idle:?}");
+        assert!(
+            live.0 > idle.0,
+            "HUD should widen the idle sliver, {live:?} vs {idle:?}"
+        );
         assert_eq!(live.1, 32.0 + theme::COMPACT_HEIGHT_OVERFLOW);
         assert!((island.hud.unwrap().display_value() - 0.6).abs() < f32::EPSILON);
 
@@ -4246,7 +4105,10 @@ mod tests {
             gen: 1,
         });
         let raised = island.target_size();
-        assert!(raised.1 > collapsed.1, "HUD should lift the 1px non-notch sliver");
+        assert!(
+            raised.1 > collapsed.1,
+            "HUD should lift the 1px non-notch sliver"
+        );
 
         island.settings.show_volume_brightness_hud = false;
         assert!(!island.hud_active());
@@ -4291,20 +4153,25 @@ mod tests {
     }
 
     #[test]
-    fn empty_hover_matches_live_activity_hover() {
+    fn compact_hover_reveals_modes_without_returning_to_the_old_size() {
         let mut island = test_island();
         island.notch_width = 185.0;
         island.notch_height = 38.0;
-        island.hovered = true;
-        assert_eq!(island.mode(), CompactMode::Idle);
-        let idle_hover = island.target_size();
-
         island.now_playing.title = Some("Track".into());
         island.now_playing.is_playing = true;
         island.settings.show_media = true;
         assert_eq!(island.mode(), CompactMode::Media);
-        assert_eq!(island.target_size(), idle_hover);
-        assert_eq!(idle_hover, (185.0 + 125.0, 38.0 + 15.0));
+
+        let compact = island.target_size();
+        assert_eq!(
+            compact,
+            (185.0 + 72.0, 38.0 + theme::COMPACT_HEIGHT_OVERFLOW)
+        );
+
+        island.hovered = true;
+        let hovered = island.target_size();
+        assert_eq!(hovered, (185.0 + 88.0, 38.0 + 11.0));
+        assert!(hovered.0 > compact.0 && hovered.1 > compact.1);
     }
 
     #[test]
@@ -4337,6 +4204,8 @@ mod tests {
             sender: "Ada".into(),
             snippet: "hi".into(),
             service: nook_core::messages::MessageService::IMessage,
+            last_date: 1_700_000_000.0,
+            last_rowid: 1,
         });
         assert_eq!(
             island.available_modes(),
@@ -4344,7 +4213,39 @@ mod tests {
         );
         assert_eq!(island.mode(), CompactMode::Messages);
         island.settings.show_messages = false;
-}
+        assert_eq!(island.available_modes(), vec![CompactMode::Idle]);
+    }
+
+    #[test]
+    fn expanded_incoming_message_uses_lockup_width() {
+        let mut island = test_island();
+        island.expanded = true;
+        island.messages.incoming = Some(nook_core::messages::IncomingPeek {
+            conversation_id: "iMessage;-;+1".into(),
+            sender: "Ada".into(),
+            snippet: "hi".into(),
+            service: nook_core::messages::MessageService::IMessage,
+            last_date: 1_700_000_000.0,
+            last_rowid: 1,
+        });
+        let (w, h) = island.target_size();
+        assert_eq!(w, 420.0);
+        assert_eq!(h, 32.0 + theme::NOOK_INSET + theme::NOOK_BODY);
+        island.tab = Tab::Files;
+        let (full_w, _) = island.target_size();
+        assert!(full_w > 420.0);
+    }
+
+    #[test]
+    fn expanded_recording_uses_memo_lockup_size() {
+        let mut island = test_island();
+        island.expanded = true;
+        island.settings.show_recorder = true;
+        island.recording = true;
+        let (w, h) = island.target_size();
+        assert_eq!(w, 420.0);
+        assert_eq!(h, 32.0 + theme::NOOK_INSET + 260.0);
+    }
     fn available_modes_share_while_transfer_is_live() {
         let mut island = test_island();
         assert!(!island.available_modes().contains(&CompactMode::Share));
@@ -4356,7 +4257,7 @@ mod tests {
         island.share.hud = Some("Link copied".into());
         assert_eq!(island.mode(), CompactMode::Share);
         island.share.hud = None;
-}
+    }
     fn available_modes_includes_recording() {
         let mut island = test_island();
         island.settings.show_recorder = true;
@@ -4368,7 +4269,7 @@ mod tests {
         );
         assert_eq!(island.mode(), CompactMode::Recording);
         island.settings.show_recorder = false;
-}
+    }
     fn available_modes_includes_meeting() {
         use nook_core::meetings::{MeetingApp, MeetingState};
         let mut island = test_island();
@@ -4384,7 +4285,7 @@ mod tests {
         );
         assert_eq!(island.mode(), CompactMode::Meeting);
         island.settings.show_meetings = false;
-}
+    }
     fn available_modes_includes_notifications() {
         let mut island = test_island();
         island.settings.show_notifications = true;
@@ -4461,7 +4362,7 @@ mod tests {
         );
         island.power.has_battery = true;
         island.settings.show_battery = false;
-}
+    }
     fn available_modes_includes_vpn_while_connected() {
         let mut island = test_island();
         island.settings.show_vpn = true;
@@ -4492,26 +4393,6 @@ mod tests {
         assert!(!island.has_vpn_face());
         assert_eq!(island.preferred, None);
         assert_eq!(island.mode(), CompactMode::Idle);
-}
-    fn available_modes_includes_process_while_a_job_or_hud_is_live() {
-        use nook_core::process::{JobKind, JobSnapshot, JobStatus};
-        let mut island = test_island();
-        assert!(!island.available_modes().contains(&CompactMode::Process));
-        island.process_jobs.push(JobSnapshot {
-            id: 1,
-            kind: JobKind::Convert,
-            input: "/tmp/a.png".into(),
-            output: None,
-            progress: 40,
-            status: JobStatus::Running,
-            message: String::new(),
-        });
-        assert!(island.available_modes().contains(&CompactMode::Process));
-        island.process_jobs.clear();
-        island.process_hud = Some(("Saved a.jpeg".into(), Instant::now()));
-        assert!(island.available_modes().contains(&CompactMode::Process));
-        island.settings.file_actions.enabled = false;
-        assert!(!island.available_modes().contains(&CompactMode::Process));
     }
 
     #[test]
@@ -4657,6 +4538,23 @@ mod tests {
         assert_eq!(island.mode(), CompactMode::Files);
         assert!(!island.apply_wheel(8.0, 0.0, TouchPhase::Moved));
         assert_eq!(island.mode(), CompactMode::Files);
+    }
+
+    #[test]
+    fn expanded_horizontal_swipe_cycles_tab() {
+        let mut island = test_island();
+        island.expanded = true;
+        island.tab = Tab::Widgets;
+        assert_eq!(island.shown_tabs(), vec![Tab::Widgets, Tab::Files]);
+
+        assert!(island.apply_wheel(40.0, 0.0, TouchPhase::Moved));
+        assert_eq!(island.tab, Tab::Files);
+        assert!(!island.apply_wheel(40.0, 0.0, TouchPhase::Moved));
+        assert_eq!(island.tab, Tab::Files);
+
+        island.last_wheel_at = Instant::now() - Duration::from_millis(400);
+        assert!(island.apply_wheel(-40.0, 0.0, TouchPhase::Moved));
+        assert_eq!(island.tab, Tab::Widgets);
     }
 
     #[test]
@@ -4981,7 +4879,7 @@ mod tests {
         island.apply_timer_tick(SystemTime::UNIX_EPOCH, 7);
         assert_eq!(island.timers[0].remaining, 0);
         assert!(!island.timers[0].running);
-}
+    }
     #[test]
     fn terminal_tab_is_opt_in() {
         let mut island = test_island();
@@ -4996,13 +4894,34 @@ mod tests {
     }
 
     #[test]
-    fn shell_mode_stays_off_until_enabled() {
+    fn expanded_terminal_fits_the_pty_grid() {
         let mut island = test_island();
-        island.shell_running = true;
-        assert!(!island.available_modes().contains(&CompactMode::Shell));
+        island.expanded = true;
         island.settings.terminal_enabled = true;
-        assert!(island.available_modes().contains(&CompactMode::Shell));
-}
+        island.tab = Tab::Terminal;
+        island.notch_height = 38.0;
+        let (_, h) = island.target_size();
+        let leftover = h - island.notch_height.max(32.0) - theme::EXPANDED_PAD;
+        assert!(
+            leftover + 0.05 >= crate::widgets::terminal_pane_min_height(),
+            "h={h} leftover={leftover} need={}",
+            crate::widgets::terminal_pane_min_height()
+        );
+        island.tab = Tab::Widgets;
+        let (_, widget_h) = island.target_size();
+        assert!(
+            h > widget_h,
+            "term tab must be taller than the widget row (term={h} widgets={widget_h})"
+        );
+    }
+
+    #[test]
+    fn shell_never_appears_in_compact_modes() {
+        let mut island = test_island();
+        island.settings.terminal_enabled = true;
+        island.shell_running = true;
+        assert_eq!(island.available_modes(), vec![CompactMode::Idle]);
+    }
     #[test]
     fn motion_art_layer_stays_off_when_collapsed_or_paused() {
         let mut island = test_island();
@@ -5012,7 +4931,10 @@ mod tests {
         island.now_playing.is_playing = true;
         island.now_playing.motion_artwork_url = Some("https://example.com/a.m3u8".into());
         island.motion_art_bounds = Some((40.0, 20.0, 84.0, 84.0));
-        assert!(island.motion_art_spec().is_none(), "collapsed hides the layer");
+        assert!(
+            island.motion_art_spec().is_none(),
+            "collapsed hides the layer"
+        );
 
         island.expanded = true;
         let spec = island.motion_art_spec().expect("expanded playing");
@@ -5022,7 +4944,10 @@ mod tests {
 
         island.now_playing.is_playing = false;
         assert!(
-            !island.motion_art_spec().expect("paused still has a spec").playing,
+            !island
+                .motion_art_spec()
+                .expect("paused still has a spec")
+                .playing,
             "pause hides via playing=false"
         );
 

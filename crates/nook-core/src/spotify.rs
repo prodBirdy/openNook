@@ -66,10 +66,11 @@ fn set_status(next: SpotifyStatus) {
 }
 
 pub fn is_connected() -> bool {
-    matches!(status(), SpotifyStatus::Connected) || tokens_lock()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .is_some()
+    matches!(status(), SpotifyStatus::Connected)
+        || tokens_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some()
         || load_refresh_token().is_some()
 }
 
@@ -690,8 +691,7 @@ async fn play_context_offset(context_uri: &str, uri: &str) -> Result<(), String>
         "offset": { "uri": uri },
         "position_ms": 0
     });
-    let (status, text) =
-        api_request(reqwest::Method::PUT, "/me/player/play", Some(body)).await?;
+    let (status, text) = api_request(reqwest::Method::PUT, "/me/player/play", Some(body)).await?;
     if status.as_u16() == 403 {
         PREMIUM_BLOCKED.store(true, Ordering::Relaxed);
         set_status(SpotifyStatus::PremiumRequired);
@@ -798,12 +798,7 @@ mod tests {
 
     #[test]
     fn authorize_url_includes_pkce_and_scopes() {
-        let url = authorize_url(
-            "cid",
-            REDIRECT_URI,
-            "challenge",
-            "state-1",
-        );
+        let url = authorize_url("cid", REDIRECT_URI, "challenge", "state-1");
         assert!(url.starts_with(AUTHORIZE_URL));
         assert!(url.contains("client_id=cid"));
         assert!(url.contains("code_challenge_method=S256"));

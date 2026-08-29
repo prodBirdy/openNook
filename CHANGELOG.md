@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+
+- Process widget (convert, OCR, PDF compress, background removal) and its
+  File Actions settings.
+- "login shell" / "live" status row on the Term tab. The PTY fills the pane;
+  a restart control still appears if the shell exits.
+
+### Fixed
+
+- Hovering a Finder file over the island did not open the file tray: the mouse
+  thread sampled NSPasteboard off the main thread and could poison the drag
+  baseline, so inbound drags never armed the dropzone.
+- Term tab clipped the last lines of a login-shell TUI: the PTY claimed the
+  pane's full height on top of the "login shell" header, and the island stayed
+  at the widget-row size.
+
+### Changed
+
+- Coding-agent faces use each agent's logo as a mask over a Magic UI glyph
+  matrix (`01·•+*/\<>=`), tinted with that agent's brand color.
+- Now Playing blooms a darkened, radially faded blur of the album artwork
+  behind the cover, so grayscale tracks don't turn the pane into a gray card.
+- Termi-Notch is a real login-shell PTY instead of the one-shot command field,
+  so typing, control keys, and interactive programs work like the machine CLI.
+- Messages is an incoming-only quick reply on the island instead of a
+  conversation inbox. The pane appears when a message arrives, with a sender
+  lockup and a reply field; Escape dismisses it.
+- Voice recordings list as dated memos with a ringed record/stop control,
+  matching a native memo list instead of a count plus mic icon.
+
 ### Packaging
 
 - Linux GPUI artifact: `cargo build --release -p nook` on Ubuntu, uploaded as

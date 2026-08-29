@@ -180,7 +180,7 @@ pub const IDLE_NOTCH_OVERFLOW: f32 = 1.0;
 pub const COMPACT_HEIGHT_OVERFLOW: f32 = 1.0;
 /// Bottom-corner radius of the compact island. The camera housing is a
 /// rounded rect, not a capsule — half-height rounding ate the 1px wrap.
-pub const COMPACT_RADIUS: f32 = 12.0;
+pub const COMPACT_RADIUS: f32 = 14.0;
 pub const EXPANDED_RADIUS: f32 = 36.0;
 /// React `WidgetWrapper`: `rounded-[28px]`.
 pub const WIDGET_RADIUS: f32 = 28.0;
@@ -192,7 +192,8 @@ pub const EXPANDED_PAD: f32 = 20.0;
 /// Nook tab body: one row under the notch, matching the capsule layout.
 pub const NOOK_BODY: f32 = 128.0;
 pub const NOOK_INSET: f32 = 16.0;
-/// One Customize-widgets cell on the expanded Nook row.
+/// One Customize-widgets cell on the expanded Nook row. Panes shrink when
+/// the row would otherwise overflow the island's max width.
 pub const NOOK_CELL: f32 = 56.0;
 pub const EXPANDED_MAX_WIDTH: f32 = 780.0;
 /// React widgets row `gap-4`.
@@ -260,6 +261,9 @@ pub const FOOTNOTE: Text = Text {
 
 /// Compact Live Activity face — album chip, mode icons, timer ring, loader.
 pub const COMPACT_FACE: f32 = 26.0;
+/// Inset from the compact capsule edge to the leading/trailing glyph.
+/// Past the 12pt corner so a 26pt face does not sit on the curve.
+pub const COMPACT_INSET: f32 = 8.0;
 /// Expanded Nook Mirror circle. Fills `NOOK_BODY` minus the pane inset.
 pub const MIRROR_FACE: f32 = 112.0;
 

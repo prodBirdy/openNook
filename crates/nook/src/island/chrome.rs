@@ -4,6 +4,7 @@ use crate::theme;
 use gpui::{canvas, point, prelude::*, px, PathBuilder};
 
 pub(super) const WING: f32 = 6.0;
+pub(super) const COMPACT_WING: f32 = 14.0;
 
 /// Whether to outline the mouse hit regions. Off unless `NOOK_DEBUG_HITBOX=1`.
 pub(super) fn hitbox_debug() -> bool {

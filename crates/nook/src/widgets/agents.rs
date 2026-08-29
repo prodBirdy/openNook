@@ -9,23 +9,17 @@ use gpui::{
     div, prelude::*, px, rgba, AnyElement, Context, CursorStyle, MouseButton, MouseDownEvent,
     SharedString,
 };
-use nook_core::agents::AgentSession;
+use nook_core::agents::{AgentKind, AgentSession};
 
 pub(crate) fn compact_left(agents: &[AgentSession], pixel_t: f32) -> AnyElement {
-    let working = agents.iter().any(|a| a.status.is_working());
-    let seed = agents
+    let agent = agents
         .iter()
         .find(|a| a.status.is_working())
-        .or(agents.first())
-        .map(|a| a.pid)
-        .unwrap_or(0);
-    dotmatrix::element(
-        dotmatrix::pick(seed),
-        pixel_t,
-        working,
-        dotmatrix::COMPACT_SIZE,
-    )
-    .into_any_element()
+        .or(agents.first());
+    let working = agent.is_some_and(|a| a.status.is_working());
+    let kind = agent.map(|a| a.kind).unwrap_or(AgentKind::Grok);
+    let seed = agent.map(|a| a.pid).unwrap_or(0);
+    dotmatrix::brand_element(kind, seed, pixel_t, working, theme::COMPACT_FACE).into_any_element()
 }
 
 /// Running count, or a pause glyph when every session is waiting.
@@ -78,15 +72,16 @@ fn agent_row(agent: &AgentSession, now: f32, cx: &mut Context<Island>) -> impl I
         )
         .child(
             div()
-                .w(px(20.))
+                .w(px(theme::HIT_MIN))
                 .flex_shrink_0()
                 .flex()
                 .justify_center()
-                .child(dotmatrix::element(
-                    dotmatrix::pick(agent.pid),
+                .child(dotmatrix::brand_element(
+                    agent.kind,
+                    agent.pid,
                     now,
                     working,
-                    dotmatrix::WIDGET_SIZE,
+                    theme::HIT_MIN,
                 )),
         )
         .child(

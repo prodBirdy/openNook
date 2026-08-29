@@ -247,7 +247,9 @@ unsafe fn read_service_paths(pboard: *mut objc2::runtime::AnyObject) -> Vec<std:
         if utf8.is_null() {
             continue;
         }
-        let raw = std::ffi::CStr::from_ptr(utf8).to_string_lossy().into_owned();
+        let raw = std::ffi::CStr::from_ptr(utf8)
+            .to_string_lossy()
+            .into_owned();
         paths.push(std::path::PathBuf::from(raw));
     }
     paths
@@ -419,6 +421,22 @@ fn pin_ns_window(ns_win: *mut objc2::runtime::AnyObject) {
                         continue;
                     }
                     let _: () = msg_send![v, setFrame: local];
+                    // GPUI's CAMetalLayer defaults to `resize` gravity, so on
+                    // every strip resize CoreAnimation scales the stale
+                    // drawable into the new bounds until GPUI presents the
+                    // next frame — that is the one-frame squish/stretch of the
+                    // island seen when the strip re-quantizes on hover. The
+                    // strip's top edge never moves, so anchoring the stale
+                    // contents top-left leaves them exactly where they were
+                    // (growth reveals transparent rows, shrink just clips).
+                    let layer: *mut AnyObject = msg_send![v, layer];
+                    if !layer.is_null() {
+                        let gravity: *mut AnyObject = msg_send![
+                            class!(NSString),
+                            stringWithUTF8String: c"topLeft".as_ptr()
+                        ];
+                        let _: () = msg_send![layer, setContentsGravity: gravity];
+                    }
                 }
             }
         }
@@ -1628,7 +1646,9 @@ fn choose_directory_macos() -> Option<std::path::PathBuf> {
         if cstr.is_null() {
             return None;
         }
-        Some(PathBuf::from(CStr::from_ptr(cstr).to_string_lossy().into_owned()))
+        Some(PathBuf::from(
+            CStr::from_ptr(cstr).to_string_lossy().into_owned(),
+        ))
     }
 }
 
@@ -1981,8 +2001,7 @@ pub fn install_media_observers() {
 }
 
 /// Re-assert OSDUIHelper suppression after sleep — launchd can respawn it.
-pub fn install_osd_wake_observer() {
-}
+pub fn install_osd_wake_observer() {}
 /// Refresh weather after sleep without polling through it. The weather loop
 /// consumes [`nook_core::weather::take_wake`] and only hits the network when
 /// the 30 min cache is stale.
@@ -2820,6 +2839,10 @@ struct MotionArtCap {
     paused: bool,
 }
 
+// Raw AppKit pointers; the cap is only touched from the main thread.
+#[cfg(target_os = "macos")]
+unsafe impl Send for MotionArtCap {}
+
 #[cfg(target_os = "macos")]
 fn motion_art_cap() -> &'static std::sync::Mutex<MotionArtCap> {
     static CAP: std::sync::OnceLock<std::sync::Mutex<MotionArtCap>> = std::sync::OnceLock::new();
@@ -2846,7 +2869,7 @@ unsafe fn sync_motion_art_macos(spec: Option<&MotionArtSpec>) {
         return;
     };
 
-    let mut ns_win = std::ptr::null_mut();
+    let mut ns_win: *mut AnyObject = std::ptr::null_mut();
     for_each_island_window(|w| {
         if ns_win.is_null() {
             ns_win = w;
@@ -2911,7 +2934,7 @@ unsafe fn sync_motion_art_macos(spec: Option<&MotionArtSpec>) {
             let _: () = msg_send![cap.player, play];
         }
         cap.paused = hide;
-}
+    }
 }
 // WP21 — Carbon global hotkey, frontmost restore, Spotlight launch, auto-paste.
 
@@ -2955,7 +2978,8 @@ pub fn make_island_key() {
         use objc2::*;
         for_each_island_window(|ns_win| {
             if window_title_is(ns_win, "openNook-island") {
-                let _: () = msg_send![ns_win, makeKeyAndOrderFront: std::ptr::null_mut::<AnyObject>()];
+                let _: () =
+                    msg_send![ns_win, makeKeyAndOrderFront: std::ptr::null_mut::<AnyObject>()];
             }
         });
     }
@@ -2978,17 +3002,6 @@ pub fn auto_paste_cmd_v() -> bool {
     #[cfg(target_os = "macos")]
     {
         auto_paste_cmd_v_macos()
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        false
-    }
-}
-
-pub fn accessibility_trusted() -> bool {
-    #[cfg(target_os = "macos")]
-    {
-        accessibility_trusted_macos()
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -3020,7 +3033,8 @@ struct HotkeyCap {
 
 #[cfg(target_os = "macos")]
 fn hotkey_cap() -> &'static std::sync::Mutex<Option<HotkeyCap>> {
-    static CAP: std::sync::OnceLock<std::sync::Mutex<Option<HotkeyCap>>> = std::sync::OnceLock::new();
+    static CAP: std::sync::OnceLock<std::sync::Mutex<Option<HotkeyCap>>> =
+        std::sync::OnceLock::new();
     CAP.get_or_init(|| std::sync::Mutex::new(None))
 }
 
@@ -3172,7 +3186,7 @@ unsafe fn hide_motion_art_macos() {
     if !cap.player.is_null() && !cap.paused {
         let _: () = msg_send![cap.player, pause];
         cap.paused = true;
-}
+    }
 }
 fn restore_frontmost_macos() {
     use objc2::runtime::AnyObject;

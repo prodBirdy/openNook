@@ -169,10 +169,7 @@ mod tests {
     fn remaining_until_is_zero_when_past() {
         let now = SystemTime::UNIX_EPOCH + Duration::from_secs(100);
         assert_eq!(remaining_until(None, now), 0);
-        assert_eq!(
-            remaining_until(Some(now - Duration::from_secs(5)), now),
-            0
-        );
+        assert_eq!(remaining_until(Some(now - Duration::from_secs(5)), now), 0);
         assert_eq!(
             remaining_until(Some(now + Duration::from_secs(90)), now),
             90

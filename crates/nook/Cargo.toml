@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 description = "openNook — Dynamic Island client, native GPUI frontend"
+default-run = "nook"
 
 [[bin]]
 name = "nook"

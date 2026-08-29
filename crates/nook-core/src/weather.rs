@@ -144,7 +144,9 @@ impl WeatherSnapshot {
     }
 
     pub fn matches(&self, lat: f64, lon: f64, units: WeatherUnits) -> bool {
-        self.units == units && (self.latitude - lat).abs() < 1e-4 && (self.longitude - lon).abs() < 1e-4
+        self.units == units
+            && (self.latitude - lat).abs() < 1e-4
+            && (self.longitude - lon).abs() < 1e-4
     }
 
     pub fn icon(&self) -> &'static str {
@@ -436,10 +438,7 @@ fn client() -> Result<reqwest::Client, String> {
 
 /// Cached snapshot when one exists, regardless of age.
 pub fn cached_snapshot() -> Option<WeatherSnapshot> {
-    cache()
-        .lock()
-        .ok()
-        .and_then(|guard| guard.snapshot.clone())
+    cache().lock().ok().and_then(|guard| guard.snapshot.clone())
 }
 
 /// Cached snapshot only when it still matches `settings` and is within TTL.

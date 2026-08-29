@@ -423,10 +423,10 @@ pub(crate) fn scroll_body(id: impl Into<ElementId>, child: impl IntoElement) -> 
             move |event: &ScrollWheelEvent, window: &mut Window, cx: &mut App| {
                 // GPUI runs its own scroll listener ahead of this one, so the
                 // card has already moved by the time we get here: all this
-                // decides is whether the row of cards behind the card gets the
+                // decides is whether the island behind the card gets the
                 // gesture too. Keep it only when it is vertical *and* there is
-                // overflow to move, so a card that fits its content never
-                // blocks scrolling from card to card.
+                // overflow to move, so a card that fits never blocks a swipe
+                // that should change tabs or collapse the island.
                 let delta = event.delta.pixel_delta(window.line_height());
                 if delta.y.abs() > delta.x.abs() && scroll.max_offset().height > px(0.5) {
                     cx.stop_propagation();
@@ -434,10 +434,9 @@ pub(crate) fn scroll_body(id: impl Into<ElementId>, child: impl IntoElement) -> 
             }
         })
         .child(child);
-    // Sideways gestures have to reach the row untouched. Without this, GPUI
-    // feeds a purely horizontal delta into whichever axis the element *can*
-    // scroll, so swiping across the cards would drag each card's content
-    // vertically on the way past.
+    // Sideways gestures have to reach the island untouched so a horizontal
+    // swipe changes tabs. Without this, GPUI feeds a purely horizontal delta
+    // into whichever axis the element *can* scroll.
     body.style().restrict_scroll_to_axis = Some(true);
     body
 }

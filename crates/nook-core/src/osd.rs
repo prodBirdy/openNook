@@ -145,10 +145,29 @@ mod macos {
         }
     }
 
+    /// `launchctl kickstart` is refused outright while SIP is on ("Operation
+    /// not permitted while System Integrity Protection is engaged"), so give
+    /// up after the first refusal instead of re-running it on every settings
+    /// sync and wake. Output is captured — launchctl's stderr must not leak
+    /// into the app's terminal.
+    static KICKSTART_DENIED: AtomicBool = AtomicBool::new(false);
+
     fn kickstart(kill: bool) {
+        if KICKSTART_DENIED.load(Ordering::Relaxed) {
+            return;
+        }
         let args = kickstart_args(uid(), kill);
-        if let Err(err) = Command::new(LAUNCHCTL).args(&args).status() {
-            log::debug!("launchctl {}: {err}", args.join(" "));
+        match Command::new(LAUNCHCTL).args(&args).output() {
+            Ok(out) if out.status.success() => {}
+            Ok(out) => {
+                KICKSTART_DENIED.store(true, Ordering::Relaxed);
+                log::debug!(
+                    "launchctl {} refused (SIP?): {}",
+                    args.join(" "),
+                    String::from_utf8_lossy(&out.stderr).trim()
+                );
+            }
+            Err(err) => log::debug!("launchctl {}: {err}", args.join(" ")),
         }
     }
 

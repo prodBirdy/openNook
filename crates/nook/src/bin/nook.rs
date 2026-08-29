@@ -61,7 +61,7 @@ fn build_url(args: &mut Vec<String>) -> Result<String, String> {
             Ok(tray_add_url(&paths))
         }
         other if looks_like_exec(other) => Err(
-            "the CLI cannot run shell commands; type them in the Termi-Notch card".into(),
+            "the CLI cannot run shell commands; type them in the Termi-Notch login shell".into(),
         ),
         _ => {
             let paths = canonicalize_paths(args)?;
@@ -84,9 +84,7 @@ fn canonicalize_paths(args: &[String]) -> Result<Vec<PathBuf>, String> {
     let mut out = Vec::new();
     for raw in args {
         let path = Path::new(raw);
-        let resolved = path
-            .canonicalize()
-            .unwrap_or_else(|_| path.to_path_buf());
+        let resolved = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
         out.push(resolved);
     }
     Ok(out)
@@ -146,10 +144,7 @@ mod tests {
             build_url(&mut vec!["clear".into()]).unwrap(),
             tray_clear_url()
         );
-        assert_eq!(
-            build_url(&mut vec!["expand".into()]).unwrap(),
-            expand_url()
-        );
+        assert_eq!(build_url(&mut vec!["expand".into()]).unwrap(), expand_url());
         assert_eq!(
             build_url(&mut vec!["timer".into(), "90".into()]).unwrap(),
             timer_start_url(90)

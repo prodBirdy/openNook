@@ -96,10 +96,7 @@ pub enum QueueJump {
     MusicTrack { index: u32 },
     /// Sequential `POST /v1/me/player/next` count, plus the track uri so we
     /// can try `PUT /v1/me/player/play` with context+offset first.
-    Spotify {
-        skip_count: u32,
-        uri: String,
-    },
+    Spotify { skip_count: u32, uri: String },
 }
 
 /// One upcoming row. Artwork stays optional: Spotify uses a 64px URL (lazy),

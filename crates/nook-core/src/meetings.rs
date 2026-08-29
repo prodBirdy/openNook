@@ -277,7 +277,9 @@ fn keep_started(prev: &MeetingState, next: MeetingState, now: Instant) -> Meetin
                 started,
                 ..
             },
-            MeetingState::InMeeting { app, pid, muted, .. },
+            MeetingState::InMeeting {
+                app, pid, muted, ..
+            },
         ) if pa == app && pp == pid => MeetingState::InMeeting {
             app: *app,
             pid: *pid,
@@ -435,10 +437,7 @@ static EVENT: AtomicBool = AtomicBool::new(false);
 static GEN: AtomicU64 = AtomicU64::new(1);
 
 pub fn snapshot() -> MeetingSnapshot {
-    store()
-        .read()
-        .unwrap_or_else(|e| e.into_inner())
-        .clone()
+    store().read().unwrap_or_else(|e| e.into_inner()).clone()
 }
 
 pub fn take_meeting_event() -> bool {
@@ -684,28 +683,46 @@ mod macos {
         ) -> i32;
         fn AXUIElementPerformAction(element: *mut c_void, action: *const c_void) -> i32;
         static kAXTrustedCheckOptionPrompt: *const c_void;
-        static kAXMenuBarAttribute: *const c_void;
-        static kAXChildrenAttribute: *const c_void;
-        static kAXTitleAttribute: *const c_void;
-        static kAXRoleAttribute: *const c_void;
-        static kAXWindowsAttribute: *const c_void;
-        static kAXPressAction: *const c_void;
-        static kAXIdentifierAttribute: *const c_void;
     }
+
+    // The kAX*Attribute / kAX*Action constants are CFSTR macros in the SDK
+    // headers, not exported symbols — an extern static for them cannot link.
+    // Build the CFStrings once instead.
+    fn ax_cfstr(slot: &'static std::sync::OnceLock<usize>, name: &'static str) -> *const c_void {
+        *slot.get_or_init(|| unsafe {
+            CFStringCreateWithCString(ptr::null(), name.as_ptr() as *const i8, UTF8) as usize
+        }) as *const c_void
+    }
+
+    macro_rules! ax_const {
+        ($fn_name:ident, $lit:literal) => {
+            fn $fn_name() -> *const c_void {
+                static SLOT: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+                ax_cfstr(&SLOT, concat!($lit, "\0"))
+            }
+        };
+    }
+    ax_const!(ax_menu_bar_attr, "AXMenuBar");
+    ax_const!(ax_children_attr, "AXChildren");
+    ax_const!(ax_title_attr, "AXTitle");
+    ax_const!(ax_role_attr, "AXRole");
+    ax_const!(ax_windows_attr, "AXWindows");
+    ax_const!(ax_press_action, "AXPress");
+    ax_const!(ax_identifier_attr, "AXIdentifier");
 
     #[link(name = "CoreFoundation", kind = "framework")]
     extern "C" {
         fn CFRelease(cf: *const c_void);
+        fn CFStringCreateWithCString(
+            alloc: *const c_void,
+            s: *const i8,
+            encoding: u32,
+        ) -> *const c_void;
         fn CFGetTypeID(cf: *const c_void) -> usize;
         fn CFStringGetTypeID() -> usize;
         fn CFArrayGetTypeID() -> usize;
         fn CFStringGetLength(s: *const c_void) -> isize;
-        fn CFStringGetCString(
-            s: *const c_void,
-            buf: *mut i8,
-            size: isize,
-            encoding: u32,
-        ) -> bool;
+        fn CFStringGetCString(s: *const c_void, buf: *mut i8, size: isize, encoding: u32) -> bool;
         fn CFArrayGetCount(arr: *const c_void) -> isize;
         fn CFArrayGetValueAtIndex(arr: *const c_void, idx: isize) -> *const c_void;
         fn CFDictionaryCreate(
@@ -761,9 +778,11 @@ mod macos {
     fn install_audio_listeners() {
         unsafe {
             let default_addr = AudioObjectPropertyAddress::new(DEFAULT_INPUT);
-            let _ = AudioObjectAddPropertyListener(SYS, &default_addr, Some(on_audio), ptr::null_mut());
+            let _ =
+                AudioObjectAddPropertyListener(SYS, &default_addr, Some(on_audio), ptr::null_mut());
             let list_addr = AudioObjectPropertyAddress::new(PROCESS_LIST);
-            let _ = AudioObjectAddPropertyListener(SYS, &list_addr, Some(on_audio), ptr::null_mut());
+            let _ =
+                AudioObjectAddPropertyListener(SYS, &list_addr, Some(on_audio), ptr::null_mut());
             rearm_input_listener();
         }
     }
@@ -774,20 +793,12 @@ mod macos {
             let old = INPUT_DEVICE.swap(new_id, Ordering::Relaxed);
             let addr = AudioObjectPropertyAddress::new(RUNNING_SOMEWHERE);
             if old != 0 && old != new_id {
-                let _ = AudioObjectRemovePropertyListener(
-                    old,
-                    &addr,
-                    Some(on_audio),
-                    ptr::null_mut(),
-                );
+                let _ =
+                    AudioObjectRemovePropertyListener(old, &addr, Some(on_audio), ptr::null_mut());
             }
             if new_id != 0 && new_id != old {
-                let _ = AudioObjectAddPropertyListener(
-                    new_id,
-                    &addr,
-                    Some(on_audio),
-                    ptr::null_mut(),
-                );
+                let _ =
+                    AudioObjectAddPropertyListener(new_id, &addr, Some(on_audio), ptr::null_mut());
             }
         }
     }
@@ -1095,7 +1106,7 @@ mod macos {
 
     fn ax_title(el: *mut c_void) -> Option<String> {
         unsafe {
-            let cf = ax_attr(el, kAXTitleAttribute);
+            let cf = ax_attr(el, ax_title_attr());
             if cf.is_null() {
                 return None;
             }
@@ -1107,7 +1118,7 @@ mod macos {
 
     fn ax_role(el: *mut c_void) -> Option<String> {
         unsafe {
-            let cf = ax_attr(el, kAXRoleAttribute);
+            let cf = ax_attr(el, ax_role_attr());
             if cf.is_null() {
                 return None;
             }
@@ -1119,7 +1130,7 @@ mod macos {
 
     fn ax_identifier(el: *mut c_void) -> Option<String> {
         unsafe {
-            let cf = ax_attr(el, kAXIdentifierAttribute);
+            let cf = ax_attr(el, ax_identifier_attr());
             if cf.is_null() {
                 return None;
             }
@@ -1131,7 +1142,7 @@ mod macos {
 
     fn ax_children(el: *mut c_void) -> Vec<*mut c_void> {
         unsafe {
-            let arr = ax_attr(el, kAXChildrenAttribute);
+            let arr = ax_attr(el, ax_children_attr());
             if arr.is_null() {
                 return Vec::new();
             }
@@ -1168,7 +1179,7 @@ mod macos {
             if el.is_null() {
                 return false;
             }
-            AXUIElementPerformAction(el, kAXPressAction) == 0
+            AXUIElementPerformAction(el, ax_press_action()) == 0
         }
     }
 
@@ -1182,7 +1193,7 @@ mod macos {
             if app.is_null() {
                 return None;
             }
-            let bar = ax_attr(app, kAXMenuBarAttribute);
+            let bar = ax_attr(app, ax_menu_bar_attr());
             CFRelease(app);
             if bar.is_null() {
                 return None;
@@ -1197,10 +1208,9 @@ mod macos {
                     return menu.or(Some(menu_extra));
                 }
                 if let Some(menu) = menu {
-                    if ax_children(menu)
-                        .iter()
-                        .any(|item| mute_title_state(&ax_title(*item).unwrap_or_default()).is_some())
-                    {
+                    if ax_children(menu).iter().any(|item| {
+                        mute_title_state(&ax_title(*item).unwrap_or_default()).is_some()
+                    }) {
                         return Some(menu);
                     }
                 }
@@ -1244,7 +1254,7 @@ mod macos {
             if app.is_null() {
                 return false;
             }
-            let windows = ax_attr(app, kAXWindowsAttribute);
+            let windows = ax_attr(app, ax_windows_attr());
             CFRelease(app);
             if windows.is_null() {
                 return false;
@@ -1453,9 +1463,7 @@ end tell"#;
         } else {
             format!(" using {mods}")
         };
-        let script = format!(
-            r#"tell application "System Events" to keystroke "{key}"{using}"#
-        );
+        let script = format!(r#"tell application "System Events" to keystroke "{key}"{using}"#);
         let _ = browser_media::run_osascript_blocking(&script);
     }
 

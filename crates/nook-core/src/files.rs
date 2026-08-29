@@ -166,6 +166,12 @@ pub fn take_outbound_drag() -> Option<(String, bool)> {
     Some((path, OUTBOUND_DROPPED.load(Ordering::SeqCst)))
 }
 
+#[cfg(target_os = "macos")]
+fn on_main_thread() -> bool {
+    use objc2::*;
+    unsafe { msg_send![class!(NSThread), isMainThread] }
+}
+
 /// True while the user is dragging files (Finder / another app) on macOS.
 /// Used to punch a hole in click-through so the island can receive the drop.
 /// Our own tray → Finder session is excluded so drop-in UI does not arm.
@@ -186,14 +192,21 @@ pub fn file_drag_active() -> bool {
         use objc2::*;
         use std::sync::atomic::Ordering;
 
+        // NSPasteboard is main-thread only. A background read can return null
+        // or a stale changeCount, and the release-edge path writes that into
+        // `DRAG_PB_IDLE` — after which inbound Finder drags never arm the tray.
+        if !on_main_thread() {
+            return false;
+        }
+
         unsafe {
             // Cheap check first: `pressedMouseButtons` is a shared-memory read,
             // while `changeCount` is an XPC round-trip to the pasteboard server.
-            // This runs 30-50×/sec from the mouse thread, so at idle (button up)
-            // the pasteboard must not be touched at all. A drag pasteboard can
-            // only change while the left button is held, so re-baselining once
-            // per release keeps the baseline exactly as fresh as re-reading it
-            // every tick did.
+            // The island UI tick and NSEvent monitors call this on the main
+            // thread; at idle (button up) the pasteboard must not be touched
+            // at all. A drag pasteboard can only change while the left button
+            // is held, so re-baselining once per release keeps the baseline
+            // exactly as fresh as re-reading it every tick did.
             let buttons: usize = msg_send![class!(NSEvent), pressedMouseButtons];
             if buttons & 1 == 0 {
                 if DRAG_PB_WAS_DOWN.swap(false, Ordering::Relaxed)
@@ -272,61 +285,14 @@ pub fn mime_from_path(path: &str) -> String {
         .map(|s| s.to_ascii_lowercase())
         .as_deref()
     {
-        Some("png" | "jpg" | "jpeg" | "gif" | "webp" | "heic" | "heif" | "tif" | "tiff" | "bmp") => {
-            "image".into()
-        }
+        Some(
+            "png" | "jpg" | "jpeg" | "gif" | "webp" | "heic" | "heif" | "tif" | "tiff" | "bmp",
+        ) => "image".into(),
         Some("mp4" | "mov" | "m4v" | "mkv" | "webm") => "video".into(),
         Some("mp3" | "wav" | "aac" | "flac" | "m4a" | "aiff" | "caf" | "alac") => "audio".into(),
         Some("pdf") => "pdf".into(),
         Some("zip" | "tar" | "gz") => "archive".into(),
         _ => "file".into(),
-    }
-}
-
-/// Actions the file-processing suite can offer for a tray item.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct FileCapabilities {
-    pub convert: bool,
-    pub target_size: bool,
-    pub compress_pdf: bool,
-    pub remove_bg: bool,
-    pub ocr: bool,
-}
-
-impl FileCapabilities {
-    pub fn any(self) -> bool {
-        self.convert || self.target_size || self.compress_pdf || self.remove_bg || self.ocr
-    }
-}
-
-pub fn capabilities_for(path: &str, ffmpeg_extended: bool) -> FileCapabilities {
-    capabilities(mime_from_path(path).as_str(), path, ffmpeg_extended)
-}
-
-pub fn item_capabilities(item: &FileTrayItem, ffmpeg_extended: bool) -> FileCapabilities {
-    capabilities(item.mime_type.as_str(), &item.path, ffmpeg_extended)
-}
-
-pub fn capabilities(mime: &str, path: &str, ffmpeg_extended: bool) -> FileCapabilities {
-    let ext = std::path::Path::new(path)
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("")
-        .to_ascii_lowercase();
-    let mime = mime.to_ascii_lowercase();
-    let is_image = mime.starts_with("image") || matches!(mime.as_str(), "image");
-    let is_video = mime.starts_with("video") || matches!(mime.as_str(), "video");
-    let is_audio = mime.starts_with("audio") || matches!(mime.as_str(), "audio");
-    let is_pdf = mime.contains("pdf") || ext == "pdf";
-    let mkv = ext == "mkv";
-    let webm = ext == "webm";
-    FileCapabilities {
-        convert: is_image
-            || ((is_video || is_audio) && (!mkv && !webm || ffmpeg_extended)),
-        target_size: is_video && (!mkv && !webm || ffmpeg_extended),
-        compress_pdf: is_pdf,
-        remove_bg: is_image,
-        ocr: is_image || is_pdf,
     }
 }
 
@@ -356,37 +322,37 @@ mod tests {
     }
 
     #[test]
-    fn capability_matrix() {
-        let img = capabilities("image", "shot.png", false);
-        assert!(img.convert && img.remove_bg && img.ocr);
-        assert!(!img.target_size && !img.compress_pdf);
-
-        let vid = capabilities("video", "clip.mp4", false);
-        assert!(vid.convert && vid.target_size);
-        assert!(!vid.remove_bg && !vid.ocr && !vid.compress_pdf);
-
-        let mkv = capabilities("video", "clip.mkv", false);
-        assert!(!mkv.convert && !mkv.target_size);
-        let mkv_ff = capabilities("video", "clip.mkv", true);
-        assert!(mkv_ff.convert && mkv_ff.target_size);
-
-        let pdf = capabilities("pdf", "doc.pdf", false);
-        assert!(pdf.compress_pdf && pdf.ocr);
-        assert!(!pdf.remove_bg && !pdf.target_size);
-
-        let wav = capabilities("audio", "take.wav", false);
-        assert!(wav.convert);
-        assert!(!wav.target_size && !wav.ocr);
-
-        let other = capabilities("file", "notes.txt", false);
-        assert!(!other.any());
-    }
-
-    #[test]
     fn format_size_buckets() {
         assert_eq!(format_size(12), "12 B");
         assert_eq!(format_size(2048), "2 KB");
         assert_eq!(format_size(1_572_864), "1.5 MB");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn background_probe_does_not_write_drag_pasteboard_baseline() {
+        struct Restore;
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                DRAG_PB_IDLE.store(i64::MIN, Ordering::Relaxed);
+                DRAG_PB_WAS_DOWN.store(false, Ordering::Relaxed);
+            }
+        }
+        let _restore = Restore;
+        DRAG_PB_IDLE.store(42, Ordering::Relaxed);
+        // Release-edge is the path that re-baselines. A background thread that
+        // sees it will write whatever NSPasteboard returns off-main — including
+        // `i64::MIN` when the pasteboard call fails — and then inbound Finder
+        // drags never arm the tray.
+        DRAG_PB_WAS_DOWN.store(true, Ordering::Relaxed);
+        let _ = std::thread::spawn(|| file_drag_active())
+            .join()
+            .expect("probe thread");
+        assert_eq!(
+            DRAG_PB_IDLE.load(Ordering::Relaxed),
+            42,
+            "off-thread pasteboard reads must not move the idle baseline"
+        );
     }
 
     #[test]

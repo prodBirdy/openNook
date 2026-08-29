@@ -40,6 +40,9 @@ const WEEKDAYS_FULL: [&str; 7] = [
     "Saturday",
 ];
 
+/// Launch Services bundle id of the Obsidian Mac app.
+pub const BUNDLE_ID: &str = "md.obsidian";
+
 /// A vault Obsidian already knows about (`obsidian.json`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct KnownVault {

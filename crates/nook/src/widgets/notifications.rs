@@ -1,15 +1,13 @@
 //! Notification shelf: recent banners captured from other apps.
 
 use crate::icons::lucide_color;
-use crate::island::ui::{
-    label, nook_display, nook_empty, nook_icon_btn, nook_pane, nook_row, scroll_body,
-};
+use crate::island::ui::{label, nook_empty, nook_pane, scroll_body};
 use crate::island::Island;
 use crate::platform;
 use crate::theme;
 use gpui::{
-    div, img, prelude::*, px, rgba, AnyElement, Context, CursorStyle, Image, MouseButton,
-    MouseDownEvent, ObjectFit, SharedString,
+    div, img, linear_color_stop, linear_gradient, prelude::*, px, rgba, AnyElement, Context,
+    CursorStyle, Image, MouseButton, MouseDownEvent, ObjectFit, SharedString,
 };
 use nook_core::notifications::{relative_age, NotificationEvent};
 use std::collections::HashMap;
@@ -18,7 +16,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 pub(crate) fn compact_left(latest: Option<&NotificationEvent>) -> AnyElement {
     if let Some(event) = latest {
-        if let Some(icon) = app_icon(&event.bundle_id, &event.app_name) {
+        if let Some(icon) = app_icon(&event.bundle_id, &event.app_name, 18.) {
             return icon;
         }
     }
@@ -44,58 +42,43 @@ pub(crate) fn notifications_card(
     events: &[NotificationEvent],
     cx: &mut Context<Island>,
 ) -> impl IntoElement {
-    let unread = events.iter().filter(|e| e.unread).count();
     let body = if events.is_empty() {
         nook_empty("bell", "No notifications").into_any_element()
     } else {
-        let mut list = div().flex().flex_col().w_full();
-        for event in events.iter().take(12) {
+        let mut list = div().flex().flex_col().w_full().gap(px(8.)).pb(px(24.));
+        for event in events.iter().take(30) {
             list = list.child(notification_row(event, cx));
         }
-        scroll_body("notify-scroll", list).into_any_element()
+        // Scroll area with a soft fade at the bottom so the last card reads
+        // as "more below" instead of being clipped.
+        div()
+            .relative()
+            .flex_1()
+            .min_h(px(0.))
+            .w_full()
+            .child(scroll_body("notify-scroll", list))
+            .child(
+                div()
+                    .absolute()
+                    .left_0()
+                    .right_0()
+                    .bottom_0()
+                    .h(px(36.))
+                    .bg(linear_gradient(
+                        180.0,
+                        linear_color_stop(rgba(0x00000000), 0.0),
+                        linear_color_stop(rgba(0x000000CC), 1.0),
+                    )),
+            )
+            .into_any_element()
     };
 
-    nook_pane("nook-notifications")
-        .w_full()
-        .child(
-            div()
-                .flex()
-                .items_end()
-                .gap(px(16.))
-                .flex_shrink_0()
-                .child(nook_display(if unread > 0 {
-                    unread.to_string()
-                } else {
-                    events.len().to_string()
-                }))
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(4.))
-                        .pb(px(4.))
-                        .child(nook_icon_btn("eye", "notify-read", cx, |this, _, _, cx| {
-                            nook_core::notifications::mark_all_read();
-                            this.refresh_notifications();
-                            cx.notify();
-                        }))
-                        .child(nook_icon_btn(
-                            "trash-2",
-                            "notify-clear",
-                            cx,
-                            |this, _, _, cx| {
-                                nook_core::notifications::clear();
-                                this.refresh_notifications();
-                                cx.notify();
-                            },
-                        )),
-                ),
-        )
-        .child(body)
+    nook_pane("nook-notifications").w_full().child(body)
 }
 
 fn notification_row(event: &NotificationEvent, cx: &mut Context<Island>) -> impl IntoElement {
-    let id = event.id.clone();
+    let dismiss_id = event.id.clone();
+    let read_id = event.id.clone();
     let title = if event.title.is_empty() {
         event.app_name.clone()
     } else {
@@ -113,31 +96,44 @@ fn notification_row(event: &NotificationEvent, cx: &mut Context<Island>) -> impl
     let age = relative_age(event.delivered_at, now);
     let unread = event.unread;
 
-    nook_row(SharedString::from(format!("notify-{}", event.id)))
-        .min_h(px(theme::HIT_MIN))
-        .gap(px(8.))
+    div()
+        .id(SharedString::from(format!("notify-{}", event.id)))
+        .w_full()
+        .flex()
+        .items_start()
+        .gap(px(10.))
+        .px(px(12.))
+        .py(px(10.))
+        .rounded(px(16.))
+        .bg(if unread {
+            rgba(0xFFFFFF14)
+        } else {
+            rgba(0xFFFFFF0A)
+        })
+        .hover(|s| s.bg(rgba(0xFFFFFF1C)))
         .cursor(CursorStyle::PointingHand)
-        .hover(|s| s.bg(rgba(0xFFFFFF0D)))
-        .active(|s| s.opacity(0.85))
         .on_mouse_down(
             MouseButton::Left,
             cx.listener(move |this, _: &MouseDownEvent, _, cx| {
                 cx.stop_propagation();
-                nook_core::notifications::dismiss(&id);
+                nook_core::notifications::mark_read(&read_id);
                 this.refresh_notifications();
                 cx.notify();
             }),
         )
         .child(
             div()
-                .size(px(22.))
+                .size(px(34.))
                 .flex_shrink_0()
+                .mt(px(4.))
+                .rounded(px(8.))
+                .bg(rgba(0xFFFFFF10))
                 .flex()
                 .items_center()
                 .justify_center()
                 .child(
-                    app_icon(&event.bundle_id, &event.app_name).unwrap_or_else(|| {
-                        lucide_color("bell", 14.0, theme::LABEL).into_any_element()
+                    app_icon(&event.bundle_id, &event.app_name, 24.).unwrap_or_else(|| {
+                        lucide_color("bell", 16.0, theme::LABEL).into_any_element()
                     }),
                 ),
         )
@@ -147,16 +143,55 @@ fn notification_row(event: &NotificationEvent, cx: &mut Context<Island>) -> impl
                 .min_w(px(0.))
                 .flex()
                 .flex_col()
-                .gap(px(1.))
-                .child(label(title, theme::CALLOUT, unread))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(8.))
+                        .child(label(title, theme::BODY, true).flex_1().min_w(px(0.)))
+                        .child(label(age, theme::SUBHEADLINE, false).flex_shrink_0()),
+                )
+                .when(!event.app_name.is_empty(), |d| {
+                    d.child(label(event.app_name.clone(), theme::SUBHEADLINE, false))
+                })
                 .when(!detail.is_empty(), |d| {
-                    d.child(label(detail, theme::SUBHEADLINE, false))
+                    d.child(
+                        div()
+                            .text_color(theme::TEXT)
+                            .text_size(px(theme::CALLOUT.size))
+                            .line_height(px(theme::CALLOUT.leading))
+                            .line_clamp(2)
+                            .child(SharedString::from(detail)),
+                    )
                 }),
         )
-        .child(label(age, theme::FOOTNOTE, false))
+        .child(
+            div()
+                .id(SharedString::from(format!("notify-x-{}", event.id)))
+                .size(px(24.))
+                .flex_shrink_0()
+                .mt(px(2.))
+                .rounded_full()
+                .bg(rgba(0xFFFFFF14))
+                .hover(|s| s.bg(rgba(0xFFFFFF26)))
+                .active(|s| s.opacity(0.7))
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(lucide_color("x", 12.0, theme::LABEL))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                        cx.stop_propagation();
+                        nook_core::notifications::dismiss(&dismiss_id);
+                        this.refresh_notifications();
+                        cx.notify();
+                    }),
+                ),
+        )
 }
 
-fn app_icon(bundle_id: &str, app_name: &str) -> Option<AnyElement> {
+fn app_icon(bundle_id: &str, app_name: &str, size: f32) -> Option<AnyElement> {
     let key = if bundle_id.is_empty() {
         app_name.to_string()
     } else {
@@ -169,8 +204,8 @@ fn app_icon(bundle_id: &str, app_name: &str) -> Option<AnyElement> {
     let image = std::sync::Arc::new(Image::from_bytes(gpui::ImageFormat::Png, png));
     Some(
         img(image)
-            .size(px(18.))
-            .rounded(px(4.))
+            .size(px(size))
+            .rounded(px(size * 0.22))
             .object_fit(ObjectFit::Fill)
             .into_any_element(),
     )

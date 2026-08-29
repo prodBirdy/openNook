@@ -2,14 +2,13 @@
 
 use crate::icons::{lucide, lucide_color};
 use crate::island::ui::{format_timer, nook_display, nook_empty, nook_icon_btn, nook_pane};
-use crate::island::{ClockTimerAction, Island, Timer};
-use crate::island::{Island, Timer, TimerKind};
+use crate::island::{ClockTimerAction, Island, Timer, TimerKind};
 use crate::theme;
-use nook_core::system_timers::{self, MTTimerState, SystemTimer};
 use gpui::{
     canvas, div, point, prelude::*, px, rgb, rgba, AnyElement, Context, FontWeight, MouseButton,
     MouseDownEvent, PathBuilder, Rgba, SharedString,
 };
+use nook_core::system_timers::{self, MTTimerState, SystemTimer};
 
 const PRESETS: [(&str, &str, &str, u32); 4] = [
     ("5m", "M", "05", 300),
@@ -40,7 +39,6 @@ pub(crate) fn compact_left(island: &Island, cx: &mut Context<Island>) -> AnyElem
             cx.listener(move |this, _: &MouseDownEvent, _, cx| {
                 cx.stop_propagation();
                 this.toggle_face_timer();
-                this.toggle_timer(id);
                 cx.notify();
             }),
         )
@@ -52,7 +50,7 @@ pub(crate) fn compact_left(island: &Island, cx: &mut Context<Island>) -> AnyElem
             if done {
                 theme::DESTRUCTIVE
             } else {
-                phase_color(timer)
+                rgb(0xffffff)
             },
             rgba(0xffffff40),
         ))
@@ -516,16 +514,11 @@ fn cycle_dots(timer: &Timer) -> Option<impl IntoElement> {
     let filled = spec.filled_cycles();
     let mut row = div().flex().items_center().gap(px(4.)).mt(px(4.));
     for i in 1..=spec.cycles_per_long {
-        row = row.child(
-            div()
-                .size(px(5.))
-                .rounded_full()
-                .bg(if i <= filled {
-                    theme::LABEL
-                } else {
-                    theme::TERTIARY_LABEL
-                }),
-        );
+        row = row.child(div().size(px(5.)).rounded_full().bg(if i <= filled {
+            theme::LABEL
+        } else {
+            theme::TERTIARY_LABEL
+        }));
     }
     Some(row)
 }

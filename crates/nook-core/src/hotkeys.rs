@@ -141,10 +141,7 @@ fn register(kind: SnapKind, hotkey: Hotkey) {
         )
     };
     if status != 0 || href.is_null() {
-        log::warn!(
-            "RegisterEventHotKey {} failed ({status})",
-            kind.label()
-        );
+        log::warn!("RegisterEventHotKey {} failed ({status})", kind.label());
         return;
     }
     HOTKEYS
@@ -259,7 +256,11 @@ extern "C" {
     fn GetEventDispatcherTarget() -> *mut std::ffi::c_void;
     fn InstallEventHandler(
         target: *mut std::ffi::c_void,
-        handler: extern "C" fn(*mut std::ffi::c_void, *mut std::ffi::c_void, *mut std::ffi::c_void) -> i32,
+        handler: extern "C" fn(
+            *mut std::ffi::c_void,
+            *mut std::ffi::c_void,
+            *mut std::ffi::c_void,
+        ) -> i32,
         num_types: u32,
         list: *const EventTypeSpec,
         user_data: *mut std::ffi::c_void,

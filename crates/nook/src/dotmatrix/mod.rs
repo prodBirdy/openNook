@@ -9,10 +9,13 @@
 //! Embedded use in an application is permitted by the upstream license;
 //! this is not a republished component library.
 
+mod brand;
 mod engine;
 mod grid3;
 
 use engine::{bloom_level, Ctx, N};
+
+pub use brand::element as brand_element;
 use gpui::{canvas, fill, point, prelude::*, px, Bounds, IntoElement, Pixels, Rgba, Window};
 
 pub use grid3::Kind;
@@ -31,7 +34,7 @@ const IDLE_ALPHA: f32 = 0.45;
 /// The idle cluster drops the accent for the secondary-label grey. Only the
 /// RGB is used — `IDLE_ALPHA` sets the alpha — and only a working agent is
 /// tinted with the accent.
-const IDLE_TINT: Rgba = crate::theme::SECONDARY_LABEL;
+pub(super) const IDLE_TINT: Rgba = crate::theme::SECONDARY_LABEL;
 /// Upstream `size={16}` / `dotSize={4}` cluster (14px span), not the 26px face.
 pub const COMPACT_SIZE: f32 = 16.0;
 pub const WIDGET_SIZE: f32 = 16.0;
@@ -75,6 +78,7 @@ pub fn layout(size: f32) -> DotLayout {
     }
 }
 
+#[allow(dead_code)]
 pub fn element(kind: Kind, now: f32, working: bool, size: f32) -> impl IntoElement {
     let lay = layout(size);
     let now = now * SPEED;
@@ -95,6 +99,7 @@ pub fn element(kind: Kind, now: f32, working: bool, size: f32) -> impl IntoEleme
     .flex_shrink_0()
 }
 
+#[allow(dead_code)]
 fn paint_grid(
     window: &mut Window,
     bounds: Bounds<Pixels>,
@@ -141,14 +146,14 @@ fn paint_grid(
 }
 
 /// The animation drives opacity only; hue and saturation stay the accent's.
-fn alpha(tint: Rgba, a: f32) -> Rgba {
+pub(super) fn alpha(tint: Rgba, a: f32) -> Rgba {
     Rgba {
         a: a.clamp(0.0, 1.0),
         ..tint
     }
 }
 
-fn paint_glow(window: &mut Window, x: f32, y: f32, dot: f32, level: f32, tint: Rgba) {
+pub(super) fn paint_glow(window: &mut Window, x: f32, y: f32, dot: f32, level: f32, tint: Rgba) {
     // CSS: drop-shadow radii `dot * 0.75 * level` and `dot * 1.35 * level`.
     let bands = [
         (dot * 1.35 * level, 0.22 * level),

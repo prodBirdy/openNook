@@ -20,58 +20,59 @@ impl Island {
         notch_w: f32,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        // Equal flex flanks keep the notch spacer on the camera; a fixed
-        // side width plus px_3 used to overflow and shift the hole.
-        div()
-            .flex()
-            .items_center()
-            .justify_between()
-            .size_full()
-            .px_3()
-            .child(
-                div()
-                    .flex_1()
-                    .min_w(px(0.))
-                    .h_full()
-                    .flex()
-                    .items_center()
-                    .justify_start()
-                    .overflow_hidden()
-                    .child(self.compact_left(mode, cx))
-                    .when(mode != CompactMode::Idle && self.high_alert_active(), |d| {
-                        d.child(
-                            div()
-                                .ml(px(4.))
-                                .flex_shrink_0()
-                                .child(lucide_color("sun", 10.0, theme::SUCCESS)),
-                        )
-                    }),
-            )
-            .child(div().w(px(notch_w)).flex_shrink_0().h_full())
-            .child(
-                div()
-                    .flex_1()
-                    .min_w(px(0.))
-                    .h_full()
-                    .flex()
-                    .items_center()
-                    .justify_end()
-                    .overflow_hidden()
-                    .child(self.compact_right(mode, hovered, cx)),
-            )
+        // Leading/trailing sit in the camera band, not the extra chin the
+        // island grows on hover — centering in the full pill dropped the
+        // glyphs below the housing. Equal flex flanks keep the spacer on
+        // the camera; a fixed side width used to shift the hole.
+        let notch_h = self.notch_height.max(32.0);
+        div().relative().size_full().child(
+            div()
+                .flex()
+                .items_center()
+                .w_full()
+                .h(px(notch_h))
+                .px(px(theme::COMPACT_INSET))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(0.))
+                        .h_full()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .overflow_hidden()
+                        .child(self.compact_left(mode, cx))
+                        .when(mode != CompactMode::Idle && self.high_alert_active(), |d| {
+                            d.child(div().ml(px(4.)).flex_shrink_0().child(lucide_color(
+                                "sun",
+                                10.0,
+                                theme::SUCCESS,
+                            )))
+                        }),
+                )
+                .child(div().w(px(notch_w)).flex_shrink_0().h_full())
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(0.))
+                        .h_full()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .overflow_hidden()
+                        .child(self.compact_right(mode, hovered, cx)),
+                ),
+        )
     }
 
     fn compact_left(&self, mode: CompactMode, cx: &mut Context<Self>) -> AnyElement {
         if let Some(text) = nook_core::window_snap::flash_label() {
             return label(text, theme::BODY, true).into_any_element();
-    }
+        }
         if self.hud_active() {
             return lucide(hud_icon(self.hud.unwrap().kind), theme::COMPACT_FACE)
                 .into_any_element();
-    }
-        if let Some(hud) = self.shell_hud.as_ref() {
-            return label(hud.clone(), theme::BODY, true).into_any_element();
-    }
+        }
         if let Some(name) = self.output_hud_label() {
             return label(name.to_string(), theme::BODY, true).into_any_element();
         }
@@ -82,7 +83,6 @@ impl Island {
             CompactMode::Agents => widgets::agents_compact_left(&self.agents, self.pixel_t),
             CompactMode::Files => super::files::compact_left(&self.files),
             CompactMode::Timer => widgets::timer_compact_left(self, cx),
-            CompactMode::Process => widgets::process_compact_left(self),
             CompactMode::Observe => {
                 lucide("triangle-alert", theme::COMPACT_FACE).into_any_element()
             }
@@ -107,7 +107,6 @@ impl Island {
                 },
             )
             .into_any_element(),
-            CompactMode::Shell => lucide("terminal", theme::COMPACT_FACE).into_any_element(),
             CompactMode::Recording => rec_dot().into_any_element(),
             CompactMode::Meeting => widgets::meeting_compact_left(&self.meeting),
             CompactMode::Notifications => {
@@ -165,7 +164,6 @@ impl Island {
                     .text_right()
                     .into_any_element()
             }
-            CompactMode::Process => widgets::process_compact_right(self),
             CompactMode::Observe => {
                 let text = match self.observe.alerts.as_slice() {
                     [one] => one.name.clone(),
@@ -173,15 +171,15 @@ impl Island {
                 };
                 label(text, theme::BODY, true).into_any_element()
             }
-            CompactMode::Battery => {
-                label(nook_core::power::format_percent(self.power.percent), theme::BODY, true)
-                    .into_any_element()
-            }
-            CompactMode::Idle if self.settings.thaw_enabled => thaw_toggle(
-                self.settings.thaw_hidden,
-                cx,
+            CompactMode::Battery => label(
+                nook_core::power::format_percent(self.power.percent),
+                theme::BODY,
+                true,
             )
             .into_any_element(),
+            CompactMode::Idle if self.settings.thaw_enabled => {
+                thaw_toggle(self.settings.thaw_hidden, cx).into_any_element()
+            }
             CompactMode::Messages => self
                 .messages
                 .incoming
@@ -207,11 +205,6 @@ impl Island {
                     .min_w(px(40.))
                     .text_right()
                     .into_any_element()
-            }
-            CompactMode::Shell => {
-                let frame = ((self.pixel_t * 8.0) as usize) % 4;
-                let spin = ["⠋", "⠙", "⠹", "⠸"][frame];
-                label(spin, theme::BODY, true).into_any_element()
             }
             CompactMode::Meeting => {
                 widgets::meeting_compact_right(&self.meeting, self.overlay_fade.value)
@@ -324,11 +317,11 @@ impl Island {
         }
         let mut row = div()
             .absolute()
-            .bottom(px(2.))
+            .top(px(self.notch_height.max(32.0)))
+            .bottom_0()
             .left_0()
             .right_0()
             .flex()
-            .gap(px(6.))
             .items_center()
             .justify_center();
         for mode in modes {
@@ -339,7 +332,6 @@ impl Island {
                 CompactMode::Agents => "agents",
                 CompactMode::Files => "files",
                 CompactMode::Timer => "timer",
-                CompactMode::Process => "process",
                 CompactMode::Observe => "observe",
                 CompactMode::Battery => "battery",
                 CompactMode::Vpn => "vpn",
@@ -349,13 +341,12 @@ impl Island {
                 CompactMode::Onboard => "onboard",
                 CompactMode::Messages => "messages",
                 CompactMode::Share => "share",
-                CompactMode::Shell => "shell",
             };
             row = row.child(
                 div()
                     .id(SharedString::from(format!("dot-{name}")))
-                    .h(px(theme::HIT_MIN.min(16.0)))
-                    .w(px(if active { 16. } else { 12. }))
+                    .h_full()
+                    .w(px(16.0))
                     .flex()
                     .items_center()
                     .justify_center()
@@ -371,8 +362,7 @@ impl Island {
                     )
                     .child(
                         div()
-                            .h(px(6.))
-                            .w(px(if active { 12. } else { 6. }))
+                            .size(px(if active { 5.0 } else { 4.0 }))
                             .rounded_full()
                             .bg(if active {
                                 theme::LABEL

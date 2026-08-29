@@ -61,7 +61,7 @@ enum SettingsCategory {
     Widgets = 1,
     Keyboard = 2,
     Scrolling = 3,
-    Search = 2,
+    Search = 4,
 }
 
 impl SettingsCategory {
@@ -70,7 +70,7 @@ impl SettingsCategory {
             1 => Self::Widgets,
             2 => Self::Keyboard,
             3 => Self::Scrolling,
-            2 => Self::Search,
+            4 => Self::Search,
             _ => Self::General,
         }
     }
@@ -148,7 +148,6 @@ impl WidgetModuleExt for WidgetModule {
             Self::Battery => "Battery",
             Self::Messages => "Messages",
             Self::Obsidian => "Obsidian",
-            Self::Mixer => "Mixer",
             Self::Weather => "Weather",
             Self::Vpn => "VPN",
             Self::HighAlert => "High Alert",
@@ -156,7 +155,6 @@ impl WidgetModuleExt for WidgetModule {
             Self::Recorder => "Voice",
             Self::Meeting => "Meetings",
             Self::Notifications => "Notifications",
-            Self::Process => "Process",
         }
     }
 
@@ -175,7 +173,6 @@ impl WidgetModuleExt for WidgetModule {
             Self::Battery => "battery",
             Self::Messages => "message-circle",
             Self::Obsidian => "book",
-            Self::Mixer => "volume-2",
             Self::Weather => "cloud-sun",
             Self::Vpn => "shield",
             Self::HighAlert => "sun",
@@ -183,7 +180,6 @@ impl WidgetModuleExt for WidgetModule {
             Self::Recorder => "mic",
             Self::Meeting => "video",
             Self::Notifications => "bell",
-            Self::Process => "image",
         }
     }
 
@@ -216,14 +212,13 @@ impl WidgetModuleExt for WidgetModule {
                 nook_core::power::clamp_alert_threshold(settings.battery_alert_threshold)
             )
             .into(),
-            Self::Messages => "iMessage".into(),
+            Self::Messages => "Incoming reply".into(),
             Self::Obsidian => settings
                 .obsidian_vault
                 .as_ref()
                 .and_then(|path| path.file_name())
                 .map(|name| SharedString::from(name.to_string_lossy().into_owned()))
                 .unwrap_or_else(|| "No vault".into()),
-            Self::Mixer => "Per-app volume".into(),
             Self::Weather => weather_subtitle(settings),
             Self::Vpn => vpn_subtitle(settings.vpn_show_timer),
             Self::HighAlert => "Keep awake".into(),
@@ -237,7 +232,6 @@ impl WidgetModuleExt for WidgetModule {
             }
             Self::Meeting => "Zoom / Teams / Meet".into(),
             Self::Notifications => notify_subtitle(settings),
-            Self::Process => "Convert / OCR".into(),
         }
     }
 
@@ -264,9 +258,13 @@ impl WidgetModuleExt for WidgetModule {
             Self::Battery => "Battery",
             Self::Messages => "Messages",
             Self::Obsidian => "Obsidian",
-            Self::Mixer => "Mixer",
             Self::HighAlert => "Alert",
             Self::Meeting => "Meetings",
+            Self::Weather => "Weather",
+            Self::Vpn => "VPN",
+            Self::SysStats => "Stats",
+            Self::Recorder => "Voice",
+            Self::Notifications => "Notify",
         }
     }
 }
@@ -468,13 +466,12 @@ pub(super) struct SettingsView {
     share_c_draft: String,
     ignore_focus: FocusHandle,
     shell_focus: FocusHandle,
-    timeout_focus: FocusHandle,
-    url_draft: String,
-    token_draft: String,
+    font_draft: String,
+    font_focus: FocusHandle,
+    font_size_draft: String,
+    font_size_focus: FocusHandle,
     ignore_draft: String,
     client_id_focus: FocusHandle,
-    url_draft: String,
-    token_draft: String,
     client_id_draft: String,
     token_revealed: bool,
     query_draft: String,
@@ -486,7 +483,6 @@ pub(super) struct SettingsView {
     location_status: Option<String>,
     location_busy: bool,
     shell_draft: String,
-    timeout_draft: String,
     catalog: Vec<String>,
     catalog_error: Option<String>,
     catalog_loading: bool,
@@ -504,14 +500,13 @@ pub(super) struct SettingsView {
     placement_drag: bool,
     placement_bounds: Rc<RefCell<Option<Bounds<Pixels>>>>,
     recording_hotkey: bool,
-    exclude_draft: String,
 }
 
 impl SettingsView {
     pub(super) fn new(cx: &mut Context<Self>) -> Self {
         let settings = nook_core::settings::get_app_settings();
         let mut module = WidgetModule::from_u8(LAST_MODULE.load(Ordering::Relaxed));
-        if module == WidgetModule::Mixer && !nook_core::mixer::is_available() {
+        if !module.is_available() {
             module = WidgetModule::Calendar;
         }
         let min = module.min_cells();
@@ -573,18 +568,22 @@ impl SettingsView {
             city_focus: cx.focus_handle(),
             ignore_focus: cx.focus_handle(),
             shell_focus: cx.focus_handle(),
-            timeout_focus: cx.focus_handle(),
+            font_draft: settings.terminal_font.clone(),
+            font_focus: cx.focus_handle(),
+            font_size_draft: format!("{}", settings.terminal_font_size),
+            font_size_focus: cx.focus_handle(),
             exclude_focus: cx.focus_handle(),
             url_draft: settings.observe.prometheus_url,
             token_draft: settings.observe.metrics_token,
             ignore_draft: nook_core::vpn::format_ignore_list(&settings.vpn_ignore_interfaces),
             client_id_focus: cx.focus_handle(),
-            url_draft: settings.observe.prometheus_url,
-            token_draft: settings.observe.metrics_token,
             client_id_draft: settings.spotify_client_id,
             token_revealed: false,
             query_draft: String::new(),
-            heading_draft: settings.obsidian_capture_heading.clone().unwrap_or_default(),
+            heading_draft: settings
+                .obsidian_capture_heading
+                .clone()
+                .unwrap_or_default(),
             city_draft: settings.weather.location.name().to_string(),
             geo_results: Vec::new(),
             geo_error: None,
@@ -592,8 +591,6 @@ impl SettingsView {
             location_status: None,
             location_busy: false,
             shell_draft: settings.terminal_shell.clone(),
-            timeout_draft: settings.terminal_timeout_secs.to_string(),
-            exclude_draft: String::new(),
             catalog: Vec::new(),
             catalog_error: None,
             catalog_loading: false,
@@ -798,7 +795,10 @@ impl SettingsView {
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
-                .spawn(async move { rx.await.unwrap_or_else(|_| Err("Location request ended.".into())) })
+                .spawn(async move {
+                    rx.await
+                        .unwrap_or_else(|_| Err("Location request ended.".into()))
+                })
                 .await;
             this.update(cx, |this, cx| {
                 this.location_busy = false;
@@ -895,13 +895,15 @@ impl gpui::Render for SettingsView {
                         cx,
                     )
                     .into_any_element(),
-                SettingsCategory::Keyboard => self.render_keyboard(&settings, cx).into_any_element(),
+                SettingsCategory::Keyboard => {
+                    self.render_keyboard(&settings, cx).into_any_element()
+                }
                 SettingsCategory::Scrolling => self
                     .render_scrolling(&settings, exclude_focused, cx)
                     .into_any_element(),
-                SettingsCategory::Search => {
-                    self.render_search_settings(&settings, cx).into_any_element()
-                }
+                SettingsCategory::Search => self
+                    .render_search_settings(&settings, cx)
+                    .into_any_element(),
                 SettingsCategory::General => self
                     .render_general(
                         &settings,
@@ -1187,6 +1189,8 @@ impl SettingsView {
                         .into_any_element(),
                     ]),
                     Some("⌘-drag extras so hidden items sit to the left of the Nook chevron. Click the chevron to hide or show. No Screen Recording."),
+                ))
+                .child(section(
                     "HUD",
                     settings_group(vec![
                         toggle_row(
@@ -1195,11 +1199,27 @@ impl SettingsView {
                             cx,
                             |s| {
                                 s.show_volume_brightness_hud = !s.show_volume_brightness_hud;
-                }
+                            },
+                        )
+                        .into_any_element(),
+                        toggle_row(
+                            "Replace system volume/brightness HUD",
+                            settings.replace_system_hud,
+                            cx,
+                            |s| {
+                                s.replace_system_hud = !s.replace_system_hud;
+                                nook_core::osd::apply(s.replace_system_hud);
+                            },
+                        )
+                        .into_any_element(),
+                    ]),
+                    Some(hud_caption(settings)),
+                ))
+                .child(section(
                     "Termi-Notch",
                     settings_group(vec![
                         toggle_row(
-                            "Enable one-shot shell",
+                            "Enable machine shell",
                             settings.terminal_enabled,
                             cx,
                             |s| s.terminal_enabled = !s.terminal_enabled,
@@ -1228,40 +1248,55 @@ impl SettingsView {
                         )
                         .into_any_element(),
                         field_row(
-                            "term-timeout",
-                            "Timeout",
-                            &self.timeout_draft,
-                            false,
-                            self.timeout_focus.is_focused(window),
-                            &self.timeout_focus,
+                            "term-font",
+                            "Font",
+                            if self.font_draft.is_empty() {
+                                "SF Mono / Menlo"
+                            } else {
+                                self.font_draft.as_str()
+                            },
+                            self.font_draft.is_empty(),
+                            self.font_focus.is_focused(window),
+                            &self.font_focus,
                             cx,
                             |this, event, cx| {
-                                if SettingsView::apply_key(&mut this.timeout_draft, event, cx) {
-                                    this.timeout_draft
-                                        .retain(|ch| ch.is_ascii_digit());
-                                    if let Ok(secs) = this.timeout_draft.parse::<u32>() {
-                                        nook_core::settings::tweak_app_settings(|s| {
-                                            s.terminal_timeout_secs = secs.clamp(1, 600);
-                                        });
-                                    }
+                                if SettingsView::apply_key(&mut this.font_draft, event, cx) {
+                                    nook_core::settings::tweak_app_settings(|s| {
+                                        s.terminal_font = this.font_draft.trim().to_string();
+                                    });
                                     cx.notify();
                                 }
                             },
                         )
                         .into_any_element(),
-                        toggle_row(
-                            "Replace system volume/brightness HUD",
-                            settings.replace_system_hud,
+                        field_row(
+                            "term-font-size",
+                            "Size",
+                            if self.font_size_draft.is_empty() {
+                                "11"
+                            } else {
+                                self.font_size_draft.as_str()
+                            },
+                            self.font_size_draft.is_empty(),
+                            self.font_size_focus.is_focused(window),
+                            &self.font_size_focus,
                             cx,
-                            |s| {
-                                s.replace_system_hud = !s.replace_system_hud;
-                                nook_core::osd::apply(s.replace_system_hud);
+                            |this, event, cx| {
+                                if SettingsView::apply_key(&mut this.font_size_draft, event, cx) {
+                                    this.font_size_draft.retain(|c| c.is_ascii_digit() || c == '.');
+                                    let parsed = this.font_size_draft.trim().parse::<f32>().ok();
+                                    nook_core::settings::tweak_app_settings(|s| {
+                                        s.terminal_font_size =
+                                            parsed.filter(|v| (6.0..=32.0).contains(v)).unwrap_or(11.0);
+                                    });
+                                    cx.notify();
+                                }
                             },
                         )
                         .into_any_element(),
                     ]),
-                    Some(hud_caption(settings)),
-                )
+                    Some("Interactive login shell in the island with ANSI colors. Font accepts any installed monospace family (e.g. JetBrains Mono, Fira Code). Typed here only — opennook://, the CLI, and Finder Services never run commands. Default off."),
+                ))
                 .child(self.render_sharing(
                     settings,
                     alias_focused,
@@ -1270,147 +1305,7 @@ impl SettingsView {
                     share_b_focused,
                     share_c_focused,
                     cx,
-                ))
-                .child(self.file_actions_section(settings, cx)),
-        )
-    }
-
-    fn file_actions_section(
-        &self,
-        settings: &AppSettings,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let fa = &settings.file_actions;
-        let ffmpeg_present = nook_core::process::ffmpeg::on_path();
-        let ffmpeg_on = fa.use_ffmpeg && ffmpeg_present;
-        let jpeg = fa.jpeg_quality;
-        let preset = fa.pdf_preset;
-        let downloads = fa.output_is_downloads();
-        section(
-            "File Actions",
-            settings_group(vec![
-                toggle_row("Enable file actions", fa.enabled, cx, |s| {
-                    s.file_actions.enabled = !s.file_actions.enabled;
-                })
-                .into_any_element(),
-                settings_row("output-folder")
-                    .child(label("Output folder", theme::BODY, true))
-                    .child(
-                        segmented_group()
-                            .child(segment("Alongside", !downloads, cx, |_, _, cx| {
-                                nook_core::settings::tweak_app_settings(|s| {
-                                    s.file_actions.set_alongside_source();
-                                });
-                                cx.notify();
-                            }))
-                            .child(segment("Downloads", downloads, cx, |_, _, cx| {
-                                nook_core::settings::tweak_app_settings(|s| {
-                                    s.file_actions.set_downloads();
-                                });
-                                cx.notify();
-                            })),
-                    )
-                    .into_any_element(),
-                settings_row("jpeg-quality")
-                    .child(label("JPEG quality", theme::BODY, true))
-                    .child(
-                        segmented_group()
-                            .child(segment("60", jpeg <= 70, cx, |_, _, cx| {
-                                nook_core::settings::tweak_app_settings(|s| {
-                                    s.file_actions.jpeg_quality = 60;
-                                });
-                                cx.notify();
-                            }))
-                            .child(segment("80", jpeg > 70 && jpeg < 90, cx, |_, _, cx| {
-                                nook_core::settings::tweak_app_settings(|s| {
-                                    s.file_actions.jpeg_quality = 80;
-                                });
-                                cx.notify();
-                            }))
-                            .child(segment("95", jpeg >= 90, cx, |_, _, cx| {
-                                nook_core::settings::tweak_app_settings(|s| {
-                                    s.file_actions.jpeg_quality = 95;
-                                });
-                                cx.notify();
-                            })),
-                    )
-                    .into_any_element(),
-                settings_row("pdf-preset")
-                    .child(label("PDF preset", theme::BODY, true))
-                    .child(
-                        segmented_group()
-                            .child(segment(
-                                "Screen",
-                                preset == nook_core::settings::PdfPreset::Screen,
-                                cx,
-                                |_, _, cx| {
-                                    nook_core::settings::tweak_app_settings(|s| {
-                                        s.file_actions.pdf_preset =
-                                            nook_core::settings::PdfPreset::Screen;
-                                    });
-                                    cx.notify();
-                                },
-                            ))
-                            .child(segment(
-                                "Print",
-                                preset == nook_core::settings::PdfPreset::Print,
-                                cx,
-                                |_, _, cx| {
-                                    nook_core::settings::tweak_app_settings(|s| {
-                                        s.file_actions.pdf_preset =
-                                            nook_core::settings::PdfPreset::Print;
-                                    });
-                                    cx.notify();
-                                },
-                            ))
-                            .child(segment(
-                                "Raster",
-                                preset == nook_core::settings::PdfPreset::Raster,
-                                cx,
-                                |_, _, cx| {
-                                    nook_core::settings::tweak_app_settings(|s| {
-                                        s.file_actions.pdf_preset =
-                                            nook_core::settings::PdfPreset::Raster;
-                                    });
-                                    cx.notify();
-                                },
-                            )),
-                    )
-                    .into_any_element(),
-                settings_row("ffmpeg-toggle")
-                    .when(ffmpeg_present, |d| {
-                        d.cursor(CursorStyle::PointingHand).on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(|_, _, _, cx| {
-                                nook_core::settings::tweak_app_settings(|s| {
-                                    s.file_actions.use_ffmpeg = !s.file_actions.use_ffmpeg;
-                                });
-                                cx.notify();
-                            }),
-                        )
-                    })
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap(px(1.))
-                            .child(label("Extended formats (ffmpeg)", theme::BODY, true))
-                            .child(label(
-                                if ffmpeg_present {
-                                    "User-installed ffmpeg on PATH"
-                                } else {
-                                    "Install ffmpeg yourself — Nook will not download it"
-                                },
-                                theme::SUBHEADLINE,
-                                false,
-                            )),
-                    )
-                    .child(toggle_knob(ffmpeg_on))
-                    .into_any_element(),
-            ]),
-            Some(
-                "Convert, target-size, PDF compress, background removal, and OCR. No MP3/Opus encode, mkv read, or webm/av1 write without your own ffmpeg. Target-size is ABR ±5%. Background removal is persons-only on macOS 12–13.",
-            ),
+                )),
         )
     }
 
@@ -1665,7 +1560,6 @@ impl SettingsView {
         )
         .into_any_element()
     }
-
 
     fn render_keyboard(&self, settings: &AppSettings, cx: &mut Context<Self>) -> impl IntoElement {
         let listen = nook_core::eventtap::input_monitoring_status();
@@ -1964,7 +1858,6 @@ impl SettingsView {
             )
     }
 
-
     fn render_search_settings(
         &self,
         settings: &AppSettings,
@@ -2064,7 +1957,11 @@ impl SettingsView {
                     .h(px(24.))
                     .px(px(8.))
                     .rounded(px(6.))
-                    .bg(if on { theme::FILL_SECONDARY } else { theme::FILL })
+                    .bg(if on {
+                        theme::FILL_SECONDARY
+                    } else {
+                        theme::FILL
+                    })
                     .cursor(CursorStyle::PointingHand)
                     .on_mouse_down(
                         MouseButton::Left,
@@ -2307,7 +2204,7 @@ impl SettingsView {
 
         let mut list = Vec::new();
         for module in settings.ordered_widgets() {
-            if module == WidgetModule::Mixer && !nook_core::mixer::is_available() {
+            if !module.is_available() {
                 continue;
             }
             list.push(self.widget_row(module, settings, cx).into_any_element());
@@ -2582,7 +2479,10 @@ impl SettingsView {
                 rows.push(
                     toggle_row("Show lyrics", settings.show_lyrics, cx, |s| {
                         s.show_lyrics = !s.show_lyrics;
-                }
+                    })
+                    .into_any_element(),
+                );
+                rows.push(
                     toggle_row(
                         "Animated album art (Apple Music)",
                         settings.animated_album_art,
@@ -2599,12 +2499,6 @@ impl SettingsView {
                 );
             }
             WidgetModule::Calendar => {
-                rows.push(
-                    toggle_row("Quick add", settings.quick_add, cx, |s| {
-                        s.quick_add = !s.quick_add;
-                    })
-                    .into_any_element(),
-                );
                 rows.push(
                     action_row(
                         "calendar-app",
@@ -2661,9 +2555,12 @@ impl SettingsView {
                         |_, _, _| {
                             if let Err(err) = nook_core::power::install_lpm_shortcut() {
                                 log::warn!("install LPM shortcut: {err}");
-        }
-    }
-}
+                            }
+                        },
+                    )
+                    .into_any_element(),
+                );
+            }
             WidgetModule::Messages => {
                 let fda = nook_core::messages::fda_status();
                 let status = match fda {
@@ -2675,29 +2572,6 @@ impl SettingsView {
                     settings_row("msg-fda-status")
                         .child(label("Full Disk Access", theme::BODY, true))
                         .child(label(status, theme::BODY, false))
-        }
-            WidgetModule::Obsidian => {
-                let vault_label = settings
-                    .obsidian_vault
-                    .as_ref()
-                    .map(|path| path.display().to_string())
-                    .unwrap_or_else(|| "None".into());
-                rows.push(
-                    settings_row("obsidian-path")
-                        .child(label("Vault", theme::BODY, true))
-                        .child(label(vault_label, theme::SUBHEADLINE, false))
-        }
-            WidgetModule::Mixer => {
-                rows.push(
-                    settings_row("mixer-permission")
-                        .child(label("Permission", theme::BODY, true))
-                        .child(label(
-                            nook_core::mixer::capture_status_label(
-                                nook_core::mixer::capture_status(),
-                            ),
-                            theme::SUBHEADLINE,
-                            false,
-                        ))
                         .into_any_element(),
                 );
                 rows.push(
@@ -2709,17 +2583,78 @@ impl SettingsView {
                         |_, _, _| {
                             if let Err(err) = nook_core::messages::open_fda_settings() {
                                 log::warn!("open FDA settings: {err}");
-        }
-    }
-}
-            WidgetModule::Timers => {
+                            }
+                        },
+                    )
+                    .into_any_element(),
+                );
                 rows.push(
                     toggle_row(
-                        "Apple Clock timers",
-                        settings.sync_clock_timers,
+                        "Experimental WhatsApp auto-send",
+                        settings.experimental_whatsapp_autosend,
                         cx,
-                        |s| s.sync_clock_timers = !s.sync_clock_timers,
+                        |s| {
+                            s.experimental_whatsapp_autosend = !s.experimental_whatsapp_autosend;
+                        },
                     )
+                    .into_any_element(),
+                );
+            }
+            WidgetModule::Obsidian => {
+                let vault_label = settings
+                    .obsidian_vault
+                    .as_ref()
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_else(|| "None".into());
+                rows.push(
+                    settings_row("obsidian-path")
+                        .child(label("Vault", theme::BODY, true))
+                        .child(label(vault_label, theme::SUBHEADLINE, false))
+                        .into_any_element(),
+                );
+                rows.push(
+                    action_row(
+                        "obsidian-folder",
+                        "Folder",
+                        "Choose Folder…",
+                        cx,
+                        |_, _, cx| {
+                            if let Some(path) = crate::platform::choose_directory() {
+                                nook_core::settings::tweak_app_settings(|s| {
+                                    s.obsidian_vault = Some(path);
+                                });
+                                cx.notify();
+                            }
+                        },
+                    )
+                    .into_any_element(),
+                );
+                if settings.obsidian_vault.is_some() {
+                    rows.push(
+                        action_row("obsidian-clear", "Vault", "Clear", cx, |_, _, cx| {
+                            nook_core::settings::tweak_app_settings(|s| {
+                                s.obsidian_vault = None;
+                            });
+                            cx.notify();
+                        })
+                        .into_any_element(),
+                    );
+                }
+                rows.push(
+                    toggle_row(
+                        "Capture via Obsidian URI",
+                        settings.obsidian_uri_capture,
+                        cx,
+                        |s| s.obsidian_uri_capture = !s.obsidian_uri_capture,
+                    )
+                    .into_any_element(),
+                );
+            }
+            WidgetModule::Timers => {
+                rows.push(
+                    toggle_row("Apple Clock timers", settings.sync_clock_timers, cx, |s| {
+                        s.sync_clock_timers = !s.sync_clock_timers
+                    })
                     .into_any_element(),
                 );
                 rows.push(
@@ -2731,30 +2666,18 @@ impl SettingsView {
                         |_, _, _| {
                             if let Err(err) = nook_core::shortcuts::import_bundled_shortcuts() {
                                 log::info!("clock shortcuts: {err}");
-                    }
-                }
-                        "obsidian-folder",
-                        "Folder",
-                        "Choose Folder…",
-                        cx,
-                        |_, _, cx| {
-                            if let Some(path) = crate::platform::choose_directory() {
-                                nook_core::settings::tweak_app_settings(|s| {
-                                    s.obsidian_vault = Some(path);
-                                });
-        }
-    }
-}
-            WidgetModule::Vpn => {
-                rows.push(
-                    toggle_row(
-                        "Timer on compact face",
-                        settings.vpn_show_timer,
-                        cx,
-                        |s| {
-                            s.vpn_show_timer = !s.vpn_show_timer;
+                            }
                         },
                     )
+                    .into_any_element(),
+                );
+                rows.extend(pomodoro_rows(settings, &self.catalog, cx));
+            }
+            WidgetModule::Vpn => {
+                rows.push(
+                    toggle_row("Timer on compact face", settings.vpn_show_timer, cx, |s| {
+                        s.vpn_show_timer = !s.vpn_show_timer;
+                    })
                     .into_any_element(),
                 );
                 let ignore_placeholder = self.ignore_draft.is_empty();
@@ -2773,8 +2696,9 @@ impl SettingsView {
                         &self.ignore_focus,
                         cx,
                         |this, event, cx| {
-                            let persist = SettingsView::apply_key(&mut this.ignore_draft, event, cx)
-                                || event.keystroke.key == "enter";
+                            let persist =
+                                SettingsView::apply_key(&mut this.ignore_draft, event, cx)
+                                    || event.keystroke.key == "enter";
                             if persist {
                                 this.persist_ignore();
                                 cx.notify();
@@ -2783,41 +2707,7 @@ impl SettingsView {
                     )
                     .into_any_element(),
                 );
-                rows.push(
-                    toggle_row(
-                        "Experimental WhatsApp auto-send",
-                        settings.experimental_whatsapp_autosend,
-                        cx,
-                        |s| {
-                            s.experimental_whatsapp_autosend = !s.experimental_whatsapp_autosend;
-                        },
-                if settings.obsidian_vault.is_some() {
-                    rows.push(
-                        action_row("obsidian-clear", "Vault", "Clear", cx, |_, _, cx| {
-                            nook_core::settings::tweak_app_settings(|s| {
-                                s.obsidian_vault = None;
-                            });
-                            cx.notify();
-                        })
-                        .into_any_element(),
-                    );
-                }
-                rows.push(
-                    toggle_row(
-                        "Capture via Obsidian URI",
-                        settings.obsidian_uri_capture,
-                        cx,
-                        |s| s.obsidian_uri_capture = !s.obsidian_uri_capture,
-                        "mixer-reset",
-                        "Volumes",
-                        "Reset All",
-                        cx,
-                        |_, _, cx| {
-                            nook_core::mixer::reset_all();
-                            nook_core::mixer::pump();
-                            cx.notify();
-        }
-    }
+            }
             WidgetModule::Meeting => {
                 rows.push(
                     toggle_row("Zoom", settings.meetings.zoom, cx, |s| {
@@ -2851,12 +2741,37 @@ impl SettingsView {
                     )
                     .into_any_element(),
                 );
-        }
+                let trusted = crate::platform::ax_is_process_trusted();
+                rows.push(
+                    action_row(
+                        "ax-status",
+                        "Accessibility",
+                        if trusted { "Granted" } else { "Denied" },
+                        cx,
+                        |_, _, _| {
+                            crate::platform::ax_prompt_accessibility();
+                            crate::platform::open_accessibility_settings();
+                        },
+                    )
+                    .into_any_element(),
+                );
+            }
             WidgetModule::HighAlert => {
                 rows.extend(high_alert_rows(settings, cx));
             }
-            WidgetModule::Timers => {
-                rows.extend(pomodoro_rows(settings, &self.catalog, cx));
+            WidgetModule::Recorder => {
+                rows.push(
+                    toggle_row(
+                        "Live transcription",
+                        settings.recorder_transcribe,
+                        cx,
+                        |s| s.recorder_transcribe = !s.recorder_transcribe,
+                    )
+                    .into_any_element(),
+                );
+            }
+            WidgetModule::Notifications => {
+                rows.extend(notification_permission_rows(cx));
             }
             _ => {}
         }
@@ -2887,6 +2802,15 @@ impl SettingsView {
             .when(self.module == WidgetModule::Weather, |d| {
                 d.child(self.render_weather_settings(settings, city_focused, cx))
             })
+            .when(self.module == WidgetModule::SysStats, |d| {
+                d.child(self.render_sysstats_settings(settings, cx))
+            })
+            .when(self.module == WidgetModule::Music, |d| {
+                d.child(self.render_music_settings(settings, client_id_focused, cx))
+            })
+            .when(self.module == WidgetModule::Notifications, |d| {
+                d.child(self.render_notification_settings(settings, cx))
+            })
     }
 
     fn render_weather_settings(
@@ -2899,7 +2823,10 @@ impl SettingsView {
 
         let units = settings.weather.units;
         let mut unit_row = segmented_group();
-        for (caption, value) in [("°C", WeatherUnits::Celsius), ("°F", WeatherUnits::Fahrenheit)] {
+        for (caption, value) in [
+            ("°C", WeatherUnits::Celsius),
+            ("°F", WeatherUnits::Fahrenheit),
+        ] {
             unit_row = unit_row.child(segment(caption, units == value, cx, move |_, _, cx| {
                 nook_core::settings::tweak_app_settings(|s| s.weather.units = value);
                 nook_core::weather::invalidate();
@@ -2986,31 +2913,7 @@ impl SettingsView {
                         move |this, _, cx| this.pick_place(picked.clone(), cx),
                     ))
                     .into_any_element(),
-                );
-            }
-            WidgetModule::Recorder => {
-                rows.push(
-                    toggle_row(
-                        "Live transcription",
-                        settings.recorder_transcribe,
-                        cx,
-                        |s| s.recorder_transcribe = !s.recorder_transcribe,
-                let trusted = crate::platform::ax_is_process_trusted();
-                rows.push(
-                    action_row(
-                        "ax-status",
-                        "Accessibility",
-                        if trusted { "Granted" } else { "Denied" },
-                        cx,
-                        |_, _, _| {
-                            crate::platform::ax_prompt_accessibility();
-                            crate::platform::open_accessibility_settings();
-                        },
-                    )
-                    .into_any_element(),
-                );
-            }
-            _ => {}
+            );
         }
 
         let location_note = match &settings.weather.location {
@@ -3060,12 +2963,6 @@ impl SettingsView {
                     .into_any_element()]),
                 Some("Required by Open-Meteo's CC-BY 4.0 license."),
             ))
-            .when(self.module == WidgetModule::SysStats, |d| {
-                d.child(self.render_sysstats_settings(settings, cx))
-            })
-            .when(self.module == WidgetModule::Music, |d| {
-                d.child(self.render_music_settings(settings, client_id_focused, cx))
-            })
     }
 
     fn persist_client_id(&self) {
@@ -3190,10 +3087,6 @@ impl SettingsView {
                     ))
                     .into_any_element(),
             );
-            WidgetModule::Notifications => {
-                rows.extend(notification_permission_rows(cx));
-            }
-            _ => {}
         }
 
         section(
@@ -3240,11 +3133,6 @@ impl SettingsView {
             ]),
             Some("Samples only while the expanded card is visible. CPU and network need two ticks; a collapse longer than a few minutes resets the rates."),
         )
-                ))
-            })
-            .when(self.module == WidgetModule::Notifications, |d| {
-                d.child(self.render_notification_settings(settings, cx))
-            })
     }
 
     fn render_notification_settings(
@@ -3695,7 +3583,11 @@ impl SettingsView {
                                 .flex_col()
                                 .child(label(name, theme::BODY, true))
                                 .child(label(
-                                    if open { "Open in Obsidian" } else { "Registered" },
+                                    if open {
+                                        "Open in Obsidian"
+                                    } else {
+                                        "Registered"
+                                    },
                                     theme::SUBHEADLINE,
                                     false,
                                 )),
@@ -3756,35 +3648,23 @@ fn hud_caption(settings: &AppSettings) -> SharedString {
 
 fn module_blurb(module: WidgetModule) -> SharedString {
     match module {
-        WidgetModule::Calendar => {
-            "Week strip is today ± 3 days. Type a line like “lunch tomorrow 12:30” to add an event.".into()
-        }
+        WidgetModule::Calendar => "Week strip is today ± 3 days.".into(),
         WidgetModule::Notes => "Scratchpad on the island. Edit here or in the expanded card.".into(),
         WidgetModule::Observe => {
             "Pinned metrics on the compact island and the expanded card.".into()
         }
-            WidgetModule::Music => {
-            "Now Playing from MediaRemote. Optional time-synced lyrics from LRCLIB — opt-in, fetched at runtime, never bundled.".into()
-        }
         WidgetModule::Music => {
-            "Now Playing from MediaRemote on macOS. The output picker lists CoreAudio devices; it cannot start AirPlay to a HomePod or Apple TV.".into()
-            "Now Playing from MediaRemote. Optional Apple Music motion art is opt-in and fails silent to static covers; the glow uses local artwork colors.".into()
-            "Now Playing from MediaRemote on macOS, with an AppleScript fallback. Up Next lists the current Music playlist (unshuffled) or the Spotify Web API queue.".into()
-        }
-        WidgetModule::Files => "Drop zone and tray live on the Tray tab of the expanded island.".into(),
-        WidgetModule::Timers => {
-            "Island countdowns plus Apple Clock timers (read from mobiletimerd). Import the bundled Nook Clock shortcuts once to pause, resume, or cancel from the island.".into()
+            "Now Playing from MediaRemote. Optional extras are all opt-in: time-synced lyrics from LRCLIB (fetched at runtime, never bundled), Apple Music motion art (fails silent to static covers; the glow uses local artwork colors), and Up Next from the current Music playlist or the Spotify Web API queue. The output picker lists CoreAudio devices; it cannot start AirPlay to a HomePod or Apple TV.".into()
         }
         WidgetModule::Files => {
             "Drop zone and tray live on the Tray tab. Drag onto LocalSend or Get a link.".into()
         }
-        WidgetModule::Timers => "Countdown presets and a compact ring while a timer is running.".into(),
+        WidgetModule::Timers => {
+            "Island countdowns plus Apple Clock timers (read from mobiletimerd) — import the bundled Nook Clock shortcuts once to pause, resume, or cancel from the island. Includes a Pomodoro work/break cycle and an optional Focus shortcut.".into()
+        }
         WidgetModule::Reminders => {
             "Incomplete reminders from EventKit. Type “remind me to …” to add one.".into()
         }
-            "Countdown presets, a Pomodoro work/break cycle, and an optional Focus shortcut.".into()
-        }
-        WidgetModule::Reminders => "Incomplete reminders from EventKit, same store as Calendar.".into(),
         WidgetModule::Speed => "Cloudflare (then OVH) download probe. Runs from the island card.".into(),
         WidgetModule::Agents => {
             "Working coding-agent sessions on the compact face and expanded card.".into()
@@ -3792,37 +3672,33 @@ fn module_blurb(module: WidgetModule) -> SharedString {
         WidgetModule::Mirror => "A live camera preview that opens when you click the Mirror card.".into(),
         WidgetModule::Battery => {
             "Low-battery takeover on the compact face. Low Power Mode uses a one-time Shortcuts import, then falls back to an admin prompt.".into()
-    }
+        }
         WidgetModule::Messages => {
-            "iMessage read + send from chat.db. WhatsApp is notify + prefill only — the Mac app cannot auto-send. Full Disk Access is required to read messages.".into()
-    }
+            "Shows only when a message arrives. Reply to iMessage from the island; WhatsApp opens a prefilled chat. Full Disk Access is required to read messages.".into()
+        }
         WidgetModule::Obsidian => {
             "Vault notes on the shelf. FSEvents keeps the list current; capture appends to today's daily note.".into()
         }
-        WidgetModule::Mixer => nook_core::mixer::TCC_PREPROMPT.into(),
         WidgetModule::Weather => {
             "Current conditions and a short hourly strip from Open-Meteo. Manual city by default.".into()
-    }
+        }
         WidgetModule::Vpn => {
             "Live utun/ipsec/ppp status. The compact face flashes on connect and disconnect; the card shows the session clock. Ignore listed interfaces to hide helpers that look like a VPN.".into()
-    }
+        }
         WidgetModule::HighAlert => {
             "IOPM keep-awake. Timed chips expire in powerd — lid-close sleep is not prevented.".into()
-    }
+        }
         WidgetModule::SysStats => {
             "Live CPU, memory, network, and disk capacity. Idle cost is zero — sampling starts on expand and stops on collapse.".into()
-    }
+        }
         WidgetModule::Recorder => {
             "Record from the island. Transcription uses Apple's on-device Speech model when available; turn it off for long recordings.".into()
-    }
+        }
         WidgetModule::Meeting => {
             "Mute and leave from the island. Zoom reads mute from the Meeting menu. Teams is a blind shortcut (the localhost API is gone). Meet focuses the tab unless you enable Apple Events JS.".into()
-    }
+        }
         WidgetModule::Notifications => {
             "Captures other apps' banners via Accessibility. Optional usernoted backfill needs a manual Full Disk Access grant. Misses Focus / Do Not Disturb / 'None' styles.".into()
-    }
-        WidgetModule::Process => {
-            "Convert, target-size, PDF compress, background removal, and OCR for files on the tray.".into()
         }
     }
 }
@@ -3861,10 +3737,7 @@ fn caption_text(text: impl Into<SharedString>) -> impl IntoElement {
         .child(text.into())
 }
 
-fn high_alert_rows(
-    settings: &AppSettings,
-    cx: &mut Context<SettingsView>,
-) -> Vec<AnyElement> {
+fn high_alert_rows(settings: &AppSettings, cx: &mut Context<SettingsView>) -> Vec<AnyElement> {
     let duration = settings.high_alert_default_duration_secs;
     let kind = settings.high_alert_kind;
     let battery = settings.low_battery_release_pct;
@@ -4014,25 +3887,19 @@ fn pomodoro_rows(
             },
         )
         .into_any_element(),
-        action_row(
-            "focus-break",
-            "Break shortcut",
-            break_name,
-            cx,
-            {
-                let listed = catalog.to_vec();
-                move |_, _, cx| {
-                    let next = nook_core::focus::cycle_shortcut(
-                        nook_core::settings::get_app_settings()
-                            .focus_shortcut_break
-                            .as_deref(),
-                        &listed,
-                    );
-                    nook_core::settings::tweak_app_settings(|s| s.focus_shortcut_break = next);
-                    cx.notify();
-                }
-            },
-        )
+        action_row("focus-break", "Break shortcut", break_name, cx, {
+            let listed = catalog.to_vec();
+            move |_, _, cx| {
+                let next = nook_core::focus::cycle_shortcut(
+                    nook_core::settings::get_app_settings()
+                        .focus_shortcut_break
+                        .as_deref(),
+                    &listed,
+                );
+                nook_core::settings::tweak_app_settings(|s| s.focus_shortcut_break = next);
+                cx.notify();
+            }
+        })
         .into_any_element(),
     ]
 }
@@ -4110,26 +3977,22 @@ fn threshold_row(value: u8, cx: &mut Context<SettingsView>) -> impl IntoElement 
                 .gap(px(8.))
                 .child(stepper_btn("thr-dec", "−", cx, move |_, _, cx| {
                     nook_core::settings::tweak_app_settings(|s| {
-                        s.battery_alert_threshold =
-                            nook_core::power::clamp_alert_threshold(
-                                s.battery_alert_threshold.saturating_sub(5),
-                            );
+                        s.battery_alert_threshold = nook_core::power::clamp_alert_threshold(
+                            s.battery_alert_threshold.saturating_sub(5),
+                        );
                     });
                     cx.notify();
                 }))
-                .child(
-                    div()
-                        .w(px(44.))
-                        .flex()
-                        .justify_center()
-                        .child(label(format!("{value}%"), theme::BODY, true)),
-                )
+                .child(div().w(px(44.)).flex().justify_center().child(label(
+                    format!("{value}%"),
+                    theme::BODY,
+                    true,
+                )))
                 .child(stepper_btn("thr-inc", "+", cx, move |_, _, cx| {
                     nook_core::settings::tweak_app_settings(|s| {
-                        s.battery_alert_threshold =
-                            nook_core::power::clamp_alert_threshold(
-                                s.battery_alert_threshold.saturating_add(5),
-                            );
+                        s.battery_alert_threshold = nook_core::power::clamp_alert_threshold(
+                            s.battery_alert_threshold.saturating_add(5),
+                        );
                     });
                     cx.notify();
                 })),
@@ -4173,7 +4036,10 @@ fn shortcut_row(title: &'static str, keys: String) -> impl IntoElement {
         .child(label(title, theme::BODY, true))
         .child(label(keys, theme::SUBHEADLINE, false))
 }
-fn permission_row(title: &'static str, status: nook_core::eventtap::PermissionStatus) -> impl IntoElement {
+fn permission_row(
+    title: &'static str,
+    status: nook_core::eventtap::PermissionStatus,
+) -> impl IntoElement {
     let (text, color) = match status {
         nook_core::eventtap::PermissionStatus::Granted => ("Granted", theme::SUCCESS),
         nook_core::eventtap::PermissionStatus::Denied => ("Not granted", theme::DESTRUCTIVE),
@@ -4500,7 +4366,10 @@ mod tests {
         assert_eq!(
             WidgetModule::Battery.subtitle(&settings).as_ref(),
             "Alert at 5%"
-}
+        );
+    }
+
+    #[test]
     fn timers_subtitle_mentions_clock_when_sync_is_on() {
         let mut settings = AppSettings::default();
         assert_eq!(
@@ -4511,7 +4380,10 @@ mod tests {
         assert_eq!(
             WidgetModule::Timers.subtitle(&settings).as_ref(),
             "Countdown"
-}
+        );
+    }
+
+    #[test]
     fn sysstats_subtitle_counts_enabled_readouts() {
         let mut settings = AppSettings::default();
         assert_eq!(
@@ -4529,7 +4401,10 @@ mod tests {
         assert_eq!(
             WidgetModule::SysStats.subtitle(&settings).as_ref(),
             "Hidden"
-}
+        );
+    }
+
+    #[test]
     fn notifications_subtitle_is_honest_when_off() {
         let settings = AppSettings::default();
         assert!(!settings.show_notifications);
@@ -4571,7 +4446,6 @@ mod tests {
                 "Battery",
                 "Messages",
                 "Obsidian",
-                "Mixer",
                 "Weather",
                 "VPN",
                 "High Alert",
@@ -4579,7 +4453,6 @@ mod tests {
                 "Voice",
                 "Meetings",
                 "Notifications",
-                "Process",
             ]
         );
         assert!(!names
@@ -4594,7 +4467,9 @@ mod tests {
             .map(|(kind, hotkey)| (kind.label(), hotkey.display()))
             .collect();
         assert_eq!(rows.len(), 9);
-        assert!(rows.iter().any(|(n, k)| *n == "Left half" && k.contains('←')));
+        assert!(rows
+            .iter()
+            .any(|(n, k)| *n == "Left half" && k.contains('←')));
     }
 
     #[test]
@@ -4602,7 +4477,7 @@ mod tests {
         assert_eq!(SettingsCategory::from_u8(1), SettingsCategory::Widgets);
         assert_eq!(SettingsCategory::from_u8(2), SettingsCategory::Keyboard);
         assert_eq!(SettingsCategory::from_u8(3), SettingsCategory::Scrolling);
-        assert_eq!(SettingsCategory::from_u8(2), SettingsCategory::Search);
+        assert_eq!(SettingsCategory::from_u8(4), SettingsCategory::Search);
         assert_eq!(SettingsCategory::from_u8(0), SettingsCategory::General);
         assert_eq!(SettingsCategory::from_u8(99), SettingsCategory::General);
         assert_eq!(SettingsCategory::Keyboard.title(), "Keyboard");

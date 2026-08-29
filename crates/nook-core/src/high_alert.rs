@@ -309,7 +309,8 @@ mod macos {
         if !BATTERY_SRC.load(Ordering::SeqCst).is_null() {
             return;
         }
-        let src = unsafe { IOPSNotificationCreateRunLoopSource(Some(on_power_source), ptr::null_mut()) };
+        let src =
+            unsafe { IOPSNotificationCreateRunLoopSource(Some(on_power_source), ptr::null_mut()) };
         if src.is_null() {
             return;
         }
@@ -401,8 +402,11 @@ mod macos {
                 return None;
             }
             let mut out: i32 = 0;
-            if CFNumberGetValue(value as CfNumberRef, K_CF_NUMBER_SINT32_TYPE, &mut out as *mut i32 as *mut c_void)
-                == 0
+            if CFNumberGetValue(
+                value as CfNumberRef,
+                K_CF_NUMBER_SINT32_TYPE,
+                &mut out as *mut i32 as *mut c_void,
+            ) == 0
             {
                 return None;
             }
@@ -417,7 +421,10 @@ mod macos {
         if value.is_null() {
             return false;
         }
-        unsafe { CFGetTypeID(value) == CFBooleanGetTypeID() && CFBooleanGetValue(value as CfBooleanRef) != 0 }
+        unsafe {
+            CFGetTypeID(value) == CFBooleanGetTypeID()
+                && CFBooleanGetValue(value as CfBooleanRef) != 0
+        }
     }
 
     fn dict_string(dict: CfDictionaryRef, key: &CStr) -> Option<String> {
@@ -451,15 +458,20 @@ mod macos {
             {
                 return None;
             }
-            CStr::from_ptr(buf.as_ptr()).to_str().ok().map(str::to_string)
+            CStr::from_ptr(buf.as_ptr())
+                .to_str()
+                .ok()
+                .map(str::to_string)
         }
     }
-
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // OWNERS is process-global; serialize the tests that mutate it.
+    static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn reset() {
         release_all();
@@ -468,10 +480,15 @@ mod tests {
 
     #[test]
     fn owners_refcount_manual_and_pomodoro() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         reset();
         assert!(!is_active());
-        acquire(HighAlertOwner::Manual, HighAlertKind::Display, Some(Duration::from_secs(60)))
-            .unwrap();
+        acquire(
+            HighAlertOwner::Manual,
+            HighAlertKind::Display,
+            Some(Duration::from_secs(60)),
+        )
+        .unwrap();
         assert!(is_active());
         assert!(is_held_by(HighAlertOwner::Manual));
         acquire(HighAlertOwner::Pomodoro, HighAlertKind::Display, None).unwrap();
@@ -486,6 +503,7 @@ mod tests {
 
     #[test]
     fn release_all_clears_every_owner() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         reset();
         let _ = acquire(HighAlertOwner::Manual, HighAlertKind::System, None);
         let _ = acquire(HighAlertOwner::Pomodoro, HighAlertKind::System, None);

@@ -191,8 +191,7 @@ async fn fetch_editorial_video(hit: &AlbumHit) -> Result<Option<MotionArtwork>, 
         return Err(format!("amp status {}", response.status()));
     }
     let bytes = read_response_limited(response, MAX_AMP_BYTES).await?;
-    let json: serde_json::Value =
-        serde_json::from_slice(&bytes).map_err(|err| err.to_string())?;
+    let json: serde_json::Value = serde_json::from_slice(&bytes).map_err(|err| err.to_string())?;
     Ok(parse_editorial_video(&json))
 }
 
@@ -306,7 +305,11 @@ fn cache_write(key: &str, value: Option<&MotionArtwork>) {
         return;
     };
     let (m3u8, preview, hit) = match value {
-        Some(art) => (Some(art.m3u8_url.as_str()), art.preview_frame.as_deref(), 1i64),
+        Some(art) => (
+            Some(art.m3u8_url.as_str()),
+            art.preview_frame.as_deref(),
+            1i64,
+        ),
         None => (None, None, 0i64),
     };
     if let Err(err) = conn.execute(
@@ -463,23 +466,24 @@ mod tests {
             "Bon Iver",
             "Folklore"
         ));
-        assert!(!album_names_match("", "Folklore", "Taylor Swift", "Folklore"));
+        assert!(!album_names_match(
+            "",
+            "Folklore",
+            "Taylor Swift",
+            "Folklore"
+        ));
     }
 
     #[test]
     fn storefront_reads_collection_url() {
         assert_eq!(
-            storefront_from_url(Some(
-                "https://music.apple.com/gb/album/folklore/1524801260"
-            ))
-            .as_deref(),
+            storefront_from_url(Some("https://music.apple.com/gb/album/folklore/1524801260"))
+                .as_deref(),
             Some("gb")
         );
         assert_eq!(
-            storefront_from_url(Some(
-                "https://music.apple.com/us/album/something/1?uo=4"
-            ))
-            .as_deref(),
+            storefront_from_url(Some("https://music.apple.com/us/album/something/1?uo=4"))
+                .as_deref(),
             Some("us")
         );
         assert_eq!(storefront_from_url(Some("https://example.com/x")), None);

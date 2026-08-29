@@ -4,6 +4,7 @@
 //! directly instead of going through `invoke`.
 
 pub mod agents;
+pub mod apps;
 pub mod audio;
 pub mod audio_devices;
 pub mod automation;
@@ -22,12 +23,11 @@ pub mod keysounds;
 pub mod location;
 #[cfg(target_os = "macos")]
 pub mod lyrics;
-pub mod meetings;
 #[cfg(any(target_os = "macos", test))]
 mod mediaremote;
+pub mod meetings;
 pub mod menubar;
 pub mod messages;
-pub mod mixer;
 pub mod models;
 pub mod motion_artwork;
 pub mod mouse;
@@ -41,7 +41,6 @@ pub mod occupancy;
 pub mod osd;
 pub mod pomodoro;
 pub mod power;
-pub mod process;
 pub mod queue;
 pub mod recorder;
 pub mod scroll;
@@ -49,8 +48,8 @@ pub mod settings;
 pub mod share;
 pub mod shell;
 pub mod shortcuts;
-pub mod spotlight;
 pub mod spotify;
+pub mod spotlight;
 pub mod sysstats;
 pub mod system_timers;
 pub mod sysvol;
@@ -100,7 +99,6 @@ pub fn init() {
         }
         audio::init_audio_state();
         audio::setup_audio_monitoring();
-        mixer::init();
         audio_devices::start();
         crate::spotify::hydrate_status();
         mouse::start_polling();

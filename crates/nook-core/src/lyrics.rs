@@ -42,7 +42,10 @@ impl SyncedLyrics {
         if self.lines.is_empty() {
             return None;
         }
-        let start = match self.lines.binary_search_by_key(&pos_ms, |line| line.time_ms) {
+        let start = match self
+            .lines
+            .binary_search_by_key(&pos_ms, |line| line.time_ms)
+        {
             Ok(mut i) => {
                 while i < self.lines.len() && self.lines[i].time_ms <= pos_ms {
                     i += 1;
@@ -58,7 +61,11 @@ impl SyncedLyrics {
     /// Three-line highlight window: previous, current, next.
     pub fn highlight_window(&self, pos_ms: u64) -> [Option<&str>; 3] {
         match self.active_index(pos_ms) {
-            None => [None, None, self.lines.first().map(|line| line.text.as_str())],
+            None => [
+                None,
+                None,
+                self.lines.first().map(|line| line.text.as_str()),
+            ],
             Some(i) => [
                 i.checked_sub(1)
                     .and_then(|j| self.lines.get(j))
@@ -354,9 +361,7 @@ fn is_id_tag(line: &str) -> bool {
         return false;
     };
     let name = inner.split_once(':').map(|(k, _)| k).unwrap_or(inner);
-    name.chars()
-        .next()
-        .is_some_and(|c| c.is_ascii_alphabetic())
+    name.chars().next().is_some_and(|c| c.is_ascii_alphabetic())
 }
 
 fn split_timestamps(line: &str) -> (Vec<u64>, &str) {
@@ -568,7 +573,10 @@ mod tests {
             lyrics.highlight_window(10_000),
             [Some("A"), Some("B"), Some("C")]
         );
-        assert_eq!(lyrics.highlight_window(20_000), [Some("B"), Some("C"), None]);
+        assert_eq!(
+            lyrics.highlight_window(20_000),
+            [Some("B"), Some("C"), None]
+        );
         let late = SyncedLyrics {
             lines: lrc("[00:05.00] A\n"),
             ..SyncedLyrics::default()

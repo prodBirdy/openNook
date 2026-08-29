@@ -108,10 +108,7 @@ mod tests {
     #[test]
     fn cycle_shortcut_walks_the_list_then_clears() {
         let listed = vec!["Focus Work".into(), "Focus Break".into()];
-        assert_eq!(
-            cycle_shortcut(None, &listed).as_deref(),
-            Some("Focus Work")
-        );
+        assert_eq!(cycle_shortcut(None, &listed).as_deref(), Some("Focus Work"));
         assert_eq!(
             cycle_shortcut(Some("Focus Work"), &listed).as_deref(),
             Some("Focus Break")

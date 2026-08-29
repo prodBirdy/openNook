@@ -243,7 +243,9 @@ unsafe fn frontmost_bundle_id_macos() -> Option<String> {
 #[cfg(target_os = "macos")]
 unsafe fn prompt_accessibility_macos() -> bool {
     use objc2::runtime::AnyObject;
-    use objc2::*;
+    // Deliberately not `use objc2::*` — that would pull in `objc2::ffi` and
+    // shadow this file's own `ffi` module.
+    use objc2::{class, msg_send};
     let key: *mut AnyObject = msg_send![
         class!(NSString),
         stringWithUTF8String: c"AXTrustedCheckOptionPrompt".as_ptr()
@@ -261,23 +263,21 @@ unsafe fn prompt_accessibility_macos() -> bool {
 }
 
 #[cfg(target_os = "macos")]
-static RUNLOOP: Mutex<Option<ffi::CFRunLoopRef>> = Mutex::new(None);
+static RUNLOOP: std::sync::atomic::AtomicPtr<std::ffi::c_void> =
+    std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
 
 #[cfg(target_os = "macos")]
 unsafe fn stop_runloop() {
-    if let Ok(slot) = RUNLOOP.lock() {
-        if let Some(rl) = *slot {
-            ffi::CFRunLoopStop(rl);
-        }
+    let rl = RUNLOOP.load(Ordering::SeqCst);
+    if !rl.is_null() {
+        ffi::CFRunLoopStop(rl);
     }
 }
 
 #[cfg(target_os = "macos")]
 unsafe fn runloop_thread(want_keys: bool, want_scroll: bool) {
     let rl = ffi::CFRunLoopGetCurrent();
-    if let Ok(mut slot) = RUNLOOP.lock() {
-        *slot = Some(rl);
-    }
+    RUNLOOP.store(rl, Ordering::SeqCst);
 
     let mut ports = Vec::new();
     if want_keys {
@@ -318,25 +318,21 @@ unsafe fn runloop_thread(want_keys: bool, want_scroll: bool) {
         ffi::CFRelease(src);
         ffi::CFRelease(port);
     }
-    if let Ok(mut slot) = RUNLOOP.lock() {
-        *slot = None;
-    }
+    RUNLOOP.store(std::ptr::null_mut(), Ordering::SeqCst);
 }
 
+// kCGEventTapDisabledBy{Timeout,UserInput} are delivered to the callback
+// regardless of the mask (their values can't be expressed as mask bits).
 #[cfg(target_os = "macos")]
 fn key_mask() -> u64 {
     (1u64 << ffi::kCGEventKeyDown)
         | (1u64 << ffi::kCGEventKeyUp)
         | (1u64 << ffi::kCGEventFlagsChanged)
-        | (1u64 << ffi::kCGEventTapDisabledByTimeout)
-        | (1u64 << ffi::kCGEventTapDisabledByUserInput)
 }
 
 #[cfg(target_os = "macos")]
 fn scroll_mask() -> u64 {
-    (1u64 << ffi::kCGEventScrollWheel)
-        | (1u64 << ffi::kCGEventTapDisabledByTimeout)
-        | (1u64 << ffi::kCGEventTapDisabledByUserInput)
+    1u64 << ffi::kCGEventScrollWheel
 }
 
 #[cfg(target_os = "macos")]
@@ -382,7 +378,10 @@ unsafe fn create_tap(
 }
 
 #[cfg(target_os = "macos")]
-unsafe fn attach(rl: ffi::CFRunLoopRef, port: ffi::CFMachPortRef) -> Option<ffi::CFRunLoopSourceRef> {
+unsafe fn attach(
+    rl: ffi::CFRunLoopRef,
+    port: ffi::CFMachPortRef,
+) -> Option<ffi::CFRunLoopSourceRef> {
     let src = ffi::CFMachPortCreateRunLoopSource(std::ptr::null_mut(), port, 0);
     if src.is_null() {
         ffi::CFMachPortInvalidate(port);
@@ -509,12 +508,8 @@ pub(crate) mod ffi {
     pub type CFAllocatorRef = *mut c_void;
     pub type CFStringRef = *const c_void;
     pub type CGEventTapProxy = *mut c_void;
-    pub type CGEventTapCallBack = unsafe extern "C" fn(
-        CGEventTapProxy,
-        u32,
-        CGEventRef,
-        *mut c_void,
-    ) -> CGEventRef;
+    pub type CGEventTapCallBack =
+        unsafe extern "C" fn(CGEventTapProxy, u32, CGEventRef, *mut c_void) -> CGEventRef;
 
     pub const kCGSessionEventTap: u32 = 1;
     pub const kCGHIDEventTap: u32 = 0;
@@ -586,8 +581,16 @@ pub(crate) mod ffi {
         pub fn CFMachPortInvalidate(port: CFMachPortRef);
         pub fn CFRunLoopGetCurrent() -> CFRunLoopRef;
         pub fn CFRunLoopAddSource(rl: CFRunLoopRef, source: CFRunLoopSourceRef, mode: CFStringRef);
-        pub fn CFRunLoopRemoveSource(rl: CFRunLoopRef, source: CFRunLoopSourceRef, mode: CFStringRef);
-        pub fn CFRunLoopRunInMode(mode: CFStringRef, seconds: f64, returnAfterSourceHandled: bool) -> i32;
+        pub fn CFRunLoopRemoveSource(
+            rl: CFRunLoopRef,
+            source: CFRunLoopSourceRef,
+            mode: CFStringRef,
+        );
+        pub fn CFRunLoopRunInMode(
+            mode: CFStringRef,
+            seconds: f64,
+            returnAfterSourceHandled: bool,
+        ) -> i32;
         pub fn CFRunLoopRun();
         pub fn CFRunLoopStop(rl: CFRunLoopRef);
         pub static kCFRunLoopDefaultMode: CFStringRef;

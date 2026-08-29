@@ -246,7 +246,12 @@ pub fn ingest_wheel(dx_lines: f64, dy_lines: f64, shift: bool) {
     }
     let (dx, dy) = apply_shift(dx_lines, dy_lines, shift);
     let mut guard = engine().gesture.lock().unwrap_or_else(|e| e.into_inner());
-    guard.ingest(dx, dy, settings.scroll_speed as f64, settings.reverse_mouse_scroll);
+    guard.ingest(
+        dx,
+        dy,
+        settings.scroll_speed as f64,
+        settings.reverse_mouse_scroll,
+    );
     engine().last_ingest_ms.store(now_ms(), Ordering::Relaxed);
     engine().wake.notify_one();
     drop(guard);
@@ -289,12 +294,7 @@ fn animator_loop() {
                 if guard.is_idle() {
                     if timeout.timed_out() {
                         engine.running.store(false, Ordering::SeqCst);
-                        if engine
-                            .gesture
-                            .lock()
-                            .map(|g| g.is_idle())
-                            .unwrap_or(true)
-                        {
+                        if engine.gesture.lock().map(|g| g.is_idle()).unwrap_or(true) {
                             return;
                         }
                         engine.running.store(true, Ordering::SeqCst);
@@ -329,11 +329,11 @@ fn post_pixel_frame(frame: ScrollFrame) {
 #[cfg(target_os = "macos")]
 unsafe fn post_pixel_frame_macos(frame: ScrollFrame) {
     use super::eventtap::ffi::{
-        CGEventCreateScrollWheelEvent2, CGEventPost, CGEventSetDoubleValueField,
-        CGEventSetIntegerValueField, CFRelease, kCGEventSourceUserData,
-        kCGHIDEventTap, kCGScrollEventUnitPixel, kCGScrollWheelEventIsContinuous,
-        kCGScrollWheelEventMomentumPhase, kCGScrollWheelEventPointDeltaAxis1,
-        kCGScrollWheelEventPointDeltaAxis2, kCGScrollWheelEventScrollPhase,
+        kCGEventSourceUserData, kCGHIDEventTap, kCGScrollEventUnitPixel,
+        kCGScrollWheelEventIsContinuous, kCGScrollWheelEventMomentumPhase,
+        kCGScrollWheelEventPointDeltaAxis1, kCGScrollWheelEventPointDeltaAxis2,
+        kCGScrollWheelEventScrollPhase, CFRelease, CGEventCreateScrollWheelEvent2, CGEventPost,
+        CGEventSetDoubleValueField, CGEventSetIntegerValueField,
     };
 
     let dy = frame.dy.round() as i32;
@@ -341,19 +341,17 @@ unsafe fn post_pixel_frame_macos(frame: ScrollFrame) {
     if dy == 0 && dx == 0 && !matches!(frame.phase, ScrollEmitPhase::MomentumEnd) {
         return;
     }
-    let event = CGEventCreateScrollWheelEvent2(
-        std::ptr::null_mut(),
-        kCGScrollEventUnitPixel,
-        2,
-        dy,
-        dx,
-        0,
-    );
+    let event =
+        CGEventCreateScrollWheelEvent2(std::ptr::null_mut(), kCGScrollEventUnitPixel, 2, dy, dx, 0);
     if event.is_null() {
         return;
     }
     CGEventSetIntegerValueField(event, kCGScrollWheelEventIsContinuous, 1);
-    CGEventSetIntegerValueField(event, kCGScrollWheelEventScrollPhase, frame.phase.scroll_phase());
+    CGEventSetIntegerValueField(
+        event,
+        kCGScrollWheelEventScrollPhase,
+        frame.phase.scroll_phase(),
+    );
     CGEventSetIntegerValueField(
         event,
         kCGScrollWheelEventMomentumPhase,
@@ -462,7 +460,10 @@ mod tests {
     #[test]
     fn conflict_filter() {
         let running = vec!["com.apple.Safari".into(), "com.caldis.Mos".into()];
-        assert_eq!(conflict_labels(&running), vec!["com.caldis.Mos".to_string()]);
+        assert_eq!(
+            conflict_labels(&running),
+            vec!["com.caldis.Mos".to_string()]
+        );
     }
 
     #[test]

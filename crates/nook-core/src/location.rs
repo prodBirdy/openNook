@@ -44,8 +44,7 @@ mod tests {
     fn nook_core_runtime_block(
         rx: oneshot::Receiver<Result<(f64, f64), String>>,
     ) -> Result<(f64, f64), String> {
-        crate::runtime()
-            .block_on(async { rx.await.unwrap_or_else(|_| Err("ended".into())) })
+        crate::runtime().block_on(async { rx.await.unwrap_or_else(|_| Err("ended".into())) })
     }
 }
 
@@ -54,8 +53,8 @@ mod macos {
     use super::*;
     use objc2::encode::{Encode, Encoding};
     use objc2::rc::{Allocated, Retained};
-    use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol};
     use objc2::runtime::AnyClass;
+    use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol};
     use objc2::{define_class, msg_send, AllocAnyThread, ClassType, DefinedClass};
     use objc2_foundation::MainThreadMarker;
     use std::cell::RefCell;
@@ -69,10 +68,8 @@ mod macos {
     }
 
     unsafe impl Encode for CLLocationCoordinate2D {
-        const ENCODING: Encoding = Encoding::Struct(
-            "CLLocationCoordinate2D",
-            &[f64::ENCODING, f64::ENCODING],
-        );
+        const ENCODING: Encoding =
+            Encoding::Struct("CLLocationCoordinate2D", &[f64::ENCODING, f64::ENCODING]);
     }
 
     #[link(name = "CoreLocation", kind = "framework")]

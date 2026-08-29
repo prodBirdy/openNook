@@ -377,15 +377,13 @@ impl SampleBank {
 
     fn sample(&self, keycode: u16, down: bool) -> Arc<Vec<f32>> {
         let map = if down { &self.down } else { &self.up };
-        map.get(&keycode)
-            .cloned()
-            .unwrap_or_else(|| {
-                if down {
-                    self.fallback_down.clone()
-                } else {
-                    self.fallback_up.clone()
-                }
-            })
+        map.get(&keycode).cloned().unwrap_or_else(|| {
+            if down {
+                self.fallback_down.clone()
+            } else {
+                self.fallback_up.clone()
+            }
+        })
     }
 }
 
@@ -531,7 +529,12 @@ fn decode_audio_macos(path: &Path) -> Result<Vec<f32>, String> {
         hint.with_extension(ext);
     }
     let probed = symphonia::default::get_probe()
-        .format(&hint, mss, &FormatOptions::default(), &MetadataOptions::default())
+        .format(
+            &hint,
+            mss,
+            &FormatOptions::default(),
+            &MetadataOptions::default(),
+        )
         .map_err(|err| err.to_string())?;
     let mut format = probed.format;
     let track = format
@@ -543,6 +546,7 @@ fn decode_audio_macos(path: &Path) -> Result<Vec<f32>, String> {
         .map_err(|err| err.to_string())?;
     let mut out = Vec::new();
     let mut sample_buf = None;
+    let mut channels = 1usize;
     loop {
         let packet = match format.next_packet() {
             Ok(p) => p,
@@ -556,14 +560,14 @@ fn decode_audio_macos(path: &Path) -> Result<Vec<f32>, String> {
         };
         if sample_buf.is_none() {
             let spec = *decoded.spec();
+            channels = spec.channels.count().max(1);
             sample_buf = Some(SampleBuffer::<f32>::new(decoded.capacity() as u64, spec));
         }
         if let Some(buf) = sample_buf.as_mut() {
             buf.copy_interleaved_ref(decoded);
-            let spec_channels = buf.spec().channels.count().max(1);
             let samples = buf.samples();
-            for frame in samples.chunks(spec_channels) {
-                let mono = frame.iter().sum::<f32>() / spec_channels as f32;
+            for frame in samples.chunks(channels) {
+                let mono = frame.iter().sum::<f32>() / channels as f32;
                 out.push(mono);
             }
         }

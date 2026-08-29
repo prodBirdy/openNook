@@ -75,9 +75,9 @@ pub fn build_mdquery(term: &str) -> Option<String> {
 pub fn is_application(content_type: &str, type_tree: &[String]) -> bool {
     content_type == "com.apple.application-bundle"
         || content_type == "com.apple.application"
-        || type_tree.iter().any(|t| {
-            t == "com.apple.application-bundle" || t == "com.apple.application"
-        })
+        || type_tree
+            .iter()
+            .any(|t| t == "com.apple.application-bundle" || t == "com.apple.application")
 }
 
 /// Apps first, then prefix matches on the display name, then the rest.
@@ -86,7 +86,11 @@ pub fn rank_hits(mut hits: Vec<SearchHit>, term: &str) -> Vec<SearchHit> {
     hits.sort_by(|a, b| {
         rank_key(a, &needle)
             .cmp(&rank_key(b, &needle))
-            .then_with(|| a.display_name.to_ascii_lowercase().cmp(&b.display_name.to_ascii_lowercase()))
+            .then_with(|| {
+                a.display_name
+                    .to_ascii_lowercase()
+                    .cmp(&b.display_name.to_ascii_lowercase())
+            })
     });
     if hits.len() > MAX_HITS {
         hits.truncate(MAX_HITS);
@@ -196,7 +200,10 @@ fn query_macos(predicate: &str, term: &str, gen: u64) -> Vec<SearchHit> {
         if ok == 0 {
             return None;
         }
-        CStr::from_ptr(buf.as_ptr()).to_str().ok().map(|s| s.to_string())
+        CStr::from_ptr(buf.as_ptr())
+            .to_str()
+            .ok()
+            .map(|s| s.to_string())
     }
 
     unsafe fn release(cf: CFTypeRef) {
