@@ -704,8 +704,11 @@ impl Island {
         let mut snapshot = snapshot;
         nook_core::observe::record_history_range(&mut self.observe_history, &mut snapshot, range);
         nook_core::observe::apply_user_alerts(&self.settings.observe, &mut snapshot);
+        let repaint = nook_core::observe::should_repaint(&self.observe, &snapshot);
         self.observe = snapshot;
-        cx.notify();
+        if repaint {
+            cx.notify();
+        }
     }
 
     pub(crate) fn refresh_observe(&mut self, cx: &mut Context<Self>) {
