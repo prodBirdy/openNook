@@ -16,6 +16,8 @@ const MAX_ALERTS: usize = 8;
 const MAX_SERIES: usize = 3;
 const MAX_POINTS: usize = 48;
 const WARMUP_METRICS_PATH: &str = "/admin/metrics";
+const WARMUP_TOKEN_NEEDED: &str =
+    "warmUP /admin/metrics needs a bearer token (Settings or WARMUP_METRICS_TOKEN)";
 const CHART_POINTS: usize = 60;
 const STORE_SLACK_MS: u64 = 120_000;
 const DAY_MS: u64 = 24 * 60 * 60 * 1000;
@@ -376,7 +378,7 @@ pub struct SeriesValue {
     pub value: f64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct FiringAlert {
     pub name: String,
     pub severity: String,
@@ -444,6 +446,24 @@ fn warmup_bearer(config: &ObserveConfig) -> Option<String> {
     is_warmup_url(&config.prometheus_url)
         .then(|| metrics_token(config))
         .filter(|token| !token.is_empty())
+}
+
+/// The approved warmUP origin requires a bearer. Hitting it without one is a
+/// guaranteed 401 — and the island retries that miss every 5s by default.
+fn missing_warmup_token(config: &ObserveConfig) -> bool {
+    is_warmup_url(&config.prometheus_url) && warmup_bearer(config).is_none()
+}
+
+/// Whether publishing `next` should dirty the island.
+///
+/// A stable disconnect (same error, still down, no alerts) must not trigger a
+/// Metal frame. The poll loop retries that path every 5s. Live data always
+/// repaints so sparklines keep moving.
+pub fn should_repaint(prev: &ObserveSnapshot, next: &ObserveSnapshot) -> bool {
+    if next.connected || prev.connected {
+        return true;
+    }
+    prev.error != next.error || prev.alerts != next.alerts
 }
 
 async fn response_text(response: reqwest::Response) -> Result<String, String> {
@@ -921,6 +941,12 @@ pub async fn poll(config: &ObserveConfig) -> ObserveSnapshot {
 }
 
 async fn poll_warmup(config: &ObserveConfig) -> ObserveSnapshot {
+    if missing_warmup_token(config) {
+        return ObserveSnapshot {
+            error: Some(WARMUP_TOKEN_NEEDED.into()),
+            ..ObserveSnapshot::default()
+        };
+    }
     let base = match normalize_base_url(&config.prometheus_url) {
         Ok(url) => url,
         Err(err) => {
@@ -952,10 +978,7 @@ async fn poll_warmup(config: &ObserveConfig) -> ObserveSnapshot {
                 Ok(body) => {
                     if status.as_u16() == 401 {
                         return ObserveSnapshot {
-                            error: Some(
-                                "warmUP /admin/metrics needs a bearer token (Settings or WARMUP_METRICS_TOKEN)"
-                                    .into(),
-                            ),
+                            error: Some(WARMUP_TOKEN_NEEDED.into()),
                             ..ObserveSnapshot::default()
                         };
                     }
@@ -1680,6 +1703,59 @@ mod tests {
             ..approved
         };
         assert_eq!(warmup_bearer(&unapproved), None);
+    }
+
+    #[test]
+    fn approved_warmup_without_token_is_not_fetched() {
+        assert!(missing_warmup_token(&ObserveConfig::default()));
+        let mut with_token = ObserveConfig::default();
+        with_token.metrics_token = "x".into();
+        assert!(!missing_warmup_token(&with_token));
+        let local = ObserveConfig {
+            source: ObserveSourceKind::Warmup,
+            prometheus_url: "http://127.0.0.1:9090".into(),
+            ..ObserveConfig::default()
+        };
+        assert!(
+            !missing_warmup_token(&local),
+            "a non-approved origin still polls (local warmup / tests)"
+        );
+    }
+
+    #[test]
+    fn stable_observe_miss_does_not_repaint() {
+        let miss = ObserveSnapshot {
+            error: Some(WARMUP_TOKEN_NEEDED.into()),
+            ..ObserveSnapshot::default()
+        };
+        assert!(
+            should_repaint(&ObserveSnapshot::default(), &miss),
+            "first miss must show the error"
+        );
+        assert!(
+            !should_repaint(&miss, &miss),
+            "the 5s retry must not dirty a stable miss"
+        );
+        let live = ObserveSnapshot {
+            connected: true,
+            ..ObserveSnapshot::default()
+        };
+        assert!(should_repaint(&miss, &live));
+        assert!(should_repaint(&live, &miss));
+        let other = ObserveSnapshot {
+            error: Some("Can't reach Prometheus".into()),
+            ..ObserveSnapshot::default()
+        };
+        assert!(should_repaint(&miss, &other));
+    }
+
+    #[tokio::test]
+    async fn default_warmup_without_token_skips_the_network() {
+        let snap = tokio::time::timeout(Duration::from_millis(50), poll(&ObserveConfig::default()))
+            .await
+            .expect("tokenless default warmup must not touch the network");
+        assert!(!snap.connected);
+        assert_eq!(snap.error.as_deref(), Some(WARMUP_TOKEN_NEEDED));
     }
 
     #[test]
