@@ -272,25 +272,6 @@ pub fn apply_island_chrome() {
 #[cfg(not(target_os = "macos"))]
 pub fn apply_island_chrome() {}
 
-/// Kept for the settings window path that still has a GPUI `Window`.
-#[cfg(target_os = "macos")]
-#[allow(dead_code)]
-pub fn apply_island_chrome_on(window: &Window) {
-    install_macos();
-    unsafe {
-        set_accessory_policy();
-        if let Some(ns_win) = ns_window(window) {
-            style_island_window(ns_win);
-            pin_ns_window(ns_win);
-        } else {
-            apply_island_chrome();
-        }
-    }
-}
-
-#[cfg(not(target_os = "macos"))]
-pub fn apply_island_chrome_on(_window: &Window) {}
-
 #[cfg(target_os = "macos")]
 unsafe fn set_accessory_policy() {
     use objc2::runtime::AnyObject;
@@ -562,24 +543,6 @@ pub fn set_click_through_current(ignore: bool) {
     }
     #[cfg(not(target_os = "macos"))]
     let _ = ignore;
-}
-
-#[allow(dead_code)]
-pub fn set_click_through(window: &Window, ignore: bool) {
-    #[cfg(target_os = "macos")]
-    unsafe {
-        if let Some(ns_win) = ns_window(window) {
-            use objc2::*;
-            let _: () = msg_send![ns_win, setIgnoresMouseEvents: ignore];
-            if !ignore {
-                register_file_drops(ns_win);
-            }
-        } else {
-            set_click_through_current(ignore);
-        }
-    }
-    #[cfg(not(target_os = "macos"))]
-    let _ = (window, ignore);
 }
 
 /// Hand activation back to whatever app sits underneath before a drag-out.
