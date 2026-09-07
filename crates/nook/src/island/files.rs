@@ -351,13 +351,6 @@ impl Island {
         file_grid_metrics(self.expanded_width())
     }
 
-    #[allow(dead_code)]
-    pub(crate) fn clear_files(&mut self, cx: &mut Context<Self>) {
-        self.files.clear();
-        let _ = nook_core::files::save_file_tray(self.files.clone());
-        cx.notify();
-    }
-
     pub(crate) fn remove_file(&mut self, path: &str, cx: &mut Context<Self>) {
         self.files.retain(|f| f.path != path);
         let _ = nook_core::files::save_file_tray(self.files.clone());

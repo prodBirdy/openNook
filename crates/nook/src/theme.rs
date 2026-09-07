@@ -63,8 +63,6 @@ pub const TERTIARY_LABEL: Rgba = Rgba {
 };
 pub const TEXT: Rgba = LABEL;
 pub const TEXT_MUTED: Rgba = SECONDARY_LABEL;
-#[allow(dead_code)]
-pub const TEXT_FAINT: Rgba = TERTIARY_LABEL;
 
 pub const FILL: Rgba = Rgba {
     r: 1.0,
@@ -84,10 +82,6 @@ pub const FILL_TERTIARY: Rgba = Rgba {
     b: 1.0,
     a: 0.08,
 };
-#[allow(dead_code)]
-pub const SURFACE: Rgba = FILL;
-#[allow(dead_code)]
-pub const SURFACE_HOVER: Rgba = FILL_SECONDARY;
 
 #[allow(dead_code)]
 pub const SEPARATOR: Rgba = Rgba {
@@ -96,8 +90,6 @@ pub const SEPARATOR: Rgba = Rgba {
     b: 1.0,
     a: 0.22,
 };
-#[allow(dead_code)]
-pub const DIVIDER: Rgba = SEPARATOR;
 
 /// Dark-mode systemBlue / systemRed / systemGreen reference values.
 pub const ACCENT: Rgba = Rgba {
@@ -130,12 +122,6 @@ pub const SUCCESS: Rgba = Rgba {
     a: 1.0,
 };
 
-pub const WINDOW_BG: Rgba = Rgba {
-    r: 0.110,
-    g: 0.110,
-    b: 0.118,
-    a: 1.0,
-};
 /// Settings window fill. Slightly transparent so macOS `Blurred` chrome reads
 /// as dark glass; opaque enough that Linux (no vibrancy) stays legible.
 pub const SETTINGS_GLASS: Rgba = Rgba {
@@ -168,11 +154,8 @@ pub const COMPACT_HEIGHT_OVERFLOW: f32 = 1.0;
 /// rounded rect, not a capsule — half-height rounding ate the 1px wrap.
 pub const COMPACT_RADIUS: f32 = 12.0;
 pub const EXPANDED_RADIUS: f32 = 36.0;
-/// React `WidgetWrapper`: `rounded-[28px]`.
-pub const WIDGET_RADIUS: f32 = 28.0;
 pub const INNER_RADIUS: f32 = 10.0;
 pub const CONTROL_RADIUS: f32 = 8.0;
-pub const CONTENT_INSET: f32 = 12.0;
 /// React expanded pane `p-5` (files tab still uses this).
 pub const EXPANDED_PAD: f32 = 20.0;
 /// Nook tab body: one row under the notch, matching the capsule layout.
@@ -181,16 +164,6 @@ pub const NOOK_INSET: f32 = 16.0;
 /// One Customize-widgets cell on the expanded Nook row.
 pub const NOOK_CELL: f32 = 56.0;
 pub const EXPANDED_MAX_WIDTH: f32 = 780.0;
-/// React widgets row `gap-4`.
-#[allow(dead_code)]
-pub const WIDGET_GAP: f32 = 16.0;
-/// React `WidgetWrapper` padding (`1rem`).
-pub const WIDGET_PAD: f32 = 16.0;
-/// How far a row highlight bleeds back out of the card's content margin. Also
-/// the concentric gap that sets the row's own corner radius.
-pub const ROW_INSET: f32 = 6.0;
-/// React widget row chips: `rounded-[20px]`.
-pub const ROW_RADIUS: f32 = 20.0;
 
 /// A macOS built-in text style: point size, line height, and the two weights
 /// the platform pairs with it.

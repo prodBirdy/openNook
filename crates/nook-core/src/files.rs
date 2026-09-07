@@ -1,8 +1,6 @@
 use crate::database::{get_connection, log_sql};
 use serde::{Deserialize, Serialize};
 use std::fs;
-#[cfg(any(target_os = "macos", target_os = "windows"))]
-use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
@@ -70,36 +68,6 @@ pub fn load_file_tray() -> Result<Vec<FileTrayItem>, String> {
 
 pub fn open_file(path: String) -> Result<(), String> {
     open::that(&path).map_err(|e| e.to_string())
-}
-
-#[allow(unused_variables)]
-pub fn reveal_file(path: String) -> Result<(), String> {
-    #[cfg(target_os = "macos")]
-    {
-        Command::new("/usr/bin/open")
-            .args(["-R", &path])
-            .spawn()
-            .map_err(|e| e.to_string())?;
-    }
-
-    #[cfg(target_os = "windows")]
-    {
-        Command::new("explorer")
-            .args(["/select,", &path])
-            .spawn()
-            .map_err(|e| e.to_string())?;
-    }
-
-    #[cfg(target_os = "linux")]
-    {
-        if let Some(parent) = std::path::Path::new(&path).parent() {
-            open::that(parent).map_err(|e| e.to_string())?;
-        } else {
-            open::that(&path).map_err(|e| e.to_string())?;
-        }
-    }
-
-    Ok(())
 }
 
 pub fn resolve_path(path: String) -> Result<String, String> {
