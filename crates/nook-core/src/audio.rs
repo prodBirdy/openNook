@@ -647,7 +647,7 @@ pub async fn get_now_playing() -> NowPlayingData {
                     load_async.await.ok()?;
                     let mut buffer = vec![0u8; size];
                     reader.ReadBytes(&mut buffer).ok()?;
-                    crate::utils::save_temp_file(&buffer, "png")
+                    crate::utils::encode_bytes_base64(&buffer)
                 });
 
                 IS_PLAYING.store(is_playing, Ordering::Relaxed);

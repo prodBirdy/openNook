@@ -264,16 +264,6 @@ pub fn mime_from_path(path: &str) -> String {
     }
 }
 
-pub fn format_size(bytes: i64) -> String {
-    if bytes < 1024 {
-        format!("{bytes} B")
-    } else if bytes < 1024 * 1024 {
-        format!("{:.0} KB", bytes as f64 / 1024.0)
-    } else {
-        format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -287,13 +277,6 @@ mod tests {
         assert_eq!(mime_from_path("shot.tiff"), "image");
         assert_eq!(mime_from_path("song.m4a"), "audio");
         assert_eq!(mime_from_path("noext"), "file");
-    }
-
-    #[test]
-    fn format_size_buckets() {
-        assert_eq!(format_size(12), "12 B");
-        assert_eq!(format_size(2048), "2 KB");
-        assert_eq!(format_size(1_572_864), "1.5 MB");
     }
 
     #[cfg(target_os = "macos")]

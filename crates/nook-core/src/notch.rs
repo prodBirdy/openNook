@@ -265,10 +265,6 @@ pub fn overlay_window_size() -> (f64, f64) {
     )
 }
 
-pub fn overlay_window_origin() -> (f64, f64) {
-    (0.0, 0.0)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

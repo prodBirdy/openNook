@@ -3761,7 +3761,6 @@ dependencies = [
  "vt100",
  "walkdir",
  "windows 0.52.0",
- "winreg 0.55.0",
  "x11rb",
  "zbus 4.4.0",
 ]
@@ -5223,7 +5222,6 @@ dependencies = [
  "base64",
  "bytes",
  "encoding_rs",
- "futures-channel",
  "futures-core",
  "futures-util",
  "h2",
@@ -5237,7 +5235,6 @@ dependencies = [
  "js-sys",
  "log",
  "mime",
- "mime_guess",
  "native-tls",
  "percent-encoding",
  "pin-project-lite",

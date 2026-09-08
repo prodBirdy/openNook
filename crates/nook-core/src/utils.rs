@@ -1,7 +1,10 @@
-/// Simple base64 encoding using the base64 crate
-pub fn base64_encode(data: &[u8]) -> String {
+/// Encode binary data as a base64 string (album artwork).
+pub fn encode_bytes_base64(data: &[u8]) -> Option<String> {
     use base64::prelude::*;
-    BASE64_STANDARD.encode(data)
+    if data.is_empty() {
+        return None;
+    }
+    Some(BASE64_STANDARD.encode(data))
 }
 
 pub async fn read_response_limited(
@@ -54,7 +57,7 @@ pub async fn fetch_artwork_from_url(url: &str) -> Option<String> {
         let bytes = read_response_limited(response, 5 * 1024 * 1024)
             .await
             .ok()?;
-        Some(base64_encode(&bytes))
+        encode_bytes_base64(&bytes)
     } else {
         None
     }
@@ -90,14 +93,6 @@ pub fn run_osascript(script: &str) -> Result<String, String> {
         }
         Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
     }
-}
-
-/// Encode binary data as a base64 string (used for album artwork).
-pub fn encode_bytes_base64(data: &[u8]) -> Option<String> {
-    if data.is_empty() {
-        return None;
-    }
-    Some(base64_encode(data))
 }
 
 /// Back-compat alias used by the Windows Now Playing path.
