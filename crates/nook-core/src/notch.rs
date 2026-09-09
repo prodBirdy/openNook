@@ -162,7 +162,6 @@ pub fn get_notch_info() -> NotchInfo {
         notch_width,
         screen_width,
         screen_height,
-        visible_height: screen_height - notch_height,
     }
 }
 

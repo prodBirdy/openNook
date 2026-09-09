@@ -1,4 +1,4 @@
-//! Expanded files tab: drop zone, grid, and tiles.
+//! Expanded files tab: drop zone and horizontal tiles.
 
 use super::ui::label;
 use super::{Island, Tab};
@@ -30,33 +30,17 @@ const FILES_NAME: f32 = 12.0;
 const FILES_CAPTION_GAP: f32 = 2.0;
 const FILES_CAPTION_PT: f32 = 8.0;
 
-/// Content width the grid tracks actually lay out in: expanded island minus
-/// the widgets/files pane inset, the dashed drop-zone border, and the grid pad.
-pub(crate) fn file_grid_inner(island_w: f32) -> f32 {
-    (island_w - theme::EXPANDED_PAD * 2.0 - FILES_BORDER * 2.0 - FILES_GAP * 2.0)
-        .max(FILES_MIN_TILE)
-}
-
-pub(crate) fn file_grid_metrics(island_w: f32) -> (u16, f32) {
-    let inner = file_grid_inner(island_w);
-    let cols = ((inner + FILES_GAP) / (FILES_MIN_TILE + FILES_GAP))
-        .floor()
-        .max(1.0);
-    let tile = ((inner - (cols - 1.0) * FILES_GAP) / cols).max(1.0);
-    (cols as u16, tile)
-}
-
 fn file_caption_height() -> f32 {
     FILES_CAPTION_PT + FILES_NAME * 2.0 + FILES_CAPTION_GAP
 }
 
-pub(crate) fn file_tile_height(_tile_w: f32) -> f32 {
+pub(crate) fn file_tile_height() -> f32 {
     TRAY_PREVIEW + file_caption_height()
 }
 
 /// Drop-zone chrome around one row of compact tiles.
-pub(crate) fn files_pane_min_height(_island_w: f32) -> f32 {
-    FILES_BORDER * 2.0 + TRAY_PAD * 2.0 + file_tile_height(TRAY_PREVIEW)
+pub(crate) fn files_pane_min_height() -> f32 {
+    FILES_BORDER * 2.0 + TRAY_PAD * 2.0 + file_tile_height()
 }
 
 /// Newest files first, then reversed so the oldest of that set paints at the
@@ -347,10 +331,6 @@ impl Island {
         pane
     }
 
-    pub(super) fn file_layout(&self) -> (u16, f32) {
-        file_grid_metrics(self.expanded_width())
-    }
-
     #[allow(dead_code)]
     pub(crate) fn clear_files(&mut self, cx: &mut Context<Self>) {
         self.files.clear();
@@ -376,29 +356,6 @@ impl Island {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn tiles_fit_dropzone_inner() {
-        for w in [300.0, 400.0, 548.0, 600.0, 1280.0] {
-            let inner = file_grid_inner(w);
-            let (cols, tile) = file_grid_metrics(w);
-            let used = cols as f32 * tile + (cols.saturating_sub(1) as f32) * FILES_GAP;
-            assert!(
-                used <= inner + 0.05,
-                "w={w} cols={cols} tile={tile} used={used} inner={inner}"
-            );
-            assert!(tile + 0.05 >= FILES_MIN_TILE || cols == 1);
-        }
-    }
-
-    #[test]
-    fn narrow_card_does_not_force_five_columns() {
-        let (cols, _) = file_grid_metrics(300.0);
-        assert!(
-            cols < 5,
-            "a 300pt-wide island cannot fit five 100pt tiles, got {cols}"
-        );
-    }
 
     fn tray_item(path: &str, mime: &str) -> FileTrayItem {
         FileTrayItem {
@@ -428,15 +385,13 @@ mod tests {
 
     #[test]
     fn files_pane_is_at_least_one_tile_tall() {
-        for w in [300.0, 400.0, 548.0, 600.0, 1280.0] {
-            let pane = files_pane_min_height(w);
-            let tile_h = file_tile_height(TRAY_PREVIEW);
-            let chrome = FILES_BORDER * 2.0 + TRAY_PAD * 2.0;
-            assert!(
-                pane + 0.05 >= chrome + tile_h,
-                "w={w} pane={pane} tile_h={tile_h} chrome={chrome}"
-            );
-            assert!(tile_h > TRAY_PREVIEW);
-        }
+        let pane = files_pane_min_height();
+        let tile_h = file_tile_height();
+        let chrome = FILES_BORDER * 2.0 + TRAY_PAD * 2.0;
+        assert!(
+            pane + 0.05 >= chrome + tile_h,
+            "pane={pane} tile_h={tile_h} chrome={chrome}"
+        );
+        assert!(tile_h > TRAY_PREVIEW);
     }
 }

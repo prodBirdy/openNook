@@ -85,7 +85,6 @@ impl SettingsCategory {
 trait WidgetModuleExt {
     fn name(self) -> &'static str;
     fn icon(self) -> &'static str;
-    fn subtitle(self, settings: &AppSettings) -> SharedString;
     fn enabled(self, settings: &AppSettings) -> bool;
     fn set_enabled(self, settings: &mut AppSettings);
     fn preview_label(self) -> &'static str;
@@ -149,21 +148,6 @@ impl WidgetModuleExt for WidgetModule {
         }
     }
 
-    fn subtitle(self, settings: &AppSettings) -> SharedString {
-        match self {
-            Self::Calendar => "7 days".into(),
-            Self::Music => "Now Playing".into(),
-            Self::Files => "Tray tab".into(),
-            Self::Notes => "Scratchpad".into(),
-            Self::Observe => observe_subtitle(settings.observe.metrics.len()),
-            Self::Timers => "Countdown".into(),
-            Self::Reminders => "EventKit".into(),
-            Self::Speed => "Cloudflare".into(),
-            Self::Agents => "Sessions".into(),
-            Self::Mirror => "Camera".into(),
-        }
-    }
-
     fn enabled(self, settings: &AppSettings) -> bool {
         settings.is_enabled(self)
     }
@@ -185,14 +169,6 @@ impl WidgetModuleExt for WidgetModule {
             Self::Agents => "Agents",
             Self::Mirror => "Mirror",
         }
-    }
-}
-
-fn observe_subtitle(pinned: usize) -> SharedString {
-    match pinned {
-        0 => "Prometheus".into(),
-        1 => "1 metric".into(),
-        n => format!("{n} metrics").into(),
     }
 }
 
@@ -1693,22 +1669,6 @@ mod tests {
         assert!(min_w > min_h, "min size stays landscape");
         assert!(min_w >= 680.0 && min_h >= 480.0);
         assert!(w > SIDEBAR_W + 400.0, "pane has room beside the sidebar");
-    }
-
-    #[test]
-    fn calendar_subtitle_uses_the_week_strip_count() {
-        let settings = AppSettings::default();
-        assert_eq!(
-            WidgetModule::Calendar.subtitle(&settings).as_ref(),
-            "7 days"
-        );
-    }
-
-    #[test]
-    fn observe_subtitle_counts_pinned_metrics() {
-        assert_eq!(observe_subtitle(0).as_ref(), "Prometheus");
-        assert_eq!(observe_subtitle(1).as_ref(), "1 metric");
-        assert_eq!(observe_subtitle(5).as_ref(), "5 metrics");
     }
 
     #[test]
