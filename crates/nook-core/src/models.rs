@@ -13,8 +13,6 @@ pub struct NotchInfo {
     pub screen_width: f64,
     /// Full screen height
     pub screen_height: f64,
-    /// The visible (usable) height below the notch
-    pub visible_height: f64,
 }
 
 /// Now Playing track information
