@@ -38,10 +38,10 @@ Release installer (DMG with an Applications drop):
 
 ```bash
 ./scripts/with-metal.sh ./scripts/installer.sh
-open target/openNook-0.2.0.dmg
+open target/openNook-0.3.0.dmg
 ```
 
-See [CHANGELOG.md](CHANGELOG.md) for what landed in 0.2.0.
+See [CHANGELOG.md](CHANGELOG.md) for what landed in 0.3.0.
 
 On macOS the process is an accessory (`LSUIElement` / `NSApplicationActivationPolicyAccessory`): no dock icon. Hover the notch to take mouse events; click or scroll up to expand. Quit and Settings live on the **Nook** menu-bar extra.
 

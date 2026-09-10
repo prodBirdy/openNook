@@ -113,7 +113,7 @@ impl Island {
                     cx.listener(|_, _: &MouseDownEvent, _, cx| {
                         cx.stop_propagation();
                         let _ = std::process::Command::new("/usr/bin/open")
-                            .arg("https://github.com/prodBirdy/openNook-gpui")
+                            .arg("https://github.com/prodBirdy/openNook")
                             .spawn();
                     }),
                 )
