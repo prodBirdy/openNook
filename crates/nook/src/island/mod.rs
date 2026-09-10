@@ -456,7 +456,6 @@ impl Island {
                                     t.running = false;
                                     nook_core::haptics::trigger(Some(nook_core::haptics::HapticConfig {
                                         pattern: nook_core::haptics::HapticPattern::Success,
-                                        intensity: 1.0,
                                     }));
                                 }
                             }
