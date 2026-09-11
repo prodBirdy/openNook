@@ -543,14 +543,6 @@ pub type MetricHistory = HashMap<String, Vec<(u64, f64)>>;
 /// Append this poll's samples onto `store` and copy a chart series onto each
 /// reading. Counters are stored raw and charted as per-minute rates so a 30
 /// min / 5 h window stays comparable.
-pub fn record_history(
-    store: &mut MetricHistory,
-    snap: &mut ObserveSnapshot,
-    window: ObserveWindow,
-) {
-    record_history_at(store, snap, window.duration_ms(), now_ms(), true);
-}
-
 pub fn record_history_range(
     store: &mut MetricHistory,
     snap: &mut ObserveSnapshot,
@@ -728,15 +720,6 @@ fn chart_values_for(
 
 /// Requests (and other counters) in `[now - window, now]`: last sample minus
 /// the last sample at or before the window start. Resets count as the new total.
-pub fn window_count(
-    query: &str,
-    history: &[(u64, f64)],
-    window: ObserveWindow,
-    now: u64,
-) -> Option<f64> {
-    window_count_for(query, history, window.duration_ms(), now)
-}
-
 fn window_count_for(
     query: &str,
     history: &[(u64, f64)],
@@ -838,42 +821,6 @@ pub fn format_chart_sample(query: &str, value: f64) -> String {
     } else {
         sample
     }
-}
-
-pub fn format_chart_age(t: f32, window: ObserveWindow) -> String {
-    let ago_ms = (1.0 - t.clamp(0.0, 1.0)) as f64 * window.duration_ms() as f64;
-    if ago_ms < 20_000.0 {
-        return "now".into();
-    }
-    let mins = (ago_ms / 60_000.0).round().max(1.0) as u64;
-    if mins < 60 {
-        if mins == 1 {
-            "1 min ago".into()
-        } else {
-            format!("{mins} min ago")
-        }
-    } else {
-        let hours = mins / 60;
-        let rem = mins % 60;
-        if rem == 0 {
-            if hours == 1 {
-                "1 h ago".into()
-            } else {
-                format!("{hours} h ago")
-            }
-        } else {
-            format!("{hours} h {rem} min ago")
-        }
-    }
-}
-
-pub fn nearest_chart_point(series: &[ChartPoint], t: f32) -> Option<ChartPoint> {
-    series.iter().copied().min_by(|a, b| {
-        (a.t - t)
-            .abs()
-            .partial_cmp(&(b.t - t).abs())
-            .unwrap_or(std::cmp::Ordering::Equal)
-    })
 }
 
 pub fn format_sample(value: f64) -> String {
@@ -1426,16 +1373,6 @@ mod tests {
         assert_eq!(format_sample(2_500_000.0), "2.50M");
         assert_eq!(format_chart_sample("total_requests", 60.0), "60/min");
         assert_eq!(format_chart_sample("slow", 3.0), "3");
-        assert_eq!(format_chart_age(1.0, ObserveWindow::ThirtyMinutes), "now");
-        assert_eq!(
-            format_chart_age(0.0, ObserveWindow::ThirtyMinutes),
-            "30 min ago"
-        );
-        let pts = [
-            ChartPoint { t: 0.1, value: 1.0 },
-            ChartPoint { t: 0.8, value: 9.0 },
-        ];
-        assert_eq!(nearest_chart_point(&pts, 0.75).unwrap().value, 9.0);
     }
 
     #[test]
@@ -1592,37 +1529,6 @@ mod tests {
         assert!((pts.last().unwrap().value - 9.0).abs() < 1e-9);
         assert!(pts.last().unwrap().t > 0.9);
         assert!(pts[0].t < 0.15);
-    }
-
-    #[test]
-    fn requests_sum_follows_the_visible_window() {
-        let now = 6 * 60 * 60 * 1000;
-        let history = vec![
-            (now - 6 * 60 * 60 * 1000, 0.0),
-            (now - 30 * 60 * 1000, 100.0),
-            (now, 110.0),
-        ];
-        assert_eq!(
-            window_count(
-                "total_requests",
-                &history,
-                ObserveWindow::ThirtyMinutes,
-                now
-            ),
-            Some(10.0)
-        );
-        assert_eq!(
-            window_count("total_requests", &history, ObserveWindow::FiveHours, now),
-            Some(110.0)
-        );
-        assert_eq!(
-            window_count("total_requests", &history, ObserveWindow::OneDay, now),
-            Some(110.0)
-        );
-        assert_eq!(
-            window_count("slow", &history, ObserveWindow::OneDay, now),
-            None
-        );
     }
 
     #[test]
