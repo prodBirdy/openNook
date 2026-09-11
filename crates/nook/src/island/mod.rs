@@ -1190,16 +1190,22 @@ impl Island {
                 .await;
             if this
                 .update(cx, |this, cx| {
+                    // Fetch still runs every 30s; notify only when the
+                    // published events, reminders, or notes actually change.
+                    let mut changed = this.events != events || this.reminders != reminders;
                     this.events = events;
                     this.reminders = reminders;
                     if !this.notes_editing {
                         if let Ok(notes) = nook_core::notes::load_notes() {
                             if this.notes != notes {
                                 this.notes = notes;
+                                changed = true;
                             }
                         }
                     }
-                    cx.notify();
+                    if changed {
+                        cx.notify();
+                    }
                 })
                 .is_err()
             {

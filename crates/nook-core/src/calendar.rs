@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct CalendarEvent {
     pub id: String,
     pub title: String,
@@ -9,7 +9,7 @@ pub struct CalendarEvent {
     pub is_all_day: bool,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct Reminder {
     pub id: String,
     pub title: String,
