@@ -3847,6 +3847,7 @@ dependencies = [
  "tokio",
  "windows 0.52.0",
  "winreg",
+ "x11rb",
  "zbus 4.4.0",
 ]
 

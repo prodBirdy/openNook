@@ -238,8 +238,75 @@ fn read_mouse_logical() -> (f64, f64) {
     }
     #[cfg(target_os = "linux")]
     {
-        (0.0, 0.0)
+        linux_read_pointer()
     }
+}
+
+/// X11 `QueryPointer` on the root window. `root_x`/`root_y` are already
+/// screen-logical y-down, matching [`update_ui_bounds`].
+///
+/// Soft-fail: missing `DISPLAY`, X11 connect failure, or Wayland-only
+/// (no XWayland) logs once and keeps returning `(0.0, 0.0)` so the app still runs.
+#[cfg(target_os = "linux")]
+fn linux_read_pointer() -> (f64, f64) {
+    use std::sync::OnceLock;
+    use x11rb::protocol::xproto::ConnectionExt as _;
+    use x11rb::rust_connection::RustConnection;
+
+    static CONN: OnceLock<Option<(RustConnection, u32)>> = OnceLock::new();
+
+    let Some((conn, root)) = CONN
+        .get_or_init(|| match open_x11_pointer() {
+            Ok(pair) => Some(pair),
+            Err(reason) => {
+                log::warn!("linux pointer: {reason}; hover-to-expand disabled");
+                None
+            }
+        })
+        .as_ref()
+    else {
+        return (0.0, 0.0);
+    };
+
+    conn.query_pointer(*root)
+        .ok()
+        .and_then(|cookie| cookie.reply().ok())
+        .map(|reply| x11_root_to_logical(reply.root_x, reply.root_y))
+        .unwrap_or((0.0, 0.0))
+}
+
+#[cfg(target_os = "linux")]
+fn linux_pointer_block_reason(display: Option<&std::ffi::OsStr>) -> Option<&'static str> {
+    if display.is_none() {
+        Some("DISPLAY unset (Wayland-only or headless)")
+    } else {
+        None
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn open_x11_pointer() -> Result<(x11rb::rust_connection::RustConnection, u32), String> {
+    use x11rb::connection::Connection;
+
+    if let Some(reason) = linux_pointer_block_reason(std::env::var_os("DISPLAY").as_deref()) {
+        return Err(reason.into());
+    }
+    let (conn, screen_num) =
+        x11rb::connect(None).map_err(|err| format!("X11 connect failed: {err}"))?;
+    let root = conn
+        .setup()
+        .roots
+        .get(screen_num)
+        .map(|screen| screen.root)
+        .ok_or_else(|| "X11 screen missing".to_string())?;
+    Ok((conn, root))
+}
+
+/// QueryPointer root pixels are already y-down from the root origin.
+/// Do not flip against screen height the way macOS `NSEvent` does.
+#[cfg(target_os = "linux")]
+fn x11_root_to_logical(root_x: i16, root_y: i16) -> (f64, f64) {
+    (f64::from(root_x), f64::from(root_y))
 }
 
 #[cfg(test)]
@@ -354,5 +421,21 @@ mod tests {
             "padded capture box around the island still works"
         );
         super::DRAG_ACTIVE.store(false, Ordering::Relaxed);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn x11_root_coords_stay_y_down() {
+        assert_eq!(super::x11_root_to_logical(850, 12), (850.0, 12.0));
+        assert_eq!(super::x11_root_to_logical(0, 0), (0.0, 0.0));
+        assert_eq!(super::x11_root_to_logical(-8, 40), (-8.0, 40.0));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_pointer_soft_fails_without_display() {
+        let reason = super::linux_pointer_block_reason(None).expect("headless is a soft-fail");
+        assert!(reason.contains("DISPLAY unset"), "{reason}");
+        assert!(super::linux_pointer_block_reason(Some(std::ffi::OsStr::new(":1"))).is_none());
     }
 }

@@ -39,3 +39,4 @@ futures-executor = "0.3"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 zbus = "4.0"
+x11rb = "0.13"
