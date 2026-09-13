@@ -4,23 +4,59 @@
 //! directly instead of going through `invoke`.
 
 pub mod agents;
+pub mod apps;
 pub mod audio;
+pub mod audio_devices;
+pub mod automation;
+pub mod brightness;
 pub mod browser_media;
 pub mod calendar;
 pub mod database;
+pub mod eventtap;
+pub mod ffi;
 pub mod files;
+pub mod focus;
 pub mod haptics;
+pub mod high_alert;
+pub mod location;
+pub mod login_item;
 #[cfg(target_os = "macos")]
+pub mod lyrics;
+#[cfg(any(target_os = "macos", test))]
 mod mediaremote;
+pub mod meetings;
+pub mod messages;
 pub mod models;
+pub mod motion_artwork;
 pub mod mouse;
+pub mod nl_parse;
 pub mod notch;
 pub mod notes;
+pub mod notifications;
 pub mod observe;
+pub mod obsidian;
 pub mod occupancy;
+pub mod osd;
+pub mod pomodoro;
+pub mod power;
+pub mod queue;
+pub mod recorder;
 pub mod settings;
+pub mod share;
+pub mod shell;
+pub mod shortcuts;
+pub mod spotify;
+pub mod sysstats;
+pub mod system_timers;
+pub mod sysvol;
+pub mod ui_tick;
 pub mod utils;
+pub mod vpn;
+pub mod weather;
 pub mod widgets;
+
+pub use models::NowPlayingData;
+pub use settings::AppSettings;
 
 use std::sync::{Once, OnceLock};
 use tokio::runtime::Runtime;
@@ -48,7 +84,7 @@ pub fn app_data_dir() -> std::path::PathBuf {
     dir
 }
 
-/// One-shot init for caches, sqlite, and audio visualizer thread.
+/// One-shot init for caches and sqlite.
 pub fn init() {
     INIT.call_once(|| {
         let _ = runtime();
@@ -58,7 +94,26 @@ pub fn init() {
             settings::load_from_db();
         }
         audio::init_audio_state();
-        audio::setup_audio_monitoring();
+        audio_devices::start();
+        crate::spotify::hydrate_status();
         mouse::start_polling();
+        power::start();
+        {
+            let settings = settings::get_app_settings();
+            if settings.show_messages {
+                messages::start_watchers();
+            }
+            if settings.sync_clock_timers {
+                system_timers::start_watcher();
+            }
+            if settings.show_vpn {
+                vpn::start();
+            }
+        }
+        sysvol::start();
+        brightness::start();
+        osd::install();
+        shell::reap_orphaned_jobs();
+        notifications::load_persisted();
     });
 }

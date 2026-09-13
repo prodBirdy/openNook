@@ -15,7 +15,7 @@ where
 
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
-        .user_agent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36")
+        .user_agent("openNook (https://github.com/prodBirdy/openNook)")
         .build()
         .map_err(|e| e.to_string())?;
 
@@ -27,6 +27,10 @@ where
     for test_url in test_urls {
         match client.get(test_url).send().await {
             Ok(response) => {
+                let expected = response
+                    .content_length()
+                    .filter(|&n| n > 0)
+                    .unwrap_or(25_000_000);
                 let mut stream = response.bytes_stream();
                 let start = Instant::now();
                 let mut total_bytes = 0u64;
@@ -45,7 +49,9 @@ where
                                 let mbps = bps / 1_000_000.0;
                                 last_sample_time = Instant::now();
                                 sent_first = true;
-                                let progress = ((elapsed / max_duration) * 100.0).min(100.0);
+                                let by_time = elapsed / max_duration;
+                                let by_bytes = total_bytes as f64 / expected as f64;
+                                let progress = (by_time.max(by_bytes) * 100.0).min(100.0);
                                 on_progress(SpeedSample {
                                     speed: mbps,
                                     progress,

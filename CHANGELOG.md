@@ -5,6 +5,70 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 1.0.0 - 2026-09-12
+
+The first open-source 1.0 release.
+
+### Changed
+
+- Applied a HIG design pass across the app, including clearer permissions, keyboard access, Reduce Motion and Reduce Transparency, Increase Contrast, and Differentiate Without Color.
+- Trimmed the visible product to the baseline widget set: Agents, Media, Calendar, Reminders, Timers, Weather, Battery, Files, Notes, Speed, and Mirror. Experimental widgets remain behind a Settings toggle.
+- Media controls now use an optimistic interaction model, expanded cards keep a consistent width, and an empty Now Playing card still provides a player surface.
+- The Nook tab is now a wrapping grid of up to three rows (11 cells each), so more than two or three widgets can be on the island at once; widget sizes Small/Medium/Large set how much of a row a widget takes.
+
+### Removed
+
+- Search, including clipboard history, keyboard sounds, smooth scrolling, window snap, Thaw menu-bar hiding, public-link sharing, and the menu-bar status item.
+
+### Fixed
+
+- Media scrubber seeks stay optimistic: the time thumb no longer snaps back
+  while MediaRemote is still catching up to the seek command.
+- Term tab aborted on wheel-scroll (and when collapsing the island while
+  scrolled): vt100 subtracted `rows - scrollback_offset` and overflowed
+  once the viewport moved more than one screen into history.
+- The LocalSend drop target is hidden when the LocalSend app is not installed,
+  so the tray does not offer a share path that cannot run.
+- Hovering a Finder file over the island did not open the file tray: the mouse
+  thread sampled NSPasteboard off the main thread and could poison the drag
+  baseline, so inbound drags never armed the dropzone.
+- Term tab clipped the last lines of a login-shell TUI: the PTY claimed the
+  pane's full height on top of the "login shell" header, and the island stayed
+  at the widget-row size.
+
+### Changed
+
+- Coding-agent faces use each agent's logo as a mask over a Magic UI glyph
+  matrix (`01·•+*/\<>=`), tinted with that agent's brand color. The island
+  border uses the same brand on the compact Agents face and while expanded.
+- Detects the Pi coding-agent harness (`pi` / `pi-coding-agent`).
+- Now Playing blooms a darkened, radially faded blur of the album artwork
+  behind the cover, so grayscale tracks don't turn the pane into a gray card.
+- Terminal is a real login-shell PTY instead of the one-shot command field,
+  so typing, control keys, and interactive programs work like the machine CLI.
+- Messages is an incoming-only quick reply on the island instead of a
+  conversation inbox. The pane appears when a message arrives, with a sender
+  lockup and a reply field; Escape dismisses it.
+- Voice recordings list as dated memos with a ringed record/stop control,
+  matching a native memo list instead of a count plus mic icon.
+
+### Packaging
+
+- Linux GPUI artifact: `cargo build --release -p nook` on Ubuntu, uploaded as
+  `openNook-0.3.0-x86_64-unknown-linux-gnu.tar.gz` from `.github/workflows/linux-release.yml`
+  (`workflow_dispatch` or a `v*-linux` tag). Publishes `v0.3.0-linux`; does not
+  retag or rewrite the macOS `v0.3.0` notes.
+- This is the current GPUI product. It is not the Tauri `0.0.2a` AppImage.
+
+Linux compact is the Idle housing wrap (no “openNook” title), top-center on
+the real X11 `DisplayWidth` / `DisplayHeight`. Hover polling is still
+stubbed — click or scroll the painted island.
+
+Linux does not get Metal, camera-housing notch metrics, MediaRemote, Liquid
+Glass, camera Mirror, AirDrop, AppKit file drag-out,
+EventKit, hide-when-maximized occupancy, or `installer.dmg`. Settings / Quit:
+Ctrl+, and Ctrl+Q.
+
 ## [0.3.0] - 2026-08-23
 
 Settings rebuilt as a native sidebar window, a compact island that hugs the
@@ -55,7 +119,7 @@ only.
 
 ### Added
 
-- Native GPUI island (transparent `PopUp` window, no dock icon, Nook menu-bar extra)
+- Native GPUI island (transparent `PopUp` window, no dock icon)
 - Hardware-notch compact pill with hover, click, and scroll-to-expand
 - Now Playing via MediaRemote on macOS 15.4+ (AppleScript fallback), with play / pause / skip
 - GPU visualizer tinted from album artwork
@@ -95,3 +159,4 @@ only.
 
 [0.3.0]: https://github.com/prodBirdy/openNook/releases/tag/v0.3.0
 [0.2.0]: https://github.com/prodBirdy/openNook/releases/tag/v0.2.0
+[1.0.0]: https://github.com/prodBirdy/openNook/compare/v0.3.0...v1.0.0

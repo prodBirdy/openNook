@@ -1,3 +1,6 @@
 # GPUI compiles Metal shaders via xcrun. Command Line Tools do not ship `metal`.
 # Don't hard-code DEVELOPER_DIR here — use ./scripts/with-metal.sh so every
 # contributor's toolchain path can differ.
+
+[alias]
+dev = ["watch", "-x", "run -p nook"]

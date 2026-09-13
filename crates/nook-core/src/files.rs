@@ -134,6 +134,12 @@ pub fn take_outbound_drag() -> Option<(String, bool)> {
     Some((path, OUTBOUND_DROPPED.load(Ordering::SeqCst)))
 }
 
+#[cfg(target_os = "macos")]
+fn on_main_thread() -> bool {
+    use objc2::*;
+    unsafe { msg_send![class!(NSThread), isMainThread] }
+}
+
 /// True while the user is dragging files (Finder / another app) on macOS.
 /// Used to punch a hole in click-through so the island can receive the drop.
 /// Our own tray → Finder session is excluded so drop-in UI does not arm.
@@ -154,14 +160,21 @@ pub fn file_drag_active() -> bool {
         use objc2::*;
         use std::sync::atomic::Ordering;
 
+        // NSPasteboard is main-thread only. A background read can return null
+        // or a stale changeCount, and the release-edge path writes that into
+        // `DRAG_PB_IDLE` — after which inbound Finder drags never arm the tray.
+        if !on_main_thread() {
+            return false;
+        }
+
         unsafe {
             // Cheap check first: `pressedMouseButtons` is a shared-memory read,
             // while `changeCount` is an XPC round-trip to the pasteboard server.
-            // This runs 30-50×/sec from the mouse thread, so at idle (button up)
-            // the pasteboard must not be touched at all. A drag pasteboard can
-            // only change while the left button is held, so re-baselining once
-            // per release keeps the baseline exactly as fresh as re-reading it
-            // every tick did.
+            // The island UI tick and NSEvent monitors call this on the main
+            // thread; at idle (button up) the pasteboard must not be touched
+            // at all. A drag pasteboard can only change while the left button
+            // is held, so re-baselining once per release keeps the baseline
+            // exactly as fresh as re-reading it every tick did.
             let buttons: usize = msg_send![class!(NSEvent), pressedMouseButtons];
             if buttons & 1 == 0 {
                 if DRAG_PB_WAS_DOWN.swap(false, Ordering::Relaxed)
@@ -233,16 +246,18 @@ pub fn add_dropped_path(path: &str) -> Result<FileTrayItem, String> {
     })
 }
 
-pub(crate) fn mime_from_path(path: &str) -> String {
+pub fn mime_from_path(path: &str) -> String {
     match std::path::Path::new(path)
         .extension()
         .and_then(|e| e.to_str())
         .map(|s| s.to_ascii_lowercase())
         .as_deref()
     {
-        Some("png" | "jpg" | "jpeg" | "gif" | "webp" | "heic") => "image".into(),
-        Some("mp4" | "mov" | "mkv") => "video".into(),
-        Some("mp3" | "wav" | "aac" | "flac") => "audio".into(),
+        Some(
+            "png" | "jpg" | "jpeg" | "gif" | "webp" | "heic" | "heif" | "tif" | "tiff" | "bmp",
+        ) => "image".into(),
+        Some("mp4" | "mov" | "m4v" | "mkv" | "webm") => "video".into(),
+        Some("mp3" | "wav" | "aac" | "flac" | "m4a" | "aiff" | "caf" | "alac") => "audio".into(),
         Some("pdf") => "pdf".into(),
         Some("zip" | "tar" | "gz") => "archive".into(),
         _ => "file".into(),
@@ -257,8 +272,38 @@ mod tests {
     fn mime_from_common_extensions() {
         assert_eq!(mime_from_path("a.PNG"), "image");
         assert_eq!(mime_from_path("clip.mp4"), "video");
+        assert_eq!(mime_from_path("clip.m4v"), "video");
         assert_eq!(mime_from_path("doc.pdf"), "pdf");
+        assert_eq!(mime_from_path("shot.tiff"), "image");
+        assert_eq!(mime_from_path("song.m4a"), "audio");
         assert_eq!(mime_from_path("noext"), "file");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn background_probe_does_not_write_drag_pasteboard_baseline() {
+        struct Restore;
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                DRAG_PB_IDLE.store(i64::MIN, Ordering::Relaxed);
+                DRAG_PB_WAS_DOWN.store(false, Ordering::Relaxed);
+            }
+        }
+        let _restore = Restore;
+        DRAG_PB_IDLE.store(42, Ordering::Relaxed);
+        // Release-edge is the path that re-baselines. A background thread that
+        // sees it will write whatever NSPasteboard returns off-main — including
+        // `i64::MIN` when the pasteboard call fails — and then inbound Finder
+        // drags never arm the tray.
+        DRAG_PB_WAS_DOWN.store(true, Ordering::Relaxed);
+        let _ = std::thread::spawn(file_drag_active)
+            .join()
+            .expect("probe thread");
+        assert_eq!(
+            DRAG_PB_IDLE.load(Ordering::Relaxed),
+            42,
+            "off-thread pasteboard reads must not move the idle baseline"
+        );
     }
 
     #[test]

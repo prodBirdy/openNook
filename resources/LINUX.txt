@@ -1,0 +1,28 @@
+GPUI 0.3.0 Linux build.
+macOS notch/Metal features unavailable.
+Not the old Tauri 0.0.2a line.
+Does not rewrite the macOS v0.3.0 dmg notes.
+
+Run: ./nook
+Needs a Vulkan-capable GPU driver, plus libxkbcommon and
+libwayland or X11 libraries at runtime.
+
+Compact island: Idle housing wrap, no app title, top-center,
+no window-manager decorations (no title bar / min / max / close).
+Screen size comes from X11 DisplayWidth / DisplayHeight (not a
+hardcoded 1920×1080 canvas). Settings, expanded island, and the
+file tray have been proven on Linux.
+
+Hover-to-expand uses global mouse polling, which is still stubbed
+on Linux (cursor reports 0,0). Click or scroll the painted island.
+Ctrl+, opens Settings; Ctrl+Q quits.
+
+Unavailable on this build:
+- Metal shaders / scripts/with-metal.sh
+- camera-housing notch metrics (no hardware notch)
+- MediaRemote Now Playing (Linux uses MPRIS when a player is running)
+- NSGlassEffectView / Liquid Glass
+- NSStatusItem menu-bar extra
+- camera Mirror, AirDrop, AppKit file drag-out
+- EventKit Calendar/Reminders, hide-when-maximized occupancy
+- installer.dmg

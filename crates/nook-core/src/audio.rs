@@ -1,12 +1,15 @@
-use crate::models::NowPlayingData;
+use crate::models::{NowPlayingData, QueueItem};
 use crate::utils::fetch_artwork_from_url;
 
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::OnceLock;
+use std::time::Duration;
+use tokio::sync::Notify;
 
-/// Global state for audio levels (updated by audio monitoring thread)
+/// Global resting audio levels (visualizer paints its own clock-driven bars).
 static AUDIO_LEVELS: std::sync::OnceLock<std::sync::Mutex<Vec<f64>>> = std::sync::OnceLock::new();
 
-/// Global state to track if media is playing (to pause simulation)
+/// Global state to track if media is playing
 static IS_PLAYING: AtomicBool = AtomicBool::new(false);
 
 /// Track if we were playing in the previous poll cycle (to detect resume)
@@ -25,6 +28,8 @@ pub fn init_audio_state() {
     let _ = AUDIO_LEVELS.set(std::sync::Mutex::new(vec![0.15; 6]));
     let _ = TRACK_CACHE.set(std::sync::Mutex::new((None, None, None)));
     let _ = LAST_PLAYED.set(std::sync::Mutex::new(None));
+    #[cfg(target_os = "macos")]
+    crate::mediaremote::ensure_stream();
 }
 
 fn lock_mutex<T>(m: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -38,15 +43,44 @@ fn get_audio_levels_internal() -> Vec<f64> {
         .unwrap_or_else(|| vec![0.15; 6])
 }
 
-fn set_audio_levels(levels: Vec<f64>) {
-    if let Some(m) = AUDIO_LEVELS.get() {
-        *lock_mutex(m) = levels;
-    }
-}
-
-/// Get current audio levels for visualizer (lightweight, no AppleScript calls)
+/// Resting visualizer levels (paint computes live bars from [`visualizer_levels_at`]).
 pub fn get_audio_levels() -> Vec<f64> {
     get_audio_levels_internal()
+}
+
+/// Synthetic six-band levels as a pure function of time. Used by the compact
+/// Media visualizer paint path — no dedicated thread, no island-tick dirties.
+pub fn visualizer_levels_at(t: f64) -> [f64; 6] {
+    let energy_wave = (t * 0.15).sin() * 0.3 + 0.9;
+    // Soft energy envelope (was an EMA on the old 30 fps thread).
+    let energy = 0.5 * 0.7 + energy_wave * 0.3;
+    // ~160 BPM beat pulse.
+    let beat_phase = t * 2.67 * std::f64::consts::TAU;
+    let beat = (beat_phase.sin().max(0.0)).powf(4.0);
+
+    let noise = |band: u64| -> f64 {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let mut hasher = DefaultHasher::new();
+        ((t * 15.0) as u64)
+            .wrapping_mul(31)
+            .wrapping_add(band)
+            .hash(&mut hasher);
+        (hasher.finish() % 1000) as f64 / 1000.0 - 0.5
+    };
+
+    let mut levels = [
+        energy * (0.4 + beat * 0.5 + noise(0) * 0.1),
+        energy * (0.35 + beat * 0.3 + (t * 3.2).sin() * 0.15 + noise(1) * 0.08),
+        energy * (0.3 + (t * 5.7).sin() * 0.2 + (t * 7.3).cos() * 0.1 + noise(2) * 0.1),
+        energy * (0.28 + (t * 4.1).sin() * 0.18 + (t * 6.8).cos() * 0.12 + noise(3) * 0.08),
+        energy * (0.22 + (t * 8.3).sin() * 0.15 + beat * 0.1 + noise(4) * 0.1),
+        energy * (0.18 + (t * 11.2).sin() * 0.1 + (t * 9.7).cos() * 0.08 + noise(5) * 0.06),
+    ];
+    for level in &mut levels {
+        *level = level.clamp(0.08, 0.92);
+    }
+    levels
 }
 
 #[cfg(target_os = "macos")]
@@ -110,7 +144,8 @@ async fn now_playing_from_adapter(track: crate::mediaremote::AdapterTrack) -> No
     if artwork.is_none() {
         artwork = track.artwork_base64.clone();
     }
-    if crate::browser_media::is_browser(track.app_name.as_deref(), track.bundle_id.as_deref())
+    if crate::settings::get_app_settings().browser_artwork
+        && crate::browser_media::is_browser(track.app_name.as_deref(), track.bundle_id.as_deref())
         && (track_changed || just_started || artwork.is_none())
     {
         if let Some(resolved) = crate::browser_media::resolve_artwork(
@@ -138,6 +173,7 @@ async fn now_playing_from_adapter(track: crate::mediaremote::AdapterTrack) -> No
         audio_levels: Some(get_audio_levels_internal()),
         app_name: track.app_name,
         bundle_id: track.bundle_id,
+        motion_artwork_url: None,
     };
     save_last_played(&data);
     data
@@ -306,12 +342,101 @@ fn safari_artwork_url<'a>(page_url: &str, artwork_url: &'a str) -> Option<&'a st
 /// waiting out its idle cadence.
 static MEDIA_EVENT: AtomicBool = AtomicBool::new(false);
 
+/// Launch Services snapshot of the AppleScript fallback players, refreshed
+/// from `NSWorkspace` launch/terminate notifications instead of walking the
+/// process table. Bit0 = primed, bit1 = Spotify, bit2 = Music, bit3 = Safari.
+static MEDIA_APPS: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+const MEDIA_APPS_PRIMED: u8 = 1 << 0;
+const MEDIA_APP_SPOTIFY: u8 = 1 << 1;
+const MEDIA_APP_MUSIC: u8 = 1 << 2;
+const MEDIA_APP_SAFARI: u8 = 1 << 3;
+
+static MEDIA_WAKE: OnceLock<Notify> = OnceLock::new();
+
+fn media_wake() -> &'static Notify {
+    MEDIA_WAKE.get_or_init(Notify::new)
+}
+
 pub fn note_media_event() {
     MEDIA_EVENT.store(true, Ordering::Relaxed);
+    media_wake().notify_waiters();
 }
 
 pub fn take_media_event() -> bool {
     MEDIA_EVENT.swap(false, Ordering::Relaxed)
+}
+
+/// Park until a playback-change poke or `timeout`.
+///
+/// The island now-playing loop uses this so idle is one timer, not a 250 ms
+/// poll of the event flag. Subscribe before checking the flag so a poke that
+/// lands in between cannot be missed.
+pub async fn wait_media_or_timeout(timeout: Duration) {
+    let notified = media_wake().notified();
+    tokio::pin!(notified);
+    if MEDIA_EVENT.swap(false, Ordering::Relaxed) {
+        return;
+    }
+    tokio::select! {
+        _ = notified => {
+            let _ = MEDIA_EVENT.swap(false, Ordering::Relaxed);
+        }
+        _ = tokio::time::sleep(timeout) => {}
+    }
+}
+
+/// Record that a media-capable app launched or quit. Unknown bundle ids are
+/// ignored so the workspace observers can be wired to every app event.
+pub fn note_media_app_running(bundle_id: &str, running: bool) {
+    let bit = match bundle_id {
+        "com.spotify.client" => MEDIA_APP_SPOTIFY,
+        "com.apple.Music" => MEDIA_APP_MUSIC,
+        "com.apple.Safari" => MEDIA_APP_SAFARI,
+        _ => return,
+    };
+    let mut packed = MEDIA_APPS.load(Ordering::Relaxed) | MEDIA_APPS_PRIMED;
+    if running {
+        packed |= bit;
+    } else {
+        packed &= !bit;
+    }
+    MEDIA_APPS.store(packed, Ordering::Relaxed);
+}
+
+/// `(spotify, music, safari)` from the launch/terminate cache, priming via
+/// `NSRunningApplication` once if no observer has run yet.
+#[cfg(target_os = "macos")]
+fn media_players_running() -> (bool, bool, bool) {
+    let packed = MEDIA_APPS.load(Ordering::Relaxed);
+    if packed & MEDIA_APPS_PRIMED == 0 {
+        return prime_media_apps();
+    }
+    (
+        packed & MEDIA_APP_SPOTIFY != 0,
+        packed & MEDIA_APP_MUSIC != 0,
+        packed & MEDIA_APP_SAFARI != 0,
+    )
+}
+
+/// Seed the media-app bits from Launch Services. Called from
+/// `install_media_observers` so the first AppleScript poll does not race.
+#[cfg(target_os = "macos")]
+pub fn prime_media_apps() -> (bool, bool, bool) {
+    let spotify = app_running(c"com.spotify.client");
+    let music = app_running(c"com.apple.Music");
+    let safari = app_running(c"com.apple.Safari");
+    let mut packed = MEDIA_APPS_PRIMED;
+    if spotify {
+        packed |= MEDIA_APP_SPOTIFY;
+    }
+    if music {
+        packed |= MEDIA_APP_MUSIC;
+    }
+    if safari {
+        packed |= MEDIA_APP_SAFARI;
+    }
+    MEDIA_APPS.store(packed, Ordering::Relaxed);
+    (spotify, music, safari)
 }
 
 /// Whether an app with this bundle id is running, via Launch Services.
@@ -337,7 +462,8 @@ fn app_running(bundle_id: &std::ffi::CStr) -> bool {
 /// Get currently playing music information.
 ///
 /// On macOS this prefers MediaRemote via [mediaremote-adapter]
-/// (`get --now`), which works for any now-playing app on 15.4+.
+/// (live `stream` cell, `get --now` only as primer / fallback),
+/// which works for any now-playing app on 15.4+.
 /// AppleScript (Spotify / Music / Safari) is the fallback.
 ///
 /// [mediaremote-adapter]: https://github.com/ungive/mediaremote-adapter
@@ -362,11 +488,7 @@ pub async fn get_now_playing() -> NowPlayingData {
         // Services' in-process app list — no walk of the whole process table
         // (the sysinfo refresh this replaces enumerated every pid on the
         // system each poll, a measurable slice of idle CPU).
-        let (spotify_running, music_running, safari_running) = (
-            app_running(c"com.spotify.client"),
-            app_running(c"com.apple.Music"),
-            app_running(c"com.apple.Safari"),
-        );
+        let (spotify_running, music_running, safari_running) = media_players_running();
 
         // If no relevant apps are running, return early with no overhead
         if !spotify_running && !music_running && !safari_running {
@@ -454,6 +576,7 @@ pub async fn get_now_playing() -> NowPlayingData {
                         "safari" => Some("com.apple.Safari".into()),
                         _ => None,
                     },
+                    motion_artwork_url: None,
                 };
 
                 save_last_played(&data);
@@ -540,6 +663,7 @@ pub async fn get_now_playing() -> NowPlayingData {
                     audio_levels: Some(get_audio_levels_internal()),
                     app_name: Some("System".to_string()),
                     bundle_id: None,
+                    motion_artwork_url: None,
                 })
             })();
 
@@ -663,6 +787,7 @@ pub async fn get_now_playing() -> NowPlayingData {
                                 audio_levels: Some(get_audio_levels_internal()),
                                 app_name: Some(name.replace("org.mpris.MediaPlayer2.", "")),
                                 bundle_id: None,
+                                motion_artwork_url: None,
                             };
                             save_last_played(&data);
                             return data;
@@ -676,29 +801,18 @@ pub async fn get_now_playing() -> NowPlayingData {
     }
 }
 
-#[cfg(target_os = "macos")]
-fn run_osascript(script: &str) -> Result<String, String> {
-    use std::process::Command;
-    let output = Command::new("/usr/bin/osascript")
-        .arg("-e")
-        .arg(script)
-        .output()
-        .map_err(|e| e.to_string())?;
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    if !output.status.success() {
-        log::warn!("osascript failed ({}): {stderr}", output.status);
-        if stderr.contains("-1743") || stderr.to_lowercase().contains("not allowed") {
-            log::warn!(
-                "Automation permission denied. Grant access in System Settings → Privacy & Security → Automation."
-            );
-        }
-        return Err(format!("osascript failed: {}", output.status));
-    }
-    if !stderr.is_empty() {
-        log::debug!("osascript stderr: {stderr}");
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+/// Jump to an Up Next row. Music uses `play track i of current playlist`;
+/// Spotify uses context+offset or N sequential nexts.
+pub async fn media_jump_to_queue_item(
+    item: QueueItem,
+    context_uri: Option<String>,
+) -> Result<(), String> {
+    note_media_event();
+    crate::queue::jump_to_item(&item, context_uri.as_deref()).await
 }
+
+#[cfg(target_os = "macos")]
+use crate::utils::run_osascript;
 
 /// Get artwork from Music.app using AppleScript to write under the app data dir.
 #[cfg(target_os = "macos")]
@@ -1278,114 +1392,6 @@ pub async fn media_seek(position: f64) -> Result<(), String> {
     }
 }
 
-use std::thread;
-
-/// Setup audio level monitoring using simulated audio visualization
-pub fn setup_audio_monitoring() {
-    static STARTED: AtomicBool = AtomicBool::new(false);
-    if AUDIO_LEVELS.get().is_none() {
-        let _ = AUDIO_LEVELS.set(std::sync::Mutex::new(vec![0.15; 6]));
-    }
-    if STARTED.swap(true, Ordering::SeqCst) {
-        return;
-    }
-
-    thread::spawn(move || {
-        log::info!("🎭 Starting audio visualization simulation");
-
-        let mut t = 0.0f64;
-        let mut prev_levels = vec![0.15; 6];
-        let mut beat_phase = 0.0f64;
-        let mut energy = 0.5f64;
-
-        // 30fps: smooth bars; every level change repaints the island, so this
-        // is a battery/smoothness tradeoff decided in favor of smoothness.
-        let frame_duration = std::time::Duration::from_micros(33333); // ~30fps
-        let mut next_frame = std::time::Instant::now();
-
-        loop {
-            if !IS_PLAYING.load(Ordering::Relaxed) {
-                std::thread::sleep(std::time::Duration::from_millis(200));
-                next_frame = std::time::Instant::now();
-                continue;
-            }
-
-            t += 0.0333; // Time increment per frame (30fps)
-
-            // Simulate varying energy levels (like quiet vs loud parts of a song)
-            let energy_wave = (t * 0.15).sin() * 0.3 + 0.9;
-            energy = energy * 0.995 + energy_wave * 0.005;
-
-            // Simulate beat at ~160 BPM (2.67 beats per second): 2π · 2.67 · dt
-            beat_phase += 0.0333 * 2.67 * std::f64::consts::TAU;
-            let beat = (beat_phase.sin().max(0.0)).powf(4.0); // Sharp beat pulse
-
-            // Add some randomness for realism (per-band: hash t and the band index)
-            let noise = |band: u64| -> f64 {
-                use std::collections::hash_map::DefaultHasher;
-                use std::hash::{Hash, Hasher};
-                let mut hasher = DefaultHasher::new();
-                ((t * 10000.0) as u64)
-                    .wrapping_mul(31)
-                    .wrapping_add(band)
-                    .hash(&mut hasher);
-                (hasher.finish() % 1000) as f64 / 1000.0 - 0.5
-            };
-
-            let mut levels = vec![0.0; 6]; // In a loop, this could be reused, but Vec of 6 floats is trivial.
-                                           // Keeping as is for simplicity unless specific optimization request for this.
-
-            // Bass (20-150 Hz) - strongest on beat
-            levels[0] = energy * (0.4 + beat * 0.5 + noise(0) * 0.1);
-
-            // Low-mid (150-400 Hz) - follows bass with slight delay
-            levels[1] = energy * (0.35 + beat * 0.3 + (t * 3.2).sin() * 0.15 + noise(1) * 0.08);
-
-            // Mid (400-1000 Hz) - melodic content
-            levels[2] =
-                energy * (0.3 + (t * 5.7).sin() * 0.2 + (t * 7.3).cos() * 0.1 + noise(2) * 0.1);
-
-            // High-mid (1000-2500 Hz) - vocals, instruments
-            levels[3] =
-                energy * (0.28 + (t * 4.1).sin() * 0.18 + (t * 6.8).cos() * 0.12 + noise(3) * 0.08);
-
-            // Presence (2500-6000 Hz) - clarity, attack
-            levels[4] = energy * (0.22 + (t * 8.3).sin() * 0.15 + beat * 0.1 + noise(4) * 0.1);
-
-            // Brilliance (6000-20000 Hz) - air, shimmer (generally lower)
-            levels[5] =
-                energy * (0.18 + (t * 11.2).sin() * 0.1 + (t * 9.7).cos() * 0.08 + noise(5) * 0.06);
-
-            // Smooth transitions (exponential moving average)
-            for i in 0..6 {
-                // Adjusted smoothing for 30fps (needs to be slightly higher to match speed of 60fps)
-                let smoothing = if levels[i] > prev_levels[i] {
-                    0.5 // faster attack
-                } else {
-                    0.25 // slower decay
-                };
-                levels[i] = prev_levels[i] + (levels[i] - prev_levels[i]) * smoothing;
-                // Clamp to valid range
-                levels[i] = levels[i].clamp(0.08, 0.92);
-            }
-
-            prev_levels = levels.clone();
-
-            set_audio_levels(levels.clone());
-
-            // Precise timing for consistent 60fps
-            next_frame += frame_duration;
-            let now = std::time::Instant::now();
-            if next_frame > now {
-                std::thread::sleep(next_frame - now);
-            } else {
-                // If we're behind, reset timing
-                next_frame = now + frame_duration;
-            }
-        }
-    });
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1402,6 +1408,22 @@ mod tests {
     }
 
     #[test]
+    fn media_app_running_cache_ignores_unrelated_bundles() {
+        note_media_app_running("com.apple.finder", true);
+        note_media_app_running("com.spotify.client", true);
+        note_media_app_running("com.apple.Music", false);
+        note_media_app_running("com.apple.Safari", true);
+        let packed = MEDIA_APPS.load(Ordering::Relaxed);
+        assert_ne!(packed & MEDIA_APPS_PRIMED, 0);
+        assert_ne!(packed & MEDIA_APP_SPOTIFY, 0);
+        assert_eq!(packed & MEDIA_APP_MUSIC, 0);
+        assert_ne!(packed & MEDIA_APP_SAFARI, 0);
+        note_media_app_running("com.spotify.client", false);
+        let packed = MEDIA_APPS.load(Ordering::Relaxed);
+        assert_eq!(packed & MEDIA_APP_SPOTIFY, 0);
+    }
+
+    #[test]
     fn safari_artwork_accepts_supported_https_origins() {
         assert_eq!(
             safari_artwork_url(
@@ -1410,5 +1432,41 @@ mod tests {
             ),
             Some("https://music.youtube.com/favicon.ico")
         );
+    }
+
+    static MEDIA_WAIT_TEST: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn wait_media_returns_when_event_already_set() {
+        let _g = MEDIA_WAIT_TEST.lock().unwrap_or_else(|e| e.into_inner());
+        let _ = take_media_event();
+        note_media_event();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        let start = std::time::Instant::now();
+        rt.block_on(wait_media_or_timeout(Duration::from_secs(3)));
+        assert!(start.elapsed() < Duration::from_millis(250));
+    }
+
+    #[test]
+    fn wait_media_wakes_on_note() {
+        let _g = MEDIA_WAIT_TEST.lock().unwrap_or_else(|e| e.into_inner());
+        let _ = take_media_event();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        let start = std::time::Instant::now();
+        rt.block_on(async {
+            let waiter = wait_media_or_timeout(Duration::from_secs(3));
+            let poker = async {
+                tokio::time::sleep(Duration::from_millis(15)).await;
+                note_media_event();
+            };
+            tokio::join!(waiter, poker);
+        });
+        assert!(start.elapsed() < Duration::from_millis(500));
     }
 }

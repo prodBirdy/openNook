@@ -1,5 +1,8 @@
 # third_party
 
+`vt100` is a patched 0.15.2 (`Grid::visible_rows` overflow). Wired via
+`[patch.crates-io]` in the workspace `Cargo.toml`.
+
 `mediaremote-adapter` is cloned and built here by
 `scripts/build-mediaremote-adapter.sh` (also invoked from `scripts/bundle.sh`).
 

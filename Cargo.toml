@@ -3,25 +3,24 @@ resolver = "2"
 members = ["crates/nook-core", "crates/nook"]
 
 [workspace.package]
-version = "0.3.0"
+version = "1.0.0"
 edition = "2021"
 license = "MIT"
 authors = ["Jonas Vögel"]
-repository = "https://github.com/prodBirdy/openNook"
+repository = "https://github.com/prodBirdy/openNook-gpui"
 
 [workspace.dependencies]
 nook-core = { path = "crates/nook-core" }
 gpui = "=0.2.2"
-gpui-component = "0.5.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "process"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "process", "net", "io-util"] }
 dirs = "6"
 rusqlite = { version = "0.32", features = ["bundled"] }
 base64 = "0.22"
 log = "0.4"
 env_logger = "0.11"
-reqwest = { version = "0.12", features = ["stream"] }
+reqwest = { version = "0.12", features = ["json", "stream"] }
 futures-util = "0.3"
 open = "5"
 image = "0.25"
@@ -34,3 +33,9 @@ pulldown-cmark = { version = "0.13", default-features = false }
 lto = true
 codegen-units = 1
 strip = true
+
+# vt100 0.15.2 panics in Grid::visible_rows when scrollback_offset > rows
+# (`rows_len - offset` overflows). Termi-Notch hits this on wheel-scroll
+# and when the island shrinks while the viewport is scrolled back.
+[patch.crates-io]
+vt100 = { path = "third_party/vt100" }

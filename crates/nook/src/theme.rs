@@ -63,6 +63,8 @@ pub const TERTIARY_LABEL: Rgba = Rgba {
 };
 pub const TEXT: Rgba = LABEL;
 pub const TEXT_MUTED: Rgba = SECONDARY_LABEL;
+#[allow(dead_code)]
+pub const TEXT_FAINT: Rgba = TERTIARY_LABEL;
 
 pub const FILL: Rgba = Rgba {
     r: 1.0,
@@ -82,16 +84,37 @@ pub const FILL_TERTIARY: Rgba = Rgba {
     b: 1.0,
     a: 0.08,
 };
-
 #[allow(dead_code)]
+pub const SURFACE: Rgba = FILL;
+#[allow(dead_code)]
+pub const SURFACE_HOVER: Rgba = FILL_SECONDARY;
+
 pub const SEPARATOR: Rgba = Rgba {
     r: 1.0,
     g: 1.0,
     b: 1.0,
     a: 0.22,
 };
+#[allow(dead_code)]
+pub const DIVIDER: Rgba = SEPARATOR;
+#[allow(dead_code)]
+pub const HAIRLINE: Rgba = Rgba {
+    r: 1.0,
+    g: 1.0,
+    b: 1.0,
+    a: 0.05,
+};
+#[allow(dead_code)]
+pub const SCRIM: Rgba = Rgba {
+    r: 0.0,
+    g: 0.0,
+    b: 0.0,
+    a: 0.60,
+};
+pub const DISABLED_OPACITY: f32 = 0.45;
 
-/// Dark-mode systemBlue / systemRed / systemGreen reference values.
+/// Dark-mode systemBlue / systemRed / systemGreen / systemYellow reference
+/// values (HIG Color: documented numbers are design-time only).
 pub const ACCENT: Rgba = Rgba {
     r: 0.039,
     g: 0.518,
@@ -108,13 +131,62 @@ pub fn accent() -> Rgba {
         None => ACCENT_FALLBACK,
     }
 }
+
+/// Replace only the alpha channel of `c`.
+pub fn with_alpha(c: Rgba, a: f32) -> Rgba {
+    Rgba {
+        r: c.r,
+        g: c.g,
+        b: c.b,
+        a,
+    }
+}
+
+/// Secondary label; bumped when Accessibility › Increase Contrast is on.
+pub fn secondary_label() -> Rgba {
+    if crate::platform::increase_contrast() {
+        with_alpha(SECONDARY_LABEL, 0.85)
+    } else {
+        SECONDARY_LABEL
+    }
+}
+
+/// Tertiary label; bumped when Accessibility › Increase Contrast is on.
+pub fn tertiary_label() -> Rgba {
+    if crate::platform::increase_contrast() {
+        with_alpha(TERTIARY_LABEL, 0.55)
+    } else {
+        TERTIARY_LABEL
+    }
+}
 pub const DESTRUCTIVE: Rgba = Rgba {
     r: 1.0,
     g: 0.271,
     b: 0.227,
     a: 1.0,
 };
-#[allow(dead_code)]
+/// Dark-mode systemOrange for low-battery (not yet critical) compact faces.
+pub const SYSTEM_ORANGE: Rgba = Rgba {
+    r: 1.0,
+    g: 0.584,
+    b: 0.0,
+    a: 1.0,
+};
+/// Dark-mode systemYellow — display brightness and Low Power Mode.
+pub const SYSTEM_YELLOW: Rgba = Rgba {
+    r: 1.0,
+    g: 0.839,
+    b: 0.039,
+    a: 1.0,
+};
+/// systemOrange — muted meeting (Zoom verified).
+pub const WARNING: Rgba = Rgba {
+    r: 1.0,
+    g: 0.624,
+    b: 0.039,
+    a: 1.0,
+};
+/// Dark-mode systemGreen — charging battery.
 pub const SUCCESS: Rgba = Rgba {
     r: 0.188,
     g: 0.820,
@@ -122,6 +194,12 @@ pub const SUCCESS: Rgba = Rgba {
     a: 1.0,
 };
 
+pub const WINDOW_BG: Rgba = Rgba {
+    r: 0.110,
+    g: 0.110,
+    b: 0.118,
+    a: 1.0,
+};
 /// Settings window fill. Slightly transparent so macOS `Blurred` chrome reads
 /// as dark glass; opaque enough that Linux (no vibrancy) stays legible.
 pub const SETTINGS_GLASS: Rgba = Rgba {
@@ -152,18 +230,52 @@ pub const IDLE_NOTCH_OVERFLOW: f32 = 1.0;
 pub const COMPACT_HEIGHT_OVERFLOW: f32 = 1.0;
 /// Bottom-corner radius of the compact island. The camera housing is a
 /// rounded rect, not a capsule — half-height rounding ate the 1px wrap.
-pub const COMPACT_RADIUS: f32 = 12.0;
+pub const COMPACT_RADIUS: f32 = 14.0;
 pub const EXPANDED_RADIUS: f32 = 36.0;
+/// Extra space on each side of the hardware notch in Liquid Glass mode so
+/// compact content (album art, visualizer) does not sit against the camera.
+/// Painted mode hides the notch inside the pill and must stay at 0.
+pub const GLASS_NOTCH_GAP: f32 = 14.0;
+/// React `WidgetWrapper`: `rounded-[28px]`.
+pub const WIDGET_RADIUS: f32 = 28.0;
 pub const INNER_RADIUS: f32 = 10.0;
 pub const CONTROL_RADIUS: f32 = 8.0;
+pub const CONTENT_INSET: f32 = 12.0;
 /// React expanded pane `p-5` (files tab still uses this).
 pub const EXPANDED_PAD: f32 = 20.0;
 /// Nook tab body: one row under the notch, matching the capsule layout.
 pub const NOOK_BODY: f32 = 128.0;
 pub const NOOK_INSET: f32 = 16.0;
-/// One Customize-widgets cell on the expanded Nook row.
+/// Nominal minimum cell; the grid uses `Island::nook_cell_width()`.
 pub const NOOK_CELL: f32 = 56.0;
-pub const EXPANDED_MAX_WIDTH: f32 = 780.0;
+/// Pane divider contribution: 1px rule + 12px margin each side.
+pub const NOOK_DIVIDER: f32 = 25.0;
+/// Vertical gap between Nook rows: 1 px rule + CONTENT_INSET margin each side.
+pub const NOOK_ROW_GAP: f32 = 25.0;
+/// Expanded island width; the Nook row holds `TOTAL_CELLS` cells at `nook_cell_width()`.
+pub const EXPANDED_MAX_WIDTH: f32 = 1120.0;
+/// Bottom widget picker strip while editing the Nook row (icons + labels + actions).
+pub const WIDGET_EDIT_PICKER_H: f32 = 78.0;
+/// React widgets row `gap-4`.
+#[allow(dead_code)]
+pub const WIDGET_GAP: f32 = 16.0;
+pub const NOTCH_MIN_H: f32 = 32.0;
+pub const SCREEN_MARGIN: f32 = 40.0;
+pub const LOCKUP_MAX_WIDTH: f32 = 420.0;
+pub const RECORDER_BODY: f32 = 260.0;
+/// Compact hover chin / flank extras.
+pub const COMPACT_HOVER_EXTRA: f32 = 88.0;
+pub const COMPACT_HUD_EXTRA: f32 = 120.0;
+pub const COMPACT_LIVE_EXTRA: f32 = 72.0;
+pub const COMPACT_HOVER_CHIN: f32 = 11.0;
+/// React `WidgetWrapper` padding (`1rem`).
+pub const WIDGET_PAD: f32 = 16.0;
+/// How far a row highlight bleeds back out of the card's content margin. Also
+/// the concentric gap that sets the row's own corner radius.
+#[allow(dead_code)]
+pub const ROW_INSET: f32 = 6.0;
+/// React widget row chips: `rounded-[20px]`.
+pub const ROW_RADIUS: f32 = 20.0;
 
 /// A macOS built-in text style: point size, line height, and the two weights
 /// the platform pairs with it.
@@ -216,9 +328,26 @@ pub const FOOTNOTE: Text = Text {
     weight: FontWeight::NORMAL,
     emphasized: FontWeight::SEMIBOLD,
 };
+#[allow(dead_code)]
+pub const DISPLAY: Text = Text {
+    size: 32.0,
+    leading: 36.0,
+    weight: FontWeight::BOLD,
+    emphasized: FontWeight::BOLD,
+};
 
-/// Compact Live Activity face — album chip, mode icons, timer ring, loader.
-pub const COMPACT_FACE: f32 = 26.0;
+/// Compact Live Activity face — lucide glyphs, HUD marks, avatars, file thumbs.
+pub const COMPACT_FACE: f32 = 20.0;
+/// Small inline badge next to a compact face (e.g. High Alert sun).
+pub const COMPACT_BADGE: f32 = 12.0;
+/// Small inline glyph next to text.
+#[allow(dead_code)]
+pub const GLYPH_SM: f32 = 16.0;
+pub const TRACK_H: f32 = 4.0;
+pub const TRACK_RADIUS: f32 = 2.0;
+/// Inset from the compact capsule edge to the leading/trailing glyph.
+/// Past the 14pt corner so a 20pt face does not sit on the curve.
+pub const COMPACT_INSET: f32 = 8.0;
 /// Expanded Nook Mirror circle. Fills `NOOK_BODY` minus the pane inset.
 pub const MIRROR_FACE: f32 = 112.0;
 

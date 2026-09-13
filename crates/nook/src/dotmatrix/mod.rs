@@ -9,11 +9,18 @@
 //! Embedded use in an application is permitted by the upstream license;
 //! this is not a republished component library.
 
+mod brand;
 mod engine;
 mod grid3;
+mod material;
 
 use engine::{bloom_level, Ctx, N};
+
+pub use brand::{element as brand_element, led_color_on};
 use gpui::{canvas, fill, point, prelude::*, px, Bounds, IntoElement, Pixels, Rgba, Window};
+/// Global LED grid — change [`LED`].resolution to retune every face.
+#[allow(unused_imports)]
+pub use material::{LedMaterial, LED};
 
 pub use grid3::Kind;
 
@@ -22,7 +29,7 @@ pub use grid3::Kind;
 /// cadence reads as frantic in the notch, so the port runs it at half rate.
 pub const SPEED: f32 = 0.6;
 /// Upstream pins `dotSize` 4 in a 16px box (1px gap). Compact and the widget
-/// row both use that cluster; scaling it to the 26px notch face made 7px dots
+/// row both use that cluster; scaling it to the compact face made 7px dots
 /// that filled the compact island.
 const DOT_RATIO: f32 = 4.0 / 16.0;
 const GAP_RATIO: f32 = 1.0 / 4.0;
@@ -31,14 +38,18 @@ const IDLE_ALPHA: f32 = 0.45;
 /// The idle cluster drops the accent for the secondary-label grey. Only the
 /// RGB is used — `IDLE_ALPHA` sets the alpha — and only a working agent is
 /// tinted with the accent.
-const IDLE_TINT: Rgba = crate::theme::SECONDARY_LABEL;
-/// Upstream `size={16}` / `dotSize={4}` cluster (14px span), not the 26px face.
+pub(super) const IDLE_TINT: Rgba = crate::theme::SECONDARY_LABEL;
+/// Upstream `size={16}` / `dotSize={4}` cluster (14px span), not the compact face.
+#[allow(dead_code)]
 pub const COMPACT_SIZE: f32 = 16.0;
+#[allow(dead_code)]
 pub const WIDGET_SIZE: f32 = 16.0;
 
+#[allow(dead_code)]
 const POOL: [Kind; 3] = [Kind::DriftTl, Kind::CoreEcho, Kind::SmileySpin];
 
 /// Deterministic pick: the same seed always lands on the same loader.
+#[allow(dead_code)]
 pub fn pick(seed: u32) -> Kind {
     POOL[(seed as usize) % POOL.len()]
 }
@@ -75,6 +86,7 @@ pub fn layout(size: f32) -> DotLayout {
     }
 }
 
+#[allow(dead_code)]
 pub fn element(kind: Kind, now: f32, working: bool, size: f32) -> impl IntoElement {
     let lay = layout(size);
     let now = now * SPEED;
@@ -95,6 +107,7 @@ pub fn element(kind: Kind, now: f32, working: bool, size: f32) -> impl IntoEleme
     .flex_shrink_0()
 }
 
+#[allow(dead_code)]
 fn paint_grid(
     window: &mut Window,
     bounds: Bounds<Pixels>,
@@ -141,14 +154,14 @@ fn paint_grid(
 }
 
 /// The animation drives opacity only; hue and saturation stay the accent's.
-fn alpha(tint: Rgba, a: f32) -> Rgba {
+pub(super) fn alpha(tint: Rgba, a: f32) -> Rgba {
     Rgba {
         a: a.clamp(0.0, 1.0),
         ..tint
     }
 }
 
-fn paint_glow(window: &mut Window, x: f32, y: f32, dot: f32, level: f32, tint: Rgba) {
+pub(super) fn paint_glow(window: &mut Window, x: f32, y: f32, dot: f32, level: f32, tint: Rgba) {
     // CSS: drop-shadow radii `dot * 0.75 * level` and `dot * 1.35 * level`.
     let bands = [
         (dot * 1.35 * level, 0.22 * level),

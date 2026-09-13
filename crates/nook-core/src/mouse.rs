@@ -20,6 +20,7 @@ static UI_BOUNDS: std::sync::OnceLock<RwLock<Option<UiBounds>>> = std::sync::Onc
 static MOUSE_X: AtomicU64 = AtomicU64::new(0);
 static MOUSE_Y: AtomicU64 = AtomicU64::new(0);
 static DRAG_ACTIVE: AtomicBool = AtomicBool::new(false);
+static DRAG_GEN: AtomicU64 = AtomicU64::new(0);
 static POLL_STARTED: AtomicBool = AtomicBool::new(false);
 
 fn bounds_store() -> &'static RwLock<Option<UiBounds>> {
@@ -46,6 +47,11 @@ pub fn current_mouse_logical() -> (f64, f64) {
 
 pub fn drag_active() -> bool {
     DRAG_ACTIVE.load(Ordering::Relaxed)
+}
+
+/// Bumped on each `drag_active` edge so observers can detect drag transitions.
+pub fn drag_generation() -> u64 {
+    DRAG_GEN.load(Ordering::Relaxed)
 }
 
 /// Hit-test the cursor against the island activation area.
@@ -104,9 +110,9 @@ pub fn exact_bounds() -> UiBounds {
 }
 
 /// Whether the cursor is within approach distance of the island. The UI tick
-/// loop uses this to stay at its fast cadence while the pointer could reach
-/// the island within one slow tick, and to idle down otherwise. Plain math on
-/// the published bounds — no AppKit calls.
+/// stays at its fast cadence while the pointer could reach the island within
+/// one idle backstop, and parks otherwise. Plain math on the published
+/// bounds — no AppKit calls.
 pub fn hit_test_near(mouse_x: f64, mouse_y: f64) -> bool {
     const NEAR: f64 = 96.0;
     let b = exact_bounds();
@@ -185,7 +191,11 @@ fn contains((x0, x1, y0, y1): (f64, f64, f64, f64), x: f64, y: f64) -> bool {
     x >= x0 && x <= x1 && y >= y0 && y <= y1
 }
 
-/// Sample the cursor off the UI thread. Safe to call more than once.
+/// Sample the cursor. On macOS this is a 1 s backstop — NSEvent monitors
+/// (installed on the main thread from `platform`) write the same atomics on
+/// move/drag and poke the island wake. Monitors can drop during secure input
+/// or some full-screen games; the slow poll is how hover still exits.
+/// Windows/Linux keep the tighter poll (no AppKit monitors).
 pub fn start_polling() {
     if POLL_STARTED.swap(true, Ordering::SeqCst) {
         return;
@@ -195,24 +205,85 @@ pub fn start_polling() {
         .name("nook-mouse".into())
         .spawn(|| loop {
             sample_now();
-            let inside = {
-                let (mx, my) = current_mouse_logical();
-                hit_test(mx, my)
-            };
-            let ms = if inside || DRAG_ACTIVE.load(Ordering::Relaxed) {
-                20
-            } else {
-                33
-            };
+            let ms = poll_interval_ms();
             std::thread::sleep(std::time::Duration::from_millis(ms));
         });
 }
 
-fn sample_now() {
+fn poll_interval_ms() -> u64 {
+    #[cfg(target_os = "macos")]
+    {
+        1000
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let inside = {
+            let (mx, my) = current_mouse_logical();
+            hit_test(mx, my)
+        };
+        if inside || DRAG_ACTIVE.load(Ordering::Relaxed) {
+            20
+        } else {
+            33
+        }
+    }
+}
+
+/// Read cursor + drag into the atomics.
+///
+/// Mouse position is safe from the 1 s backstop thread. The drag
+/// pasteboard is not: sample it only on the main thread (NSEvent monitors
+/// and the island UI tick). Off-main, we may clear a finished drag when the
+/// button is up, but we must not arm or disarm one while the button is down.
+///
+/// Pokes [`crate::ui_tick`] when the pointer is near the island or a drag
+/// edge flips — far-away moves update atomics without waking the UI loop.
+pub fn sample_now() {
     let (x, y) = read_mouse_logical();
-    MOUSE_X.store(x.to_bits(), Ordering::Relaxed);
-    MOUSE_Y.store(y.to_bits(), Ordering::Relaxed);
-    DRAG_ACTIVE.store(crate::files::file_drag_active(), Ordering::Relaxed);
+    let prev_x = MOUSE_X.swap(x.to_bits(), Ordering::Relaxed);
+    let prev_y = MOUSE_Y.swap(y.to_bits(), Ordering::Relaxed);
+    let moved = prev_x != x.to_bits() || prev_y != y.to_bits();
+    #[cfg(target_os = "macos")]
+    if !on_main_thread() {
+        let mut drag_edge = false;
+        if !left_button_down() {
+            drag_edge = publish_drag(false);
+        }
+        if drag_edge || (moved && (hit_test_near(x, y) || hit_test(x, y))) {
+            crate::ui_tick::poke();
+        }
+        return;
+    }
+    let drag_edge = publish_drag(crate::files::file_drag_active());
+    if drag_edge || (moved && (hit_test_near(x, y) || hit_test(x, y) || drag_active())) {
+        crate::ui_tick::poke();
+    }
+}
+
+/// Returns true when the drag flag flipped.
+fn publish_drag(drag: bool) -> bool {
+    let was = DRAG_ACTIVE.swap(drag, Ordering::Relaxed);
+    if was != drag {
+        DRAG_GEN.fetch_add(1, Ordering::Relaxed);
+        true
+    } else {
+        false
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn on_main_thread() -> bool {
+    use objc2::*;
+    unsafe { msg_send![class!(NSThread), isMainThread] }
+}
+
+#[cfg(target_os = "macos")]
+fn left_button_down() -> bool {
+    use objc2::*;
+    unsafe {
+        let buttons: usize = msg_send![class!(NSEvent), pressedMouseButtons];
+        buttons & 1 != 0
+    }
 }
 
 fn read_mouse_logical() -> (f64, f64) {
@@ -405,6 +476,19 @@ mod tests {
             "the drag capture strip must not count as hover"
         );
         assert!(hit_test_drag_capture(far_x, 20.0));
+    }
+
+    #[test]
+    fn off_main_sample_never_arms_a_file_drag() {
+        let _guard = lock();
+        DRAG_ACTIVE.store(false, Ordering::Relaxed);
+        std::thread::spawn(sample_now)
+            .join()
+            .expect("mouse sample thread");
+        assert!(
+            !drag_active(),
+            "the mouse thread must not arm inbound file-drag from NSPasteboard"
+        );
     }
 
     #[test]

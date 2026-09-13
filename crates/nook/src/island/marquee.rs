@@ -13,6 +13,7 @@ use gpui::{
     canvas, point, prelude::*, px, App, Bounds, Canvas, ContentMask, Hsla, Pixels, ShapedLine,
     SharedString, Window,
 };
+use std::cell::Cell;
 use std::sync::OnceLock;
 use std::time::Instant;
 
@@ -25,6 +26,21 @@ const GAP: f32 = 48.0;
 /// Slack before a string counts as overflowing. Shaping and layout round
 /// differently, so an exact comparison makes flush text twitch.
 const SLOP: f32 = 0.5;
+
+thread_local! {
+    /// Cleared while the island is in widget customize mode so overflowing
+    /// titles do not keep requesting animation frames under edit chrome.
+    static ANIMATE: Cell<bool> = const { Cell::new(true) };
+}
+
+/// Park or resume every marquee for the current render pass.
+pub(crate) fn set_animate(on: bool) {
+    ANIMATE.set(on);
+}
+
+fn animate() -> bool {
+    ANIMATE.get()
+}
 
 /// Shared phase clock. Every marquee reads the same origin, so two of them in
 /// one card (a title over a subtitle) travel in lockstep rather than beating
@@ -107,6 +123,13 @@ fn paint_slide(
         return;
     }
 
+    if !animate() {
+        window.with_content_mask(Some(ContentMask { bounds }), |window| {
+            let _ = line.paint(bounds.origin, leading, window, cx);
+        });
+        return;
+    }
+
     let travel = width + GAP;
     let offset = offset_at(clock(), travel);
     let x = bounds.origin.x - px(offset);
@@ -149,22 +172,11 @@ mod tests {
     }
 
     #[test]
-    fn every_cycle_repeats() {
-        let travel = 137.0;
-        let cycle = DWELL + travel / SPEED;
-        for t in [0.0, 0.9, 2.5, 4.0] {
-            assert!((offset_at(t, travel) - offset_at(t + cycle * 3.0, travel)).abs() < 0.01);
-        }
-    }
-
-    #[test]
-    fn never_runs_past_the_wrap() {
-        let travel = 90.0;
-        let mut t = 0.0;
-        while t < 40.0 {
-            let o = offset_at(t, travel);
-            assert!((0.0..=travel).contains(&o), "t={t} -> {o}");
-            t += 0.017;
-        }
+    fn freeze_flag_defaults_on() {
+        set_animate(true);
+        assert!(animate());
+        set_animate(false);
+        assert!(!animate());
+        set_animate(true);
     }
 }

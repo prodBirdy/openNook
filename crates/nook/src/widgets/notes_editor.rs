@@ -4,6 +4,7 @@
 //! into [`EntityInputHandler::replace_text_in_range`]; editing keys are bound
 //! here. Text is markdown source, saved (debounced) to the shared notes store.
 
+use crate::island::ui::label;
 use crate::theme;
 use gpui::{
     canvas, div, point, prelude::*, px, relative, size, App, Bounds, ClipboardItem, Context,
@@ -18,7 +19,8 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-const FONT_SIZE: f32 = 13.0;
+const FONT_SIZE: f32 = theme::BODY.size;
+/// Slightly taller than body leading so wrapped lines stay comfortable to edit.
 const LINE_HEIGHT: f32 = 18.0;
 const SAVE_DEBOUNCE: Duration = Duration::from_millis(500);
 
@@ -96,7 +98,7 @@ impl ShapedNotes {
         while idx < range.end {
             let y = self.position_for_index(idx).map(|p| f32::from(p.y));
             match (seg, y) {
-                (Some((s, sy)), Some(y)) if y == sy => {}
+                (Some((_s, sy)), Some(y)) if y == sy => {}
                 (Some((s, sy)), _) => {
                     push_rect(
                         &mut rects,
@@ -204,6 +206,14 @@ pub(crate) struct NotesEditor {
     save_scheduled: bool,
     selecting: bool,
     content_height: f32,
+    undo: Vec<String>,
+    redo: Vec<String>,
+    save_flash: Option<(bool, Instant)>,
+}
+
+thread_local! {
+    pub(super) static SAVE_FLASH: std::cell::RefCell<Option<(bool, Instant)>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 impl NotesEditor {
@@ -223,6 +233,9 @@ impl NotesEditor {
             save_scheduled: false,
             selecting: false,
             content_height,
+            undo: Vec::new(),
+            redo: Vec::new(),
+            save_flash: None,
         }
     }
 
@@ -235,11 +248,19 @@ impl NotesEditor {
         if !self.dirty {
             return;
         }
-        self.dirty = false;
         self.save_scheduled = false;
         self.last_save = Instant::now();
-        if let Err(err) = nook_core::notes::save_notes(self.text.clone()) {
-            log::warn!("save notes: {err}");
+        match nook_core::notes::save_notes(self.text.clone()) {
+            Ok(()) => {
+                self.dirty = false;
+                self.save_flash = Some((true, Instant::now()));
+                SAVE_FLASH.with(|f| *f.borrow_mut() = Some((true, Instant::now())));
+            }
+            Err(err) => {
+                log::warn!("save notes: {err}");
+                self.save_flash = Some((false, Instant::now()));
+                SAVE_FLASH.with(|f| *f.borrow_mut() = Some((false, Instant::now())));
+            }
         }
     }
 
@@ -324,10 +345,48 @@ impl NotesEditor {
             .map_or(self.text.len(), |i| from + i)
     }
 
+    fn push_undo(&mut self) {
+        self.undo.push(self.text.clone());
+        if self.undo.len() > 100 {
+            self.undo.remove(0);
+        }
+        self.redo.clear();
+    }
+
+    fn restore(&mut self, snapshot: String, cx: &mut Context<Self>) {
+        self.text = snapshot;
+        let at = self.snap(self.text.len());
+        self.anchor = at;
+        self.head = at;
+        self.marked_range = None;
+        self.schedule_save(cx);
+        cx.notify();
+    }
+
+    fn undo(&mut self, cx: &mut Context<Self>) {
+        let Some(prev) = self.undo.pop() else {
+            return;
+        };
+        self.redo.push(self.text.clone());
+        self.restore(prev, cx);
+    }
+
+    fn redo(&mut self, cx: &mut Context<Self>) {
+        let Some(next) = self.redo.pop() else {
+            return;
+        };
+        self.undo.push(self.text.clone());
+        if self.undo.len() > 100 {
+            self.undo.remove(0);
+        }
+        self.restore(next, cx);
+    }
+
     fn splice(&mut self, cx: &mut Context<Self>, range: Range<usize>, insertion: &str) {
         let start = self.snap(range.start);
         let end = self.snap(range.end).max(start);
         let normalized = insertion.replace("\r\n", "\n").replace('\r', "\n");
+        self.push_undo();
         self.text.replace_range(start..end, &normalized);
         let caret = start + normalized.len();
         self.anchor = caret;
@@ -341,6 +400,12 @@ impl NotesEditor {
         self.dirty = true;
         if self.last_save.elapsed() >= SAVE_DEBOUNCE {
             self.flush();
+            cx.notify();
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(Duration::from_secs(2)).await;
+                let _ = this.update(cx, |_, cx| cx.notify());
+            })
+            .detach();
             return;
         }
         if self.save_scheduled {
@@ -464,6 +529,8 @@ impl NotesEditor {
                     self.splice(cx, sel, &text);
                 }
             }
+            "z" if cmd && m.shift => self.redo(cx),
+            "z" if cmd => self.undo(cx),
             "escape" => {
                 self.flush();
                 window.blur();
@@ -706,7 +773,7 @@ fn paint_editor(
 }
 
 fn paint_placeholder(bounds: Bounds<Pixels>, window: &mut Window, cx: &mut App) {
-    let placeholder = "Write markdown…";
+    let placeholder = "Write a note…";
     let run = gpui::TextRun {
         len: placeholder.len(),
         font: editor_font(),
@@ -742,6 +809,9 @@ impl Render for NotesEditor {
         let layout_cell = self.layout.clone();
         let bounds_cell = self.bounds.clone();
         let min_h = self.content_height.max(LINE_HEIGHT);
+        let flash = self
+            .save_flash
+            .filter(|(_, at)| at.elapsed() < Duration::from_secs(2));
         div()
             .id("notes-editor")
             .w_full()
@@ -802,6 +872,20 @@ impl Render for NotesEditor {
                 .flex_1()
                 .min_h(px(min_h)),
             )
+            .when_some(flash, |d, (ok, _)| {
+                d.child(
+                    label(
+                        if ok { "Saved" } else { "Couldn't save" },
+                        theme::FOOTNOTE,
+                        false,
+                    )
+                    .text_color(if ok {
+                        theme::SECONDARY_LABEL
+                    } else {
+                        theme::DESTRUCTIVE
+                    }),
+                )
+            })
     }
 }
 

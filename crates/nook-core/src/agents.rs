@@ -2,14 +2,18 @@
 //!
 //! Binary matching, process-tree walks, and the Claude / Codex / OpenCode
 //! fingerprints follow [abtop](https://github.com/graykode/abtop)
-//! (MIT License, Copyright (c) 2026 Tae Hwan Jung). Grok and Cursor Agent
-//! workers are matched the same way.
+//! (MIT License, Copyright (c) 2026 Tae Hwan Jung). Grok, Cursor Agent, and
+//! Pi workers are matched the same way.
 
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
+use std::fs::File;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
+#[cfg(target_os = "macos")]
+use sysinfo::Pid;
 use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
 
 /// CPU % above which a descendant process counts as doing real work. The
@@ -39,6 +43,7 @@ pub enum AgentKind {
     Cursor,
     Aider,
     Gemini,
+    Pi,
 }
 
 impl AgentKind {
@@ -52,6 +57,7 @@ impl AgentKind {
             AgentKind::Cursor => "Cursor",
             AgentKind::Aider => "Aider",
             AgentKind::Gemini => "Gemini",
+            AgentKind::Pi => "Pi",
         }
     }
 
@@ -65,6 +71,7 @@ impl AgentKind {
             AgentKind::Cursor => &["cursor-agent"],
             AgentKind::Aider => &["aider"],
             AgentKind::Gemini => &["gemini"],
+            AgentKind::Pi => &["pi"],
         }
     }
 }
@@ -153,6 +160,45 @@ fn process_system() -> &'static Mutex<System> {
 }
 
 fn scan_processes() -> HashMap<u32, ProcInfo> {
+    #[cfg(target_os = "macos")]
+    {
+        scan_processes_macos()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        scan_processes_all()
+    }
+}
+
+fn proc_from_sysinfo(pid_u32: u32, proc_: &sysinfo::Process) -> Option<ProcInfo> {
+    let name = proc_.name().to_string_lossy().into_owned();
+    let argv: Vec<String> = if proc_.cmd().is_empty() {
+        if name.is_empty() {
+            return None;
+        }
+        vec![name.clone()]
+    } else {
+        proc_
+            .cmd()
+            .iter()
+            .map(|s| s.to_string_lossy().into_owned())
+            .collect()
+    };
+    Some(ProcInfo {
+        pid: pid_u32,
+        ppid: proc_.parent().map(|p| p.as_u32()).unwrap_or(0),
+        cpu_pct: proc_.cpu_usage(),
+        name,
+        argv,
+        cwd: proc_.cwd().map(PathBuf::from),
+        exe: proc_.exe().map(PathBuf::from),
+        start_time: proc_.start_time(),
+    })
+}
+
+/// Full-table refresh. Used off macOS, where the process list is small and
+/// there is no `proc_pidpath` two-stage split.
+fn scan_processes_all() -> HashMap<u32, ProcInfo> {
     let mut sys = process_system().lock().unwrap_or_else(|e| e.into_inner());
     // argv (KERN_PROCARGS2 sysctl) and the exe path are fixed at exec time, so
     // OnlyIfNotSet fetches them once per new pid instead of re-reading them
@@ -172,35 +218,404 @@ fn scan_processes() -> HashMap<u32, ProcInfo> {
 
     let mut map = HashMap::new();
     for (pid, proc_) in sys.processes() {
-        let pid_u32 = pid.as_u32();
-        let name = proc_.name().to_string_lossy().into_owned();
-        let argv: Vec<String> = if proc_.cmd().is_empty() {
-            if name.is_empty() {
-                continue;
-            }
-            vec![name.clone()]
-        } else {
-            proc_
-                .cmd()
-                .iter()
-                .map(|s| s.to_string_lossy().into_owned())
-                .collect()
-        };
-        map.insert(
-            pid_u32,
-            ProcInfo {
-                pid: pid_u32,
-                ppid: proc_.parent().map(|p| p.as_u32()).unwrap_or(0),
-                cpu_pct: proc_.cpu_usage(),
-                name,
-                argv,
-                cwd: proc_.cwd().map(PathBuf::from),
-                exe: proc_.exe().map(PathBuf::from),
-                start_time: proc_.start_time(),
-            },
-        );
+        if let Some(info) = proc_from_sysinfo(pid.as_u32(), proc_) {
+            map.insert(info.pid, info);
+        }
     }
     map
+}
+
+/// Cached argv/cwd/exe for a live pid. Invalidated when start_time changes
+/// (pid reuse) or the pid disappears.
+#[cfg(any(target_os = "macos", test))]
+#[derive(Clone, Debug, PartialEq)]
+struct CachedDetail {
+    start_time: u64,
+    name: String,
+    argv: Vec<String>,
+    cwd: Option<PathBuf>,
+    exe: Option<PathBuf>,
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn cache_lookup(
+    cache: &HashMap<u32, CachedDetail>,
+    pid: u32,
+    start_time: u64,
+) -> Option<&CachedDetail> {
+    let hit = cache.get(&pid)?;
+    (start_time > 0 && hit.start_time == start_time).then_some(hit)
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn prune_detail_cache(cache: &mut HashMap<u32, CachedDetail>, live: &HashSet<u32>) {
+    cache.retain(|pid, _| live.contains(pid));
+}
+
+#[cfg(target_os = "macos")]
+fn detail_cache() -> &'static Mutex<HashMap<u32, CachedDetail>> {
+    static CACHE: OnceLock<Mutex<HashMap<u32, CachedDetail>>> = OnceLock::new();
+    CACHE.get_or_init(Mutex::default)
+}
+
+/// macOS two-stage scan: `proc_listallpids` + `proc_pidpath` / `PROC_PIDTBSDINFO`
+/// first (cheap), then argv (KERN_PROCARGS2) and cwd only for agent candidates
+/// and their descendants, and only when `(pid, start_time)` is not cached.
+#[cfg(target_os = "macos")]
+fn scan_processes_macos() -> HashMap<u32, ProcInfo> {
+    let stage = list_stage1();
+    if stage.is_empty() {
+        return scan_processes_all();
+    }
+
+    let sidecar: HashSet<u32> = grok_sessions()
+        .keys()
+        .chain(claude_sessions().keys())
+        .copied()
+        .collect();
+
+    let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
+    let mut by_pid: HashMap<u32, Stage1> = HashMap::new();
+    let mut seeds = Vec::new();
+    for info in stage {
+        children.entry(info.ppid).or_default().push(info.pid);
+        if is_scan_seed(&info.path, &info.comm) || sidecar.contains(&info.pid) {
+            seeds.push(info.pid);
+        }
+        by_pid.insert(info.pid, info);
+    }
+
+    let mut detail = HashSet::new();
+    let mut stack = seeds;
+    while let Some(pid) = stack.pop() {
+        if detail.insert(pid) {
+            if let Some(kids) = children.get(&pid) {
+                stack.extend(kids.iter().copied());
+            }
+        }
+    }
+    if detail.is_empty() {
+        let mut cache = detail_cache().lock().unwrap_or_else(|e| e.into_inner());
+        cache.clear();
+        return HashMap::new();
+    }
+
+    let mut cache = detail_cache().lock().unwrap_or_else(|e| e.into_inner());
+    let mut hits: HashMap<u32, CachedDetail> = HashMap::new();
+    let mut misses = Vec::new();
+    for pid in &detail {
+        let start = by_pid.get(pid).map(|s| s.start_time).unwrap_or(0);
+        if let Some(hit) = cache_lookup(&cache, *pid, start) {
+            hits.insert(*pid, hit.clone());
+        } else {
+            misses.push(*pid);
+        }
+    }
+
+    let mut sys = process_system().lock().unwrap_or_else(|e| e.into_inner());
+    let cpu_kind = ProcessRefreshKind::nothing().without_tasks().with_cpu();
+    let all_pids: Vec<Pid> = detail.iter().copied().map(Pid::from_u32).collect();
+    sys.refresh_processes_specifics(ProcessesToUpdate::Some(&all_pids), true, cpu_kind);
+    if !misses.is_empty() {
+        let miss_pids: Vec<Pid> = misses.iter().copied().map(Pid::from_u32).collect();
+        sys.refresh_processes_specifics(
+            ProcessesToUpdate::Some(&miss_pids),
+            true,
+            ProcessRefreshKind::nothing()
+                .without_tasks()
+                .with_cpu()
+                .with_cmd(UpdateKind::OnlyIfNotSet)
+                .with_cwd(UpdateKind::OnlyIfNotSet)
+                .with_exe(UpdateKind::OnlyIfNotSet),
+        );
+    }
+
+    let mut map = HashMap::new();
+    for pid in detail {
+        let stage = by_pid.get(&pid);
+        let start = stage.map(|s| s.start_time).unwrap_or(0);
+        let ppid = stage.map(|s| s.ppid).unwrap_or(0);
+        let cpu_pct = sys
+            .process(Pid::from_u32(pid))
+            .map(|p| p.cpu_usage())
+            .unwrap_or(0.0);
+        if let Some(hit) = hits.get(&pid) {
+            let mut info = ProcInfo {
+                pid,
+                ppid,
+                cpu_pct,
+                name: hit.name.clone(),
+                argv: hit.argv.clone(),
+                cwd: hit.cwd.clone(),
+                exe: hit.exe.clone(),
+                start_time: hit.start_time,
+            };
+            apply_stage1(&mut info, stage);
+            map.insert(pid, info);
+            continue;
+        }
+        let mut info = match sys
+            .process(Pid::from_u32(pid))
+            .and_then(|p| proc_from_sysinfo(pid, p))
+        {
+            Some(mut info) => {
+                if info.start_time == 0 {
+                    info.start_time = start;
+                }
+                if info.ppid == 0 {
+                    info.ppid = ppid;
+                }
+                info
+            }
+            None => match stage {
+                Some(stage) => proc_from_stage1(stage, cpu_pct),
+                None => continue,
+            },
+        };
+        apply_stage1(&mut info, stage);
+        cache.insert(
+            pid,
+            CachedDetail {
+                start_time: info.start_time,
+                name: info.name.clone(),
+                argv: info.argv.clone(),
+                cwd: info.cwd.clone(),
+                exe: info.exe.clone(),
+            },
+        );
+        map.insert(pid, info);
+    }
+    prune_detail_cache(&mut cache, &map.keys().copied().collect());
+    map
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Clone)]
+struct Stage1 {
+    pid: u32,
+    ppid: u32,
+    start_time: u64,
+    path: String,
+    comm: String,
+}
+
+#[cfg(target_os = "macos")]
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct ProcBsdInfo {
+    pbi_flags: u32,
+    pbi_status: u32,
+    pbi_xstatus: u32,
+    pbi_pid: u32,
+    pbi_ppid: u32,
+    pbi_uid: u32,
+    pbi_gid: u32,
+    pbi_ruid: u32,
+    pbi_rgid: u32,
+    pbi_svuid: u32,
+    pbi_svgid: u32,
+    rfu_1: u32,
+    pbi_comm: [u8; 16],
+    pbi_name: [u8; 32],
+    pbi_nfiles: u32,
+    pbi_pgid: u32,
+    pbi_pjobc: u32,
+    e_tdev: u32,
+    e_tpgid: u32,
+    pbi_nice: i32,
+    pbi_start_tvsec: u64,
+    pbi_start_tvusec: u64,
+}
+
+#[cfg(target_os = "macos")]
+const PROC_PIDTBSDINFO: i32 = 3;
+
+#[cfg(target_os = "macos")]
+extern "C" {
+    fn proc_listallpids(buffer: *mut std::ffi::c_void, buffersize: i32) -> i32;
+    fn proc_pidpath(pid: i32, buffer: *mut std::ffi::c_void, buffersize: u32) -> i32;
+    fn proc_pidinfo(
+        pid: i32,
+        flavor: i32,
+        arg: u64,
+        buffer: *mut std::ffi::c_void,
+        buffersize: i32,
+    ) -> i32;
+}
+
+#[cfg(target_os = "macos")]
+fn c_name(buf: &[u8]) -> String {
+    let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+    String::from_utf8_lossy(&buf[..end]).into_owned()
+}
+
+#[cfg(target_os = "macos")]
+fn list_all_pids() -> Vec<i32> {
+    unsafe {
+        let hint = proc_listallpids(std::ptr::null_mut(), 0);
+        if hint <= 0 {
+            return Vec::new();
+        }
+        let mut buf = vec![0i32; hint as usize + 64];
+        let bytes = (buf.len() * std::mem::size_of::<i32>()) as i32;
+        let n = proc_listallpids(buf.as_mut_ptr() as *mut std::ffi::c_void, bytes);
+        if n <= 0 {
+            return Vec::new();
+        }
+        buf.truncate(n as usize);
+        buf.retain(|&p| p > 0);
+        buf
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn pid_path(pid: i32) -> String {
+    let mut buf = [0u8; 4096];
+    let n = unsafe {
+        proc_pidpath(
+            pid,
+            buf.as_mut_ptr() as *mut std::ffi::c_void,
+            buf.len() as u32,
+        )
+    };
+    if n <= 0 {
+        return String::new();
+    }
+    String::from_utf8_lossy(&buf[..n as usize]).into_owned()
+}
+
+#[cfg(target_os = "macos")]
+fn pid_bsdinfo(pid: i32) -> Option<ProcBsdInfo> {
+    let mut info = ProcBsdInfo::default();
+    let sz = std::mem::size_of::<ProcBsdInfo>() as i32;
+    let n = unsafe {
+        proc_pidinfo(
+            pid,
+            PROC_PIDTBSDINFO,
+            0,
+            &mut info as *mut _ as *mut std::ffi::c_void,
+            sz,
+        )
+    };
+    (n == sz).then_some(info)
+}
+
+#[cfg(target_os = "macos")]
+fn list_stage1() -> Vec<Stage1> {
+    list_all_pids()
+        .into_iter()
+        .filter_map(|pid| {
+            let bsd = pid_bsdinfo(pid)?;
+            let path = pid_path(pid);
+            let comm = {
+                let name = c_name(&bsd.pbi_name);
+                if name.is_empty() {
+                    c_name(&bsd.pbi_comm)
+                } else {
+                    name
+                }
+            };
+            Some(Stage1 {
+                pid: if bsd.pbi_pid != 0 {
+                    bsd.pbi_pid
+                } else {
+                    pid as u32
+                },
+                ppid: bsd.pbi_ppid,
+                start_time: bsd.pbi_start_tvsec,
+                path,
+                comm,
+            })
+        })
+        .collect()
+}
+
+/// Fill exe/name from the cheap `proc_pidpath` / BSD `comm` when sysinfo
+/// omitted them. Grok's on-disk name is `grok-1.0.5-macos-aarch64`; without
+/// this path the two-stage scan can seed the pid and then drop it.
+#[cfg(target_os = "macos")]
+fn apply_stage1(info: &mut ProcInfo, stage: Option<&Stage1>) {
+    let Some(stage) = stage else {
+        return;
+    };
+    if info.exe.is_none() && !stage.path.is_empty() {
+        info.exe = Some(PathBuf::from(&stage.path));
+    }
+    if info.name.is_empty() && !stage.comm.is_empty() {
+        info.name = stage.comm.clone();
+    }
+    if info.argv.is_empty() {
+        let argv0 = if !stage.path.is_empty() {
+            stage.path.clone()
+        } else {
+            stage.comm.clone()
+        };
+        if !argv0.is_empty() {
+            info.argv = vec![argv0];
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn proc_from_stage1(stage: &Stage1, cpu_pct: f32) -> ProcInfo {
+    let exe = (!stage.path.is_empty()).then(|| PathBuf::from(&stage.path));
+    let argv0 = if !stage.path.is_empty() {
+        stage.path.clone()
+    } else {
+        stage.comm.clone()
+    };
+    ProcInfo {
+        pid: stage.pid,
+        ppid: stage.ppid,
+        cpu_pct,
+        name: stage.comm.clone(),
+        argv: if argv0.is_empty() {
+            Vec::new()
+        } else {
+            vec![argv0]
+        },
+        cwd: None,
+        exe,
+        start_time: stage.start_time,
+    }
+}
+
+/// Stage-1 filter: exe path or `comm` looks like an agent or a wrapper that
+/// may hide the real binary in argv (`node …/claude`).
+fn is_scan_seed(path: &str, comm: &str) -> bool {
+    if grok_install_path(path) || grok_versioned_binary(path) || grok_versioned_binary(comm) {
+        return true;
+    }
+    if is_wrapper_comm(comm) || is_wrapper_comm(path.rsplit('/').next().unwrap_or(path)) {
+        return true;
+    }
+    [
+        AgentKind::Cursor,
+        AgentKind::OpenCode,
+        AgentKind::Claude,
+        AgentKind::Codex,
+        AgentKind::Fx,
+        AgentKind::Grok,
+        AgentKind::Aider,
+        AgentKind::Gemini,
+        AgentKind::Pi,
+    ]
+    .into_iter()
+    .any(|kind| {
+        kind.binaries()
+            .iter()
+            .any(|bin| token_has_binary(path, bin) || token_has_binary(comm, bin))
+    })
+}
+
+fn is_wrapper_comm(name: &str) -> bool {
+    const WRAPPERS: &[&str] = &[
+        "node", "bun", "deno", "ruby", "perl", "npx", "python", "python3",
+    ];
+    let base = name.rsplit(['/', '\\']).next().unwrap_or(name);
+    let base = base.strip_suffix(".exe").unwrap_or(base);
+    let lower = base.to_ascii_lowercase();
+    WRAPPERS.iter().any(|w| lower == *w) || lower.starts_with("python")
 }
 
 fn assemble(procs: &HashMap<u32, ProcInfo>) -> Vec<AgentSession> {
@@ -371,6 +786,10 @@ fn assemble_inner(
                 .get(&pid)
                 .and_then(|s| s.status.as_deref())
                 .map(|s| !s.eq_ignore_ascii_case("idle")),
+            AgentKind::Grok => grok_meta
+                .get(&pid)
+                .and_then(|s| grok_session_busy(&s.cwd, &s.session_id)),
+            AgentKind::Cursor => cursor_session_busy(&cwd),
             _ => None,
         };
 
@@ -440,10 +859,13 @@ fn classify_process(name: &str, argv: &[String], exe: Option<&Path>) -> Option<A
         return None;
     }
 
-    // Live Grok TUI rewrites argv0 to `agent`; the path only survives on `exe`
-    // (`~/.grok/bin/agent` or `~/.grok/downloads/grok-*`).
+    // Live Grok TUI: argv0 is `grok` or `agent`; the on-disk name is the
+    // versioned build (`grok-1.0.5-macos-aarch64`) under `~/.grok/`.
     if is_grok_process(name, argv, exe) {
         return Some(AgentKind::Grok);
+    }
+    if is_pi_process(name, argv, exe) {
+        return Some(AgentKind::Pi);
     }
 
     [
@@ -455,6 +877,7 @@ fn classify_process(name: &str, argv: &[String], exe: Option<&Path>) -> Option<A
         AgentKind::Grok,
         AgentKind::Aider,
         AgentKind::Gemini,
+        AgentKind::Pi,
     ]
     .into_iter()
     .find(|kind| {
@@ -467,16 +890,54 @@ fn classify_process(name: &str, argv: &[String], exe: Option<&Path>) -> Option<A
 }
 
 fn is_grok_process(name: &str, argv: &[String], exe: Option<&Path>) -> bool {
-    if exe.is_some_and(|p| grok_install_path(&p.to_string_lossy())) {
+    if exe.is_some_and(|p| grok_cli_token(&p.to_string_lossy())) {
         return true;
     }
-    argv.iter().take(2).any(|tok| {
-        grok_install_path(tok) && (token_has_binary(tok, "agent") || token_has_binary(tok, "grok"))
-    }) || (token_has_binary(name, "agent") && argv.iter().any(|tok| grok_install_path(tok)))
+    if grok_versioned_binary(name) {
+        return true;
+    }
+    argv.iter().take(2).any(|tok| grok_cli_token(tok))
+        || (token_has_binary(name, "agent") && argv.iter().any(|tok| grok_install_path(tok)))
+}
+
+fn grok_cli_token(tok: &str) -> bool {
+    grok_install_path(tok) || grok_versioned_binary(tok)
+}
+
+/// Pi (`@earendil-works/pi-coding-agent`) is the `pi` binary, or a node/bun
+/// wrapper whose argv points at `pi-coding-agent`. Basename `pi` is exact so
+/// `pip` / `pihole` do not match.
+fn is_pi_process(name: &str, argv: &[String], exe: Option<&Path>) -> bool {
+    if token_has_binary(name, "pi") {
+        return true;
+    }
+    if exe.is_some_and(|p| pi_cli_token(&p.to_string_lossy())) {
+        return true;
+    }
+    argv.iter().take(3).any(|tok| pi_cli_token(tok))
+}
+
+fn pi_cli_token(tok: &str) -> bool {
+    token_has_binary(tok, "pi")
+        || tok.contains("pi-coding-agent")
+        || tok.contains("@earendil-works/pi")
+        || tok.contains("@mariozechner/pi-coding-agent")
 }
 
 fn grok_install_path(s: &str) -> bool {
     s.contains("/.grok/") || s.contains("\\.grok\\")
+}
+
+/// Grok CLI ships as `grok-<version>-<os>-<arch>` (comm is that basename, or
+/// the 16-byte truncated `pbi_comm`). Same idea as Claude's `claude/versions/`
+/// autoupdater layout: the running name is not the `grok` symlink.
+fn grok_versioned_binary(tok: &str) -> bool {
+    let base = tok.rsplit(['/', '\\']).next().unwrap_or(tok);
+    let base = base.strip_suffix(".exe").unwrap_or(base);
+    let Some(rest) = base.strip_prefix("grok-") else {
+        return false;
+    };
+    rest.starts_with(|c: char| c.is_ascii_digit())
 }
 
 fn is_excluded(name: &str, argv: &[String]) -> bool {
@@ -645,6 +1106,280 @@ fn cursor_worker_dir(argv: &[String]) -> Option<String> {
     None
 }
 
+/// Cursor stores agent transcripts at
+/// `~/.cursor/projects/<slugified-cwd>/agent-transcripts/…/*.jsonl`.
+/// `/Users/me/app` → `Users-me-app`.
+fn cursor_project_slug(cwd: &str) -> Option<String> {
+    let cwd = cwd.trim().trim_end_matches(['/', '\\']);
+    if cwd.is_empty() || cwd == "?" {
+        return None;
+    }
+    let stripped = cwd.strip_prefix('/').unwrap_or(cwd);
+    let slug = stripped.replace(['/', '\\'], "-");
+    (!slug.is_empty()).then_some(slug)
+}
+
+#[derive(Deserialize)]
+struct CursorEvent {
+    #[serde(rename = "type", default)]
+    kind: String,
+    #[serde(default)]
+    role: Option<String>,
+}
+
+fn cursor_session_busy(cwd: &str) -> Option<bool> {
+    cursor_session_busy_in(dirs::home_dir()?.as_path(), cwd)
+}
+
+fn cursor_session_busy_in(home: &Path, cwd: &str) -> Option<bool> {
+    // Composer `unfinishedRunAt` is the live signal: IDE agent transcripts
+    // often freeze after the first assistant line and may never write
+    // `turn_ended`, so mtime-based transcript heuristics go idle mid-turn.
+    let composer = cursor_composer_unfinished(home, cwd);
+    if composer == Some(true) {
+        return Some(true);
+    }
+
+    let dir = home
+        .join(".cursor")
+        .join("projects")
+        .join(cursor_project_slug(cwd)?)
+        .join("agent-transcripts");
+    let transcript = cursor_transcripts_busy(&dir);
+    match (composer, transcript) {
+        (_, Some(true)) => Some(true),
+        // DB readable and nothing unfinished for this cwd → idle, even when
+        // a transcript still ends on a stale assistant line.
+        (Some(false), _) => Some(false),
+        (_, Some(false)) => Some(false),
+        _ => None,
+    }
+}
+
+/// Cursor writes `unfinishedRunAt` on `composerHeaders` for the active run.
+/// `~/Library/Application Support/Cursor/User/globalStorage/state.vscdb`
+/// (Linux/Windows: under the same `Cursor/User/globalStorage` data dir).
+fn cursor_state_db(home: &Path) -> PathBuf {
+    #[cfg(target_os = "macos")]
+    {
+        home.join("Library/Application Support/Cursor/User/globalStorage/state.vscdb")
+    }
+    #[cfg(target_os = "windows")]
+    {
+        home.join("AppData/Roaming/Cursor/User/globalStorage/state.vscdb")
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        home.join(".config/Cursor/User/globalStorage/state.vscdb")
+    }
+}
+
+/// `Some(true)` if a composer for `cwd` has `unfinishedRunAt`, `Some(false)`
+/// if the DB opened and none matched, `None` if the DB is missing/unreadable.
+fn cursor_composer_unfinished(home: &Path, cwd: &str) -> Option<bool> {
+    let db = cursor_state_db(home);
+    if !db.is_file() {
+        return None;
+    }
+    let uri = format!("file:{}?mode=ro", db.display());
+    let conn = rusqlite::Connection::open_with_flags(
+        &uri,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI,
+    )
+    .ok()?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT workspaceId, value FROM composerHeaders \
+             WHERE value LIKE '%unfinishedRunAt%'",
+        )
+        .ok()?;
+    let mut rows = stmt.query([]).ok()?;
+    while let Ok(Some(row)) = rows.next() {
+        let workspace_id: String = row.get(0).unwrap_or_default();
+        let value: String = match row.get(1) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        if cursor_composer_matches_cwd(home, cwd, &workspace_id, &value) {
+            return Some(true);
+        }
+    }
+    Some(false)
+}
+
+#[derive(Deserialize)]
+struct CursorComposerHeader {
+    #[serde(default, rename = "unfinishedRunAt")]
+    unfinished_run_at: Option<u64>,
+    #[serde(default, rename = "trackedGitRepos")]
+    tracked_git_repos: Vec<CursorTrackedRepo>,
+}
+
+#[derive(Deserialize)]
+struct CursorTrackedRepo {
+    #[serde(default, rename = "repoPath")]
+    repo_path: Option<String>,
+}
+
+fn cursor_composer_matches_cwd(home: &Path, cwd: &str, workspace_id: &str, value: &str) -> bool {
+    let Ok(header) = serde_json::from_str::<CursorComposerHeader>(value) else {
+        return false;
+    };
+    if header.unfinished_run_at.is_none() {
+        return false;
+    }
+    let cwd = normalize_cwd(cwd);
+    if cwd.is_empty() || cwd == "?" {
+        return false;
+    }
+    for repo in &header.tracked_git_repos {
+        if let Some(path) = repo.repo_path.as_deref() {
+            if normalize_cwd(path) == cwd {
+                return true;
+            }
+        }
+    }
+    cursor_workspace_folder(home, workspace_id).is_some_and(|folder| folder == cwd)
+}
+
+fn cursor_workspace_storage_root(home: &Path) -> PathBuf {
+    #[cfg(target_os = "macos")]
+    {
+        home.join("Library/Application Support/Cursor/User/workspaceStorage")
+    }
+    #[cfg(target_os = "windows")]
+    {
+        home.join("AppData/Roaming/Cursor/User/workspaceStorage")
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        home.join(".config/Cursor/User/workspaceStorage")
+    }
+}
+
+fn cursor_workspace_folder(home: &Path, workspace_id: &str) -> Option<String> {
+    if workspace_id.is_empty() {
+        return None;
+    }
+    let path = cursor_workspace_storage_root(home)
+        .join(workspace_id)
+        .join("workspace.json");
+    let text = std::fs::read_to_string(path).ok()?;
+    #[derive(Deserialize)]
+    struct WorkspaceFile {
+        folder: Option<String>,
+    }
+    let folder = serde_json::from_str::<WorkspaceFile>(&text).ok()?.folder?;
+    let path = folder.strip_prefix("file://").unwrap_or(&folder);
+    // Percent-decode common space escapes; Cursor stores file URLs.
+    let decoded = path.replace("%20", " ");
+    Some(normalize_cwd(&decoded))
+}
+
+fn normalize_cwd(cwd: &str) -> String {
+    cwd.trim().trim_end_matches(['/', '\\']).to_string()
+}
+
+/// Newest transcripts first. An open turn (user/assistant after the last
+/// `turn_ended`) is Working — Cursor's worker does the turn in-process over
+/// the network, so descendant CPU never fires. Files that never recorded
+/// `turn_ended` only count as open while they were just written; otherwise
+/// a finished chat that ends on an assistant line would stay Working forever.
+fn cursor_transcripts_busy(dir: &Path) -> Option<bool> {
+    let mut files = Vec::new();
+    collect_jsonl(dir, 0, &mut files);
+    if files.is_empty() {
+        return None;
+    }
+    files.sort_by_key(|a| std::cmp::Reverse(a.1));
+    let mut saw_idle = false;
+    let mut saw_stale_open = false;
+    for (path, mtime) in files.into_iter().take(8) {
+        let Some(text) = read_file_tail(&path, 64 * 1024) else {
+            continue;
+        };
+        let Some(busy) = cursor_events_busy(&text) else {
+            continue;
+        };
+        if busy {
+            if cursor_open_turn_is_live(&text, mtime) {
+                return Some(true);
+            }
+            // Open turn, but no `turn_ended` history and mtime went cold —
+            // common mid-turn for IDE agents that don't stream tool lines.
+            saw_stale_open = true;
+        } else {
+            saw_idle = true;
+        }
+    }
+    if saw_stale_open {
+        return None;
+    }
+    saw_idle.then_some(false)
+}
+
+/// How long a transcript without `turn_ended` may sit on an assistant line
+/// before we treat the turn as finished. Streaming writes keep mtime fresh.
+const CURSOR_OPEN_TURN_STALE_SECS: u64 = 30;
+
+fn cursor_open_turn_is_live(text: &str, mtime: SystemTime) -> bool {
+    if cursor_transcript_has_turn_end(text) {
+        return true;
+    }
+    SystemTime::now()
+        .duration_since(mtime)
+        .map(|age| age.as_secs() < CURSOR_OPEN_TURN_STALE_SECS)
+        .unwrap_or(false)
+}
+
+fn cursor_transcript_has_turn_end(text: &str) -> bool {
+    text.lines().any(|line| {
+        serde_json::from_str::<CursorEvent>(line).is_ok_and(|ev| ev.kind == "turn_ended")
+    })
+}
+
+fn collect_jsonl(dir: &Path, depth: u8, out: &mut Vec<(PathBuf, SystemTime)>) {
+    if depth > 3 {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_jsonl(&path, depth + 1, out);
+            continue;
+        }
+        if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+            continue;
+        }
+        let mtime = entry
+            .metadata()
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .unwrap_or(SystemTime::UNIX_EPOCH);
+        out.push((path, mtime));
+    }
+}
+
+/// Last `turn_ended` vs a user/assistant line in a Cursor transcript tail.
+/// Same signal as Grok's `turn_started` / `turn_ended`.
+fn cursor_events_busy(text: &str) -> Option<bool> {
+    let mut last_turn: Option<bool> = None;
+    for line in text.lines() {
+        let Ok(ev) = serde_json::from_str::<CursorEvent>(line) else {
+            continue;
+        };
+        if ev.kind == "turn_ended" {
+            last_turn = Some(false);
+        } else if matches!(ev.role.as_deref(), Some("user" | "assistant")) {
+            last_turn = Some(true);
+        }
+    }
+    last_turn
+}
+
 #[derive(Deserialize)]
 struct GrokActive {
     session_id: String,
@@ -716,6 +1451,76 @@ fn grok_sessions() -> HashMap<u32, GrokActive> {
         return HashMap::new();
     };
     rows.into_iter().map(|row| (row.pid, row)).collect()
+}
+
+#[derive(Deserialize)]
+struct GrokEvent {
+    #[serde(rename = "type", default)]
+    kind: String,
+    #[serde(default)]
+    phase: Option<String>,
+}
+
+fn grok_session_busy(cwd: &str, session_id: &str) -> Option<bool> {
+    let path = grok_session_dir(cwd, session_id).join("events.jsonl");
+    grok_events_busy(&read_file_tail(&path, 64 * 1024)?)
+}
+
+/// Last `turn_started` / `turn_ended` in a Grok `events.jsonl` tail, with
+/// in-progress phases as a fallback when a long turn has aged the start
+/// event out of the window. Claude's sidecar `status` is the same signal.
+fn grok_events_busy(text: &str) -> Option<bool> {
+    let mut last_turn: Option<bool> = None;
+    let mut saw_working_phase = false;
+    for line in text.lines() {
+        let Ok(ev) = serde_json::from_str::<GrokEvent>(line) else {
+            continue;
+        };
+        match ev.kind.as_str() {
+            "turn_started" => {
+                last_turn = Some(true);
+                saw_working_phase = false;
+            }
+            "turn_ended" => {
+                last_turn = Some(false);
+                saw_working_phase = false;
+            }
+            "phase_changed" if grok_working_phase(ev.phase.as_deref()) => {
+                saw_working_phase = true;
+            }
+            _ => {}
+        }
+    }
+    last_turn.or(saw_working_phase.then_some(true))
+}
+
+fn grok_working_phase(phase: Option<&str>) -> bool {
+    matches!(
+        phase,
+        Some(
+            "streaming_reasoning"
+                | "streaming_text"
+                | "tool_execution"
+                | "permission_prompt"
+                | "waiting_for_model"
+        )
+    )
+}
+
+fn read_file_tail(path: &Path, max: u64) -> Option<String> {
+    let mut file = File::open(path).ok()?;
+    let len = file.metadata().ok()?.len();
+    if len > max {
+        file.seek(SeekFrom::End(-(max as i64))).ok()?;
+    }
+    let mut buf = String::new();
+    file.read_to_string(&mut buf).ok()?;
+    if len > max {
+        if let Some(i) = buf.find('\n') {
+            buf = buf[i + 1..].to_string();
+        }
+    }
+    Some(buf)
 }
 
 #[derive(Clone, Deserialize)]
@@ -990,17 +1795,16 @@ fn activate(_pid: u32) -> bool {
     false
 }
 
-/// How long the island should wait between scans: quick while sessions are
-/// live (status changes matter), relaxed once none have been seen for a
-/// while — a newly started agent then appears within one slow tick, which is
-/// fine for a status glance and keeps the recurring process-table walk off
-/// the battery.
+/// How long the island should wait between scans: 2s while a session was
+/// seen recently, 5s once none are active — a newly started agent then
+/// appears within one slow tick, which is fine for a status glance and
+/// keeps the recurring process-table walk off the battery.
 pub fn poll_interval() -> Duration {
     let last = LAST_AGENT_SEEN.load(std::sync::atomic::Ordering::Relaxed);
     if unix_secs().saturating_sub(last) < 30 {
         Duration::from_secs(2)
     } else {
-        Duration::from_secs(6)
+        Duration::from_secs(5)
     }
 }
 
@@ -1086,6 +1890,82 @@ mod tests {
             ),
             Some(AgentKind::Cursor)
         );
+        assert_eq!(
+            classify_process("pi", &["/usr/local/bin/pi".into()], None),
+            Some(AgentKind::Pi)
+        );
+        assert_eq!(
+            classify_process(
+                "node",
+                &[
+                    "node".into(),
+                    "/Users/a/.nvm/versions/node/v22/lib/node_modules/@earendil-works/pi-coding-agent/dist/cli.js".into(),
+                ],
+                None,
+            ),
+            Some(AgentKind::Pi)
+        );
+        assert_eq!(
+            classify_process("pip", &["/usr/bin/pip".into()], None),
+            None
+        );
+    }
+
+    #[test]
+    fn scan_seed_matches_agent_paths_and_wrappers() {
+        assert!(is_scan_seed("/usr/local/bin/claude", "claude"));
+        assert!(is_scan_seed(
+            "/Users/a/.local/share/claude/versions/2.1.121",
+            "claude"
+        ));
+        assert!(is_scan_seed("/bin/cursor-agent", "cursor-agent"));
+        assert!(is_scan_seed("/usr/local/bin/pi", "pi"));
+        assert!(is_scan_seed("/opt/homebrew/bin/node", "node"));
+        assert!(is_scan_seed("/usr/bin/python3.12", "Python"));
+        assert!(is_scan_seed("/Users/a/.grok/bin/agent", "agent"));
+        assert!(is_scan_seed(
+            "/Users/a/.grok/downloads/grok-1.0.5-macos-aarch64",
+            "grok-1.0.5-macos-aarch64"
+        ));
+        assert!(is_scan_seed("", "grok-1.0.5-macos-aarch64"));
+        assert!(is_scan_seed("", "grok-1.0.5-maco"));
+        assert!(!is_scan_seed("/usr/bin/grep", "grep"));
+        assert!(!is_scan_seed(
+            "/Applications/Safari.app/Contents/MacOS/Safari",
+            "Safari"
+        ));
+        assert!(!is_scan_seed("/usr/sbin/syslogd", "syslogd"));
+    }
+
+    #[test]
+    fn argv_cache_hits_only_matching_start_time() {
+        let mut cache = HashMap::new();
+        cache.insert(
+            7,
+            CachedDetail {
+                start_time: 100,
+                name: "claude".into(),
+                argv: vec!["claude".into()],
+                cwd: None,
+                exe: None,
+            },
+        );
+        assert!(cache_lookup(&cache, 7, 100).is_some());
+        assert!(cache_lookup(&cache, 7, 101).is_none());
+        assert!(cache_lookup(&cache, 7, 0).is_none());
+        assert!(cache_lookup(&cache, 8, 100).is_none());
+        let live = HashSet::from([8u32]);
+        prune_detail_cache(&mut cache, &live);
+        assert!(cache.is_empty());
+    }
+
+    #[test]
+    fn poll_interval_is_5s_when_no_recent_session() {
+        let prev = LAST_AGENT_SEEN.swap(0, std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(poll_interval(), Duration::from_secs(5));
+        LAST_AGENT_SEEN.store(unix_secs(), std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(poll_interval(), Duration::from_secs(2));
+        LAST_AGENT_SEEN.store(prev, std::sync::atomic::Ordering::Relaxed);
     }
 
     #[test]
@@ -1150,6 +2030,24 @@ mod tests {
             Some(AgentKind::Grok)
         );
         assert_eq!(classify_process("agent", &["agent".into()], None), None);
+        // Versioned on-disk name with no `/.grok/` path — Claude's equivalent
+        // is `claude/versions/2.1.250`. Without this, comm-only Grok is invisible.
+        assert_eq!(
+            classify_process(
+                "grok-1.0.5-macos-aarch64",
+                &["grok-1.0.5-macos-aarch64".into()],
+                None,
+            ),
+            Some(AgentKind::Grok)
+        );
+        assert_eq!(
+            classify_process("grok-1.0.5-maco", &["grok-1.0.5-maco".into()], None),
+            Some(AgentKind::Grok)
+        );
+        assert_eq!(
+            classify_process("grok-launch", &["grok-launch".into()], None),
+            None
+        );
     }
 
     #[test]
@@ -1186,6 +2084,29 @@ mod tests {
         assert_eq!(sessions[0].pid, 77);
         assert_eq!(sessions[0].session_id.as_deref(), Some("abc"));
         assert_eq!(sessions[0].cwd, "/tmp/proj");
+    }
+
+    #[test]
+    fn assemble_detects_versioned_grok_binary_without_install_path() {
+        let mut procs = HashMap::new();
+        procs.insert(
+            42,
+            proc(
+                42,
+                1,
+                "grok-1.0.5-macos-aarch64",
+                &["grok-1.0.5-macos-aarch64"],
+            ),
+        );
+        let sessions = assemble_inner(
+            &procs,
+            &HashMap::new(),
+            &HashMap::new(),
+            &mut HashMap::new(),
+        );
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].kind, AgentKind::Grok);
+        assert_eq!(sessions[0].pid, 42);
     }
 
     fn sidecar(status: Option<&str>, started_at: Option<u64>) -> ClaudeSidecar {
@@ -1256,6 +2177,37 @@ mod tests {
     }
 
     #[test]
+    fn cursor_idle_mcp_child_is_not_work() {
+        // The IDE worker keeps MCP servers as children. They must not flip
+        // status; an in-progress turn is read from the transcript instead.
+        let mut procs = HashMap::new();
+        let mut worker = proc(
+            80,
+            1,
+            "cursor-agent",
+            &[
+                "/bin/cursor-agent",
+                "worker",
+                "start",
+                "--worker-dir",
+                "/tmp/does-not-exist-nook-cursor",
+            ],
+        );
+        worker.cwd = Some(PathBuf::from("/tmp/does-not-exist-nook-cursor"));
+        procs.insert(80, worker);
+        let mut mcp = proc(81, 80, "node", &["node", "n8n-mcp"]);
+        mcp.cpu_pct = 2.0;
+        procs.insert(81, mcp);
+        let mut debounce = HashMap::new();
+        for _ in 0..3 {
+            let s = assemble_inner(&procs, &HashMap::new(), &HashMap::new(), &mut debounce);
+            assert_eq!(s.len(), 1);
+            assert_eq!(s[0].kind, AgentKind::Cursor);
+            assert_eq!(s[0].status, AgentStatus::Waiting);
+        }
+    }
+
+    #[test]
     fn stale_sidecar_for_reused_pid_is_ignored() {
         let mut procs = HashMap::new();
         // Unrelated process that started long after the dead session.
@@ -1285,7 +2237,12 @@ mod tests {
         );
         procs.insert(12, proc(12, 1, "zsh", &["zsh"]));
 
-        let sessions = assemble_inner(&procs, &HashMap::new(), &HashMap::new(), &mut HashMap::new());
+        let sessions = assemble_inner(
+            &procs,
+            &HashMap::new(),
+            &HashMap::new(),
+            &mut HashMap::new(),
+        );
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].pid, 11);
     }
@@ -1359,6 +2316,196 @@ mod tests {
     }
 
     #[test]
+    fn cursor_project_slug_strips_root_and_slashes() {
+        assert_eq!(
+            cursor_project_slug("/Users/jonasvogel/openNook").as_deref(),
+            Some("Users-jonasvogel-openNook")
+        );
+        assert_eq!(
+            cursor_project_slug("/Users/jonasvogel/openNook/").as_deref(),
+            Some("Users-jonasvogel-openNook")
+        );
+        assert_eq!(cursor_project_slug("?"), None);
+        assert_eq!(cursor_project_slug(""), None);
+    }
+
+    #[test]
+    fn cursor_events_busy_follows_turn_markers() {
+        assert_eq!(cursor_events_busy(""), None);
+        assert_eq!(
+            cursor_events_busy(
+                r#"{"role":"user","message":{"content":[{"type":"text","text":"hi"}]}}
+{"role":"assistant","message":{"content":[{"type":"text","text":"ok"}]}}
+"#
+            ),
+            Some(true)
+        );
+        assert_eq!(
+            cursor_events_busy(
+                r#"{"role":"user","message":{"content":[]}}
+{"role":"assistant","message":{"content":[]}}
+{"type":"turn_ended","status":"success"}
+"#
+            ),
+            Some(false)
+        );
+        // Next prompt: user line after turn_ended is an open turn, even
+        // before the first assistant chunk lands.
+        assert_eq!(
+            cursor_events_busy(
+                r#"{"type":"turn_ended","status":"success"}
+{"role":"user","message":{"content":[]}}
+"#
+            ),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn cursor_transcript_open_turn_is_working() {
+        let home = std::env::temp_dir().join(format!(
+            "nook-cursor-busy-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let dir = home
+            .join(".cursor")
+            .join("projects")
+            .join("tmp-app")
+            .join("agent-transcripts")
+            .join("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
+        std::fs::create_dir_all(&dir).unwrap();
+        let jsonl = dir.join("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee.jsonl");
+        std::fs::write(
+            &jsonl,
+            r#"{"role":"user","message":{"content":[]}}
+{"role":"assistant","message":{"content":[]}}
+{"type":"turn_ended","status":"success"}
+{"role":"user","message":{"content":[]}}
+{"role":"assistant","message":{"content":[]}}
+"#,
+        )
+        .unwrap();
+        assert_eq!(cursor_session_busy_in(&home, "/tmp/app"), Some(true));
+
+        std::fs::write(
+            &jsonl,
+            r#"{"role":"user","message":{"content":[]}}
+{"role":"assistant","message":{"content":[]}}
+{"type":"turn_ended","status":"success"}
+"#,
+        )
+        .unwrap();
+        assert_eq!(cursor_session_busy_in(&home, "/tmp/app"), Some(false));
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn cursor_open_turn_without_end_marker_needs_fresh_mtime() {
+        let now = SystemTime::now();
+        let stale = now - Duration::from_secs(CURSOR_OPEN_TURN_STALE_SECS + 5);
+        assert!(cursor_open_turn_is_live(
+            r#"{"type":"turn_ended","status":"success"}
+{"role":"assistant","message":{"content":[]}}
+"#,
+            stale
+        ));
+        assert!(!cursor_open_turn_is_live(
+            r#"{"role":"assistant","message":{"content":[]}}"#,
+            stale
+        ));
+        assert!(cursor_open_turn_is_live(
+            r#"{"role":"assistant","message":{"content":[]}}"#,
+            now
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cursor_stale_open_turn_without_end_is_uncertain() {
+        let dir = std::env::temp_dir().join(format!(
+            "nook-cursor-stale-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let jsonl = dir.join("chat.jsonl");
+        std::fs::write(
+            &jsonl,
+            r#"{"role":"user","message":{"content":[]}}
+{"role":"assistant","message":{"content":[]}}
+"#,
+        )
+        .unwrap();
+        let stale = SystemTime::now() - Duration::from_secs(CURSOR_OPEN_TURN_STALE_SECS + 5);
+        filetime_set_mtime(&jsonl, stale);
+        assert_eq!(cursor_transcripts_busy(&dir), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cursor_composer_unfinished_run_marks_working() {
+        let home = std::env::temp_dir().join(format!(
+            "nook-cursor-composer-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let db_path = cursor_state_db(&home);
+        std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+        {
+            let conn = rusqlite::Connection::open(&db_path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE composerHeaders (
+                    composerId TEXT PRIMARY KEY,
+                    workspaceId TEXT,
+                    value TEXT
+                );",
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO composerHeaders (composerId, workspaceId, value) VALUES (?1, ?2, ?3)",
+                rusqlite::params![
+                    "comp-1",
+                    "ws-1",
+                    r#"{"unfinishedRunAt":1700000000000,"trackedGitRepos":[{"repoPath":"/tmp/app"}]}"#,
+                ],
+            )
+            .unwrap();
+        }
+        assert_eq!(cursor_composer_unfinished(&home, "/tmp/app"), Some(true));
+        assert_eq!(cursor_composer_unfinished(&home, "/tmp/other"), Some(false));
+        // No transcripts at all — composer alone drives Working.
+        assert_eq!(cursor_session_busy_in(&home, "/tmp/app"), Some(true));
+        assert_eq!(cursor_session_busy_in(&home, "/tmp/other"), Some(false));
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[cfg(unix)]
+    fn filetime_set_mtime(path: &Path, when: SystemTime) {
+        let dur = when
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default();
+        let tv = libc::timeval {
+            tv_sec: dur.as_secs() as libc::time_t,
+            tv_usec: dur.subsec_micros() as libc::suseconds_t,
+        };
+        let times = [tv, tv];
+        let c = std::ffi::CString::new(path.to_str().unwrap()).unwrap();
+        unsafe {
+            assert_eq!(libc::utimes(c.as_ptr(), times.as_ptr()), 0);
+        }
+    }
+
+    #[test]
     fn ancestry_starts_with_self() {
         let pid = std::process::id();
         let chain = ancestry(pid);
@@ -1403,8 +2550,8 @@ mod tests {
     }
 
     /// Live coding agents listed in Grok/Claude session files must show up in
-    /// `snapshot()`. This is the user-facing miss: a running Grok TUI whose
-    /// argv is just `agent` (no `/.grok/` path) is invisible today.
+    /// `snapshot()`, including a Grok TUI whose comm is the versioned build
+    /// name (`grok-1.0.5-macos-aarch64`) rather than the `grok` symlink.
     #[test]
     fn snapshot_detects_live_session_file_agents() {
         let sessions = snapshot();
@@ -1445,6 +2592,38 @@ mod tests {
         assert_eq!(
             percent_encode_path("/Users/jonasvogel/openNook-gpui"),
             "%2FUsers%2Fjonasvogel%2FopenNook-gpui"
+        );
+    }
+
+    #[test]
+    fn grok_events_busy_follows_turn_markers() {
+        assert_eq!(grok_events_busy(""), None);
+        assert_eq!(
+            grok_events_busy(
+                r#"{"ts":"t0","type":"mcp_init_completed"}
+{"ts":"t1","type":"turn_started","turn_number":0}
+{"ts":"t2","type":"phase_changed","phase":"streaming_text"}
+"#
+            ),
+            Some(true)
+        );
+        assert_eq!(
+            grok_events_busy(
+                r#"{"ts":"t1","type":"turn_started"}
+{"ts":"t2","type":"phase_changed","phase":"streaming_text"}
+{"ts":"t3","type":"turn_ended"}
+"#
+            ),
+            Some(false)
+        );
+        // Long turn: start event aged out of the tail; last phase still working.
+        assert_eq!(
+            grok_events_busy(r#"{"ts":"t9","type":"phase_changed","phase":"tool_execution"}"#),
+            Some(true)
+        );
+        assert_eq!(
+            grok_events_busy(r#"{"ts":"t9","type":"phase_changed","phase":"idle"}"#),
+            None
         );
     }
 
@@ -1511,6 +2690,7 @@ mod tests {
 #[cfg(all(test, target_os = "macos"))]
 mod focus_probe {
     #[test]
+    #[ignore = "live-environment probe; run manually"]
     fn probe() {
         for s in super::snapshot() {
             let hosts = super::host_pids(s.pid);

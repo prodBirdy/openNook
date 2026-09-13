@@ -1,0 +1,15 @@
+{
+    "name": "external-counter-plugin",
+    "version": "1.0.0",
+    "description": "Example external plugin for openNook",
+    "scripts": {
+        "build": "esbuild src/index.tsx --bundle --outfile=index.js --format=iife --external:react --jsx=transform --jsx-factory=React.createElement --jsx-fragment=React.Fragment"
+    },
+    "devDependencies": {
+        "esbuild": "^0.20.0",
+        "@types/react": "^19.0.0"
+    },
+    "peerDependencies": {
+        "react": "^19.0.0"
+    }
+}

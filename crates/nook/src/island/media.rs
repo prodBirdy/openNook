@@ -1,30 +1,69 @@
 //! Compact album chip, visualizer, and expanded Now Playing pane.
 
-use super::ui::slide_label;
-use super::Island;
+use super::ui::{
+    card_chrome, scroll_body, slide_label, timer_text, MEDIA_ART, MEDIA_ART_RADIUS, MEDIA_PLAY,
+    MEDIA_PROGRESS_HIT, MEDIA_TIME_PAD_GAP, MEDIA_TIME_PAD_TOP,
+};
+use super::{Island, QUEUE_PANEL_W, QUEUE_ROW_H};
 use crate::icons::lucide_color;
 use crate::theme;
 use gpui::{
-    div, img, linear_color_stop, linear_gradient, prelude::*, px, relative, rgb, rgba, AnyElement,
-    Context, CursorStyle, Image, MouseButton, MouseDownEvent, Rgba, SharedString,
+    canvas, div, img, linear_color_stop, linear_gradient, prelude::*, px, relative, rgba,
+    AnyElement, Context, CursorStyle, FontWeight, Image, MouseButton, MouseDownEvent, Rgba,
+    SharedString,
 };
-use nook_core::models::NowPlayingData;
+use nook_core::models::{NowPlayingData, PlaybackQueue, QueueItem};
 use std::sync::{Mutex, OnceLock};
 
 const MAX_ARTWORK_BYTES: usize = 5 * 1024 * 1024;
 const MAX_ARTWORK_DIMENSION: u32 = 4096;
 
-const COMPACT_ART: f32 = theme::COMPACT_FACE;
+const COMPACT_ART: f32 = 24.0;
 const COMPACT_ART_RADIUS: f32 = 5.0;
-const VIS_BAR_W: f32 = 3.5;
-const VIS_BAR_GAP: f32 = 2.5;
-const VIS_H: f32 = 20.0;
+const ART: f32 = MEDIA_ART;
+const ART_RADIUS: f32 = MEDIA_ART_RADIUS;
+const PLAY: f32 = MEDIA_PLAY;
+const SKIP_GAP: f32 = 36.0;
+/// Room for ~15 title glyphs at Title 2, beside the artwork.
+const TITLE_COL: f32 = 120.0;
+const VIS_BAR_W: f32 = 2.5;
+const VIS_BAR_GAP: f32 = 2.0;
+const VIS_H: f32 = 12.0;
+const VIS_REST: [f32; 6] = [0.35, 0.60, 0.45, 0.80, 0.55, 0.30];
 const VIS_DEFAULT: Rgba = Rgba {
     r: 0.882,
     g: 0.882,
     b: 0.882,
     a: 1.0,
 };
+const ART_PLACEHOLDER: (Rgba, Rgba) = (
+    Rgba {
+        r: 0.165,
+        g: 0.165,
+        b: 0.165,
+        a: 1.0,
+    },
+    Rgba {
+        r: 0.067,
+        g: 0.067,
+        b: 0.067,
+        a: 1.0,
+    },
+);
+
+thread_local! {
+    static REDUCE_MOTION: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Called from pane entry points so the compact visualizer (owned call site
+/// in compact.rs) can honour Accessibility › Reduce Motion.
+pub(super) fn set_reduce_motion(on: bool) {
+    REDUCE_MOTION.set(on);
+}
+
+fn reduce_motion() -> bool {
+    REDUCE_MOTION.get() || crate::platform::reduce_motion()
+}
 
 /// Target opacity for the compact play/pause scrim; `Island::overlay_fade`
 /// springs to it on `motion::REVEAL`. GPUI `.hover()` / `on_hover` stick
@@ -41,8 +80,10 @@ pub(super) fn album_overlay_target(island_hovered: bool) -> f32 {
 pub(super) fn album_chip(
     np: &NowPlayingData,
     overlay_alpha: f32,
+    reduce_motion: bool,
     cx: &mut Context<Island>,
 ) -> impl IntoElement {
+    set_reduce_motion(reduce_motion);
     let playing = np.is_playing;
     let art = np
         .artwork_base64
@@ -51,13 +92,9 @@ pub(super) fn album_chip(
     let overlay_icon = if playing { "pause-fill" } else { "play-fill" };
 
     div()
-        .id("album")
-        .relative()
-        .size(px(COMPACT_ART))
+        .id("album-hit")
+        .size(px(theme::HIT_MIN))
         .flex_shrink_0()
-        .rounded(px(COMPACT_ART_RADIUS))
-        .overflow_hidden()
-        .shadow_sm()
         .flex()
         .items_center()
         .justify_center()
@@ -66,26 +103,34 @@ pub(super) fn album_chip(
             MouseButton::Left,
             cx.listener(move |this, _: &MouseDownEvent, _, cx| {
                 cx.stop_propagation();
-                this.now_playing.is_playing = !this.now_playing.is_playing;
-                cx.notify();
+                this.note_media_play_pause(cx);
                 nook_core::runtime().spawn(async {
                     let _ = nook_core::audio::media_play_pause().await;
                 });
             }),
         )
-        .child(art.unwrap_or_else(placeholder_art))
         .child(
             div()
-                .absolute()
-                .inset_0()
+                .id("album")
+                .relative()
+                .size(px(COMPACT_ART))
                 .rounded(px(COMPACT_ART_RADIUS))
-                .bg(rgba(0x0000004D))
-                .flex()
-                .items_center()
-                .justify_center()
-                .opacity(overlay_alpha.clamp(0.0, 1.0))
-                .when(!playing, |d| d.pl(px(1.)))
-                .child(lucide_color(overlay_icon, 14.0, rgb(0xffffff))),
+                .overflow_hidden()
+                .shadow_sm()
+                .child(art.unwrap_or_else(placeholder_art))
+                .child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .rounded(px(COMPACT_ART_RADIUS))
+                        .bg(theme::with_alpha(theme::SCRIM, 0.30))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .opacity(overlay_alpha.clamp(0.0, 1.0))
+                        .when(!playing, |d| d.pl(px(1.)))
+                        .child(lucide_color(overlay_icon, 14.0, theme::LABEL)),
+                ),
         )
 }
 
@@ -95,13 +140,13 @@ fn placeholder_art() -> AnyElement {
         .rounded(px(COMPACT_ART_RADIUS))
         .bg(linear_gradient(
             135.0,
-            linear_color_stop(rgb(0x333333), 0.0),
-            linear_color_stop(rgb(0x111111), 1.0),
+            linear_color_stop(ART_PLACEHOLDER.0, 0.0),
+            linear_color_stop(ART_PLACEHOLDER.1, 1.0),
         ))
         .flex()
         .items_center()
         .justify_center()
-        .child(lucide_color("music", 14.0, rgba(0xffffff80)))
+        .child(lucide_color("music", 14.0, theme::SECONDARY_LABEL))
         .into_any_element()
 }
 
@@ -198,46 +243,105 @@ fn gpui_format(bytes: &[u8]) -> gpui::ImageFormat {
     }
 }
 
-pub(super) fn visualizer(levels: &[f64], playing: bool, color: Option<Rgba>) -> impl IntoElement {
+pub(super) fn visualizer(playing: bool, color: Option<Rgba>) -> impl IntoElement {
     let color = color.unwrap_or(VIS_DEFAULT);
-    let mut row = div()
-        .flex()
-        .items_center()
-        .justify_center()
-        .gap(px(VIS_BAR_GAP))
-        .h(px(VIS_H))
-        .pr_1();
-    for (i, level) in levels.iter().take(6).enumerate() {
-        let scale = if playing {
-            (*level as f32).clamp(0.15, 1.0)
-        } else {
-            0.15
-        };
-        row = row.child(
-            div()
-                .id(SharedString::from(format!("bar-{i}")))
-                .w(px(VIS_BAR_W))
-                .h(px(VIS_H * scale))
-                .rounded_full()
-                .bg(color),
-        );
-    }
-    row
+    let still = reduce_motion() || !playing;
+    // Clock-driven bars at ~15 fps via request_animation_frame — only while
+    // this element is on screen (Media compact face). No island-tick dirties.
+    canvas(
+        move |_, _, _| (),
+        move |bounds, _, window, _cx| {
+            let levels: [f64; 6] = if still {
+                VIS_REST.map(|r| r as f64)
+            } else {
+                // Quantize to 15 Hz so bar heights hold between paints.
+                let t = (vis_clock() * 15.0).floor() / 15.0;
+                nook_core::audio::visualizer_levels_at(t)
+            };
+            let bar_w = px(VIS_BAR_W);
+            let gap = px(VIS_BAR_GAP);
+            let total_w = VIS_BAR_W * 6.0 + VIS_BAR_GAP * 5.0;
+            let mut x =
+                bounds.origin.x + px(((f32::from(bounds.size.width) - total_w) * 0.5).max(0.0));
+            let bottom = bounds.origin.y + bounds.size.height;
+            let mut fill: gpui::Hsla = color.into();
+            if still {
+                fill.a *= 0.55;
+            }
+            for (i, level) in levels.iter().enumerate() {
+                let scale = visualizer_scale(*level, !still, i);
+                let h = px(VIS_H * scale);
+                let bar = gpui::Bounds {
+                    origin: gpui::point(x, bottom - h),
+                    size: gpui::size(bar_w, h),
+                };
+                window.paint_quad(gpui::fill(bar, fill).corner_radii(bar_w / 2.0));
+                x = x + bar_w + gap;
+            }
+            if !still {
+                window.request_animation_frame();
+            }
+        },
+    )
+    .h(px(VIS_H))
+    .w(px(VIS_BAR_W * 6.0 + VIS_BAR_GAP * 5.0 + 4.0))
 }
 
-const NOOK_ART: f32 = 84.0;
-const NOOK_ART_RADIUS: f32 = 14.0;
+fn vis_clock() -> f64 {
+    static ORIGIN: OnceLock<std::time::Instant> = OnceLock::new();
+    ORIGIN
+        .get_or_init(std::time::Instant::now)
+        .elapsed()
+        .as_secs_f64()
+}
+
+fn visualizer_scale(level: f64, playing: bool, index: usize) -> f32 {
+    let resting = VIS_REST[index];
+    if playing {
+        (level as f32).clamp(resting * 0.5, 1.0)
+    } else {
+        resting
+    }
+}
+
+const NOOK_ART: f32 = 52.0;
+pub(crate) const NOOK_ART_RADIUS: f32 = 12.0;
 const APP_BADGE: f32 = 22.0;
 const APP_BADGE_RADIUS: f32 = 5.0;
+const NOOK_PLAY_HIT: f32 = 40.0;
+const NOOK_SKIP_HIT: f32 = 32.0;
+const NOOK_PLAY_GLYPH: f32 = 30.0;
+const NOOK_SKIP_GLYPH: f32 = 22.0;
+#[allow(dead_code)]
+const NOOK_PROGRESS_H: f32 = 6.0;
 
-/// Horizontal Now Playing strip for the Nook tab (art + metadata + transport).
-pub(crate) fn nook_media_pane(np: &NowPlayingData, cx: &mut Context<Island>) -> impl IntoElement {
-    let title = np.title.clone().unwrap_or_else(|| "Unknown Title".into());
-    let artist = np.artist.clone().unwrap_or_else(|| "Unknown Artist".into());
-    let album = np.album.clone().filter(|s| !s.is_empty());
+/// Expanded Now Playing: artwork + title row, flanked scrubber, filled
+/// transport. With no track loaded the same chrome stays up — empty art,
+/// blank labels, zeroed scrubber — instead of a separate empty state.
+/// Lyrics sit beside the player when enabled.
+pub(crate) fn nook_media_pane(island: &Island, cx: &mut Context<Island>) -> AnyElement {
+    set_reduce_motion(island.reduce_motion);
+    let has = island.has_media();
+    let np = &island.now_playing;
+    let title: SharedString = if has {
+        np.title
+            .clone()
+            .unwrap_or_else(|| "Unknown Title".into())
+            .into()
+    } else {
+        SharedString::from("")
+    };
+    let artist: SharedString = if has {
+        np.artist
+            .clone()
+            .unwrap_or_else(|| "Unknown Artist".into())
+            .into()
+    } else {
+        SharedString::from("")
+    };
     let playing = np.is_playing;
-    let elapsed = np.elapsed_time.unwrap_or(0.0);
     let duration = np.duration.unwrap_or(0.0);
+    let elapsed = displayed_elapsed(np, island.scrubber_drag);
     let progress = if duration > 0.0 {
         (elapsed / duration) as f32
     } else {
@@ -248,86 +352,454 @@ pub(crate) fn nook_media_pane(np: &NowPlayingData, cx: &mut Context<Island>) -> 
         .artwork_base64
         .as_deref()
         .and_then(|b64| artwork_element(b64, NOOK_ART, NOOK_ART_RADIUS));
+    let queue_open = island.queue_panel_visible();
+    // Queue claims the trailing column; lyrics stay hidden while it is open.
+    let lyrics = if queue_open {
+        None
+    } else {
+        lyrics_pane(island)
+    };
+    let show_picker = island.output_picker_enabled();
+    let picker_open = island.output_picker_open && show_picker;
+    let show_queue_btn = island.settings.show_media_queue
+        && nook_core::queue::supports_local_queue(np.app_name.as_deref(), np.bundle_id.as_deref());
+    let picker_icon = island
+        .output_devices
+        .iter()
+        .find(|d| d.is_default)
+        .map(|d| d.icon())
+        .unwrap_or("airplay");
+
+    let header = div()
+        .w_full()
+        .flex()
+        .items_center()
+        .gap(px(12.))
+        .child(nook_art_frame(art))
+        .child(
+            div()
+                .flex_1()
+                .min_w(px(0.))
+                .overflow_hidden()
+                .flex()
+                .flex_col()
+                .justify_center()
+                .gap(px(1.))
+                .child(slide_label(title, theme::TITLE_2, true).w_full())
+                .child(slide_label(artist, theme::TITLE_3, false).w_full()),
+        );
+
+    let body = if picker_open {
+        div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .w_full()
+            .h_full()
+            .min_w(px(0.))
+            .min_h(px(0.))
+            .overflow_hidden()
+            .child(header)
+            .child(output_picker_list(island, cx))
+            .into_any_element()
+    } else {
+        div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .w_full()
+            .h_full()
+            .min_w(px(0.))
+            .min_h(px(0.))
+            .justify_between()
+            .overflow_hidden()
+            .child(header.flex_shrink_0())
+            .child(
+                div()
+                    .w_full()
+                    .flex_shrink_0()
+                    .opacity(if has { 1.0 } else { theme::DISABLED_OPACITY })
+                    .child(nook_progress(
+                        island, progress, elapsed, duration, seekable, cx,
+                    )),
+            )
+            .child(
+                div()
+                    .w_full()
+                    .flex_shrink_0()
+                    .opacity(if has { 1.0 } else { theme::DISABLED_OPACITY })
+                    .child(nook_transport(
+                        playing,
+                        show_queue_btn,
+                        queue_open,
+                        show_picker,
+                        picker_icon,
+                        cx,
+                    )),
+            )
+            .into_any_element()
+    };
+
+    let player = div()
+        .id("nook-media")
+        .relative()
+        .h_full()
+        .min_h(px(theme::NOOK_BODY - 4.0))
+        .overflow_hidden()
+        .flex()
+        .gap(px(12.))
+        .pr(px(4.))
+        .child(body)
+        .when_some(lyrics, |d, pane| d.child(pane));
+    // When the queue is open, the pane is often wider than the nominal cell
+    // width (flex-grown Nook column). Let the player absorb the leftover so
+    // the fixed-width Up Next panel does not leave a dead strip on the right.
+    let player = if queue_open {
+        player
+            .flex_1()
+            .min_w(px(island.music_player_width()))
+            .into_any_element()
+    } else {
+        player.flex_1().min_w(px(0.)).into_any_element()
+    };
 
     div()
-        .id("nook-media")
+        .id("nook-media-col")
         .w_full()
         .h_full()
         .overflow_hidden()
         .flex()
+        .gap(px(12.))
+        .child(player)
+        .when(queue_open, |d| {
+            d.child(
+                div()
+                    .w(px(1.))
+                    .h_full()
+                    .flex_shrink_0()
+                    .my(px(4.))
+                    .bg(theme::SEPARATOR),
+            )
+            .child(up_next_panel(&island.queue, cx))
+        })
+        .into_any_element()
+}
+
+fn nook_art_frame(art: Option<AnyElement>) -> impl IntoElement {
+    div().relative().size(px(NOOK_ART)).flex_shrink_0().child(
+        div()
+            .size(px(NOOK_ART))
+            .rounded(px(NOOK_ART_RADIUS))
+            .overflow_hidden()
+            .shadow_md()
+            .border_1()
+            .border_color(theme::FILL)
+            .bg(linear_gradient(
+                135.0,
+                linear_color_stop(ART_PLACEHOLDER.0, 0.0),
+                linear_color_stop(ART_PLACEHOLDER.1, 1.0),
+            ))
+            .child(art.unwrap_or_else(|| {
+                div()
+                    .size(px(NOOK_ART))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(lucide_color("music", 20.0, theme::SECONDARY_LABEL))
+                    .into_any_element()
+            }))
+            .child(
+                canvas(
+                    |bounds, _, _| {
+                        let x: f32 = bounds.origin.x.into();
+                        let y: f32 = bounds.origin.y.into();
+                        let w: f32 = bounds.size.width.into();
+                        let h: f32 = bounds.size.height.into();
+                        report_art_bounds(x, y, w, h);
+                    },
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .inset_0(),
+            ),
+    )
+}
+
+fn nook_transport(
+    playing: bool,
+    show_queue_btn: bool,
+    queue_open: bool,
+    show_picker: bool,
+    picker_icon: &'static str,
+    cx: &mut Context<Island>,
+) -> impl IntoElement {
+    // Equal leading/trailing slots keep play geometrically centered while
+    // the list / output glyphs sit on the edges.
+    div()
+        .w_full()
+        .flex()
         .items_center()
-        .gap(px(14.))
-        .pr(px(4.))
         .child(
             div()
-                .relative()
-                .size(px(NOOK_ART))
+                .w(px(theme::HIT_MIN))
                 .flex_shrink_0()
-                .child(
-                    div()
-                        .size(px(NOOK_ART))
-                        .rounded(px(NOOK_ART_RADIUS))
-                        .overflow_hidden()
-                        .shadow_md()
-                        .bg(linear_gradient(
-                            135.0,
-                            linear_color_stop(rgb(0x2a2a2a), 0.0),
-                            linear_color_stop(rgb(0x1a1a1a), 1.0),
-                        ))
-                        .child(art.unwrap_or_else(|| {
-                            div()
-                                .size(px(NOOK_ART))
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .child(lucide_color("music", 28.0, rgba(0xffffff66)))
-                                .into_any_element()
-                        })),
-                )
-                .child(
-                    div()
-                        .absolute()
-                        .right(px(4.))
-                        .bottom(px(4.))
-                        .shadow_sm()
-                        .child(app_badge(np.bundle_id.as_deref(), np.app_name.as_deref())),
-                ),
+                .flex()
+                .items_center()
+                .justify_start()
+                .when(show_queue_btn, |d| {
+                    d.child(queue_toggle_btn(queue_open, cx))
+                }),
         )
+        .child(nook_skip(
+            "skip-back-fill",
+            "nook-skip-back",
+            cx,
+            |this, _, cx| {
+                this.note_media_skip(cx);
+                nook_core::runtime().spawn(async {
+                    let _ = nook_core::audio::media_previous_track().await;
+                });
+            },
+        ))
+        .child(div().flex_1())
+        .child(nook_play(playing, cx))
+        .child(div().flex_1())
+        .child(nook_skip(
+            "skip-forward-fill",
+            "nook-skip-fwd",
+            cx,
+            |this, _, cx| {
+                this.note_media_skip(cx);
+                nook_core::runtime().spawn(async {
+                    let _ = nook_core::audio::media_next_track().await;
+                });
+            },
+        ))
         .child(
             div()
+                .w(px(theme::HIT_MIN))
+                .flex_shrink_0()
                 .flex()
-                .flex_col()
-                .justify_center()
-                .min_w(px(0.))
-                .w(px(160.))
-                .overflow_hidden()
-                .child(slide_label(title, theme::TITLE_3, true).w_full())
-                .when_some(album, |d, album| {
-                    d.child(slide_label(album, theme::CALLOUT, false).w_full())
-                })
-                .child(slide_label(artist, theme::CALLOUT, false).w_full())
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(18.))
-                        .mt(px(6.))
-                        .child(nook_skip("skip-back", "nook-skip-back", cx, |_, _, _| {
-                            nook_core::runtime().spawn(async {
-                                let _ = nook_core::audio::media_previous_track().await;
-                            });
-                        }))
-                        .child(nook_play(playing, cx))
-                        .child(nook_skip("skip-forward", "nook-skip-fwd", cx, |_, _, _| {
-                            nook_core::runtime().spawn(async {
-                                let _ = nook_core::audio::media_next_track().await;
-                            });
-                        })),
-                )
-                .child(nook_progress(progress, elapsed, duration, seekable, cx)),
+                .items_center()
+                .justify_end()
+                .when(show_picker, |d| {
+                    d.child(output_picker_btn(picker_icon, false, cx))
+                }),
         )
 }
 
+fn queue_toggle_btn(open: bool, cx: &mut Context<Island>) -> impl IntoElement {
+    div()
+        .id("nook-queue-toggle")
+        .size(px(theme::HIT_MIN))
+        .rounded(px(theme::CONTROL_RADIUS))
+        .flex()
+        .items_center()
+        .justify_center()
+        .bg(if open {
+            theme::FILL_SECONDARY
+        } else {
+            rgba(0x00000000)
+        })
+        .opacity(if open { 1.0 } else { 0.9 })
+        .hover(|s| s.opacity(1.0).bg(theme::FILL_TERTIARY))
+        .active(|s| s.opacity(0.75))
+        .cursor(CursorStyle::PointingHand)
+        .child(lucide_color("list", 16.0, theme::LABEL))
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                cx.stop_propagation();
+                this.toggle_queue_panel(cx);
+            }),
+        )
+}
+
+fn output_picker_btn(icon: &'static str, open: bool, cx: &mut Context<Island>) -> impl IntoElement {
+    div()
+        .id("nook-output-picker")
+        .size(px(theme::HIT_MIN))
+        .flex()
+        .items_center()
+        .justify_center()
+        .opacity(if open { 1.0 } else { 0.9 })
+        .hover(|s| s.opacity(1.0))
+        .active(|s| s.opacity(0.75))
+        .cursor(CursorStyle::PointingHand)
+        .child(lucide_color(icon, 18.0, theme::LABEL))
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                cx.stop_propagation();
+                this.toggle_output_picker(cx);
+            }),
+        )
+}
+
+fn lyrics_pane(island: &Island) -> Option<AnyElement> {
+    if !island.settings.show_lyrics {
+        return None;
+    }
+    let lyrics = island.lyrics.as_ref()?;
+    if lyrics.instrumental {
+        return None;
+    }
+    if lyrics.has_synced() {
+        let [prev, cur, next] = lyrics.highlight_window(island.lyrics_position_ms());
+        return Some(lyrics_window(prev, cur, next));
+    }
+    let plain = lyrics.plain.as_deref()?;
+    let mut lines = plain.lines().filter(|line| !line.trim().is_empty());
+    let first = lines.next()?;
+    Some(lyrics_window(
+        None,
+        Some(first.trim()),
+        lines.next().map(str::trim),
+    ))
+}
+
+fn lyrics_window(prev: Option<&str>, cur: Option<&str>, next: Option<&str>) -> AnyElement {
+    div()
+        .id("lyrics-pane")
+        .flex_1()
+        .min_w(px(72.))
+        .max_w(px(220.))
+        .h_full()
+        .flex()
+        .flex_col()
+        .justify_center()
+        .gap(px(2.))
+        .overflow_hidden()
+        .child(lyric_line(prev.unwrap_or(""), false))
+        .child(lyric_line(cur.unwrap_or(""), true))
+        .child(lyric_line(next.unwrap_or(""), false))
+        .into_any_element()
+}
+
+fn lyric_line(text: &str, current: bool) -> AnyElement {
+    if text.is_empty() {
+        return div()
+            .h(px(theme::CALLOUT.leading))
+            .w_full()
+            .into_any_element();
+    }
+    slide_label(text.to_string(), theme::CALLOUT, current)
+        .w_full()
+        .into_any_element()
+}
+
+fn output_picker_list(island: &Island, cx: &mut Context<Island>) -> impl IntoElement {
+    let mut list = div()
+        .id("nook-output-list")
+        .flex()
+        .flex_col()
+        .min_w(px(0.))
+        .w(px(200.))
+        .h_full()
+        .overflow_hidden();
+    // Styled after the Control Center Sound panel: a small section title,
+    // rows with a circular icon chip, and a checkmark on the active device.
+    list = list.child(
+        div()
+            .flex()
+            .items_center()
+            .justify_between()
+            .mb(px(6.))
+            .child(
+                div()
+                    .text_color(theme::SECONDARY_LABEL)
+                    .text_size(px(theme::SUBHEADLINE.size))
+                    .line_height(px(theme::SUBHEADLINE.leading))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child("Sound"),
+            )
+            .child(output_picker_btn("airplay", true, cx)),
+    );
+    if island.output_devices.is_empty() {
+        list = list.child(
+            div()
+                .text_color(theme::SECONDARY_LABEL)
+                .text_size(px(theme::SUBHEADLINE.size))
+                .child("No output devices"),
+        );
+    } else {
+        let mut rows = div().flex().flex_col().gap(px(1.));
+        for device in &island.output_devices {
+            let id = device.id;
+            let name = device.name.clone();
+            let icon = device.icon();
+            let selected = device.is_default;
+            rows = rows.child(
+                div()
+                    .id(SharedString::from(format!("out-dev-{id}")))
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .h(px(30.))
+                    .rounded(px(theme::CONTROL_RADIUS))
+                    .px(px(4.))
+                    .hover(|s| s.bg(theme::FILL_TERTIARY))
+                    .active(|s| s.bg(theme::FILL_SECONDARY))
+                    .cursor(CursorStyle::PointingHand)
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                            cx.stop_propagation();
+                            this.select_output_device(id, cx);
+                        }),
+                    )
+                    .child(
+                        div()
+                            .size(px(theme::HIT_MIN))
+                            .flex_shrink_0()
+                            .rounded_full()
+                            .bg(if selected {
+                                theme::LABEL
+                            } else {
+                                theme::FILL_SECONDARY
+                            })
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(lucide_color(
+                                icon,
+                                12.0,
+                                if selected {
+                                    theme::WINDOW_BG
+                                } else {
+                                    theme::LABEL
+                                },
+                            )),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.))
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .text_color(theme::LABEL)
+                            .text_size(px(theme::SUBHEADLINE.size))
+                            .line_height(px(theme::SUBHEADLINE.leading))
+                            .child(name),
+                    )
+                    .when(selected, |d| {
+                        d.child(lucide_color("check", 13.0, theme::LABEL))
+                    }),
+            );
+        }
+        list = list.child(scroll_body("nook-output-rows", rows));
+    }
+    list.child(
+        div()
+            .mt(px(4.))
+            .text_color(theme::tertiary_label())
+            .text_size(px(theme::FOOTNOTE.size))
+            .line_height(px(theme::FOOTNOTE.leading))
+            .child("AirPlay starts from Control Center."),
+    )
+}
+
+#[allow(dead_code)]
 fn app_badge(bundle_id: Option<&str>, app_name: Option<&str>) -> AnyElement {
     if let Some(image) = app_icon_image(bundle_id, app_name) {
         return img(image)
@@ -339,15 +811,15 @@ fn app_badge(bundle_id: Option<&str>, app_name: Option<&str>) -> AnyElement {
     div()
         .size(px(APP_BADGE))
         .rounded(px(APP_BADGE_RADIUS))
-        .bg(rgba(0x00000099))
+        .bg(theme::SCRIM)
         .flex()
         .items_center()
         .justify_center()
-        .child(lucide_color("music", 11.0, rgb(0xffffff)))
+        .child(lucide_color("music", 11.0, theme::LABEL))
         .into_any_element()
 }
 
-fn app_icon_image(
+pub(crate) fn app_icon_image(
     bundle_id: Option<&str>,
     app_name: Option<&str>,
 ) -> Option<std::sync::Arc<Image>> {
@@ -381,88 +853,122 @@ fn app_icon_image(
     loaded
 }
 
+fn displayed_elapsed(np: &NowPlayingData, drag: Option<f32>) -> f64 {
+    if let Some(ratio) = drag {
+        return np.duration.unwrap_or(0.0) * ratio as f64;
+    }
+    np.elapsed_time.unwrap_or(0.0)
+}
+
+pub(crate) fn scrubber_ratio(x: f32, origin: f32, width: f32) -> f32 {
+    if width < 1.0 {
+        return 0.0;
+    }
+    ((x - origin) / width).clamp(0.0, 1.0)
+}
+
 fn nook_progress(
+    island: &Island,
     progress: f32,
     elapsed: f64,
     duration: f64,
     seekable: bool,
     cx: &mut Context<Island>,
 ) -> impl IntoElement {
-    let progress = progress.clamp(0.0, 1.0);
+    let progress = island.scrubber_drag.unwrap_or(progress).clamp(0.0, 1.0);
+    let bounds = island.scrubber_bounds.clone();
     div()
         .w_full()
-        .mt(px(6.))
-        .opacity(if seekable { 1.0 } else { 0.45 })
+        .flex()
+        .items_center()
+        .gap(px(8.))
+        .opacity(if seekable {
+            1.0
+        } else {
+            theme::DISABLED_OPACITY
+        })
         .cursor(if seekable {
             CursorStyle::PointingHand
         } else {
             CursorStyle::Arrow
         })
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                if !seekable {
+                    return;
+                }
+                cx.stop_propagation();
+                this.update_scrubber_from_x(event.position.x.into());
+                cx.notify();
+            }),
+        )
+        .child(
+            time_label(if duration > 0.0 {
+                format_time(elapsed)
+            } else {
+                "–:––".into()
+            })
+            .w(px(36.)),
+        )
         .child(
             div()
                 .relative()
-                .w_full()
-                .h(px(10.))
+                .flex_1()
+                .min_w(px(24.))
+                .h(px(20.))
                 .flex()
                 .items_center()
+                .group("nook-scrub")
+                .child(
+                    canvas(
+                        {
+                            let bounds = bounds.clone();
+                            move |layout, _, _| {
+                                let origin: f32 = layout.origin.x.into();
+                                let width: f32 = layout.size.width.into();
+                                *bounds.borrow_mut() = Some((origin, width));
+                                layout
+                            }
+                        },
+                        |_bounds, _, _, _| {},
+                    )
+                    .absolute()
+                    .inset_0(),
+                )
                 .child(
                     div()
                         .w_full()
-                        .h(px(3.))
-                        .rounded(px(2.))
-                        .bg(rgba(0xffffff26))
+                        .h(px(theme::TRACK_H))
+                        .rounded(px(theme::TRACK_RADIUS))
+                        .bg(theme::FILL_SECONDARY)
+                        .hover(|s| s.h(px(theme::TRACK_H + 2.0)))
                         .child(
                             div()
                                 .h_full()
                                 .w(relative(progress))
-                                .rounded(px(2.))
-                                .bg(rgb(0xffffff)),
+                                .rounded(px(theme::TRACK_RADIUS))
+                                .bg(theme::LABEL),
                         ),
                 )
-                .when(seekable, |d| d.child(nook_seek_hits(cx))),
+                .when(seekable, |d| d.child(scrubber_thumb(progress))),
         )
         .child(
-            div()
-                .flex()
-                .justify_between()
-                .pt(px(2.))
-                .child(time_label(format_time(elapsed)))
-                .child(time_label(format_time(duration))),
+            time_label(format_remaining(elapsed, duration))
+                .w(px(48.))
+                .text_right(),
         )
 }
 
-fn nook_seek_hits(cx: &mut Context<Island>) -> impl IntoElement {
-    const SEGMENTS: u32 = 24;
-    let mut row = div()
+fn scrubber_thumb(progress: f32) -> impl IntoElement {
+    div()
         .absolute()
-        .inset_0()
-        .flex()
-        .cursor(CursorStyle::PointingHand);
-    for i in 0..SEGMENTS {
-        let ratio = (i as f32 + 0.5) / SEGMENTS as f32;
-        row = row.child(
-            div()
-                .id(SharedString::from(format!("nook-seek-{i}")))
-                .flex_1()
-                .h_full()
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(move |this, _: &MouseDownEvent, _, cx| {
-                        cx.stop_propagation();
-                        let Some(duration) = this.now_playing.duration.filter(|d| *d > 0.0) else {
-                            return;
-                        };
-                        let position = duration * ratio as f64;
-                        this.now_playing.elapsed_time = Some(position);
-                        cx.notify();
-                        nook_core::runtime().spawn(async move {
-                            let _ = nook_core::audio::media_seek(position).await;
-                        });
-                    }),
-                ),
-        );
-    }
-    row
+        .left(relative(progress.clamp(0.0, 1.0)))
+        .ml(px(-5.))
+        .size(px(10.))
+        .rounded_full()
+        .bg(theme::LABEL)
+        .shadow_sm()
 }
 
 fn nook_skip(
@@ -473,15 +979,15 @@ fn nook_skip(
 ) -> impl IntoElement {
     div()
         .id(elem_id)
-        .size(px(22.))
+        .size(px(NOOK_SKIP_HIT))
         .flex()
         .items_center()
         .justify_center()
-        .opacity(0.9)
+        .opacity(0.95)
         .hover(|s| s.opacity(1.0))
         .active(|s| s.opacity(0.75))
         .cursor(CursorStyle::PointingHand)
-        .child(lucide_color(icon, 16.0, rgb(0xffffff)))
+        .child(lucide_color(icon, NOOK_SKIP_GLYPH, theme::LABEL))
         .on_mouse_down(
             MouseButton::Left,
             cx.listener(move |this, event: &MouseDownEvent, _, cx| {
@@ -494,24 +1000,25 @@ fn nook_skip(
 fn nook_play(playing: bool, cx: &mut Context<Island>) -> impl IntoElement {
     div()
         .id("nook-playpause")
-        .size(px(22.))
+        .size(px(NOOK_PLAY_HIT))
         .flex()
         .items_center()
         .justify_center()
-        .hover(|s| s.opacity(0.85))
-        .active(|s| s.opacity(0.7))
+        .when(!playing, |d| d.pl(px(2.)))
+        .opacity(0.95)
+        .hover(|s| s.opacity(1.0))
+        .active(|s| s.opacity(0.75))
         .cursor(CursorStyle::PointingHand)
         .child(lucide_color(
-            if playing { "pause" } else { "play" },
-            16.0,
-            rgb(0xffffff),
+            if playing { "pause-fill" } else { "play-fill" },
+            NOOK_PLAY_GLYPH,
+            theme::LABEL,
         ))
         .on_mouse_down(
             MouseButton::Left,
             cx.listener(move |this, _: &MouseDownEvent, _, cx| {
                 cx.stop_propagation();
-                this.now_playing.is_playing = !this.now_playing.is_playing;
-                cx.notify();
+                this.note_media_play_pause(cx);
                 nook_core::runtime().spawn(async {
                     let _ = nook_core::audio::media_play_pause().await;
                 });
@@ -519,19 +1026,409 @@ fn nook_play(playing: bool, cx: &mut Context<Island>) -> impl IntoElement {
         )
 }
 
-fn time_label(text: String) -> impl IntoElement {
+#[allow(dead_code)]
+pub(crate) fn media_card(island: &Island, cx: &mut Context<Island>) -> impl IntoElement {
+    let np = &island.now_playing;
+    let title = np.title.clone().unwrap_or_else(|| "Unknown Title".into());
+    let artist = np.artist.clone().unwrap_or_else(|| "Unknown Artist".into());
+    let playing = np.is_playing;
+    let duration = np.duration.unwrap_or(0.0);
+    let elapsed = displayed_elapsed(np, island.scrubber_drag);
+    let progress = if duration > 0.0 {
+        (elapsed / duration) as f32
+    } else {
+        0.0
+    };
+    let seekable = duration > 0.0;
+    let art = np
+        .artwork_base64
+        .as_deref()
+        .and_then(|b64| artwork_element(b64, ART, ART_RADIUS));
+
+    let header = ART + theme::CONTENT_INSET + TITLE_COL;
+    let transport = theme::HIT_MIN + SKIP_GAP + PLAY + SKIP_GAP + theme::HIT_MIN;
+    let card_w =
+        (theme::WIDGET_PAD * 2.0 + header.max(transport)).max(super::ui::WIDGET_CARD_WIDTH);
+
+    card_chrome(card_w)
+        .gap(px(12.))
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(theme::CONTENT_INSET))
+                .child(
+                    div()
+                        .size(px(ART))
+                        .rounded(px(ART_RADIUS))
+                        .overflow_hidden()
+                        .shadow_md()
+                        .flex_shrink_0()
+                        .bg(linear_gradient(
+                            135.0,
+                            linear_color_stop(ART_PLACEHOLDER.0, 0.0),
+                            linear_color_stop(ART_PLACEHOLDER.1, 1.0),
+                        ))
+                        .child(art.unwrap_or_else(|| div().size(px(ART)).into_any_element())),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(0.))
+                        .flex()
+                        .flex_col()
+                        .justify_center()
+                        .overflow_hidden()
+                        .child(slide_label(title, theme::TITLE_2, true).w_full())
+                        .child(slide_label(artist, theme::BODY, false).w_full()),
+                ),
+        )
+        .child(progress_block(
+            island, progress, elapsed, duration, seekable, cx,
+        ))
+        .child(transport_row(playing, cx))
+}
+
+fn progress_block(
+    island: &Island,
+    progress: f32,
+    elapsed: f64,
+    duration: f64,
+    seekable: bool,
+    cx: &mut Context<Island>,
+) -> impl IntoElement {
+    let progress = island.scrubber_drag.unwrap_or(progress).clamp(0.0, 1.0);
+    let bounds = island.scrubber_bounds.clone();
     div()
-        .text_color(rgba(0xffffff66))
-        .text_size(px(theme::SUBHEADLINE.size))
-        .line_height(px(theme::SUBHEADLINE.leading))
-        .font_weight(theme::SUBHEADLINE.emphasized)
-        .font_family("SF Mono")
-        .child(text)
+        .flex()
+        .flex_col()
+        .w_full()
+        .opacity(if seekable {
+            1.0
+        } else {
+            theme::DISABLED_OPACITY
+        })
+        .cursor(if seekable {
+            CursorStyle::PointingHand
+        } else {
+            CursorStyle::Arrow
+        })
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                if !seekable {
+                    return;
+                }
+                cx.stop_propagation();
+                this.update_scrubber_from_x(event.position.x.into());
+                cx.notify();
+            }),
+        )
+        .child(
+            div()
+                .relative()
+                .w_full()
+                .h(px(MEDIA_PROGRESS_HIT))
+                .flex()
+                .items_center()
+                .child(
+                    canvas(
+                        {
+                            let bounds = bounds.clone();
+                            move |layout, _, _| {
+                                let origin: f32 = layout.origin.x.into();
+                                let width: f32 = layout.size.width.into();
+                                *bounds.borrow_mut() = Some((origin, width));
+                                layout
+                            }
+                        },
+                        |_bounds, _, _, _| {},
+                    )
+                    .absolute()
+                    .inset_0(),
+                )
+                .child(
+                    div()
+                        .w_full()
+                        .h(px(theme::TRACK_H))
+                        .rounded(px(theme::TRACK_RADIUS))
+                        .bg(theme::FILL_SECONDARY)
+                        .hover(|s| s.h(px(theme::TRACK_H + 2.0)))
+                        .child(
+                            div()
+                                .h_full()
+                                .w(relative(progress))
+                                .rounded(px(theme::TRACK_RADIUS))
+                                .bg(theme::LABEL),
+                        ),
+                )
+                .when(seekable, |d| d.child(scrubber_thumb(progress))),
+        )
+        .child(
+            div()
+                .flex()
+                .justify_between()
+                .pt(px(MEDIA_TIME_PAD_TOP))
+                .mt(px(MEDIA_TIME_PAD_GAP))
+                .px(px(1.))
+                .child(time_label(if duration > 0.0 {
+                    format_time(elapsed)
+                } else {
+                    "–:––".into()
+                }))
+                .child(time_label(format_remaining(elapsed, duration))),
+        )
+}
+
+fn up_next_panel(queue: &PlaybackQueue, cx: &mut Context<Island>) -> impl IntoElement {
+    let label = if queue.label.is_empty() {
+        "Playing Next".to_string()
+    } else {
+        queue.label.clone()
+    };
+    let empty_msg = queue_empty_message(queue);
+    let mut rows = div()
+        .id("up-next-rows")
+        .flex_1()
+        .min_h(px(QUEUE_ROW_H))
+        .overflow_y_scroll();
+    if queue.items.is_empty() {
+        rows = rows.child(
+            div()
+                .pt(px(4.))
+                .pr(px(4.))
+                .text_size(px(theme::FOOTNOTE.size))
+                .line_height(px(theme::FOOTNOTE.leading))
+                .text_color(theme::SECONDARY_LABEL)
+                .child(empty_msg),
+        );
+    } else {
+        for (i, item) in queue.items.iter().enumerate() {
+            rows = rows.child(queue_row(i, item, cx));
+        }
+    }
+    div()
+        .id("up-next")
+        .w(px(QUEUE_PANEL_W))
+        .flex_shrink_0()
+        .h_full()
+        .min_h(px(theme::NOOK_BODY - 4.0))
+        .overflow_hidden()
+        .flex()
+        .flex_col()
+        .child(
+            div()
+                .pb(px(6.))
+                .text_size(px(theme::SUBHEADLINE.size))
+                .line_height(px(theme::SUBHEADLINE.leading))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(theme::LABEL)
+                .child(label),
+        )
+        .child(rows)
+}
+
+fn queue_empty_message(queue: &PlaybackQueue) -> SharedString {
+    use nook_core::models::QueueHidden;
+    SharedString::from(match queue.hidden {
+        Some(QueueHidden::NeedsSpotifyAuth) | Some(QueueHidden::SpotifyUnavailable) => {
+            "Not available in Spotify"
+        }
+        Some(QueueHidden::PremiumRequired) => "Not available in Spotify",
+        Some(QueueHidden::AutomationDenied) => "Needs Music automation",
+        Some(QueueHidden::Shuffle) => "Hidden while shuffling",
+        Some(QueueHidden::Radio) => "Hidden during radio",
+        Some(QueueHidden::Idle) | None => "No upcoming tracks",
+    })
+}
+
+fn queue_row(index: usize, item: &QueueItem, cx: &mut Context<Island>) -> impl IntoElement {
+    if let Some(url) = item.artwork_url.as_ref() {
+        if nook_core::queue::cached_artwork(&item.id).is_none() {
+            nook_core::queue::request_artwork(item.id.clone(), url.clone());
+        }
+    }
+    let thumb = item
+        .artwork_base64
+        .as_deref()
+        .map(str::to_string)
+        .or_else(|| nook_core::queue::cached_artwork(&item.id).and_then(|hit| hit));
+    let art = thumb
+        .as_deref()
+        .and_then(|b64| artwork_element(b64, 32.0, 6.0))
+        .unwrap_or_else(|| {
+            div()
+                .size(px(32.))
+                .rounded(px(theme::CONTROL_RADIUS))
+                .bg(theme::FILL_TERTIARY)
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(lucide_color("music", 12.0, theme::SECONDARY_LABEL))
+                .into_any_element()
+        });
+    let title = item.title.clone();
+    let artist = item.artist.clone();
+    let jump = item.clone();
+    div()
+        .id(SharedString::from(format!("up-next-{index}")))
+        .h(px(QUEUE_ROW_H))
+        .w_full()
+        .flex()
+        .items_center()
+        .gap(px(8.))
+        .rounded(px(theme::CONTROL_RADIUS))
+        .hover(|s| s.bg(theme::FILL_TERTIARY))
+        .active(|s| s.bg(theme::FILL_SECONDARY))
+        .cursor(CursorStyle::PointingHand)
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                cx.stop_propagation();
+                let item = jump.clone();
+                let context = this.queue.context_uri.clone();
+                nook_core::runtime().spawn(async move {
+                    let _ = nook_core::audio::media_jump_to_queue_item(item, context).await;
+                });
+            }),
+        )
+        .child(art)
+        .child(
+            div()
+                .flex_1()
+                .min_w(px(0.))
+                .overflow_hidden()
+                .flex()
+                .flex_col()
+                .child(
+                    div()
+                        .text_size(px(theme::CALLOUT.size))
+                        .font_weight(theme::CALLOUT.emphasized)
+                        .text_color(theme::LABEL)
+                        .text_ellipsis()
+                        .whitespace_nowrap()
+                        .child(title),
+                )
+                .child(
+                    div()
+                        .text_size(px(theme::FOOTNOTE.size))
+                        .text_color(theme::SECONDARY_LABEL)
+                        .text_ellipsis()
+                        .whitespace_nowrap()
+                        .child(artist),
+                ),
+        )
+}
+
+fn transport_row(playing: bool, cx: &mut Context<Island>) -> impl IntoElement {
+    div()
+        .flex()
+        .items_center()
+        .justify_center()
+        .gap(px(SKIP_GAP))
+        .child(skip_btn(
+            "skip-back-fill",
+            "ibtn-skip-back",
+            cx,
+            |this, _, cx| {
+                this.note_media_skip(cx);
+                nook_core::runtime().spawn(async {
+                    let _ = nook_core::audio::media_previous_track().await;
+                });
+            },
+        ))
+        .child(play_btn(playing, cx))
+        .child(skip_btn(
+            "skip-forward-fill",
+            "ibtn-skip-forward",
+            cx,
+            |this, _, cx| {
+                this.note_media_skip(cx);
+                nook_core::runtime().spawn(async {
+                    let _ = nook_core::audio::media_next_track().await;
+                });
+            },
+        ))
+}
+
+fn skip_btn(
+    icon: &'static str,
+    elem_id: &'static str,
+    cx: &mut Context<Island>,
+    on_click: impl Fn(&mut Island, &MouseDownEvent, &mut Context<Island>) + 'static,
+) -> impl IntoElement {
+    div()
+        .id(elem_id)
+        .size(px(theme::HIT_MIN))
+        .flex()
+        .items_center()
+        .justify_center()
+        .opacity(0.9)
+        .hover(|s| s.opacity(1.0))
+        .active(|s| s.opacity(0.85))
+        .cursor(CursorStyle::PointingHand)
+        .child(lucide_color(icon, 24.0, theme::LABEL))
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                cx.stop_propagation();
+                on_click(this, event, cx);
+            }),
+        )
+}
+
+fn play_btn(playing: bool, cx: &mut Context<Island>) -> impl IntoElement {
+    div()
+        .id("ibtn-playpause")
+        .size(px(PLAY))
+        .rounded_full()
+        .bg(theme::LABEL)
+        .flex()
+        .items_center()
+        .justify_center()
+        .when(!playing, |d| d.pl(px(1.5)))
+        .hover(|s| s.bg(theme::LABEL))
+        .active(|s| s.opacity(0.95))
+        .cursor(CursorStyle::PointingHand)
+        .shadow_sm()
+        .child(lucide_color(
+            if playing { "pause-fill" } else { "play-fill" },
+            22.0,
+            theme::ISLAND,
+        ))
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                cx.stop_propagation();
+                this.note_media_play_pause(cx);
+                nook_core::runtime().spawn(async {
+                    let _ = nook_core::audio::media_play_pause().await;
+                });
+            }),
+        )
+}
+
+fn time_label(text: String) -> gpui::Div {
+    timer_text(text, theme::CALLOUT).text_color(theme::secondary_label())
 }
 
 fn format_time(seconds: f64) -> String {
     let total = seconds.max(0.0) as u32;
-    format!("{}:{:02}", total / 60, total % 60)
+    let h = total / 3600;
+    let m = (total % 3600) / 60;
+    let s = total % 60;
+    if h > 0 {
+        format!("{h}:{m:02}:{s:02}")
+    } else {
+        format!("{m}:{s:02}")
+    }
+}
+
+fn format_remaining(elapsed: f64, duration: f64) -> String {
+    if duration <= 0.0 {
+        return "–:––".into();
+    }
+    format!("-{}", format_time((duration - elapsed).max(0.0)))
 }
 
 pub(crate) fn visualizer_color_from_art(artwork_base64: Option<&str>) -> Option<Rgba> {
@@ -600,6 +1497,239 @@ fn sample_dominant_color(b64: &str) -> Option<Rgba> {
     })
 }
 
+pub(crate) fn art_palette(artwork_base64: Option<&str>) -> Option<[Rgba; 3]> {
+    let b64 = artwork_base64?;
+    use std::hash::{DefaultHasher, Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    b64.hash(&mut hasher);
+    let key = hasher.finish();
+    static CACHE: OnceLock<Mutex<(u64, Option<[Rgba; 3]>)>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new((0, None)));
+    if let Ok(guard) = cache.lock() {
+        if guard.0 == key {
+            return guard.1;
+        }
+    }
+    let palette = sample_palette(b64);
+    if let Ok(mut guard) = cache.lock() {
+        *guard = (key, palette);
+    }
+    palette
+}
+
+fn sample_palette(b64: &str) -> Option<[Rgba; 3]> {
+    use image::GenericImageView;
+    use std::collections::HashMap;
+
+    let bytes = artwork_bytes(b64)?;
+    let img = image::load_from_memory(&bytes).ok()?.thumbnail(32, 32);
+    let mut buckets: HashMap<(u8, u8, u8), u32> = HashMap::new();
+    for (_, _, px) in img.pixels() {
+        let [r, g, b, a] = px.0;
+        if a < 200 {
+            continue;
+        }
+        let brightness = (r as u16 + g as u16 + b as u16) / 3;
+        if !(16..=240).contains(&brightness) {
+            continue;
+        }
+        *buckets.entry((r >> 4, g >> 4, b >> 4)).or_insert(0) += 1;
+    }
+    if buckets.is_empty() {
+        return sample_dominant_color(b64).map(|c| [c, shift_color(c, 0.08), shift_color(c, 0.16)]);
+    }
+    let mut ranked: Vec<_> = buckets.into_iter().collect();
+    ranked.sort_by_key(|(_, count)| std::cmp::Reverse(*count));
+    let mut picked: Vec<Rgba> = Vec::new();
+    for ((r, g, b), _) in ranked {
+        let color = Rgba {
+            r: (r as f32 + 0.5) * 16.0 / 255.0,
+            g: (g as f32 + 0.5) * 16.0 / 255.0,
+            b: (b as f32 + 0.5) * 16.0 / 255.0,
+            a: 1.0,
+        };
+        if picked.iter().all(|p| color_dist(*p, color) > 0.18) {
+            picked.push(color);
+        }
+        if picked.len() == 3 {
+            break;
+        }
+    }
+    while picked.len() < 3 {
+        let base = picked
+            .first()
+            .copied()
+            .or_else(|| sample_dominant_color(b64))?;
+        picked.push(shift_color(base, 0.08 * picked.len() as f32));
+    }
+    Some([picked[0], picked[1], picked[2]])
+}
+
+fn shift_color(color: Rgba, amount: f32) -> Rgba {
+    Rgba {
+        r: (color.r + amount).clamp(0.0, 1.0),
+        g: (color.g + amount * 0.5).clamp(0.0, 1.0),
+        b: (color.b + amount * 0.75).clamp(0.0, 1.0),
+        a: 1.0,
+    }
+}
+
+fn color_dist(a: Rgba, b: Rgba) -> f32 {
+    let dr = a.r - b.r;
+    let dg = a.g - b.g;
+    let db = a.b - b.b;
+    (dr * dr + dg * dg + db * db).sqrt()
+}
+
+#[allow(dead_code)]
+const WASH_INNER: u32 = 80;
+#[allow(dead_code)]
+const WASH_OUTER: u32 = 160;
+#[allow(dead_code)]
+const WASH_BLUR: f32 = 18.0;
+
+#[allow(dead_code)]
+fn blurred_artwork_png(b64: &str) -> Option<Vec<u8>> {
+    use std::hash::{DefaultHasher, Hash, Hasher};
+
+    if b64.len() > MAX_ARTWORK_BYTES.div_ceil(3) * 4 {
+        return None;
+    }
+    let mut hasher = DefaultHasher::new();
+    b64.hash(&mut hasher);
+    let key = hasher.finish();
+    static CACHE: OnceLock<Mutex<(u64, Option<Vec<u8>>)>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new((0, None)));
+    if let Ok(guard) = cache.lock() {
+        if guard.0 == key {
+            return guard.1.clone();
+        }
+    }
+    let loaded = render_artwork_wash(b64);
+    if let Ok(mut guard) = cache.lock() {
+        *guard = (key, loaded.clone());
+    }
+    loaded
+}
+
+#[allow(dead_code)]
+fn render_artwork_wash(b64: &str) -> Option<Vec<u8>> {
+    let bytes = artwork_bytes(b64)?;
+    let art = image::load_from_memory(&bytes)
+        .ok()?
+        .resize_exact(
+            WASH_INNER,
+            WASH_INNER,
+            image::imageops::FilterType::Triangle,
+        )
+        .to_rgba8();
+    let pad = (WASH_OUTER - WASH_INNER) / 2;
+    let mut canvas = image::RgbaImage::new(WASH_OUTER, WASH_OUTER);
+    for (x, y, px) in art.enumerate_pixels() {
+        canvas.put_pixel(x + pad, y + pad, *px);
+    }
+    let mut wash = image::imageops::blur(&canvas, WASH_BLUR);
+    apply_bloom_vignette(&mut wash);
+    encode_wash_png(&wash)
+}
+
+#[allow(dead_code)]
+fn apply_bloom_vignette(wash: &mut image::RgbaImage) {
+    let cx = (WASH_OUTER as f32 - 1.0) * 0.5;
+    let cy = cx;
+    let max_r = WASH_OUTER as f32 * 0.5;
+    for (x, y, px) in wash.enumerate_pixels_mut() {
+        let [r, g, b, _] = px.0;
+        let (wr, wg, wb) = wash_srgb(r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0);
+        let dx = x as f32 - cx;
+        let dy = y as f32 - cy;
+        let d = (dx * dx + dy * dy).sqrt() / max_r;
+        let alpha = bloom_alpha(d);
+        // Fade RGB to black so the bloom dissolves on island chrome even
+        // when the renderer ignores PNG alpha.
+        px.0 = [
+            (wr * alpha * 255.0).round() as u8,
+            (wg * alpha * 255.0).round() as u8,
+            (wb * alpha * 255.0).round() as u8,
+            255,
+        ];
+    }
+}
+
+#[allow(dead_code)]
+fn encode_wash_png(wash: &image::RgbaImage) -> Option<Vec<u8>> {
+    use std::io::Cursor;
+    let mut png = Cursor::new(Vec::new());
+    wash.write_to(&mut png, image::ImageFormat::Png).ok()?;
+    let png = png.into_inner();
+    if png.is_empty() || png.len() > MAX_ARTWORK_BYTES {
+        None
+    } else {
+        Some(png)
+    }
+}
+
+#[allow(dead_code)]
+fn bloom_alpha(d: f32) -> f32 {
+    if d <= 0.22 {
+        1.0
+    } else if d >= 0.98 {
+        0.0
+    } else {
+        (1.0 - (d - 0.22) / 0.76).clamp(0.0, 1.0).powf(1.45)
+    }
+}
+
+/// Saturate real hues; crush luminance so the bloom sits on black island
+/// chrome instead of lifting grayscale covers into a mid-gray slab.
+#[allow(dead_code)]
+fn wash_srgb(r: f32, g: f32, b: f32) -> (f32, f32, f32) {
+    let gray = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+    let chroma = r.max(g).max(b) - r.min(g).min(b);
+    let sat = if chroma > 0.08 { 1.55 } else { 1.0 };
+    let mut r = (gray + (r - gray) * sat).clamp(0.0, 1.0);
+    let mut g = (gray + (g - gray) * sat).clamp(0.0, 1.0);
+    let mut b = (gray + (b - gray) * sat).clamp(0.0, 1.0);
+    let luma = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+    let target = if chroma > 0.10 {
+        luma.powf(1.2) * 0.62
+    } else {
+        luma.powf(1.8) * 0.28
+    };
+    if luma > 0.001 {
+        let scale = target / luma;
+        r = (r * scale).clamp(0.0, 1.0);
+        g = (g * scale).clamp(0.0, 1.0);
+        b = (b * scale).clamp(0.0, 1.0);
+    }
+    (r, g, b)
+}
+
+static ART_BOUNDS: OnceLock<Mutex<(u64, f32, f32, f32, f32)>> = OnceLock::new();
+
+fn report_art_bounds(x: f32, y: f32, w: f32, h: f32) {
+    let cache = ART_BOUNDS.get_or_init(|| Mutex::new((0, 0.0, 0.0, 0.0, 0.0)));
+    let Ok(mut guard) = cache.lock() else {
+        return;
+    };
+    let (gen, ox, oy, ow, oh) = *guard;
+    if (ox - x).abs() < 0.5 && (oy - y).abs() < 0.5 && (ow - w).abs() < 0.5 && (oh - h).abs() < 0.5
+    {
+        return;
+    }
+    *guard = (gen.wrapping_add(1), x, y, w, h);
+}
+
+pub(crate) fn take_art_bounds(seen: &mut u64) -> Option<(f32, f32, f32, f32)> {
+    let cache = ART_BOUNDS.get_or_init(|| Mutex::new((0, 0.0, 0.0, 0.0, 0.0)));
+    let guard = cache.lock().ok()?;
+    if guard.0 == *seen || guard.0 == 0 {
+        return None;
+    }
+    *seen = guard.0;
+    Some((guard.1, guard.2, guard.3, guard.4))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -619,10 +1749,35 @@ mod tests {
     }
 
     #[test]
+    fn scrubber_ratio_clamps_to_the_bar() {
+        assert_eq!(scrubber_ratio(50.0, 0.0, 100.0), 0.5);
+        assert_eq!(scrubber_ratio(-10.0, 0.0, 100.0), 0.0);
+        assert_eq!(scrubber_ratio(200.0, 0.0, 100.0), 1.0);
+        assert_eq!(scrubber_ratio(10.0, 0.0, 0.0), 0.0);
+    }
+
+    #[test]
+    fn remaining_time_is_negative_and_clamped() {
+        assert_eq!(format_remaining(50.0, 241.0), "-3:11");
+        assert_eq!(format_remaining(0.0, 65.0), "-1:05");
+        assert_eq!(format_remaining(0.0, 0.0), "–:––");
+        assert_eq!(format_remaining(100.0, 90.0), "-0:00");
+    }
+
+    #[test]
     fn compact_play_overlay_tracks_polled_island_hover() {
         // GPUI `.hover()` stays true after click-through; this must not.
         assert_eq!(album_overlay_target(false), 0.0);
         assert_eq!(album_overlay_target(true), 1.0);
+    }
+
+    #[test]
+    fn compact_visualizer_keeps_a_legible_waveform_at_rest() {
+        let heights = (0..VIS_REST.len())
+            .map(|i| visualizer_scale(0.0, false, i))
+            .collect::<Vec<_>>();
+        assert_eq!(heights, VIS_REST);
+        assert!(visualizer_scale(0.0, true, 3) > visualizer_scale(0.0, true, 0));
     }
 
     fn encode_rgba(w: u32, h: u32, format: image::ImageFormat) -> String {
@@ -668,5 +1823,131 @@ mod tests {
         assert_eq!(gpui_format(&jpeg), gpui::ImageFormat::Jpeg);
         let png = artwork_bytes(&encode_rgba(8, 8, image::ImageFormat::Png)).unwrap();
         assert_eq!(gpui_format(&png), gpui::ImageFormat::Png);
+    }
+
+    fn encode_two_tone() -> String {
+        use base64::Engine;
+        use std::io::Cursor;
+        let mut img = image::RgbaImage::new(16, 16);
+        for (x, y, px) in img.enumerate_pixels_mut() {
+            *px = if x < 8 {
+                image::Rgba([0x20, 0x40, 0xC0, 0xff])
+            } else if y < 8 {
+                image::Rgba([0xC0, 0x30, 0x20, 0xff])
+            } else {
+                image::Rgba([0x20, 0xB0, 0x40, 0xff])
+            };
+        }
+        let mut encoded = Cursor::new(Vec::new());
+        img.write_to(&mut encoded, image::ImageFormat::Png).unwrap();
+        base64::engine::general_purpose::STANDARD.encode(encoded.into_inner())
+    }
+
+    #[test]
+    fn artwork_palette_returns_three_distinct_colors() {
+        let palette = art_palette(Some(&encode_two_tone())).expect("palette");
+        assert_eq!(palette.len(), 3);
+        assert!(color_dist(palette[0], palette[1]) > 0.1);
+        assert!(art_palette(None).is_none());
+    }
+
+    fn luma(r: f32, g: f32, b: f32) -> f32 {
+        0.2126 * r + 0.7152 * g + 0.0722 * b
+    }
+
+    #[test]
+    fn wash_keeps_hue_and_dims_for_white_labels() {
+        let (r, g, b) = wash_srgb(0.15, 0.45, 0.95);
+        assert!(b > r && b > g, "blue wash lost its hue");
+        let washed = luma(r, g, b);
+        assert!(
+            (0.08..0.40).contains(&washed),
+            "wash luma {washed} left the dim band"
+        );
+
+        let (r, g, b) = wash_srgb(1.0, 1.0, 1.0);
+        assert!(luma(r, g, b) < 0.35, "white art must dim");
+
+        let (r, g, b) = wash_srgb(0.02, 0.02, 0.02);
+        assert!(luma(r, g, b) < 0.05, "near-black art must stay near black");
+
+        let (r, g, b) = wash_srgb(0.62, 0.62, 0.62);
+        assert!(
+            luma(r, g, b) < 0.18,
+            "grayscale covers must not become a mid-gray card"
+        );
+    }
+
+    #[test]
+    fn blurred_artwork_is_a_cached_png() {
+        let b64 = encode_two_tone();
+        let png = blurred_artwork_png(&b64).expect("wash");
+        assert!(
+            png.starts_with(&[0x89, b'P', b'N', b'G']),
+            "expected PNG, got {:02x?}",
+            &png[..4.min(png.len())]
+        );
+        assert!(blurred_artwork_png("").is_none());
+        let again = blurred_artwork_png(&b64).expect("cached wash");
+        assert_eq!(png, again);
+    }
+
+    fn encode_bands(top: [u8; 4], bottom: [u8; 4]) -> String {
+        use base64::Engine;
+        use std::io::Cursor;
+        let mut img = image::RgbaImage::new(32, 32);
+        for (_, y, px) in img.enumerate_pixels_mut() {
+            *px = image::Rgba(if y < 16 { top } else { bottom });
+        }
+        let mut encoded = Cursor::new(Vec::new());
+        img.write_to(&mut encoded, image::ImageFormat::Png).unwrap();
+        base64::engine::general_purpose::STANDARD.encode(encoded.into_inner())
+    }
+
+    #[test]
+    fn artwork_wash_keeps_region_hues() {
+        let png = blurred_artwork_png(&encode_bands(
+            [0x4A, 0x8C, 0xC8, 0xff],
+            [0x2A, 0x5A, 0x38, 0xff],
+        ))
+        .expect("banded wash");
+        let wash = image::load_from_memory(&png).unwrap().to_rgba8();
+        assert_eq!(wash.dimensions(), (WASH_OUTER, WASH_OUTER));
+        let sky = wash.get_pixel(80, 52).0;
+        let trees = wash.get_pixel(80, 108).0;
+        assert!(sky[2] > sky[0] && sky[2] > sky[1], "sky band lost blue");
+        assert!(
+            trees[1] > trees[0] && trees[1] > trees[2],
+            "tree band lost green"
+        );
+        let corner = wash.get_pixel(2, 2).0;
+        assert!(
+            corner[0] < 8 && corner[1] < 8 && corner[2] < 8,
+            "bloom corners must fade to black, got {corner:?}"
+        );
+    }
+
+    #[test]
+    fn bloom_alpha_falls_off_before_the_edge() {
+        assert_eq!(bloom_alpha(0.0), 1.0);
+        assert_eq!(bloom_alpha(0.22), 1.0);
+        assert!(bloom_alpha(0.6) > 0.1 && bloom_alpha(0.6) < 0.7);
+        assert_eq!(bloom_alpha(1.0), 0.0);
+    }
+
+    #[test]
+    fn art_bounds_only_surface_when_the_rect_moves() {
+        let mut seen = 0;
+        assert!(take_art_bounds(&mut seen).is_none());
+        report_art_bounds(10.0, 20.0, 84.0, 84.0);
+        let first = take_art_bounds(&mut seen).expect("first report");
+        assert_eq!(first, (10.0, 20.0, 84.0, 84.0));
+        report_art_bounds(10.2, 20.1, 84.0, 84.0);
+        assert!(take_art_bounds(&mut seen).is_none());
+        report_art_bounds(40.0, 20.0, 84.0, 84.0);
+        assert_eq!(
+            take_art_bounds(&mut seen).expect("moved"),
+            (40.0, 20.0, 84.0, 84.0)
+        );
     }
 }

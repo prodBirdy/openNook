@@ -14,7 +14,13 @@ STAGE="$ROOT/target/dmg"
 
 "$ROOT/scripts/bundle.sh" release
 
-APP="$ROOT/target/OpenNook.app"
+APP="$ROOT/target/openNook.app"
+
+echo "After copying openNook.app to /Applications:"
+echo "  ln -sf /Applications/openNook.app/Contents/MacOS/nook /usr/local/bin/nook"
+echo "  /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f /Applications/openNook.app"
+echo "Finder Services may need: /System/Library/CoreServices/pbs -update  (or a re-login)"
+
 rm -rf "$STAGE" "$DMG"
 mkdir -p "$STAGE"
 ditto "$APP" "$STAGE/openNook.app"

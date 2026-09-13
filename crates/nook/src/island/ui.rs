@@ -1,12 +1,12 @@
-//! Shared island controls: labels, buttons, and formatters.
+//! Shared island controls: labels, buttons, widget card chrome, formatters.
 
 use super::Island;
 use crate::icons::lucide_color;
 use crate::theme;
 use gpui::{
-    div, prelude::*, px, rgba, App, Context, CursorStyle, Div, ElementId, Font, FontFeatures,
-    FontStyle, FontWeight, MouseButton, MouseDownEvent, ScrollHandle, ScrollWheelEvent,
-    SharedString, Stateful, Window,
+    div, prelude::*, px, AnyElement, App, Context, CursorStyle, Div, ElementId, Font, FontFeatures,
+    FontStyle, MouseButton, MouseDownEvent, ScrollHandle, ScrollWheelEvent, SharedString, Stateful,
+    Window,
 };
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -17,7 +17,7 @@ pub(crate) fn format_timer(seconds: u32) -> String {
     let m = (seconds % 3600) / 60;
     let s = seconds % 60;
     if h > 0 {
-        format!("{h}:{m:02}")
+        format!("{h}:{m:02}:{s:02}")
     } else {
         format!("{m}:{s:02}")
     }
@@ -90,6 +90,82 @@ pub(crate) fn timer_text(text: impl Into<SharedString>, style: theme::Text) -> D
 
 pub(crate) use super::marquee::slide_label;
 
+#[allow(dead_code)]
+pub(crate) fn text_btn(
+    caption: impl Into<SharedString>,
+    cx: &mut Context<Island>,
+    on_click: impl Fn(&mut Island, &MouseDownEvent, &mut Context<Island>) + 'static,
+) -> impl IntoElement {
+    let caption = caption.into();
+    div()
+        .id(caption.clone())
+        .h(px(theme::HIT_MIN))
+        .px_3()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(theme::CONTROL_RADIUS))
+        .bg(theme::FILL)
+        .hover(|s| s.bg(theme::FILL_SECONDARY))
+        .active(|s| s.opacity(0.85))
+        .cursor(CursorStyle::PointingHand)
+        .child(label(caption, theme::CALLOUT, true))
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                cx.stop_propagation();
+                on_click(this, event, cx);
+            }),
+        )
+}
+
+/// Empty-state CTA (`Create Timer`, `Create Reminder`): `rounded-[20px]`.
+#[allow(dead_code)]
+pub(crate) fn pill_btn(
+    caption: impl Into<SharedString>,
+    cx: &mut Context<Island>,
+    on_click: impl Fn(&mut Island, &MouseDownEvent, &mut Context<Island>) + 'static,
+) -> impl IntoElement {
+    let caption = caption.into();
+    div()
+        .id(caption.clone())
+        .px(px(16.))
+        .py(px(8.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(theme::ROW_RADIUS))
+        .bg(theme::FILL)
+        .hover(|s| s.bg(theme::FILL_SECONDARY))
+        .active(|s| s.opacity(0.85))
+        .cursor(CursorStyle::PointingHand)
+        .child(label(caption, theme::BODY, true))
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                cx.stop_propagation();
+                on_click(this, event, cx);
+            }),
+        )
+}
+
+#[allow(dead_code)]
+pub(crate) fn empty_state(
+    message: impl Into<SharedString>,
+    action: impl IntoElement,
+) -> impl IntoElement {
+    div()
+        .flex_1()
+        .w_full()
+        .flex()
+        .flex_col()
+        .items_center()
+        .justify_center()
+        .gap_3()
+        .child(label(message, theme::TITLE_3, false).text_color(theme::TERTIARY_LABEL))
+        .child(action)
+}
+
 /// Full-height Nook pane. Same chrome as Now Playing and Calendar: no fill,
 /// no card radius — content sits in the scrolling row behind a 1px divider.
 pub(crate) fn nook_pane(id: impl Into<ElementId>) -> Stateful<Div> {
@@ -97,6 +173,7 @@ pub(crate) fn nook_pane(id: impl Into<ElementId>) -> Stateful<Div> {
         .id(id)
         .flex_shrink_0()
         .h_full()
+        .min_h(px(0.))
         .flex()
         .flex_col()
         .overflow_hidden()
@@ -104,6 +181,18 @@ pub(crate) fn nook_pane(id: impl Into<ElementId>) -> Stateful<Div> {
 
 /// Calendar empty copy: 16px glyph + 12pt medium tertiary label, centered.
 pub(crate) fn nook_empty(icon: &'static str, message: impl Into<SharedString>) -> impl IntoElement {
+    nook_empty_column(icon, message)
+}
+
+pub(crate) fn nook_empty_with(
+    icon: &'static str,
+    message: impl Into<SharedString>,
+    action: AnyElement,
+) -> impl IntoElement {
+    nook_empty_column(icon, message).child(action)
+}
+
+fn nook_empty_column(icon: &'static str, message: impl Into<SharedString>) -> Div {
     div()
         .flex_1()
         .flex()
@@ -111,11 +200,12 @@ pub(crate) fn nook_empty(icon: &'static str, message: impl Into<SharedString>) -
         .items_center()
         .justify_center()
         .gap(px(6.))
-        .child(lucide_color(icon, 16.0, theme::TERTIARY_LABEL))
+        .child(lucide_color(icon, theme::GLYPH_SM, theme::TERTIARY_LABEL))
         .child(
             div()
-                .text_size(px(12.))
-                .font_weight(FontWeight::MEDIUM)
+                .text_size(px(theme::CALLOUT.size))
+                .line_height(px(theme::CALLOUT.leading))
+                .font_weight(theme::CALLOUT.weight)
                 .text_color(theme::TERTIARY_LABEL)
                 .child(message.into()),
         )
@@ -124,11 +214,32 @@ pub(crate) fn nook_empty(icon: &'static str, message: impl Into<SharedString>) -
 /// Calendar month numeral: 32/36 bold primary label.
 pub(crate) fn nook_display(text: impl Into<SharedString>) -> Div {
     div()
-        .text_size(px(32.))
-        .line_height(px(36.))
-        .font_weight(FontWeight::BOLD)
+        .text_size(px(theme::DISPLAY.size))
+        .line_height(px(theme::DISPLAY.leading))
+        .font_weight(theme::DISPLAY.emphasized)
         .text_color(theme::LABEL)
         .child(text.into())
+}
+
+/// Title row: body label on the left, trailing control on the right.
+pub(crate) fn nook_header(
+    title: impl Into<SharedString>,
+    trailing: impl IntoElement,
+) -> impl IntoElement {
+    div()
+        .flex()
+        .items_center()
+        .justify_between()
+        .flex_shrink_0()
+        .pb(px(4.))
+        .child(label(title, theme::BODY, true))
+        .child(trailing)
+}
+
+/// Open a Privacy & Security pane in System Settings via `/usr/bin/open`.
+pub(crate) fn open_privacy_pane(anchor: &'static str) {
+    let url = format!("x-apple.systempreferences:com.apple.preference.security?{anchor}");
+    let _ = std::process::Command::new("/usr/bin/open").arg(url).spawn();
 }
 
 /// Calendar event row: hairline, vertical padding, no card fill.
@@ -138,8 +249,13 @@ pub(crate) fn nook_row(id: impl Into<ElementId>) -> Stateful<Div> {
         .flex()
         .items_center()
         .py_2()
+        .min_h(px(theme::HIT_MIN))
+        .flex_shrink_0()
         .border_b_1()
-        .border_color(rgba(0xFFFFFF0D))
+        .border_color(theme::HAIRLINE)
+        .cursor(CursorStyle::PointingHand)
+        .hover(|s| s.bg(theme::FILL_TERTIARY))
+        .active(|s| s.bg(theme::FILL_SECONDARY))
 }
 
 /// 3×32pt accent rail used beside Calendar event titles.
@@ -162,15 +278,15 @@ pub(crate) fn nook_icon_btn(
 ) -> impl IntoElement {
     div()
         .id(elem_id.into())
-        .size(px(22.))
+        .size(px(theme::HIT_MIN))
+        .rounded_full()
         .flex()
         .items_center()
         .justify_center()
-        .opacity(0.9)
-        .hover(|s| s.opacity(1.0))
+        .hover(|s| s.bg(theme::FILL))
         .active(|s| s.opacity(0.75))
         .cursor(CursorStyle::PointingHand)
-        .child(lucide_color(name, 16.0, theme::LABEL))
+        .child(lucide_color(name, theme::GLYPH_SM, theme::LABEL))
         .on_mouse_down(
             MouseButton::Left,
             cx.listener(move |this, event: &MouseDownEvent, window, cx| {
@@ -178,6 +294,36 @@ pub(crate) fn nook_icon_btn(
                 on_click(this, event, window, cx);
             }),
         )
+}
+
+/// React `WidgetWrapper`: `min-w-[300px]`.
+pub(crate) const WIDGET_CARD_WIDTH: f32 = 300.0;
+
+pub(crate) const MEDIA_ART: f32 = 52.0;
+pub(crate) const MEDIA_ART_RADIUS: f32 = 12.0;
+pub(crate) const MEDIA_PLAY: f32 = 40.0;
+pub(crate) const MEDIA_PROGRESS_HIT: f32 = 12.0;
+pub(crate) const MEDIA_TIME_PAD_TOP: f32 = 2.0;
+pub(crate) const MEDIA_TIME_PAD_GAP: f32 = 6.0;
+
+/// Expanded-card chrome matching React `WidgetWrapper`: 28px corners, 16px
+/// pad, hairline, stretch to the row height.
+#[allow(dead_code)]
+pub(crate) fn card_chrome(width: f32) -> Div {
+    div()
+        .relative()
+        .flex()
+        .flex_col()
+        .flex_shrink_0()
+        .w(px(width))
+        .h_full()
+        .p(px(theme::WIDGET_PAD))
+        .bg(theme::FILL)
+        .border_1()
+        .border_color(theme::FILL)
+        .rounded(px(theme::WIDGET_RADIUS))
+        .overflow_hidden()
+        .shadow_md()
 }
 
 // Live scroll handles for the expanded cards, keyed by element id.
@@ -210,12 +356,6 @@ pub(crate) fn scroll_body(id: impl Into<ElementId>, child: impl IntoElement) -> 
         .on_scroll_wheel({
             let scroll = scroll.clone();
             move |event: &ScrollWheelEvent, window: &mut Window, cx: &mut App| {
-                // GPUI runs its own scroll listener ahead of this one, so the
-                // card has already moved by the time we get here: all this
-                // decides is whether the row of cards behind the card gets the
-                // gesture too. Keep it only when it is vertical *and* there is
-                // overflow to move, so a card that fits its content never
-                // blocks scrolling from card to card.
                 let delta = event.delta.pixel_delta(window.line_height());
                 if delta.y.abs() > delta.x.abs() && scroll.max_offset().height > px(0.5) {
                     cx.stop_propagation();
@@ -223,10 +363,6 @@ pub(crate) fn scroll_body(id: impl Into<ElementId>, child: impl IntoElement) -> 
             }
         })
         .child(child);
-    // Sideways gestures have to reach the row untouched. Without this, GPUI
-    // feeds a purely horizontal delta into whichever axis the element *can*
-    // scroll, so swiping across the cards would drag each card's content
-    // vertically on the way past.
-    body.style().restrict_scroll_to_axis = Some(true);
+    body.style().restrict_scroll_to_axis = Some(false);
     body
 }

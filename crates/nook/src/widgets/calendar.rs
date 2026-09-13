@@ -1,20 +1,14 @@
 //! Week strip + empty/event state for the Nook calendar pane.
 
-use crate::island::ui::{nook_accent_bar, nook_empty};
+use crate::island::ui::{
+    label, nook_accent_bar, nook_display, nook_empty, nook_row, open_privacy_pane, scroll_body,
+    slide_label, text_btn, timer_text,
+};
 use crate::island::Island;
 use crate::theme;
 use chrono::{Datelike, Local, TimeZone, Weekday};
-use gpui::{
-    div, prelude::*, px, rgba, Context, FontWeight, MouseButton, MouseDownEvent, SharedString,
-};
+use gpui::{div, prelude::*, px, Context, MouseButton, MouseDownEvent, SharedString};
 use nook_core::calendar::CalendarEvent;
-
-const WEEKEND: gpui::Rgba = gpui::Rgba {
-    r: 0.78,
-    g: 0.42,
-    b: 0.42,
-    a: 1.0,
-};
 
 pub(crate) fn calendar_card(
     events: &[CalendarEvent],
@@ -45,25 +39,40 @@ pub(crate) fn calendar_card(
         .filter(|e| same_day(e.start_date, selected_date))
         .collect();
 
+    let denied = nook_core::calendar::calendar_authorized() == Some(false);
     let empty_copy = if is_today {
-        "Nothing for today"
+        "Nothing today"
     } else {
         "No events"
     };
-    let body = if filtered.is_empty() {
+    let body = if denied {
+        div()
+            .flex_1()
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .gap(px(8.))
+            .child(nook_empty("calendar-x", "Calendar access is off"))
+            .child(text_btn("Open Privacy Settings", cx, |_, _, _| {
+                open_privacy_pane("Privacy_Calendars");
+            }))
+            .into_any_element()
+    } else if filtered.is_empty() {
         nook_empty("calendar", empty_copy).into_any_element()
     } else {
-        let mut col = div().flex().flex_col().gap_2().pt(px(8.));
-        for event in filtered.into_iter().take(2) {
+        let mut col = div().flex().flex_col().flex_shrink_0().gap_2().pt(px(8.));
+        for event in filtered {
             col = col.child(event_row(event, cx));
         }
-        col.into_any_element()
+        scroll_body("cal-events", col).into_any_element()
     };
 
     div()
         .id("nook-calendar")
         .w_full()
         .h_full()
+        .min_h(px(0.))
         .flex()
         .flex_col()
         .overflow_hidden()
@@ -72,14 +81,8 @@ pub(crate) fn calendar_card(
                 .flex()
                 .items_center()
                 .gap(px(16.))
-                .child(
-                    div()
-                        .text_size(px(32.))
-                        .line_height(px(36.))
-                        .font_weight(FontWeight::BOLD)
-                        .text_color(theme::LABEL)
-                        .child(month),
-                )
+                .flex_shrink_0()
+                .child(nook_display(month))
                 .child(week),
         )
         .child(body)
@@ -113,28 +116,23 @@ fn day_col(
     weekend: bool,
     cx: &mut Context<Island>,
 ) -> impl IntoElement {
-    let number_color = if selected {
-        theme::accent()
-    } else if weekend {
-        WEEKEND
+    let number_color = if weekend {
+        theme::SECONDARY_LABEL
     } else {
         theme::LABEL
     };
-    let label_color = if selected {
-        theme::accent()
-    } else if weekend {
-        WEEKEND
-    } else {
-        theme::SECONDARY_LABEL
-    };
+    let label_color = theme::SECONDARY_LABEL;
     div()
         .id(SharedString::from(format!("cal-day-{index}")))
         .flex()
         .flex_col()
         .items_center()
+        .justify_center()
         .gap(px(4.))
+        .min_h(px(theme::HIT_MIN))
         .cursor(gpui::CursorStyle::PointingHand)
         .hover(|s| s.opacity(0.85))
+        .active(|s| s.opacity(0.75))
         .on_mouse_down(
             MouseButton::Left,
             cx.listener(move |this, _: &MouseDownEvent, _, cx| {
@@ -143,21 +141,16 @@ fn day_col(
                 cx.notify();
             }),
         )
+        .child(label(weekday, theme::FOOTNOTE, true).text_color(label_color))
         .child(
             div()
-                .text_size(px(9.))
-                .line_height(px(11.))
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(label_color)
-                .child(weekday),
-        )
-        .child(
-            div()
-                .text_size(px(15.))
-                .line_height(px(18.))
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(number_color)
-                .child(format!("{day:02}")),
+                .id(SharedString::from(format!("day-pill-{index}")))
+                .px(px(6.))
+                .py(px(2.))
+                .rounded_full()
+                .active(|s| s.bg(theme::FILL))
+                .when(selected, |d| d.bg(theme::FILL_SECONDARY))
+                .child(label(format!("{day:02}"), theme::TITLE_3, true).text_color(number_color)),
         )
 }
 
@@ -165,18 +158,11 @@ fn event_row(event: &CalendarEvent, cx: &mut Context<Island>) -> impl IntoElemen
     let id = event.id.clone();
     let date = event.start_date;
     let time = if event.is_all_day {
-        "ALL DAY".to_string()
+        "All day".to_string()
     } else {
         format_event_time(event.start_date)
     };
-    div()
-        .id(SharedString::from(format!("cal-ev-{id}")))
-        .flex()
-        .items_center()
-        .py_2()
-        .border_b_1()
-        .border_color(rgba(0xFFFFFF0D))
-        .cursor(gpui::CursorStyle::PointingHand)
+    nook_row(SharedString::from(format!("cal-ev-{id}")))
         .on_mouse_down(
             MouseButton::Left,
             cx.listener(move |_, _: &MouseDownEvent, _, cx| {
@@ -194,21 +180,13 @@ fn event_row(event: &CalendarEvent, cx: &mut Context<Island>) -> impl IntoElemen
                 .flex()
                 .justify_end()
                 .pr_2()
-                .child(
-                    div()
-                        .text_size(px(if event.is_all_day { 10. } else { 13. }))
-                        .font_weight(if event.is_all_day {
-                            FontWeight::SEMIBOLD
-                        } else {
-                            FontWeight::MEDIUM
-                        })
-                        .text_color(if event.is_all_day {
-                            rgba(0xffffff99)
-                        } else {
-                            rgba(0xffffffe6)
-                        })
-                        .child(time),
-                ),
+                .child(if event.is_all_day {
+                    label(time, theme::FOOTNOTE, true)
+                        .text_color(theme::SECONDARY_LABEL)
+                        .into_any_element()
+                } else {
+                    timer_text(time, theme::BODY).into_any_element()
+                }),
         )
         .child(nook_accent_bar(theme::accent()))
         .child(
@@ -219,26 +197,12 @@ fn event_row(event: &CalendarEvent, cx: &mut Context<Island>) -> impl IntoElemen
                 .flex_col()
                 .justify_center()
                 .overflow_hidden()
-                .child(
-                    div()
-                        .text_size(px(14.))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(theme::LABEL)
-                        .whitespace_nowrap()
-                        .overflow_hidden()
-                        .text_ellipsis()
-                        .child(event.title.clone()),
-                )
+                .child(slide_label(event.title.clone(), theme::TITLE_3, true).w_full())
                 .when_some(event.location.clone(), |d, loc| {
                     d.child(
-                        div()
-                            .text_size(px(11.))
-                            .text_color(rgba(0xffffff80))
-                            .mt(px(1.))
-                            .whitespace_nowrap()
-                            .overflow_hidden()
-                            .text_ellipsis()
-                            .child(loc),
+                        label(loc, theme::SUBHEADLINE, false)
+                            .text_color(theme::SECONDARY_LABEL)
+                            .mt(px(1.)),
                     )
                 }),
         )

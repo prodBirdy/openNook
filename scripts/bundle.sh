@@ -5,6 +5,7 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
+plutil -lint "$ROOT/Info.plist" || exit 1
 
 PROFILE="${1:-release}"
 if [[ "$PROFILE" == "release" ]]; then
@@ -15,7 +16,8 @@ else
   BIN="$ROOT/target/debug/nook"
 fi
 
-APP="$ROOT/target/OpenNook.app"
+APP="$ROOT/target/openNook.app"
+ENTITLEMENTS="$ROOT/resources/openNook.entitlements"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$ROOT/Info.plist" "$APP/Contents/Info.plist"
@@ -33,6 +35,21 @@ fi
 cp "$BIN" "$APP/Contents/MacOS/openNook"
 chmod +x "$APP/Contents/MacOS/openNook"
 
+# CLI shim: same crate, separate bin. LaunchServices only sees the .app.
+CLI_SRC="$ROOT/target/${PROFILE}/nook-cli"
+if [[ -f "$CLI_SRC" ]]; then
+  cp "$CLI_SRC" "$APP/Contents/MacOS/nook"
+  chmod +x "$APP/Contents/MacOS/nook"
+else
+  echo "warning: nook-cli not built; skip Contents/MacOS/nook" >&2
+fi
+
+# Dev `cargo run` never receives opennook:// — register the bundle.
+LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
+if [[ -x "$LSREGISTER" ]]; then
+  "$LSREGISTER" -f "$APP" || true
+fi
+
 # Bundle mediaremote-adapter (not linked; /usr/bin/perl loads the framework).
 if "$ROOT/scripts/build-mediaremote-adapter.sh"; then
   ditto "$ROOT/third_party/mediaremote-adapter/build/MediaRemoteAdapter.framework" \
@@ -45,13 +62,25 @@ else
   echo "warning: MediaRemote adapter not bundled; Now Playing will use AppleScript" >&2
 fi
 
+# Clock App Intent shortcuts (user imports once from Settings).
+if [[ -d "$ROOT/resources/shortcuts" ]]; then
+  mkdir -p "$APP/Contents/Resources/shortcuts"
+  cp -R "$ROOT/resources/shortcuts/." "$APP/Contents/Resources/shortcuts/"
+fi
+
 # Ad-hoc sign so the .app launches without "damaged" on this machine.
 # A Developer ID identity, if present, is used instead.
 if security find-identity -v -p codesigning 2>/dev/null | grep -q "Developer ID Application"; then
   IDENTITY="$(security find-identity -v -p codesigning | awk -F'\"' '/Developer ID Application/{print $2; exit}')"
-  codesign --force --deep --options runtime --sign "$IDENTITY" "$APP"
+  codesign --force --options runtime --entitlements "$ENTITLEMENTS" --sign "$IDENTITY" "$APP"
 else
   codesign --force --deep --sign - "$APP"
+fi
+
+if [[ -n "${NOTARY_PROFILE:-}" ]]; then
+  ditto -c -k --keepParent "$APP" "$ROOT/target/openNook-notary.zip"
+  xcrun notarytool submit "$ROOT/target/openNook-notary.zip" --keychain-profile "$NOTARY_PROFILE" --wait
+  xcrun stapler staple "$APP"
 fi
 
 echo "built $APP"

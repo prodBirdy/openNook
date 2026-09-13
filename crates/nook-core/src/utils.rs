@@ -63,6 +63,111 @@ pub async fn fetch_artwork_from_url(url: &str) -> Option<String> {
     }
 }
 
+/// Run `/usr/bin/osascript`. Shared by media controls and iMessage send.
+pub fn run_osascript(script: &str) -> Result<String, String> {
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = script;
+        return Err("osascript is only available on macOS".into());
+    }
+    #[cfg(target_os = "macos")]
+    {
+        use std::process::Command;
+        let output = Command::new("/usr/bin/osascript")
+            .arg("-e")
+            .arg(script)
+            .output()
+            .map_err(|e| e.to_string())?;
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if !output.status.success() {
+            log::warn!("osascript failed ({}): {stderr}", output.status);
+            if stderr.contains("-1743") || stderr.to_lowercase().contains("not allowed") {
+                log::warn!(
+                    "Automation permission denied. Grant access in System Settings → Privacy & Security → Automation."
+                );
+            }
+            return Err(format!("osascript failed: {}", output.status));
+        }
+        if !stderr.is_empty() {
+            log::debug!("osascript stderr: {stderr}");
+        }
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    }
+}
+
+/// Back-compat alias used by the Windows Now Playing path.
+pub fn save_temp_file(data: &[u8], _extension: &str) -> Option<String> {
+    encode_bytes_base64(data)
+}
+
+/// Get the system accent color on macOS
+#[cfg(target_os = "macos")]
+pub fn get_macos_accent_color() -> String {
+    use objc2::runtime::AnyObject;
+    use objc2::{class, msg_send};
+
+    // Default to Apple Blue if anything fails
+    let default_color = "#007AFF".to_string();
+
+    unsafe {
+        // Get NSColor.controlAccentColor
+        let color_class = class!(NSColor);
+        let accent_color: *mut AnyObject = msg_send![color_class, controlAccentColor];
+
+        if accent_color.is_null() {
+            return default_color;
+        }
+
+        // Convert to SRGB color space to ensure components are valid
+        // colorUsingColorSpace: [NSColorSpace sRGBColorSpace]
+        let color_space_class = class!(NSColorSpace);
+        let srgb_space: *mut AnyObject = msg_send![color_space_class, sRGBColorSpace];
+        let srgb_color: *mut AnyObject = msg_send![accent_color, colorUsingColorSpace: srgb_space];
+
+        if srgb_color.is_null() {
+            return default_color;
+        }
+
+        // Get RGB components
+        type CGFloat = f64;
+        let mut r: CGFloat = 0.0;
+        let mut g: CGFloat = 0.0;
+        let mut b: CGFloat = 0.0;
+        let mut a: CGFloat = 0.0;
+
+        // getRed:green:blue:alpha:
+        let _: () =
+            msg_send![srgb_color, getRed: &mut r, green: &mut g, blue: &mut b, alpha: &mut a];
+
+        // Format as hex string
+        format!(
+            "#{:02X}{:02X}{:02X}",
+            (r * 255.0).round() as u8,
+            (g * 255.0).round() as u8,
+            (b * 255.0).round() as u8
+        )
+    }
+}
+
+/// Get the system accent color on Windows
+#[cfg(target_os = "windows")]
+pub fn get_windows_accent_color() -> String {
+    use winreg::enums::*;
+    use winreg::RegKey;
+
+    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+    if let Ok(dwm) = hkcu.open_subkey("SOFTWARE\\Microsoft\\Windows\\DWM") {
+        if let Ok(color) = dwm.get_value::<u32, _>("ColorizationColor") {
+            // Color is in ARGB format (alpha, red, green, blue)
+            let r = (color >> 16) & 0xFF;
+            let g = (color >> 8) & 0xFF;
+            let b = color & 0xFF;
+            return format!("#{:02x}{:02x}{:02x}", r, g, b);
+        }
+    }
+    "#007AFF".to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
