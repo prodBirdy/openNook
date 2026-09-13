@@ -8,8 +8,8 @@ use crate::theme;
 use gpui::{
     div, point, prelude::*, px, rgba, AnyElement, App, Bounds, Context, CursorStyle,
     ExternalPaths, FontFallbacks, FontWeight, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, ScrollWheelEvent, Window, WindowBackgroundAppearance, WindowBounds, WindowKind,
-    WindowOptions,
+    MouseUpEvent, ScrollWheelEvent, Window, WindowBackgroundAppearance, WindowBounds,
+    WindowDecorations, WindowKind, WindowOptions,
 };
 use nook_core::notch;
 use std::any::Any;
@@ -472,7 +472,7 @@ pub fn open_island(cx: &mut App) {
             is_resizable: false,
             is_minimizable: false,
             window_background: WindowBackgroundAppearance::Transparent,
-            window_decorations: None,
+            window_decorations: Some(WindowDecorations::Client),
             app_id: Some("com.jonasvogel.opennook-gpui".into()),
             ..Default::default()
         },
