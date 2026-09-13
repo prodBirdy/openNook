@@ -75,7 +75,6 @@ impl gpui::Render for Island {
                 w: chrome_w as f64,
                 h: chrome_h as f64,
                 radius: radius as f64,
-                wing: wing as f64,
                 tint,
             }));
             // If this tick failed to talk to AppKit, keep the live underlay

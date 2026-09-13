@@ -5,10 +5,8 @@ pub struct CalendarEvent {
     pub id: String,
     pub title: String,
     pub start_date: f64, // Timestamp
-    pub end_date: f64,   // Timestamp
     pub location: Option<String>,
     pub is_all_day: bool,
-    pub color: String,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -16,9 +14,7 @@ pub struct Reminder {
     pub id: String,
     pub title: String,
     pub due_date: Option<f64>,
-    pub priority: i32,
     pub is_completed: bool,
-    pub list_name: String,
     pub list_color: String,
 }
 
@@ -251,12 +247,6 @@ mod macos {
                 date.timeIntervalSince1970()
             };
 
-            // endDate() returns Retained<NSDate>
-            let end_ts: f64 = {
-                let date = unsafe { event.endDate() };
-                date.timeIntervalSince1970()
-            };
-
             // location() returns Option<Retained<NSString>>
             let location: Option<String> = {
                 let loc = unsafe { event.location() };
@@ -272,17 +262,12 @@ mod macos {
 
             let is_all_day = unsafe { event.isAllDay() };
 
-            // Use default color for now
-            let color = "#34c759".to_string();
-
             events_list.push(CalendarEvent {
                 id,
                 title,
                 start_date: start_ts,
-                end_date: end_ts,
                 location,
                 is_all_day,
-                color,
             });
         }
 
@@ -360,9 +345,6 @@ mod macos {
                                 id_ns.to_string()
                             };
 
-                            // Get priority (0 = none, 1-4 = high, 5 = medium, 6-9 = low)
-                            let priority = unsafe { reminder.priority() } as i32;
-
                             // Due date - reminders use dueDateComponents
                             let due_date: Option<f64> = unsafe {
                                 reminder.dueDateComponents().and_then(|components| {
@@ -373,12 +355,10 @@ mod macos {
                                 })
                             };
 
-                            // Get calendar info
-                            let (list_name, list_color) = {
+                            // List color from the EventKit calendar.
+                            let list_color = {
                                 match unsafe { reminder.calendar() } {
                                     Some(cal) => {
-                                        let name = unsafe { cal.title() }.to_string();
-
                                         // Extract color from calendar using Core Graphics C API
                                         let color = unsafe {
                                             use objc2::msg_send;
@@ -432,9 +412,9 @@ mod macos {
                                             }
                                         };
 
-                                        (name, color)
+                                        color
                                     }
-                                    None => ("Unknown".to_string(), "#0a84ff".to_string()),
+                                    None => "#0a84ff".to_string(),
                                 }
                             };
 
@@ -442,9 +422,7 @@ mod macos {
                                 id,
                                 title,
                                 due_date,
-                                priority,
                                 is_completed,
-                                list_name,
                                 list_color,
                             });
                         }
