@@ -3821,7 +3821,6 @@ dependencies = [
  "pulldown-cmark",
  "raw-window-handle",
  "rust-embed",
- "serde",
 ]
 
 [[package]]
@@ -3846,7 +3845,6 @@ dependencies = [
  "sysinfo 0.37.2",
  "tokio",
  "windows 0.52.0",
- "winreg",
  "x11rb",
  "zbus 4.4.0",
 ]
@@ -5132,7 +5130,6 @@ dependencies = [
  "base64",
  "bytes",
  "encoding_rs",
- "futures-channel",
  "futures-core",
  "futures-util",
  "h2",

@@ -5,7 +5,7 @@
 //! useful artwork, so we read the front (or title-matching) tab via
 //! AppleScript and resolve a picture from the URL.
 
-use crate::utils::{base64_encode, read_response_limited};
+use crate::utils::{encode_bytes_base64, read_response_limited};
 
 /// Chrome-family and Safari bundle IDs that can report a tab URL.
 pub fn is_browser(app_name: Option<&str>, bundle_id: Option<&str>) -> bool {
@@ -178,7 +178,7 @@ async fn fetch_image(url: &str, min_bytes: usize) -> Option<String> {
     if bytes.len() < min_bytes {
         return None;
     }
-    Some(base64_encode(&bytes))
+    encode_bytes_base64(&bytes)
 }
 
 #[cfg(target_os = "macos")]
