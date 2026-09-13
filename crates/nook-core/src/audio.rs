@@ -6,10 +6,10 @@ use std::sync::OnceLock;
 use std::time::Duration;
 use tokio::sync::Notify;
 
-/// Global state for audio levels (updated by audio monitoring thread)
+/// Global resting audio levels (visualizer paints its own clock-driven bars).
 static AUDIO_LEVELS: std::sync::OnceLock<std::sync::Mutex<Vec<f64>>> = std::sync::OnceLock::new();
 
-/// Global state to track if media is playing (to pause simulation)
+/// Global state to track if media is playing
 static IS_PLAYING: AtomicBool = AtomicBool::new(false);
 
 /// Track if we were playing in the previous poll cycle (to detect resume)
@@ -43,15 +43,44 @@ fn get_audio_levels_internal() -> Vec<f64> {
         .unwrap_or_else(|| vec![0.15; 6])
 }
 
-fn set_audio_levels(levels: Vec<f64>) {
-    if let Some(m) = AUDIO_LEVELS.get() {
-        *lock_mutex(m) = levels;
-    }
-}
-
-/// Get current audio levels for visualizer (lightweight, no AppleScript calls)
+/// Resting visualizer levels (paint computes live bars from [`visualizer_levels_at`]).
 pub fn get_audio_levels() -> Vec<f64> {
     get_audio_levels_internal()
+}
+
+/// Synthetic six-band levels as a pure function of time. Used by the compact
+/// Media visualizer paint path — no dedicated thread, no island-tick dirties.
+pub fn visualizer_levels_at(t: f64) -> [f64; 6] {
+    let energy_wave = (t * 0.15).sin() * 0.3 + 0.9;
+    // Soft energy envelope (was an EMA on the old 30 fps thread).
+    let energy = 0.5 * 0.7 + energy_wave * 0.3;
+    // ~160 BPM beat pulse.
+    let beat_phase = t * 2.67 * std::f64::consts::TAU;
+    let beat = (beat_phase.sin().max(0.0)).powf(4.0);
+
+    let noise = |band: u64| -> f64 {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let mut hasher = DefaultHasher::new();
+        ((t * 15.0) as u64)
+            .wrapping_mul(31)
+            .wrapping_add(band)
+            .hash(&mut hasher);
+        (hasher.finish() % 1000) as f64 / 1000.0 - 0.5
+    };
+
+    let mut levels = [
+        energy * (0.4 + beat * 0.5 + noise(0) * 0.1),
+        energy * (0.35 + beat * 0.3 + (t * 3.2).sin() * 0.15 + noise(1) * 0.08),
+        energy * (0.3 + (t * 5.7).sin() * 0.2 + (t * 7.3).cos() * 0.1 + noise(2) * 0.1),
+        energy * (0.28 + (t * 4.1).sin() * 0.18 + (t * 6.8).cos() * 0.12 + noise(3) * 0.08),
+        energy * (0.22 + (t * 8.3).sin() * 0.15 + beat * 0.1 + noise(4) * 0.1),
+        energy * (0.18 + (t * 11.2).sin() * 0.1 + (t * 9.7).cos() * 0.08 + noise(5) * 0.06),
+    ];
+    for level in &mut levels {
+        *level = level.clamp(0.08, 0.92);
+    }
+    levels
 }
 
 #[cfg(target_os = "macos")]
@@ -115,7 +144,8 @@ async fn now_playing_from_adapter(track: crate::mediaremote::AdapterTrack) -> No
     if artwork.is_none() {
         artwork = track.artwork_base64.clone();
     }
-    if crate::browser_media::is_browser(track.app_name.as_deref(), track.bundle_id.as_deref())
+    if crate::settings::get_app_settings().browser_artwork
+        && crate::browser_media::is_browser(track.app_name.as_deref(), track.bundle_id.as_deref())
         && (track_changed || just_started || artwork.is_none())
     {
         if let Some(resolved) = crate::browser_media::resolve_artwork(
@@ -1360,114 +1390,6 @@ pub async fn media_seek(position: f64) -> Result<(), String> {
         let _ = position;
         Ok(())
     }
-}
-
-use std::thread;
-
-/// Setup audio level monitoring using simulated audio visualization
-pub fn setup_audio_monitoring() {
-    static STARTED: AtomicBool = AtomicBool::new(false);
-    if AUDIO_LEVELS.get().is_none() {
-        let _ = AUDIO_LEVELS.set(std::sync::Mutex::new(vec![0.15; 6]));
-    }
-    if STARTED.swap(true, Ordering::SeqCst) {
-        return;
-    }
-
-    thread::spawn(move || {
-        log::info!("🎭 Starting audio visualization simulation");
-
-        let mut t = 0.0f64;
-        let mut prev_levels = vec![0.15; 6];
-        let mut beat_phase = 0.0f64;
-        let mut energy = 0.5f64;
-
-        // 30fps: smooth bars; every level change repaints the island, so this
-        // is a battery/smoothness tradeoff decided in favor of smoothness.
-        let frame_duration = std::time::Duration::from_micros(33333); // ~30fps
-        let mut next_frame = std::time::Instant::now();
-
-        loop {
-            if !IS_PLAYING.load(Ordering::Relaxed) {
-                std::thread::sleep(std::time::Duration::from_millis(200));
-                next_frame = std::time::Instant::now();
-                continue;
-            }
-
-            t += 0.0333; // Time increment per frame (30fps)
-
-            // Simulate varying energy levels (like quiet vs loud parts of a song)
-            let energy_wave = (t * 0.15).sin() * 0.3 + 0.9;
-            energy = energy * 0.995 + energy_wave * 0.005;
-
-            // Simulate beat at ~160 BPM (2.67 beats per second): 2π · 2.67 · dt
-            beat_phase += 0.0333 * 2.67 * std::f64::consts::TAU;
-            let beat = (beat_phase.sin().max(0.0)).powf(4.0); // Sharp beat pulse
-
-            // Add some randomness for realism (per-band: hash t and the band index)
-            let noise = |band: u64| -> f64 {
-                use std::collections::hash_map::DefaultHasher;
-                use std::hash::{Hash, Hasher};
-                let mut hasher = DefaultHasher::new();
-                ((t * 10000.0) as u64)
-                    .wrapping_mul(31)
-                    .wrapping_add(band)
-                    .hash(&mut hasher);
-                (hasher.finish() % 1000) as f64 / 1000.0 - 0.5
-            };
-
-            let mut levels = vec![0.0; 6]; // In a loop, this could be reused, but Vec of 6 floats is trivial.
-                                           // Keeping as is for simplicity unless specific optimization request for this.
-
-            // Bass (20-150 Hz) - strongest on beat
-            levels[0] = energy * (0.4 + beat * 0.5 + noise(0) * 0.1);
-
-            // Low-mid (150-400 Hz) - follows bass with slight delay
-            levels[1] = energy * (0.35 + beat * 0.3 + (t * 3.2).sin() * 0.15 + noise(1) * 0.08);
-
-            // Mid (400-1000 Hz) - melodic content
-            levels[2] =
-                energy * (0.3 + (t * 5.7).sin() * 0.2 + (t * 7.3).cos() * 0.1 + noise(2) * 0.1);
-
-            // High-mid (1000-2500 Hz) - vocals, instruments
-            levels[3] =
-                energy * (0.28 + (t * 4.1).sin() * 0.18 + (t * 6.8).cos() * 0.12 + noise(3) * 0.08);
-
-            // Presence (2500-6000 Hz) - clarity, attack
-            levels[4] = energy * (0.22 + (t * 8.3).sin() * 0.15 + beat * 0.1 + noise(4) * 0.1);
-
-            // Brilliance (6000-20000 Hz) - air, shimmer (generally lower)
-            levels[5] =
-                energy * (0.18 + (t * 11.2).sin() * 0.1 + (t * 9.7).cos() * 0.08 + noise(5) * 0.06);
-
-            // Smooth transitions (exponential moving average)
-            for i in 0..6 {
-                // Adjusted smoothing for 30fps (needs to be slightly higher to match speed of 60fps)
-                let smoothing = if levels[i] > prev_levels[i] {
-                    0.5 // faster attack
-                } else {
-                    0.25 // slower decay
-                };
-                levels[i] = prev_levels[i] + (levels[i] - prev_levels[i]) * smoothing;
-                // Clamp to valid range
-                levels[i] = levels[i].clamp(0.08, 0.92);
-            }
-
-            prev_levels = levels.clone();
-
-            set_audio_levels(levels.clone());
-
-            // Precise timing for consistent 60fps
-            next_frame += frame_duration;
-            let now = std::time::Instant::now();
-            if next_frame > now {
-                std::thread::sleep(next_frame - now);
-            } else {
-                // If we're behind, reset timing
-                next_frame = now + frame_duration;
-            }
-        }
-    });
 }
 
 #[cfg(test)]

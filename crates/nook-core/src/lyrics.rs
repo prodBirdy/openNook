@@ -123,7 +123,7 @@ pub fn parse_lrc(src: &str) -> Vec<LyricLine> {
             });
         }
     }
-    lines.sort_by(|a, b| a.time_ms.cmp(&b.time_ms));
+    lines.sort_by_key(|a| a.time_ms);
     lines
 }
 

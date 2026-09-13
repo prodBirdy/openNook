@@ -1,5 +1,6 @@
 //! Compact Live Activity: left | notch gap | right, plus mode dots.
 
+use super::chrome::COMPACT_WING;
 use super::media::{album_chip, visualizer};
 use super::ui::{label, timer_text};
 use super::{CompactMode, Island};
@@ -7,10 +8,12 @@ use crate::icons::{lucide, lucide_color};
 use crate::theme;
 use crate::widgets;
 use gpui::{
-    div, prelude::*, px, relative, rgb, rgba, AnyElement, Context, CursorStyle, MouseButton,
+    canvas, div, prelude::*, px, relative, AnyElement, Context, CursorStyle, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, SharedString,
 };
 use nook_core::sysvol::HudKind;
+use std::cell::RefCell;
+use std::rc::Rc;
 
 impl Island {
     pub(super) fn render_compact(
@@ -18,20 +21,23 @@ impl Island {
         mode: CompactMode,
         hovered: bool,
         notch_w: f32,
+        glass: bool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         // Leading/trailing sit in the camera band, not the extra chin the
         // island grows on hover — centering in the full pill dropped the
         // glyphs below the housing. Equal flex flanks keep the spacer on
         // the camera; a fixed side width used to shift the hole.
-        let notch_h = self.notch_height.max(32.0);
+        let notch_h = self.notch_height.max(theme::NOTCH_MIN_H);
         div().relative().size_full().child(
             div()
                 .flex()
                 .items_center()
                 .w_full()
                 .h(px(notch_h))
-                .px(px(theme::COMPACT_INSET))
+                .px(px(
+                    theme::COMPACT_INSET + if glass { COMPACT_WING } else { 0. }
+                ))
                 .child(
                     div()
                         .flex_1()
@@ -45,12 +51,17 @@ impl Island {
                         .when(mode != CompactMode::Idle && self.high_alert_active(), |d| {
                             d.child(div().ml(px(4.)).flex_shrink_0().child(lucide_color(
                                 "sun",
-                                10.0,
+                                theme::COMPACT_BADGE,
                                 theme::SUCCESS,
                             )))
                         }),
                 )
-                .child(div().w(px(notch_w)).flex_shrink_0().h_full())
+                .child(
+                    div()
+                        .w(px(notch_w + 2.0 * self.glass_notch_gap()))
+                        .flex_shrink_0()
+                        .h_full(),
+                )
                 .child(
                     div()
                         .flex_1()
@@ -66,52 +77,54 @@ impl Island {
     }
 
     fn compact_left(&self, mode: CompactMode, cx: &mut Context<Self>) -> AnyElement {
-        if let Some(text) = nook_core::window_snap::flash_label() {
-            return label(text, theme::BODY, true).into_any_element();
-        }
         if self.hud_active() {
-            return lucide(hud_icon(self.hud.unwrap().kind), theme::COMPACT_FACE)
+            let kind = self.hud.unwrap().kind;
+            return lucide_color(hud_icon(kind), theme::COMPACT_FACE, hud_tint(kind))
                 .into_any_element();
         }
         if let Some(name) = self.output_hud_label() {
             return label(name.to_string(), theme::BODY, true).into_any_element();
         }
         match mode {
-            CompactMode::Media => {
-                album_chip(&self.now_playing, self.overlay_fade.value, cx).into_any_element()
-            }
+            CompactMode::Media => album_chip(
+                &self.now_playing,
+                self.overlay_fade.value,
+                self.reduce_motion,
+                cx,
+            )
+            .into_any_element(),
             CompactMode::Agents => widgets::agents_compact_left(
                 &self.agents,
                 self.pixel_t,
                 theme::island_fill(self.settings.island_color),
+                self.size_morphing(),
             ),
             CompactMode::Files => super::files::compact_left(&self.files),
             CompactMode::Timer => widgets::timer_compact_left(self, cx),
             CompactMode::Observe => {
-                lucide("triangle-alert", theme::COMPACT_FACE).into_any_element()
+                lucide_color("triangle-alert", theme::COMPACT_FACE, theme::WARNING)
+                    .into_any_element()
             }
             CompactMode::Battery => {
-                let critical = self.power.percent.map(|p| p <= 10).unwrap_or(false)
-                    || self.power.warning_level == nook_core::power::BatteryWarning::Final;
-                let color = if critical {
-                    theme::DESTRUCTIVE
-                } else {
-                    theme::SYSTEM_ORANGE
-                };
+                let color = widgets::battery_tint(self.power);
                 lucide_color(self.power.compact_icon(), theme::COMPACT_FACE, color)
                     .into_any_element()
             }
             CompactMode::Vpn => lucide_color(
-                "shield",
+                if self.vpn.connected {
+                    "shield-check"
+                } else {
+                    "shield-off"
+                },
                 theme::COMPACT_FACE,
                 if self.vpn.connected {
                     theme::SUCCESS
                 } else {
-                    theme::TERTIARY_LABEL
+                    theme::tertiary_label()
                 },
             )
             .into_any_element(),
-            CompactMode::Recording => rec_dot().into_any_element(),
+            CompactMode::Recording => widgets::recorder_compact_left(self),
             CompactMode::Meeting => widgets::meeting_compact_left(&self.meeting),
             CompactMode::Notifications => {
                 widgets::notifications_compact_left(self.notifications.first())
@@ -124,10 +137,12 @@ impl Island {
                 .map(widgets::messages_compact_left)
                 .map(|el| el.into_any_element())
                 .unwrap_or_else(|| div().into_any_element()),
-            CompactMode::Share => lucide("share", theme::COMPACT_FACE).into_any_element(),
+            CompactMode::Share => {
+                lucide_color("share", theme::COMPACT_FACE, theme::ACCENT).into_any_element()
+            }
             CompactMode::Idle => {
                 if self.high_alert_active() {
-                    lucide_color("sun", 12.0, theme::SUCCESS).into_any_element()
+                    lucide_color("sun", theme::COMPACT_FACE, theme::SUCCESS).into_any_element()
                 } else {
                     widgets::compact_weather(self)
                 }
@@ -145,15 +160,9 @@ impl Island {
             return self.hud_slider(cx);
         }
         match mode {
-            CompactMode::Media => visualizer(
-                self.now_playing
-                    .audio_levels
-                    .as_deref()
-                    .unwrap_or(&[0.2; 6]),
-                self.now_playing.is_playing,
-                self.visualizer_color,
-            )
-            .into_any_element(),
+            CompactMode::Media => {
+                visualizer(self.now_playing.is_playing, self.visualizer_color).into_any_element()
+            }
             CompactMode::Agents => widgets::agents_compact_right(&self.agents),
             CompactMode::Files => {
                 label(self.files.len().to_string(), theme::BODY, true).into_any_element()
@@ -180,10 +189,9 @@ impl Island {
                 theme::BODY,
                 true,
             )
+            .text_color(widgets::battery_tint(self.power))
             .into_any_element(),
-            CompactMode::Idle if self.settings.thaw_enabled => {
-                thaw_toggle(self.settings.thaw_hidden, cx).into_any_element()
-            }
+            CompactMode::Idle => div().into_any_element(),
             CompactMode::Messages => self
                 .messages
                 .incoming
@@ -203,87 +211,89 @@ impl Island {
                     .text_right()
                     .into_any_element()
             }
-            CompactMode::Recording => {
-                let text = super::ui::format_timer_compact(self.recording_elapsed_secs());
-                timer_text(text, theme::BODY)
-                    .min_w(px(40.))
-                    .text_right()
-                    .into_any_element()
-            }
+            CompactMode::Recording => widgets::recorder_compact_right(self, cx),
             CompactMode::Meeting => {
                 widgets::meeting_compact_right(&self.meeting, self.overlay_fade.value)
             }
-            CompactMode::Idle if self.settings.search.show_magnifier => div()
-                .id("search-magnifier")
-                .cursor(CursorStyle::PointingHand)
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(|this, _: &MouseDownEvent, window, cx| {
-                        cx.stop_propagation();
-                        this.open_search(Some(window), cx);
-                    }),
-                )
-                .child(lucide("search", theme::COMPACT_FACE))
-                .into_any_element(),
             CompactMode::Notifications => widgets::notifications_compact_right(
                 self.notification_unread,
                 self.notifications.first(),
             ),
-            CompactMode::Onboard if hovered => div()
-                .id("github")
-                .cursor(CursorStyle::PointingHand)
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(|_, _: &MouseDownEvent, _, cx| {
-                        cx.stop_propagation();
-                        let _ = std::process::Command::new("/usr/bin/open")
-                            .arg("https://github.com/prodBirdy/openNook-gpui")
-                            .spawn();
-                    }),
+            CompactMode::Onboard => div()
+                .flex()
+                .items_center()
+                .gap(px(2.))
+                .opacity(if hovered { 1.0 } else { 0.7 })
+                .child(
+                    div()
+                        .id("onboard-dismiss")
+                        .size(px(theme::HIT_MIN))
+                        .rounded_full()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .cursor(CursorStyle::PointingHand)
+                        .hover(|s| s.bg(theme::FILL))
+                        .active(|s| s.opacity(0.75))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                                cx.stop_propagation();
+                                this.first_run = false;
+                                nook_core::settings::mark_onboarded();
+                                cx.notify();
+                            }),
+                        )
+                        .child(lucide_color("x", theme::GLYPH_SM, theme::secondary_label())),
                 )
-                .child(lucide("github", theme::COMPACT_FACE))
+                .child(hit_icon("github", "github", cx, |_, _, _| {
+                    let _ = std::process::Command::new("/usr/bin/open")
+                        .arg("https://github.com/prodBirdy/openNook")
+                        .spawn();
+                }))
                 .into_any_element(),
-            _ => div().into_any_element(),
         }
     }
 
     fn hud_slider(&self, cx: &mut Context<Self>) -> AnyElement {
-        const SEGMENTS: u32 = 20;
         let fill = self.hud_fill.value.clamp(0.0, 1.0);
-        let mut hits = div()
-            .absolute()
-            .inset_0()
-            .flex()
-            .cursor(CursorStyle::PointingHand);
-        for i in 0..SEGMENTS {
-            let ratio = (i as f32 + 0.5) / SEGMENTS as f32;
-            hits = hits.child(
-                div()
-                    .id(SharedString::from(format!("hud-seg-{i}")))
-                    .flex_1()
-                    .h_full()
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |this, _: &MouseDownEvent, _, cx| {
-                            cx.stop_propagation();
-                            this.apply_hud_slider(ratio, cx);
-                        }),
-                    )
-                    .on_mouse_move(cx.listener(move |this, _: &MouseMoveEvent, _, cx| {
-                        if this.hud_dragging {
-                            cx.stop_propagation();
-                            this.apply_hud_slider(ratio, cx);
-                        }
-                    })),
-            );
-        }
+        let bounds: Rc<RefCell<Option<(f32, f32)>>> = Rc::new(RefCell::new(None));
+        let fill_color = self
+            .hud
+            .map(|hud| hud_tint(hud.kind))
+            .unwrap_or(theme::LABEL);
+        let bounds_down = bounds.clone();
+        let bounds_move = bounds.clone();
         div()
             .id("hud-slider")
             .w_full()
             .max_w(px(72.))
-            .h(px(theme::HIT_MIN.min(18.0)))
+            .h(px(theme::HIT_MIN))
             .flex()
             .items_center()
+            .cursor(CursorStyle::PointingHand)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                    cx.stop_propagation();
+                    let Some((origin, width)) = *bounds_down.borrow() else {
+                        return;
+                    };
+                    let ratio = media_scrubber_ratio(event.position.x.into(), origin, width);
+                    this.apply_hud_slider(ratio, cx);
+                }),
+            )
+            .on_mouse_move(cx.listener(move |this, event: &MouseMoveEvent, _, cx| {
+                if !this.hud_dragging {
+                    return;
+                }
+                cx.stop_propagation();
+                let Some((origin, width)) = *bounds_move.borrow() else {
+                    return;
+                };
+                let ratio = media_scrubber_ratio(event.position.x.into(), origin, width);
+                this.apply_hud_slider(ratio, cx);
+            }))
             .on_mouse_up(
                 MouseButton::Left,
                 cx.listener(|this, _: &MouseUpEvent, _, cx| {
@@ -295,17 +305,28 @@ impl Island {
                 div()
                     .relative()
                     .w_full()
-                    .h(px(4.))
-                    .rounded(px(2.))
-                    .bg(rgba(0xffffff26))
+                    .h(px(theme::TRACK_H))
+                    .rounded(px(theme::TRACK_RADIUS))
+                    .bg(theme::FILL_SECONDARY)
                     .child(
                         div()
                             .h_full()
                             .w(relative(fill))
-                            .rounded(px(2.))
-                            .bg(rgb(0xffffff)),
+                            .rounded(px(theme::TRACK_RADIUS))
+                            .bg(fill_color),
                     )
-                    .child(hits),
+                    .child(canvas(
+                        {
+                            let bounds = bounds.clone();
+                            move |layout, _, _| {
+                                let origin: f32 = layout.origin.x.into();
+                                let width: f32 = layout.size.width.into();
+                                *bounds.borrow_mut() = Some((origin, width));
+                                layout
+                            }
+                        },
+                        |_bounds, _, _, _| {},
+                    )),
             )
             .into_any_element()
     }
@@ -321,7 +342,7 @@ impl Island {
         }
         let mut row = div()
             .absolute()
-            .top(px(self.notch_height.max(32.0)))
+            .top(px(self.notch_height.max(theme::NOTCH_MIN_H)))
             .bottom_0()
             .left_0()
             .right_0()
@@ -349,8 +370,9 @@ impl Island {
             row = row.child(
                 div()
                     .id(SharedString::from(format!("dot-{name}")))
-                    .h_full()
-                    .w(px(16.0))
+                    .h(px(theme::HIT_MIN))
+                    .mt(px(-theme::COMPACT_HOVER_CHIN))
+                    .w(px(theme::HIT_MIN))
                     .flex()
                     .items_center()
                     .justify_center()
@@ -359,20 +381,25 @@ impl Island {
                         MouseButton::Left,
                         cx.listener(move |this, _: &MouseDownEvent, _, cx| {
                             cx.stop_propagation();
+                            this.user_preferred = Some(mode);
                             this.preferred = Some(mode);
+                            this.alert_preferred = None;
                             nook_core::haptics::trigger(None);
                             cx.notify();
                         }),
                     )
                     .child(
                         div()
+                            .id(SharedString::from(format!("dot-glyph-{name}")))
                             .size(px(if active { 5.0 } else { 4.0 }))
                             .rounded_full()
                             .bg(if active {
                                 theme::LABEL
                             } else {
-                                theme::TERTIARY_LABEL
-                            }),
+                                theme::tertiary_label()
+                            })
+                            .hover(|s| s.opacity(0.7))
+                            .active(|s| s.opacity(0.5)),
                     ),
             );
         }
@@ -380,20 +407,39 @@ impl Island {
     }
 }
 
-fn thaw_toggle(hidden: bool, cx: &mut Context<Island>) -> impl IntoElement {
+fn media_scrubber_ratio(x: f32, origin: f32, width: f32) -> f32 {
+    if width <= 0.0 {
+        return 0.0;
+    }
+    ((x - origin) / width).clamp(0.0, 1.0)
+}
+
+fn hit_icon(
+    id: &'static str,
+    icon: &'static str,
+    cx: &mut Context<Island>,
+    on_click: impl Fn(&mut Island, &mut gpui::Window, &mut Context<Island>) + 'static,
+) -> gpui::Stateful<gpui::Div> {
     div()
-        .id("thaw-toggle")
+        .id(id)
+        .size(px(theme::HIT_MIN))
+        .rounded_full()
+        .flex()
+        .items_center()
+        .justify_center()
         .cursor(CursorStyle::PointingHand)
+        .hover(|s| s.bg(theme::FILL))
+        .active(|s| s.opacity(0.75))
         .on_mouse_down(
             MouseButton::Left,
-            cx.listener(|_, _: &MouseDownEvent, _, cx| {
+            cx.listener(move |this, _: &MouseDownEvent, window, cx| {
                 cx.stop_propagation();
-                nook_core::menubar::toggle();
+                on_click(this, window, cx);
             }),
         )
-        .child(lucide("eye", theme::COMPACT_FACE))
-        .when(hidden, |d| d.opacity(0.45))
+        .child(lucide(icon, theme::COMPACT_FACE))
 }
+
 fn hud_icon(kind: HudKind) -> &'static str {
     match kind {
         HudKind::Volume => "volume-2",
@@ -402,9 +448,17 @@ fn hud_icon(kind: HudKind) -> &'static str {
     }
 }
 
+fn hud_tint(kind: HudKind) -> gpui::Rgba {
+    match kind {
+        HudKind::Brightness => theme::SYSTEM_YELLOW,
+        HudKind::Volume | HudKind::Mute => theme::LABEL,
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::hud_icon;
+    use super::{hud_icon, hud_tint};
+    use crate::theme;
     use nook_core::sysvol::HudKind;
 
     #[test]
@@ -413,11 +467,11 @@ mod tests {
         assert_eq!(hud_icon(HudKind::Mute), "volume-x");
         assert_eq!(hud_icon(HudKind::Brightness), "sun");
     }
-}
-fn rec_dot() -> gpui::Div {
-    div()
-        .size(px(8.))
-        .rounded_full()
-        .flex_shrink_0()
-        .bg(theme::DESTRUCTIVE)
+
+    #[test]
+    fn hud_tints_match_macos() {
+        assert_eq!(hud_tint(HudKind::Brightness), theme::SYSTEM_YELLOW);
+        assert_eq!(hud_tint(HudKind::Volume), theme::LABEL);
+        assert_eq!(hud_tint(HudKind::Mute), theme::LABEL);
+    }
 }

@@ -1,88 +1,25 @@
-//! On-demand LAN sharing: LocalSend send + drop-a-link uploads.
+//! On-demand LAN sharing: LocalSend send. AirDrop is handled by the island.
 //!
 //! Send-only LocalSend never holds a socket at idle. Discovery binds for a
-//! short window, then every socket is dropped. Receive mode is a settings
-//! flag only in this release (default off) — no listener is started.
+//! short window, then every socket is dropped.
 
 pub mod localsend;
-pub mod upload;
 
 pub use localsend::{
     DeviceInfo, FileMeta, PrepareUploadResponse, TransferProgress, PROTOCOL_VERSION,
 };
-pub use upload::{LinkBackend, LinkUpload, UploadResult};
 
 use serde::{Deserialize, Serialize};
+use std::time::{Duration, Instant};
 
-/// How a finished drop-a-link upload should be hosted.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum LinkBackendKind {
-    /// Community host at 0x0.st. Public-by-URL, 512 MiB cap, 30–365 day retention.
-    #[default]
-    ZeroXZero,
-    /// HTTP PUT + Basic auth. The configured base URL must be publicly readable.
-    WebDav,
-    /// S3-compatible PUT. Permanent links need a public bucket or CloudFront;
-    /// otherwise a 7-day presigned GET is issued.
-    S3,
-}
-
-impl LinkBackendKind {
-    pub const ALL: [Self; 3] = [Self::ZeroXZero, Self::WebDav, Self::S3];
-
-    pub fn caption(self) -> &'static str {
-        match self {
-            Self::ZeroXZero => "0x0.st",
-            Self::WebDav => "WebDAV",
-            Self::S3 => "S3",
-        }
-    }
-
-    pub fn next(self) -> Self {
-        match self {
-            Self::ZeroXZero => Self::WebDav,
-            Self::WebDav => Self::S3,
-            Self::S3 => Self::ZeroXZero,
-        }
-    }
-}
-
-/// Persisted sharing preferences. Secrets are stripped on macOS serialize
-/// and stored in the Keychain instead.
+/// Persisted sharing preferences.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ShareSettings {
     #[serde(default = "default_device_alias")]
     pub device_alias: String,
-    /// Opt-in LocalSend receive. Default off; this release does not bind a
-    /// receive server even when the flag is on (phase 2).
-    #[serde(default)]
-    pub localsend_receive: bool,
     /// Optional PIN appended as `?pin=` on prepare-upload.
     #[serde(default)]
     pub localsend_pin: String,
-    #[serde(default)]
-    pub link_backend: LinkBackendKind,
-    #[serde(default)]
-    pub webdav_url: String,
-    #[serde(default)]
-    pub webdav_username: String,
-    #[serde(default, skip_serializing)]
-    pub webdav_password: String,
-    #[serde(default)]
-    pub s3_bucket: String,
-    #[serde(default)]
-    pub s3_region: String,
-    #[serde(default)]
-    pub s3_endpoint: String,
-    #[serde(default, skip_serializing)]
-    pub s3_access_key: String,
-    #[serde(default, skip_serializing)]
-    pub s3_secret_key: String,
-    /// Public base for permanent S3 links (`https://cdn.example/`). Empty
-    /// falls back to a 7-day presigned GET.
-    #[serde(default)]
-    pub s3_public_base: String,
 }
 
 pub fn default_device_alias() -> String {
@@ -93,18 +30,7 @@ impl Default for ShareSettings {
     fn default() -> Self {
         Self {
             device_alias: default_device_alias(),
-            localsend_receive: false,
             localsend_pin: String::new(),
-            link_backend: LinkBackendKind::default(),
-            webdav_url: String::new(),
-            webdav_username: String::new(),
-            webdav_password: String::new(),
-            s3_bucket: String::new(),
-            s3_region: String::new(),
-            s3_endpoint: String::new(),
-            s3_access_key: String::new(),
-            s3_secret_key: String::new(),
-            s3_public_base: String::new(),
         }
     }
 }
@@ -114,7 +40,6 @@ pub enum ShareKind {
     #[default]
     Idle,
     LocalSend,
-    Link,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -140,6 +65,40 @@ pub struct ShareSession {
     pub error: Option<String>,
     pub gen: u64,
     pub paths: Vec<std::path::PathBuf>,
+    /// When [`SharePhase::Failed`] was entered; used by [`Self::maybe_reset_failure`].
+    #[doc(hidden)]
+    pub failed_at: Option<Instant>,
+}
+
+/// Map a raw LocalSend / network error to a short island-facing message.
+pub fn friendly_share_error(err: &str) -> String {
+    match err {
+        "Couldn't reach device" | "Timed out" | "Device not found" | "Transfer failed" => {
+            return err.into();
+        }
+        _ => {}
+    }
+    let lower = err.to_ascii_lowercase();
+    if lower.contains("connection refused")
+        || lower.contains("network is unreachable")
+        || lower.contains("no route to host")
+        || lower.contains("host unreachable")
+    {
+        "Couldn't reach device".into()
+    } else if lower.contains("timed out")
+        || lower.contains("timeout")
+        || lower.contains("deadline has elapsed")
+    {
+        "Timed out".into()
+    } else if lower.contains("not found")
+        || lower.contains("no devices")
+        || lower.contains("nxdomain")
+        || lower.contains("name or service not known")
+    {
+        "Device not found".into()
+    } else {
+        "Transfer failed".into()
+    }
 }
 
 impl ShareSession {
@@ -151,12 +110,41 @@ impl ShareSession {
         matches!(self.phase, SharePhase::Discovering | SharePhase::Picking)
     }
 
+    /// Enter [`SharePhase::Failed`] with a user-facing error and start the
+    /// 4 s auto-clear timer (call [`Self::maybe_reset_failure`] from the UI tick).
+    pub fn mark_failed(&mut self, err: impl AsRef<str>) {
+        self.phase = SharePhase::Failed;
+        self.error = Some(friendly_share_error(err.as_ref()));
+        self.failed_at = Some(Instant::now());
+        self.hud = None;
+    }
+
+    /// Clear a stale failure after 4 s, mirroring the Done auto-reset path.
+    /// Returns `true` when the session was reset.
+    pub fn maybe_reset_failure(&mut self) -> bool {
+        let Some(at) = self.failed_at else {
+            return false;
+        };
+        if !matches!(self.phase, SharePhase::Failed) {
+            return false;
+        }
+        if at.elapsed() < Duration::from_secs(4) {
+            return false;
+        }
+        let gen = self.gen;
+        *self = ShareSession {
+            gen,
+            ..ShareSession::default()
+        };
+        true
+    }
+
     pub fn compact_label(&self) -> String {
         if let Some(hud) = &self.hud {
             return hud.clone();
         }
         if let Some(err) = &self.error {
-            return err.clone();
+            return friendly_share_error(err);
         }
         if !self.status.is_empty() {
             return self.status.clone();
@@ -166,7 +154,7 @@ impl ShareSession {
             SharePhase::Picking => "Choose device".into(),
             SharePhase::Transferring => format!("{:.0}%", self.progress * 100.0),
             SharePhase::Done => "Sent".into(),
-            SharePhase::Failed => "Failed".into(),
+            SharePhase::Failed => "Transfer failed".into(),
             SharePhase::Idle => String::new(),
         }
     }
@@ -177,34 +165,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn receive_defaults_off_and_alias_is_stable() {
-        let parsed: ShareSettings = serde_json::from_str("{}").unwrap();
+    fn alias_is_stable_and_unknown_keys_are_ignored() {
+        let parsed: ShareSettings = serde_json::from_str(
+            r#"{"device_alias":"openNook","legacy_host":"public","unused_flag":true}"#,
+        )
+        .unwrap();
         assert_eq!(parsed, ShareSettings::default());
-        assert!(!parsed.localsend_receive);
         assert_eq!(parsed.device_alias, "openNook");
-        assert_eq!(parsed.link_backend, LinkBackendKind::ZeroXZero);
-    }
-
-    #[test]
-    fn secrets_are_omitted_from_json() {
-        let mut settings = ShareSettings::default();
-        settings.webdav_password = "dav-secret".into();
-        settings.s3_access_key = "AKIA".into();
-        settings.s3_secret_key = "s3-secret".into();
-        let json = serde_json::to_string(&settings).unwrap();
-        assert!(!json.contains("dav-secret"));
-        assert!(!json.contains("s3-secret"));
-        assert!(!json.contains("webdav_password"));
-        assert!(!json.contains("s3_access_key"));
-        assert!(!json.contains("s3_secret_key"));
-    }
-
-    #[test]
-    fn backend_cycle_visits_every_host() {
-        assert_eq!(LinkBackendKind::ZeroXZero.caption(), "0x0.st");
-        assert_eq!(LinkBackendKind::ZeroXZero.next(), LinkBackendKind::WebDav);
-        assert_eq!(LinkBackendKind::WebDav.next(), LinkBackendKind::S3);
-        assert_eq!(LinkBackendKind::S3.next(), LinkBackendKind::ZeroXZero);
+        assert!(parsed.localsend_pin.is_empty());
     }
 
     #[test]
@@ -216,8 +184,35 @@ mod tests {
         assert!(session.is_live());
         assert!(session.shows_picker());
         session.phase = SharePhase::Idle;
-        session.hud = Some("Link copied".into());
+        session.hud = Some("Sent".into());
         assert!(session.is_live());
-        assert_eq!(session.compact_label(), "Link copied");
+        assert_eq!(session.compact_label(), "Sent");
+    }
+
+    #[test]
+    fn friendly_share_error_maps_common_failures() {
+        assert_eq!(
+            friendly_share_error("tcp connect: Connection refused"),
+            "Couldn't reach device"
+        );
+        assert_eq!(friendly_share_error("request timed out"), "Timed out");
+        assert_eq!(
+            friendly_share_error("peer not found on LAN"),
+            "Device not found"
+        );
+        assert_eq!(
+            friendly_share_error("ssl handshake blew up"),
+            "Transfer failed"
+        );
+    }
+
+    #[test]
+    fn mark_failed_stores_friendly_error() {
+        let mut session = ShareSession::default();
+        session.mark_failed("connection refused while dialing");
+        assert_eq!(session.phase, SharePhase::Failed);
+        assert_eq!(session.error.as_deref(), Some("Couldn't reach device"));
+        assert!(session.failed_at.is_some());
+        assert!(!session.maybe_reset_failure());
     }
 }

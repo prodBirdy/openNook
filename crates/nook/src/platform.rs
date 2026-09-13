@@ -1,6 +1,6 @@
-//! Native window chrome GPUI does not expose: status-item level, accessory
-//! activation policy, click-through, and pinning the overlay to the physical
-//! top of the main display (into the camera notch).
+//! Native window chrome GPUI does not expose: accessory activation policy,
+//! click-through, and pinning the overlay to the physical top of the main
+//! display (into the camera notch).
 //!
 //! GPUI always creates even `titlebar: None` windows with `NSTitledWindowMask`.
 //! AppKit then clamps them to `visibleFrame` (below the menu bar) via
@@ -29,12 +29,7 @@ static INSTALL: Once = Once::new();
 #[cfg(target_os = "macos")]
 static LOGGED_PIN: AtomicBool = AtomicBool::new(false);
 #[cfg(target_os = "macos")]
-static OPEN_SETTINGS: AtomicBool = AtomicBool::new(false);
-#[cfg(target_os = "macos")]
 static PIN_NEEDED: AtomicBool = AtomicBool::new(false);
-#[cfg(target_os = "macos")]
-static STATUS_ITEM: std::sync::atomic::AtomicPtr<objc2::runtime::AnyObject> =
-    std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
 
 /// Call once before `open_island`. Safe to call again.
 pub fn install() {
@@ -62,7 +57,7 @@ pub fn request_pin() {
 pub fn take_pin_needed() -> bool {
     #[cfg(target_os = "macos")]
     {
-        return PIN_NEEDED.swap(false, Ordering::AcqRel);
+        PIN_NEEDED.swap(false, Ordering::AcqRel)
     }
     #[cfg(not(target_os = "macos"))]
     false
@@ -84,19 +79,24 @@ fn pin_wait() -> &'static PinWait {
 }
 
 /// Block until [`request_pin`] or `timeout`. Must run off the main thread.
+/// Consumes the wait signal (`ready`) so the next call can park again.
+/// [`PIN_NEEDED`] is left for [`take_pin_needed`] so a request that races
+/// in after wake is still observed by the caller.
 pub fn wait_pin_needed(timeout: Duration) -> bool {
     #[cfg(target_os = "macos")]
     {
-        if PIN_NEEDED.load(Ordering::Acquire) {
-            return true;
-        }
         let wait = pin_wait();
         let Ok(mut ready) = wait.ready.lock() else {
             std::thread::sleep(timeout);
             return PIN_NEEDED.load(Ordering::Acquire);
         };
+        // Consume an already-posted condvar signal before parking. Do not
+        // clear PIN_NEEDED here — the caller must take it (see spawn_pin).
         if *ready {
             *ready = false;
+            return true;
+        }
+        if PIN_NEEDED.load(Ordering::Acquire) {
             return true;
         }
         let (mut ready, _) = wait
@@ -118,7 +118,7 @@ pub fn wait_pin_needed(timeout: Duration) -> bool {
 fn install_macos() {
     INSTALL.call_once(|| unsafe {
         use objc2::ffi::{class_addMethod, class_replaceMethod};
-        use objc2::runtime::{AnyClass, AnyObject, Imp, Sel};
+        use objc2::runtime::{AnyClass, AnyObject, Sel};
         use objc2::sel;
         use std::ffi::CString;
 
@@ -142,7 +142,8 @@ fn install_macos() {
             CString::new("{CGRect={CGPoint=dd}{CGSize=dd}}@:{CGRect={CGPoint=dd}{CGSize=dd}}@")
                 .unwrap();
         let sel = sel!(constrainFrameRect:toScreen:);
-        let imp: Imp = std::mem::transmute(
+        // SAFETY: constrain_frame matches the ObjC encoding in `types`.
+        let imp = nook_core::ffi::as_objc_imp(
             constrain_frame as extern "C" fn(*mut AnyObject, Sel, CGRect, *mut AnyObject) -> CGRect,
         );
         let cls_ptr = gpui_panel as *const AnyClass as *mut AnyClass;
@@ -865,95 +866,10 @@ fn ns_window(window: &Window) -> Option<*mut objc2::runtime::AnyObject> {
     }
 }
 
-/// True once if the status item asked to open Settings.
-pub fn take_open_settings() -> bool {
-    #[cfg(target_os = "macos")]
-    {
-        OPEN_SETTINGS.swap(false, Ordering::SeqCst)
-    }
-    #[cfg(not(target_os = "macos"))]
-    false
-}
-
-/// Menu-bar extra with Settings and Quit. Accessory apps have no Dock/menu otherwise.
-pub fn install_status_item() {
-    #[cfg(target_os = "macos")]
-    unsafe {
-        install_macos();
-        use objc2::runtime::AnyObject;
-        use objc2::*;
-
-        if !STATUS_ITEM.load(Ordering::Relaxed).is_null() {
-            return;
-        }
-
-        let bar: *mut AnyObject = msg_send![class!(NSStatusBar), systemStatusBar];
-        // NSVariableStatusItemLength = -1
-        let item: *mut AnyObject = msg_send![bar, statusItemWithLength: -1.0_f64];
-        if item.is_null() {
-            log::error!("failed to create NSStatusItem");
-            return;
-        }
-        let _: *mut AnyObject = msg_send![item, retain];
-        STATUS_ITEM.store(item, Ordering::Relaxed);
-
-        let title: *mut AnyObject =
-            msg_send![class!(NSString), stringWithUTF8String: c"Nook".as_ptr()];
-        let button: *mut AnyObject = msg_send![item, button];
-        if !button.is_null() {
-            let _: () = msg_send![button, setTitle: title];
-        } else {
-            let _: () = msg_send![item, setTitle: title];
-        }
-
-        let menu: *mut AnyObject = msg_send![class!(NSMenu), new];
-        let settings_title: *mut AnyObject =
-            msg_send![class!(NSString), stringWithUTF8String: c"Settings".as_ptr()];
-        let settings_item: *mut AnyObject = msg_send![class!(NSMenuItem), alloc];
-        let empty: *mut AnyObject = msg_send![class!(NSString), stringWithUTF8String: c"".as_ptr()];
-        let settings_item: *mut AnyObject = msg_send![
-            settings_item,
-            initWithTitle: settings_title,
-            action: sel!(openSettings:),
-            keyEquivalent: empty
-        ];
-        let target_cls = objc2::runtime::AnyClass::get(c"NookAppTarget");
-        let target: *mut AnyObject = if let Some(cls) = target_cls {
-            msg_send![cls, new]
-        } else {
-            std::ptr::null_mut()
-        };
-        if !target.is_null() {
-            let _: () = msg_send![settings_item, setTarget: target];
-        }
-        let _: () = msg_send![menu, addItem: settings_item];
-
-        let sep: *mut AnyObject = msg_send![class!(NSMenuItem), separatorItem];
-        let _: () = msg_send![menu, addItem: sep];
-
-        let quit_title: *mut AnyObject =
-            msg_send![class!(NSString), stringWithUTF8String: c"Quit openNook".as_ptr()];
-        let quit_item: *mut AnyObject = msg_send![class!(NSMenuItem), alloc];
-        let q: *mut AnyObject = msg_send![class!(NSString), stringWithUTF8String: c"q".as_ptr()];
-        let quit_item: *mut AnyObject = msg_send![
-            quit_item,
-            initWithTitle: quit_title,
-            action: sel!(terminate:),
-            keyEquivalent: q
-        ];
-        let ns_app: *mut AnyObject = msg_send![class!(NSApplication), sharedApplication];
-        let _: () = msg_send![quit_item, setTarget: ns_app];
-        let _: () = msg_send![menu, addItem: quit_item];
-
-        let _: () = msg_send![item, setMenu: menu];
-        log::info!("status item installed");
-    }
-}
-
 #[cfg(target_os = "macos")]
 fn install_app_target() {
     use objc2::ffi::{class_addMethod, objc_allocateClassPair, objc_registerClassPair};
-    use objc2::runtime::{AnyClass, AnyObject, Imp, Sel};
+    use objc2::runtime::{AnyClass, AnyObject, Sel};
     use objc2::{class, sel};
     use std::ffi::CString;
 
@@ -963,9 +879,6 @@ fn install_app_target() {
             return;
         }
 
-        extern "C" fn open_settings(_this: *mut AnyObject, _cmd: Sel, _sender: *mut AnyObject) {
-            OPEN_SETTINGS.store(true, Ordering::SeqCst);
-        }
         extern "C" fn screen_changed(_this: *mut AnyObject, _cmd: Sel, _note: *mut AnyObject) {
             nook_core::notch::invalidate_screen_cache();
             request_pin();
@@ -997,25 +910,22 @@ fn install_app_target() {
             return;
         }
         let types = CString::new("v@:@").unwrap();
-        let imp_settings: Imp = std::mem::transmute(
-            open_settings as extern "C" fn(*mut AnyObject, Sel, *mut AnyObject),
-        );
-        let imp_screen: Imp = std::mem::transmute(
+        // SAFETY: each handler matches encoding "v@:@".
+        let imp_screen = nook_core::ffi::as_objc_imp(
             screen_changed as extern "C" fn(*mut AnyObject, Sel, *mut AnyObject),
         );
-        let imp_space: Imp = std::mem::transmute(
+        let imp_space = nook_core::ffi::as_objc_imp(
             space_changed as extern "C" fn(*mut AnyObject, Sel, *mut AnyObject),
         );
-        let imp_app: Imp = std::mem::transmute(
+        let imp_app = nook_core::ffi::as_objc_imp(
             app_activated as extern "C" fn(*mut AnyObject, Sel, *mut AnyObject),
         );
-        let imp_a11y: Imp = std::mem::transmute(
+        let imp_a11y = nook_core::ffi::as_objc_imp(
             accessibility_changed as extern "C" fn(*mut AnyObject, Sel, *mut AnyObject),
         );
-        let imp_colors: Imp = std::mem::transmute(
+        let imp_colors = nook_core::ffi::as_objc_imp(
             colors_changed as extern "C" fn(*mut AnyObject, Sel, *mut AnyObject),
         );
-        let _ = class_addMethod(cls, sel!(openSettings:), imp_settings, types.as_ptr());
         let _ = class_addMethod(cls, sel!(screenChanged:), imp_screen, types.as_ptr());
         let _ = class_addMethod(cls, sel!(spaceChanged:), imp_space, types.as_ptr());
         let _ = class_addMethod(cls, sel!(appActivated:), imp_app, types.as_ptr());
@@ -1119,8 +1029,9 @@ unsafe fn observe_screen_changes() {
 }
 
 /// NSEvent global + local monitors for mouse moved / left-drag / left-up.
-/// Main thread only. Handlers write the same atomics as the 250 ms backstop
-/// poll in `nook_core::mouse`. Local handler must return the event.
+/// Main thread only. Handlers write the same atomics as the 1 s backstop
+/// poll in `nook_core::mouse` and poke the island wake when relevant.
+/// Local handler must return the event.
 pub fn install_mouse_monitors() {
     #[cfg(target_os = "macos")]
     unsafe {
@@ -1130,7 +1041,10 @@ pub fn install_mouse_monitors() {
 
         static INSTALLED: Once = Once::new();
         INSTALLED.call_once(|| {
-            // MouseMoved | LeftMouseDragged | LeftMouseUp
+            // MouseMoved | LeftMouseDragged | LeftMouseUp.
+            // sample_now only pokes the island wake when near/dragging, so
+            // far-away moves stay cheap atomic writes. A tracking area plus
+            // drag-only global would cut further; not wired yet.
             const MASK: u64 = (1 << 5) | (1 << 6) | (1 << 2);
 
             let global = RcBlock::new(move |_event: *mut AnyObject| {
@@ -1260,6 +1174,7 @@ pub fn mirror_frame(seen: u64) -> Option<(u64, Vec<u8>)> {
 /// AppKit performs the source decode, so this also works for macOS wallpaper
 /// formats (such as HEIC) that GPUI's cross-platform image decoder may not
 /// understand directly.
+#[allow(dead_code)]
 pub fn desktop_wallpaper_png() -> Option<Vec<u8>> {
     #[cfg(target_os = "macos")]
     unsafe {
@@ -1272,6 +1187,7 @@ pub fn desktop_wallpaper_png() -> Option<Vec<u8>> {
 }
 
 #[cfg(target_os = "macos")]
+#[allow(dead_code)]
 unsafe fn desktop_wallpaper_png_macos() -> Option<Vec<u8>> {
     desktop_wallpaper_window_png_macos().or_else(|| desktop_wallpaper_url_png_macos())
 }
@@ -1281,14 +1197,17 @@ unsafe fn desktop_wallpaper_png_macos() -> Option<Vec<u8>> {
 /// `DefaultDesktop.heic`, not what the user sees. The Dock owns one wallpaper
 /// window per display, so capture its already-rendered frame instead.
 #[cfg(target_os = "macos")]
+#[allow(dead_code)]
 unsafe fn desktop_wallpaper_window_png_macos() -> Option<Vec<u8>> {
+    use nook_core::ffi::macos::CGWindowListCopyWindowInfo;
     use objc2::rc::autoreleasepool;
     use objc2::runtime::AnyObject;
     use objc2::*;
 
+    // CGImageRef needs objc2::Encode (`^{CGImage=}`); keep these local.
     #[link(name = "CoreGraphics", kind = "framework")]
+    #[allow(dead_code)]
     unsafe extern "C" {
-        fn CGWindowListCopyWindowInfo(option: u32, relative_to_window: u32) -> *mut AnyObject;
         fn CGWindowListCreateImage(
             screen_bounds: CGRect,
             list_option: u32,
@@ -1304,7 +1223,7 @@ unsafe fn desktop_wallpaper_window_png_macos() -> Option<Vec<u8>> {
     const IMAGE_BEST_RESOLUTION: u32 = 1 << 3;
 
     autoreleasepool(|_| {
-        let windows = CGWindowListCopyWindowInfo(OPTION_ALL, 0);
+        let windows = CGWindowListCopyWindowInfo(OPTION_ALL, 0) as *mut AnyObject;
         if windows.is_null() {
             return None;
         }
@@ -1380,6 +1299,7 @@ unsafe fn desktop_wallpaper_window_png_macos() -> Option<Vec<u8>> {
 }
 
 #[cfg(target_os = "macos")]
+#[allow(dead_code)]
 unsafe fn desktop_wallpaper_url_png_macos() -> Option<Vec<u8>> {
     use objc2::rc::autoreleasepool;
     use objc2::runtime::AnyObject;
@@ -1412,6 +1332,7 @@ unsafe fn desktop_wallpaper_url_png_macos() -> Option<Vec<u8>> {
 }
 
 #[cfg(target_os = "macos")]
+#[allow(dead_code)]
 unsafe fn bitmap_rep_png(rep: *mut objc2::runtime::AnyObject) -> Option<Vec<u8>> {
     use objc2::runtime::AnyObject;
     use objc2::*;
@@ -1485,6 +1406,31 @@ struct CGImageRef(*const std::ffi::c_void);
 unsafe impl objc2::Encode for CGImageRef {
     const ENCODING: objc2::Encoding =
         objc2::Encoding::Pointer(&objc2::Encoding::Struct("CGImage", &[]));
+}
+
+/// `CGColorRef` encodes as `^{CGColor=}`; a raw `*const c_void` is `^v`
+/// and panics objc2's encoding check.
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy)]
+#[repr(transparent)]
+struct CGColorRef(*const std::ffi::c_void);
+
+#[cfg(target_os = "macos")]
+unsafe impl objc2::Encode for CGColorRef {
+    const ENCODING: objc2::Encoding =
+        objc2::Encoding::Pointer(&objc2::Encoding::Struct("CGColor", &[]));
+}
+
+/// `CGPathRef` encodes as `^{CGPath=}`; same `^v` trap as `CGColorRef`.
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy)]
+#[repr(transparent)]
+struct CGPathRef(*const std::ffi::c_void);
+
+#[cfg(target_os = "macos")]
+unsafe impl objc2::Encode for CGPathRef {
+    const ENCODING: objc2::Encoding =
+        objc2::Encoding::Pointer(&objc2::Encoding::Struct("CGPath", &[]));
 }
 
 #[cfg(target_os = "macos")]
@@ -1678,6 +1624,7 @@ fn invalidate_accent_color() {
 }
 /// Accessibility TCC via `AXIsProcessTrustedWithOptions`. `prompt` shows the
 /// system dialog (and deep-links if the user agrees).
+#[allow(dead_code)]
 pub fn ax_process_trusted(prompt: bool) -> bool {
     nook_core::notifications::ax_trusted(prompt)
 }
@@ -1776,11 +1723,17 @@ fn accent_color_macos() -> Option<(f32, f32, f32)> {
 static REDUCE_TRANSPARENCY_CACHE: AtomicU64 = AtomicU64::new(0);
 #[cfg(target_os = "macos")]
 static REDUCE_MOTION_CACHE: AtomicU64 = AtomicU64::new(0);
+#[cfg(target_os = "macos")]
+static INCREASE_CONTRAST_CACHE: AtomicU64 = AtomicU64::new(0);
+#[cfg(target_os = "macos")]
+static DIFFERENTIATE_WITHOUT_COLOR_CACHE: AtomicU64 = AtomicU64::new(0);
 
 #[cfg(target_os = "macos")]
 fn invalidate_accessibility_flags() {
     REDUCE_TRANSPARENCY_CACHE.store(0, Ordering::Relaxed);
     REDUCE_MOTION_CACHE.store(0, Ordering::Relaxed);
+    INCREASE_CONTRAST_CACHE.store(0, Ordering::Relaxed);
+    DIFFERENTIATE_WITHOUT_COLOR_CACHE.store(0, Ordering::Relaxed);
 }
 
 /// 1s-TTL cache for an AppKit accessibility flag. Both flags below are read
@@ -1847,16 +1800,50 @@ pub fn reduce_motion() -> bool {
     false
 }
 
-/// Accessibility (TCC) for window snap. Cached by the AX call itself; Settings
-/// reads this when the pane is open, never from the island tick.
-pub fn accessibility_trusted() -> bool {
-    nook_core::window_snap::is_trusted()
+/// Accessibility › Display › "Increase contrast". Cached for 1s like the other
+/// display flags; `false` when there is no AppKit to ask.
+pub fn increase_contrast() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        unsafe fn read() -> bool {
+            use objc2::runtime::AnyObject;
+            use objc2::*;
+            let workspace: *mut AnyObject = msg_send![class!(NSWorkspace), sharedWorkspace];
+            if workspace.is_null() {
+                return false;
+            }
+            msg_send![workspace, accessibilityDisplayShouldIncreaseContrast]
+        }
+        cached_accessibility_flag(&INCREASE_CONTRAST_CACHE, read)
+    }
+    #[cfg(not(target_os = "macos"))]
+    false
 }
 
-/// Show the system Accessibility prompt. Call from a user gesture.
-pub fn prompt_accessibility() -> bool {
-    nook_core::window_snap::prompt_trust()
+/// Accessibility › Display › "Differentiate without color". Cached for 1s;
+/// `false` when there is no AppKit to ask.
+#[allow(dead_code)]
+pub fn differentiate_without_color() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        unsafe fn read() -> bool {
+            use objc2::runtime::AnyObject;
+            use objc2::*;
+            let workspace: *mut AnyObject = msg_send![class!(NSWorkspace), sharedWorkspace];
+            if workspace.is_null() {
+                return false;
+            }
+            msg_send![
+                workspace,
+                accessibilityDisplayShouldDifferentiateWithoutColor
+            ]
+        }
+        cached_accessibility_flag(&DIFFERENTIATE_WITHOUT_COLOR_CACHE, read)
+    }
+    #[cfg(not(target_os = "macos"))]
+    false
 }
+
 #[cfg(target_os = "macos")]
 unsafe fn workspace_note_bundle_id(note: *mut objc2::runtime::AnyObject) -> Option<String> {
     use objc2::runtime::AnyObject;
@@ -1902,16 +1889,19 @@ unsafe fn workspace_note_bundle_id(note: *mut objc2::runtime::AnyObject) -> Opti
 /// tokens are intentionally leaked — they live for the process.
 /// Accessibility (kTCCServiceAccessibility). Required for AX menu clicks and
 /// `CGEventPostToPid`. Off-macOS this is always false.
+#[allow(dead_code)]
 pub fn ax_is_process_trusted() -> bool {
     nook_core::meetings::accessibility_trusted()
 }
 
 /// Prompt via `AXIsProcessTrustedWithOptions` + `kAXTrustedCheckOptionPrompt`.
+#[allow(dead_code)]
 pub fn ax_prompt_accessibility() -> bool {
     nook_core::meetings::prompt_accessibility()
 }
 
 /// Focus-free keystrokes to another process. Needs Accessibility.
+#[allow(dead_code)]
 pub fn post_keys_to_pid(pid: i32, keycode: u16, flags: u64) {
     nook_core::meetings::post_keys_to_pid(pid, keycode, flags);
 }
@@ -2043,6 +2033,14 @@ pub fn install_weather_observers() {
     }
 }
 
+/// Brand ring drawn *under* native glass so the material refracts it.
+#[derive(Clone, Copy, Debug)]
+pub struct GlassBorder {
+    pub color: (f32, f32, f32),
+    pub alpha: f32,
+    pub glow: f32,
+}
+
 /// GPUI-space island rect (origin top-left) for the native glass underlay.
 #[derive(Clone, Copy, Debug)]
 pub struct IslandGlass {
@@ -2055,6 +2053,8 @@ pub struct IslandGlass {
     /// Optional stained-glass tint (`NSGlassEffectView.tintColor`). `None`
     /// leaves the system default.
     pub tint: Option<(f32, f32, f32)>,
+    /// Agent brand stroke + halo. `None` hides the ring view.
+    pub border: Option<GlassBorder>,
 }
 
 impl IslandGlass {
@@ -2067,6 +2067,21 @@ impl IslandGlass {
     }
 }
 
+#[cfg(target_os = "macos")]
+fn border_needs_update(old: Option<GlassBorder>, new: Option<GlassBorder>) -> bool {
+    match (old, new) {
+        (None, None) => false,
+        (None, Some(_)) | (Some(_), None) => true,
+        (Some(a), Some(b)) => {
+            (a.color.0 - b.color.0).abs() > 0.01
+                || (a.color.1 - b.color.1).abs() > 0.01
+                || (a.color.2 - b.color.2).abs() > 0.01
+                || (a.alpha - b.alpha).abs() > 0.01
+                || (a.glow - b.glow).abs() > 0.01
+        }
+    }
+}
+
 /// Convert a GPUI top-left rect into AppKit view coordinates (origin bottom-left).
 pub fn cocoa_rect_from_gpui(x: f64, y: f64, w: f64, h: f64, view_h: f64) -> (f64, f64, f64, f64) {
     (x, view_h - y - h, w, h)
@@ -2075,6 +2090,7 @@ pub fn cocoa_rect_from_gpui(x: f64, y: f64, w: f64, h: f64, view_h: f64) -> (f64
 /// Glass underlay height. Attached to the top edge: island plus corner radius
 /// so the top rounding is clipped at the screen and the visible top stays
 /// flat. Detached: the island's own height, so all four corners show.
+#[allow(dead_code)]
 pub fn glass_underlay_height(island_h: f64, radius: f64, attached: bool) -> f64 {
     if attached {
         island_h + radius.max(0.0)
@@ -2138,6 +2154,7 @@ pub fn island_glass_attached() -> bool {
 #[cfg(target_os = "macos")]
 struct GlassCap {
     view: *mut objc2::runtime::AnyObject,
+    ring: *mut objc2::runtime::AnyObject,
     last: Option<IslandGlass>,
 }
 
@@ -2150,6 +2167,7 @@ fn glass_cap() -> &'static std::sync::Mutex<GlassCap> {
     GLASS.get_or_init(|| {
         std::sync::Mutex::new(GlassCap {
             view: std::ptr::null_mut(),
+            ring: std::ptr::null_mut(),
             last: None,
         })
     })
@@ -2177,14 +2195,22 @@ fn hide_island_glass() {
     use objc2::*;
     let mut cap = glass_cap().lock().unwrap_or_else(|e| e.into_inner());
     cap.last = None;
-    if cap.view.is_null() {
+    let view = cap.view;
+    let ring = cap.ring;
+    cap.view = std::ptr::null_mut();
+    cap.ring = std::ptr::null_mut();
+    if view.is_null() && ring.is_null() {
         return;
     }
-    let view = cap.view;
-    cap.view = std::ptr::null_mut();
     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
-        let _: () = msg_send![view, removeFromSuperview];
-        let _: () = msg_send![view, release];
+        if !ring.is_null() {
+            let _: () = msg_send![ring, removeFromSuperview];
+            let _: () = msg_send![ring, release];
+        }
+        if !view.is_null() {
+            let _: () = msg_send![view, removeFromSuperview];
+            let _: () = msg_send![view, release];
+        }
     }));
 }
 
@@ -2222,11 +2248,20 @@ unsafe fn apply_island_glass(spec: IslandGlass) -> bool {
             None => return false,
         };
         attach_glass_behind_content(ns_win, content, cap.view);
+        if cap.ring.is_null() {
+            cap.ring = create_ring_view(rect).unwrap_or(std::ptr::null_mut());
+        }
+        if !cap.ring.is_null() {
+            attach_ring_below_glass(cap.view, cap.ring);
+        }
     } else {
         let hosted: *mut AnyObject = msg_send![cap.view, window];
         if hosted != ns_win {
             attach_glass_behind_content(ns_win, content, cap.view);
             pin_dark_appearance(cap.view);
+            if !cap.ring.is_null() {
+                attach_ring_below_glass(cap.view, cap.ring);
+            }
         }
         let current: CGRect = msg_send![cap.view, frame];
         let moved = (current.origin.x - rect.origin.x).abs() > 0.4
@@ -2246,6 +2281,15 @@ unsafe fn apply_island_glass(spec: IslandGlass) -> bool {
         if reshape || retint {
             apply_glass_tint(cap.view, spec.tint);
         }
+        if cap.ring.is_null() {
+            cap.ring = create_ring_view(rect).unwrap_or(std::ptr::null_mut());
+            if !cap.ring.is_null() {
+                attach_ring_below_glass(cap.view, cap.ring);
+            }
+        }
+    }
+    if !cap.ring.is_null() {
+        sync_ring_view(cap.ring, rect, spec, cap.last);
     }
     cap.last = Some(spec);
     let hidden: bool = msg_send![cap.view, isHidden];
@@ -2443,6 +2487,277 @@ unsafe fn attach_glass_behind_content(
 }
 
 #[cfg(target_os = "macos")]
+const RING_LINE: f64 = 2.5;
+#[cfg(target_os = "macos")]
+const RING_SHADOW: f64 = 12.0;
+
+#[cfg(target_os = "macos")]
+unsafe extern "C" {
+    fn CGPathCreateWithRoundedRect(
+        rect: CGRect,
+        corner_width: f64,
+        corner_height: f64,
+        transform: *const std::ffi::c_void,
+    ) -> CGPathRef;
+    fn CGPathRelease(path: CGPathRef);
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn create_ring_view(rect: CGRect) -> Option<*mut objc2::runtime::AnyObject> {
+    use objc2::runtime::{AnyClass, AnyObject, Bool};
+    use objc2::*;
+
+    let shape_cls = AnyClass::get(c"CAShapeLayer")?;
+    let view: *mut AnyObject = msg_send![class!(NSView), alloc];
+    let view: *mut AnyObject = msg_send![view, initWithFrame: rect];
+    if view.is_null() {
+        return None;
+    }
+    let layer: *mut AnyObject = msg_send![shape_cls, layer];
+    if layer.is_null() {
+        let _: () = msg_send![view, release];
+        return None;
+    }
+    // Layer must be set before wantsLayer so NSView does not mint a CALayer.
+    let _: () = msg_send![view, setLayer: layer];
+    let _: () = msg_send![view, setWantsLayer: Bool::from(true)];
+    let _: () = msg_send![view, setHidden: Bool::from(true)];
+    let _: () = msg_send![view, setClipsToBounds: Bool::from(false)];
+    let id_sel = sel!(setIdentifier:);
+    let can_id: Bool = msg_send![view, respondsToSelector: id_sel];
+    if can_id.as_bool() {
+        let id = ns_string("nook-island-glass-ring");
+        if !id.is_null() {
+            let _: () = msg_send![view, setIdentifier: id];
+        }
+    }
+    let join = ns_string("round");
+    if !join.is_null() {
+        let _: () = msg_send![layer, setLineJoin: join];
+    }
+    let _: () = msg_send![layer, setLineWidth: RING_LINE];
+    let fill: *mut AnyObject = msg_send![class!(NSColor), clearColor];
+    if !fill.is_null() {
+        let cg: CGColorRef = msg_send![fill, CGColor];
+        let _: () = msg_send![layer, setFillColor: cg];
+    }
+    Some(view)
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn attach_ring_below_glass(
+    glass: *mut objc2::runtime::AnyObject,
+    ring: *mut objc2::runtime::AnyObject,
+) {
+    use objc2::runtime::AnyObject;
+    use objc2::*;
+
+    let parent: *mut AnyObject = msg_send![glass, superview];
+    if parent.is_null() {
+        return;
+    }
+    // NSWindowBelow = -1: ring sits under the glass so the material refracts it.
+    let _: () = msg_send![
+        parent,
+        addSubview: ring,
+        positioned: -1_i64,
+        relativeTo: glass
+    ];
+}
+
+#[cfg(target_os = "macos")]
+fn ring_is_visible(border: Option<GlassBorder>) -> bool {
+    border.is_some_and(|b| b.glow >= 0.02)
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn sync_ring_view(
+    ring: *mut objc2::runtime::AnyObject,
+    rect: CGRect,
+    spec: IslandGlass,
+    last: Option<IslandGlass>,
+) {
+    use objc2::runtime::Bool;
+    use objc2::*;
+
+    let current: CGRect = msg_send![ring, frame];
+    let origin_moved = (current.origin.x - rect.origin.x).abs() > 0.4
+        || (current.origin.y - rect.origin.y).abs() > 0.4;
+    let size_moved = (current.size.width - rect.size.width).abs() > 0.4
+        || (current.size.height - rect.size.height).abs() > 0.4;
+    let radius_changed = last
+        .map(|old| (old.radius - spec.radius).abs() > 0.5)
+        .unwrap_or(true);
+    let restyle = last
+        .map(|old| border_needs_update(old.border, spec.border))
+        .unwrap_or(true);
+    let want_hidden = !ring_is_visible(spec.border);
+    let was_hidden: Bool = msg_send![ring, isHidden];
+
+    if !origin_moved
+        && !size_moved
+        && !radius_changed
+        && !restyle
+        && was_hidden.as_bool() == want_hidden
+    {
+        return;
+    }
+
+    let Some(txn) = objc2::runtime::AnyClass::get(c"CATransaction") else {
+        apply_ring_updates(
+            ring,
+            rect,
+            spec,
+            origin_moved || size_moved,
+            size_moved || radius_changed,
+            restyle,
+            was_hidden.as_bool() != want_hidden,
+            want_hidden,
+        );
+        return;
+    };
+    let _: () = msg_send![txn, begin];
+    let _: () = msg_send![txn, setDisableActions: Bool::from(true)];
+    apply_ring_updates(
+        ring,
+        rect,
+        spec,
+        origin_moved || size_moved,
+        size_moved || radius_changed,
+        restyle,
+        was_hidden.as_bool() != want_hidden,
+        want_hidden,
+    );
+    let _: () = msg_send![txn, commit];
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn apply_ring_updates(
+    ring: *mut objc2::runtime::AnyObject,
+    rect: CGRect,
+    spec: IslandGlass,
+    move_frame: bool,
+    rewrite_path: bool,
+    restyle: bool,
+    toggle_hidden: bool,
+    want_hidden: bool,
+) {
+    use objc2::runtime::{AnyObject, Bool};
+    use objc2::*;
+
+    if move_frame {
+        let _: () = msg_send![ring, setFrame: rect];
+    }
+    if rewrite_path {
+        set_ring_path(ring, rect.size, spec.radius);
+    }
+    if restyle {
+        set_ring_style(ring, spec.border);
+    }
+    if toggle_hidden {
+        let _: () = msg_send![ring, setHidden: Bool::from(want_hidden)];
+    }
+    if move_frame || rewrite_path {
+        let window: *mut AnyObject = msg_send![ring, window];
+        if !window.is_null() {
+            let layer: *mut AnyObject = msg_send![ring, layer];
+            if !layer.is_null() {
+                let scale: f64 = msg_send![window, backingScaleFactor];
+                if scale > 0.0 {
+                    let _: () = msg_send![layer, setContentsScale: scale];
+                }
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn set_ring_path(ring: *mut objc2::runtime::AnyObject, size: CGSize, radius: f64) {
+    use objc2::runtime::AnyObject;
+    use objc2::*;
+
+    let layer: *mut AnyObject = msg_send![ring, layer];
+    if layer.is_null() {
+        return;
+    }
+    let inset = RING_LINE * 0.5;
+    let path_rect = CGRect {
+        origin: CGPoint { x: inset, y: inset },
+        size: CGSize {
+            width: (size.width - RING_LINE).max(0.0),
+            height: (size.height - RING_LINE).max(0.0),
+        },
+    };
+    if path_rect.size.width < 1.0 || path_rect.size.height < 1.0 {
+        return;
+    }
+    let max_r = path_rect.size.width.min(path_rect.size.height) * 0.5;
+    let corner = (radius - inset).clamp(0.0, max_r);
+    let path = CGPathCreateWithRoundedRect(path_rect, corner, corner, std::ptr::null());
+    if path.0.is_null() {
+        return;
+    }
+    let _: () = msg_send![layer, setPath: path];
+    CGPathRelease(path);
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn set_ring_style(ring: *mut objc2::runtime::AnyObject, border: Option<GlassBorder>) {
+    use objc2::runtime::AnyObject;
+    use objc2::*;
+
+    let layer: *mut AnyObject = msg_send![ring, layer];
+    if layer.is_null() {
+        return;
+    }
+    let Some(border) = border else {
+        let clear: *mut AnyObject = msg_send![class!(NSColor), clearColor];
+        if !clear.is_null() {
+            let cg: CGColorRef = msg_send![clear, CGColor];
+            let _: () = msg_send![layer, setStrokeColor: cg];
+            let _: () = msg_send![layer, setShadowColor: cg];
+        }
+        let _: () = msg_send![layer, setShadowOpacity: 0.0_f32];
+        return;
+    };
+    let stroke: *mut AnyObject = msg_send![
+        class!(NSColor),
+        colorWithSRGBRed: border.color.0 as f64,
+        green: border.color.1 as f64,
+        blue: border.color.2 as f64,
+        alpha: border.alpha as f64
+    ];
+    if !stroke.is_null() {
+        let cg: CGColorRef = msg_send![stroke, CGColor];
+        let _: () = msg_send![layer, setStrokeColor: cg];
+    }
+    let fill: *mut AnyObject = msg_send![class!(NSColor), clearColor];
+    if !fill.is_null() {
+        let cg: CGColorRef = msg_send![fill, CGColor];
+        let _: () = msg_send![layer, setFillColor: cg];
+    }
+    let _: () = msg_send![layer, setLineWidth: RING_LINE];
+    let shadow: *mut AnyObject = msg_send![
+        class!(NSColor),
+        colorWithSRGBRed: border.color.0 as f64,
+        green: border.color.1 as f64,
+        blue: border.color.2 as f64,
+        alpha: 1.0_f64
+    ];
+    if !shadow.is_null() {
+        let cg: CGColorRef = msg_send![shadow, CGColor];
+        let _: () = msg_send![layer, setShadowColor: cg];
+    }
+    let _: () = msg_send![layer, setShadowOpacity: (border.glow * 0.9)];
+    let _: () = msg_send![layer, setShadowRadius: RING_SHADOW];
+    let offset = CGSize {
+        width: 0.0,
+        height: 0.0,
+    };
+    let _: () = msg_send![layer, setShadowOffset: offset];
+}
+
+#[cfg(target_os = "macos")]
 struct MirrorCap {
     session: *mut objc2::runtime::AnyObject,
     sink: *mut objc2::runtime::AnyObject,
@@ -2472,11 +2787,14 @@ fn default_mirror() -> std::sync::Mutex<MirrorCap> {
 static MIRROR: std::sync::OnceLock<std::sync::Mutex<MirrorCap>> = std::sync::OnceLock::new();
 
 #[cfg(target_os = "macos")]
-#[link(name = "AVFoundation", kind = "framework")]
 #[link(name = "CoreMedia", kind = "framework")]
-#[link(name = "CoreVideo", kind = "framework")]
 unsafe extern "C" {
     fn CMSampleBufferGetImageBuffer(sample: *mut std::ffi::c_void) -> *mut std::ffi::c_void;
+}
+
+#[cfg(target_os = "macos")]
+#[link(name = "CoreVideo", kind = "framework")]
+unsafe extern "C" {
     fn CVPixelBufferLockBaseAddress(buf: *mut std::ffi::c_void, flags: u64) -> i32;
     fn CVPixelBufferUnlockBaseAddress(buf: *mut std::ffi::c_void, flags: u64) -> i32;
     fn CVPixelBufferGetBaseAddress(buf: *mut std::ffi::c_void) -> *mut std::ffi::c_void;
@@ -2936,41 +3254,21 @@ unsafe fn sync_motion_art_macos(spec: Option<&MotionArtSpec>) {
         cap.paused = hide;
     }
 }
-// WP21 — Carbon global hotkey, frontmost restore, Spotlight launch, auto-paste.
+// WP21 — frontmost restore, Spotlight launch, auto-paste.
 
-use std::sync::atomic::AtomicBool as SearchAtomicBool;
-
-static SEARCH_HOTKEY_FIRED: SearchAtomicBool = SearchAtomicBool::new(false);
-
-pub fn take_search_hotkey() -> bool {
-    #[cfg(target_os = "macos")]
-    {
-        drain_hotkey_events();
-    }
-    SEARCH_HOTKEY_FIRED.swap(false, std::sync::atomic::Ordering::SeqCst)
-}
-
-pub fn sync_search_hotkey(enabled: bool, hotkey: &nook_core::settings::SearchHotkey) {
-    #[cfg(target_os = "macos")]
-    {
-        sync_search_hotkey_macos(enabled, hotkey);
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = (enabled, hotkey);
-    }
-}
-
+#[allow(dead_code)]
 pub fn remember_frontmost() {
     #[cfg(target_os = "macos")]
     remember_frontmost_macos();
 }
 
+#[allow(dead_code)]
 pub fn restore_frontmost() {
     #[cfg(target_os = "macos")]
     restore_frontmost_macos();
 }
 
+#[allow(dead_code)]
 pub fn make_island_key() {
     #[cfg(target_os = "macos")]
     unsafe {
@@ -2985,6 +3283,7 @@ pub fn make_island_key() {
     }
 }
 
+#[allow(dead_code)]
 pub fn launch_path(path: &str) -> bool {
     #[cfg(target_os = "macos")]
     {
@@ -2998,6 +3297,7 @@ pub fn launch_path(path: &str) -> bool {
 }
 
 /// Synthesize Cmd-V. Requires Accessibility TCC; returns false when untrusted.
+#[allow(dead_code)]
 pub fn auto_paste_cmd_v() -> bool {
     #[cfg(target_os = "macos")]
     {
@@ -3009,152 +3309,8 @@ pub fn auto_paste_cmd_v() -> bool {
     }
 }
 
-pub fn install_screen_lock_observer() {
-    #[cfg(target_os = "macos")]
-    install_screen_lock_observer_macos();
-}
-
 #[cfg(target_os = "macos")]
-fn drain_hotkey_events() {
-    use global_hotkey::{GlobalHotKeyEvent, HotKeyState};
-    while let Ok(event) = GlobalHotKeyEvent::receiver().try_recv() {
-        if event.state == HotKeyState::Pressed {
-            SEARCH_HOTKEY_FIRED.store(true, std::sync::atomic::Ordering::SeqCst);
-        }
-    }
-}
-
-#[cfg(target_os = "macos")]
-struct HotkeyCap {
-    manager: global_hotkey::GlobalHotKeyManager,
-    registered: Option<global_hotkey::hotkey::HotKey>,
-    last: Option<(bool, nook_core::settings::SearchHotkey)>,
-}
-
-#[cfg(target_os = "macos")]
-fn hotkey_cap() -> &'static std::sync::Mutex<Option<HotkeyCap>> {
-    static CAP: std::sync::OnceLock<std::sync::Mutex<Option<HotkeyCap>>> =
-        std::sync::OnceLock::new();
-    CAP.get_or_init(|| std::sync::Mutex::new(None))
-}
-
-#[cfg(target_os = "macos")]
-fn sync_search_hotkey_macos(enabled: bool, hotkey: &nook_core::settings::SearchHotkey) {
-    use global_hotkey::hotkey::{HotKey, Modifiers};
-    use global_hotkey::GlobalHotKeyManager;
-
-    let mut guard = hotkey_cap().lock().unwrap_or_else(|e| e.into_inner());
-    if guard.is_none() {
-        match GlobalHotKeyManager::new() {
-            Ok(manager) => {
-                *guard = Some(HotkeyCap {
-                    manager,
-                    registered: None,
-                    last: None,
-                });
-            }
-            Err(err) => {
-                log::warn!("search hotkey manager: {err}");
-                return;
-            }
-        }
-    }
-    let Some(cap) = guard.as_mut() else {
-        return;
-    };
-    let fingerprint = (enabled, hotkey.clone());
-    if cap.last.as_ref() == Some(&fingerprint) {
-        return;
-    }
-    if let Some(old) = cap.registered.take() {
-        if let Err(err) = cap.manager.unregister(old) {
-            log::debug!("unregister search hotkey: {err}");
-        }
-    }
-    cap.last = Some(fingerprint);
-    if !enabled {
-        return;
-    }
-    let Some(code) = hotkey_code(&hotkey.key) else {
-        log::warn!("search hotkey: unknown key {}", hotkey.key);
-        return;
-    };
-    let mut mods = Modifiers::empty();
-    if hotkey.alt {
-        mods |= Modifiers::ALT;
-    }
-    if hotkey.ctrl {
-        mods |= Modifiers::CONTROL;
-    }
-    if hotkey.shift {
-        mods |= Modifiers::SHIFT;
-    }
-    if hotkey.meta {
-        mods |= Modifiers::SUPER;
-    }
-    if mods.is_empty() {
-        log::warn!("search hotkey needs a modifier");
-        return;
-    }
-    let hk = HotKey::new(Some(mods), code);
-    match cap.manager.register(hk) {
-        Ok(()) => {
-            cap.registered = Some(hk);
-            log::info!("search hotkey registered as {}", hotkey.label());
-        }
-        Err(err) => log::warn!("search hotkey register {}: {err}", hotkey.label()),
-    }
-}
-
-#[cfg(target_os = "macos")]
-fn hotkey_code(key: &str) -> Option<global_hotkey::hotkey::Code> {
-    use global_hotkey::hotkey::Code;
-    Some(match key.trim().to_ascii_lowercase().as_str() {
-        "space" => Code::Space,
-        "tab" => Code::Tab,
-        "enter" | "return" => Code::Enter,
-        "escape" | "esc" => Code::Escape,
-        "a" => Code::KeyA,
-        "b" => Code::KeyB,
-        "c" => Code::KeyC,
-        "d" => Code::KeyD,
-        "e" => Code::KeyE,
-        "f" => Code::KeyF,
-        "g" => Code::KeyG,
-        "h" => Code::KeyH,
-        "i" => Code::KeyI,
-        "j" => Code::KeyJ,
-        "k" => Code::KeyK,
-        "l" => Code::KeyL,
-        "m" => Code::KeyM,
-        "n" => Code::KeyN,
-        "o" => Code::KeyO,
-        "p" => Code::KeyP,
-        "q" => Code::KeyQ,
-        "r" => Code::KeyR,
-        "s" => Code::KeyS,
-        "t" => Code::KeyT,
-        "u" => Code::KeyU,
-        "v" => Code::KeyV,
-        "w" => Code::KeyW,
-        "x" => Code::KeyX,
-        "y" => Code::KeyY,
-        "z" => Code::KeyZ,
-        "0" | "digit0" => Code::Digit0,
-        "1" | "digit1" => Code::Digit1,
-        "2" | "digit2" => Code::Digit2,
-        "3" | "digit3" => Code::Digit3,
-        "4" | "digit4" => Code::Digit4,
-        "5" | "digit5" => Code::Digit5,
-        "6" | "digit6" => Code::Digit6,
-        "7" | "digit7" => Code::Digit7,
-        "8" | "digit8" => Code::Digit8,
-        "9" | "digit9" => Code::Digit9,
-        _ => return None,
-    })
-}
-
-#[cfg(target_os = "macos")]
+#[allow(dead_code)]
 fn remember_frontmost_macos() {
     use objc2::runtime::AnyObject;
     use objc2::*;
@@ -3188,6 +3344,7 @@ unsafe fn hide_motion_art_macos() {
         cap.paused = true;
     }
 }
+#[allow(dead_code)]
 fn restore_frontmost_macos() {
     use objc2::runtime::AnyObject;
     use objc2::*;
@@ -3304,6 +3461,7 @@ unsafe fn create_motion_art_layer(
     let _: () = msg_send![layer, setMasksToBounds: true];
     Some((layer, player, looper))
 }
+#[allow(dead_code)]
 fn frontmost_pid() -> std::sync::MutexGuard<'static, Option<i32>> {
     static PID: std::sync::OnceLock<std::sync::Mutex<Option<i32>>> = std::sync::OnceLock::new();
     PID.get_or_init(|| std::sync::Mutex::new(None))
@@ -3312,6 +3470,7 @@ fn frontmost_pid() -> std::sync::MutexGuard<'static, Option<i32>> {
 }
 
 #[cfg(target_os = "macos")]
+#[allow(dead_code)]
 fn launch_path_macos(path: &str) -> bool {
     use objc2::runtime::AnyObject;
     use objc2::*;
@@ -3337,33 +3496,23 @@ fn launch_path_macos(path: &str) -> bool {
 }
 
 #[cfg(target_os = "macos")]
+#[allow(dead_code)]
 fn accessibility_trusted_macos() -> bool {
-    #[link(name = "ApplicationServices", kind = "framework")]
-    extern "C" {
-        fn AXIsProcessTrusted() -> bool;
-    }
-    unsafe { AXIsProcessTrusted() }
+    use nook_core::ffi::macos::AXIsProcessTrusted;
+    unsafe { AXIsProcessTrusted() != 0 }
 }
 
 #[cfg(target_os = "macos")]
+#[allow(dead_code)]
 fn auto_paste_cmd_v_macos() -> bool {
     if !accessibility_trusted_macos() {
         return false;
     }
-    #[link(name = "CoreGraphics", kind = "framework")]
-    extern "C" {
-        fn CGEventCreateKeyboardEvent(
-            source: *mut std::ffi::c_void,
-            virtual_key: u16,
-            key_down: bool,
-        ) -> *mut std::ffi::c_void;
-        fn CGEventSetFlags(event: *mut std::ffi::c_void, flags: u64);
-        fn CGEventPost(tap: u32, event: *mut std::ffi::c_void);
-        fn CFRelease(cf: *mut std::ffi::c_void);
-    }
+    use nook_core::ffi::macos::{
+        kCGEventFlagMaskCommand, kCGHIDEventTap, CFRelease, CGEventCreateKeyboardEvent,
+        CGEventPost, CGEventSetFlags,
+    };
     const KEY_V: u16 = 9;
-    const CMD: u64 = 0x0010_0000;
-    const TAP_HID: u32 = 0;
     unsafe {
         let down = CGEventCreateKeyboardEvent(std::ptr::null_mut(), KEY_V, true);
         let up = CGEventCreateKeyboardEvent(std::ptr::null_mut(), KEY_V, false);
@@ -3376,47 +3525,14 @@ fn auto_paste_cmd_v_macos() -> bool {
             }
             return false;
         }
-        CGEventSetFlags(down, CMD);
-        CGEventSetFlags(up, CMD);
-        CGEventPost(TAP_HID, down);
-        CGEventPost(TAP_HID, up);
+        CGEventSetFlags(down, kCGEventFlagMaskCommand);
+        CGEventSetFlags(up, kCGEventFlagMaskCommand);
+        CGEventPost(kCGHIDEventTap, down);
+        CGEventPost(kCGHIDEventTap, up);
         CFRelease(down);
         CFRelease(up);
         true
     }
-}
-
-#[cfg(target_os = "macos")]
-fn install_screen_lock_observer_macos() {
-    use block2::RcBlock;
-    use objc2::runtime::AnyObject;
-    use objc2::*;
-    static INSTALLED: Once = Once::new();
-    INSTALLED.call_once(|| unsafe {
-        let center: *mut AnyObject =
-            msg_send![class!(NSDistributedNotificationCenter), defaultCenter];
-        if center.is_null() {
-            return;
-        }
-        for (name, locked) in [
-            (c"com.apple.screenIsLocked", true),
-            (c"com.apple.screenIsUnlocked", false),
-        ] {
-            let ns_name: *mut AnyObject =
-                msg_send![class!(NSString), stringWithUTF8String: name.as_ptr()];
-            let block = RcBlock::new(move |_note: *mut AnyObject| {
-                nook_core::clipboard::set_screen_locked(locked);
-            });
-            let _token: *mut AnyObject = msg_send![
-                center,
-                addObserverForName: ns_name,
-                object: std::ptr::null_mut::<AnyObject>(),
-                queue: std::ptr::null_mut::<AnyObject>(),
-                usingBlock: &*block
-            ];
-            std::mem::forget(block);
-        }
-    });
 }
 
 #[cfg(all(test, target_os = "macos"))]

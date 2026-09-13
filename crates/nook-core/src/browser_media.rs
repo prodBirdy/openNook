@@ -151,12 +151,15 @@ pub fn applescript_app<'a>(app_name: Option<&'a str>, bundle_id: Option<&str>) -
     }
 }
 
-/// Fetch a YouTube thumb or site icon for the playing browser tab.
+/// Fetch a YouTube thumb or site icon for the current browser tab after opt-in.
 pub async fn resolve_artwork(
     app_name: Option<&str>,
     bundle_id: Option<&str>,
     title: Option<&str>,
 ) -> Option<String> {
+    if !crate::settings::get_app_settings().browser_artwork {
+        return None;
+    }
     let app = applescript_app(app_name, bundle_id)?;
     let url = active_tab_url(app, title).await?;
     if let Some(id) = youtube_video_id(&url) {
@@ -166,7 +169,7 @@ pub async fn resolve_artwork(
             }
         }
     }
-    for candidate in favicon_candidates(&url) {
+    for candidate in favicon_candidates(&url, crate::settings::get_app_settings().browser_artwork) {
         if let Some(art) = fetch_image(&candidate, 80).await {
             return Some(art);
         }
@@ -174,7 +177,10 @@ pub async fn resolve_artwork(
     None
 }
 
-fn favicon_candidates(page: &str) -> Vec<String> {
+fn favicon_candidates(page: &str, enabled: bool) -> Vec<String> {
+    if !enabled {
+        return Vec::new();
+    }
     let Ok(url) = reqwest::Url::parse(page) else {
         return Vec::new();
     };
@@ -204,6 +210,9 @@ fn is_private_host(host: &str) -> bool {
 }
 
 async fn fetch_image(url: &str, min_bytes: usize) -> Option<String> {
+    if !crate::settings::get_app_settings().browser_artwork {
+        return None;
+    }
     let parsed = reqwest::Url::parse(url).ok()?;
     if parsed.scheme() != "https" {
         return None;
@@ -254,43 +263,18 @@ async fn active_tab_url(_app: &str, _title: Option<&str>) -> Option<String> {
     None
 }
 
-fn tab_script(app: &str, title: &str) -> String {
-    let needle = applescript_escape(title.trim_end_matches(" - YouTube").trim());
-    if app == "Safari" {
-        format!(
-            r#"tell application "Safari"
-  if (count of windows) is 0 then return ""
-  set needle to "{needle}"
-  if needle is not "" then
-    repeat with w in windows
-      repeat with t in tabs of w
-        try
-          if (name of t) contains needle then return URL of t
-        end try
-      end repeat
-    end repeat
-  end if
-  return URL of front document
-end tell"#
-        )
+fn tab_script(app: &str, _title: &str) -> String {
+    let current = if app == "Safari" {
+        "URL of front document"
     } else {
-        format!(
-            r#"tell application "{app}"
+        "URL of active tab of front window"
+    };
+    format!(
+        r#"tell application "{app}"
   if (count of windows) is 0 then return ""
-  set needle to "{needle}"
-  if needle is not "" then
-    repeat with w in windows
-      repeat with t in tabs of w
-        try
-          if (title of t) contains needle then return URL of t
-        end try
-      end repeat
-    end repeat
-  end if
-  return URL of active tab of front window
+  return {current}
 end tell"#
-        )
-    }
+    )
 }
 
 fn applescript_escape(s: &str) -> String {
@@ -581,6 +565,19 @@ mod tests {
     }
 
     #[test]
+    fn artwork_script_reads_only_the_current_tab() {
+        for app in ["Safari", "Google Chrome"] {
+            let script = tab_script(app, "A title");
+            assert!(!script.contains("repeat"));
+            assert!(script.contains(if app == "Safari" {
+                "URL of front document"
+            } else {
+                "URL of active tab of front window"
+            }));
+        }
+    }
+
+    #[test]
     fn thumbnails_are_https_ytimg() {
         let urls = youtube_thumbnail_candidates("dQw4w9wgGcQ");
         assert!(urls[0].starts_with("https://i.ytimg.com/vi/dQw4w9wgGcQ/"));
@@ -589,13 +586,14 @@ mod tests {
 
     #[test]
     fn favicon_only_https_public_hosts() {
-        let urls = favicon_candidates("https://open.spotify.com/track/1");
+        assert!(favicon_candidates("https://open.spotify.com/track/1", false).is_empty());
+        let urls = favicon_candidates("https://open.spotify.com/track/1", true);
         assert_eq!(urls.len(), 1);
         assert!(urls[0].starts_with("https://www.google.com/s2/favicons?"));
         assert!(urls[0].contains("domain=open.spotify.com"));
-        assert!(favicon_candidates("http://example.com/").is_empty());
-        assert!(favicon_candidates("https://127.0.0.1/").is_empty());
-        assert!(favicon_candidates("https://localhost/x").is_empty());
+        assert!(favicon_candidates("http://example.com/", true).is_empty());
+        assert!(favicon_candidates("https://127.0.0.1/", true).is_empty());
+        assert!(favicon_candidates("https://localhost/x", true).is_empty());
     }
 
     #[test]

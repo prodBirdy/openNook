@@ -1,6 +1,6 @@
 [package]
 name = "nook-core"
-version.workspace = true
+version = "1.0.0"
 edition.workspace = true
 license.workspace = true
 description = "Tauri-free openNook backend: media, calendar, files, widgets, notch"
@@ -23,7 +23,6 @@ notify-debouncer-mini = "0.5"
 plist = "1"
 walkdir = "2"
 sha2 = "0.10"
-hmac = "0.12"
 uuid = { version = "1", features = ["v4"] }
 libc = "0.2"
 portable-pty = "0.8"
@@ -44,8 +43,6 @@ objc2-speech = "0.3"
 objc2-av-foundation = "0.3"
 block2 = "0.6"
 security-framework = "3.7"
-cpal = "0.15"
-symphonia = { version = "0.5", default-features = false, features = ["ogg", "vorbis", "wav", "pcm"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { version = "0.52", features = [

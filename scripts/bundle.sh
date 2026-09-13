@@ -5,6 +5,7 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
+plutil -lint "$ROOT/Info.plist" || exit 1
 
 PROFILE="${1:-release}"
 if [[ "$PROFILE" == "release" ]]; then
@@ -15,7 +16,8 @@ else
   BIN="$ROOT/target/debug/nook"
 fi
 
-APP="$ROOT/target/OpenNook.app"
+APP="$ROOT/target/openNook.app"
+ENTITLEMENTS="$ROOT/resources/openNook.entitlements"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$ROOT/Info.plist" "$APP/Contents/Info.plist"
@@ -70,9 +72,15 @@ fi
 # A Developer ID identity, if present, is used instead.
 if security find-identity -v -p codesigning 2>/dev/null | grep -q "Developer ID Application"; then
   IDENTITY="$(security find-identity -v -p codesigning | awk -F'\"' '/Developer ID Application/{print $2; exit}')"
-  codesign --force --deep --options runtime --sign "$IDENTITY" "$APP"
+  codesign --force --options runtime --entitlements "$ENTITLEMENTS" --sign "$IDENTITY" "$APP"
 else
   codesign --force --deep --sign - "$APP"
+fi
+
+if [[ -n "${NOTARY_PROFILE:-}" ]]; then
+  ditto -c -k --keepParent "$APP" "$ROOT/target/openNook-notary.zip"
+  xcrun notarytool submit "$ROOT/target/openNook-notary.zip" --keychain-profile "$NOTARY_PROFILE" --wait
+  xcrun stapler staple "$APP"
 fi
 
 echo "built $APP"

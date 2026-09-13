@@ -5,7 +5,7 @@
 //! Inline styles flow at span granularity, so a paragraph with mixed bold /
 //! italic runs wraps between spans rather than mid-span.
 
-use crate::island::ui::{nook_empty, nook_icon_btn, nook_pane, scroll_body};
+use crate::island::ui::{label, nook_empty, nook_icon_btn, nook_pane, scroll_body};
 use crate::island::Island;
 use crate::theme;
 use gpui::{
@@ -13,7 +13,7 @@ use gpui::{
 };
 use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 
-const BODY_SIZE: f32 = 12.0;
+const BODY_SIZE: f32 = theme::BODY.size;
 const MONO_FAMILY: &str = "SF Mono";
 
 pub(crate) fn notes_card(island: &mut Island, cx: &mut Context<Island>) -> impl IntoElement {
@@ -31,25 +31,61 @@ pub(crate) fn notes_card(island: &mut Island, cx: &mut Context<Island>) -> impl 
         },
     );
     let body = if editing {
-        let editor = island
-            .notes_editor
-            .clone()
-            .expect("notes editor exists while editing");
-        div()
-            .w_full()
-            .min_h(relative(1.))
-            .flex()
-            .flex_col()
-            .child(editor)
-            .into_any_element()
+        if let Some(editor) = island.notes_editor.clone() {
+            div()
+                .w_full()
+                .min_h(relative(1.))
+                .flex()
+                .flex_col()
+                .child(editor)
+                .into_any_element()
+        } else {
+            preview_body(island.notes.trim().is_empty(), island.notes.clone(), cx)
+                .into_any_element()
+        }
     } else {
         preview_body(island.notes.trim().is_empty(), island.notes.clone(), cx).into_any_element()
+    };
+    let flash = if editing {
+        None
+    } else {
+        super::notes_editor::SAVE_FLASH.with(|f| {
+            (*f.borrow()).filter(|(_, at)| at.elapsed() < std::time::Duration::from_secs(2))
+        })
     };
     nook_pane("nook-notes")
         .relative()
         .w_full()
         .child(scroll_body("notes-scroll", body))
-        .child(div().absolute().top(px(0.)).right(px(0.)).child(toggle))
+        .child(
+            div()
+                .absolute()
+                .top(px(0.))
+                .right(px(0.))
+                .size(px(theme::HIT_MIN))
+                .rounded_full()
+                .bg(theme::FILL_TERTIARY)
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(toggle),
+        )
+        .when_some(flash, |d, (ok, _)| {
+            d.child(
+                div().absolute().bottom(px(0.)).left(px(0.)).child(
+                    label(
+                        if ok { "Saved" } else { "Couldn't save" },
+                        theme::FOOTNOTE,
+                        false,
+                    )
+                    .text_color(if ok {
+                        theme::SECONDARY_LABEL
+                    } else {
+                        theme::DESTRUCTIVE
+                    }),
+                ),
+            )
+        })
 }
 
 fn preview_body(empty: bool, notes: String, cx: &mut Context<Island>) -> impl IntoElement {
@@ -69,7 +105,7 @@ fn preview_body(empty: bool, notes: String, cx: &mut Context<Island>) -> impl In
             }),
         )
         .when(empty, |d| {
-            d.child(nook_empty("notebook", "Click to add notes"))
+            d.child(nook_empty("notebook", "Tap to add a note"))
         })
         .when(!empty, |d| d.child(markdown_preview(&notes)))
 }
@@ -120,13 +156,15 @@ impl Span {
         if self.code {
             d = d
                 .font_family(MONO_FAMILY)
-                .text_size(px(BODY_SIZE - 1.0))
+                .text_size(px(theme::SUBHEADLINE.size))
                 .px_1()
                 .rounded(px(3.))
                 .bg(theme::FILL_TERTIARY)
                 .text_color(theme::TEXT_MUTED);
         } else {
-            d = d.text_size(px(BODY_SIZE));
+            d = d
+                .text_size(px(BODY_SIZE))
+                .line_height(px(theme::BODY.leading));
             if self.link {
                 d = d.text_color(theme::accent());
             }
@@ -202,18 +240,18 @@ pub(crate) fn markdown_preview(src: &str) -> gpui::Div {
             }
             Event::End(TagEnd::Heading(_)) => {
                 let level = heading_level.take().unwrap_or(HeadingLevel::H3);
-                let (size, weight) = match level {
-                    HeadingLevel::H1 => (17.0, FontWeight::BOLD),
-                    HeadingLevel::H2 => (15.0, FontWeight::SEMIBOLD),
-                    HeadingLevel::H3 => (13.0, FontWeight::SEMIBOLD),
-                    _ => (12.0, FontWeight::SEMIBOLD),
+                let style = match level {
+                    HeadingLevel::H1 => theme::TITLE_2,
+                    HeadingLevel::H2 => theme::TITLE_3,
+                    HeadingLevel::H3 => theme::BODY,
+                    _ => theme::CALLOUT,
                 };
                 let text = std::mem::take(&mut heading_text);
                 col = col.child(
                     div()
-                        .text_size(px(size))
-                        .line_height(px((size * 1.25).ceil()))
-                        .font_weight(weight)
+                        .text_size(px(style.size))
+                        .line_height(px(style.leading))
+                        .font_weight(style.emphasized)
                         .text_color(theme::TEXT)
                         .child(text),
                 );
@@ -239,6 +277,7 @@ pub(crate) fn markdown_preview(src: &str) -> gpui::Div {
                         .child(
                             div()
                                 .text_size(px(BODY_SIZE))
+                                .line_height(px(theme::BODY.leading))
                                 .text_color(theme::TEXT_MUTED)
                                 .min_w(px(14.))
                                 .child(marker),
@@ -266,7 +305,7 @@ pub(crate) fn markdown_preview(src: &str) -> gpui::Div {
                             .rounded(px(theme::INNER_RADIUS))
                             .bg(theme::FILL_TERTIARY)
                             .font_family(MONO_FAMILY)
-                            .text_size(px(BODY_SIZE - 1.0))
+                            .text_size(px(theme::SUBHEADLINE.size))
                             .text_color(theme::TEXT_MUTED)
                             .child(code.trim_end().to_string()),
                     );

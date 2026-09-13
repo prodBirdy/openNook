@@ -2,12 +2,12 @@
 
 mod chrome;
 mod compact;
+mod edit;
 mod expanded;
 mod files;
 mod marquee;
 pub(crate) mod media;
 mod render;
-mod search;
 mod settings;
 pub(crate) mod ui;
 
@@ -35,17 +35,35 @@ use nook_core::observe::{MetricHistory, ObserveSnapshot};
 use nook_core::obsidian::{NoteEntry, VaultWatch};
 use nook_core::pomodoro::{PomodoroPhase, PomodoroSpec};
 use nook_core::power::PowerSnapshot;
-use nook_core::settings::AppSettings;
+use nook_core::settings::{AppSettings, WidgetModule};
 use nook_core::system_timers::{self, SystemTimer};
 use nook_core::sysvol::{self, HudEvent, HudKind, HUD_TTL};
 use nook_core::vpn::VpnSnapshot;
 use nook_core::weather::WeatherSnapshot;
 use settings::SettingsView;
 use std::cell::RefCell;
+use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
+
+/// How long an optimistic media intent overrides contradicting polls.
+const MEDIA_INTENT_WINDOW: Duration = Duration::from_millis(2500);
+/// Polled elapsed within this many seconds of a seek target counts as caught up.
+const SEEK_CATCHUP_TOL: f64 = 1.5;
+
+/// Keep the optimistic scrubber position while a seek is still in flight.
+fn hold_seek_intent(want: f64, since: Instant, polled: Option<f64>, track_changed: bool) -> bool {
+    if track_changed || since.elapsed() >= MEDIA_INTENT_WINDOW {
+        return false;
+    }
+    match polled {
+        Some(elapsed) => (elapsed - want).abs() > SEEK_CATCHUP_TOL,
+        None => true,
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) struct HudState {
@@ -95,9 +113,9 @@ pub enum Tab {
 
 #[derive(Clone, Debug)]
 pub(crate) enum ClockTimerAction {
-    Pause,
-    Resume,
-    Cancel,
+    Pause(String),
+    Resume(String),
+    Cancel(String),
     Open(String),
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -126,6 +144,7 @@ pub struct FaceTimer {
     pub remaining: u32,
     pub total: u32,
     pub running: bool,
+    #[allow(dead_code)]
     pub name: String,
     pub source: FaceTimerSource,
 }
@@ -143,7 +162,12 @@ pub struct Island {
     pub screen_height: f32,
     pub hovered: bool,
     pub expanded: bool,
+    /// User swipe / mode-dot / tray preference.
+    pub user_preferred: Option<CompactMode>,
+    /// Alias for [`Self::user_preferred`] so concurrent `files.rs` still compiles.
     pub preferred: Option<CompactMode>,
+    /// Background-producer takeover (media, alerts, timers, …).
+    pub alert_preferred: Option<CompactMode>,
     pub tab: Tab,
     pub now_playing: NowPlayingData,
     pub visualizer_color: Option<gpui::Rgba>,
@@ -171,6 +195,12 @@ pub struct Island {
     pub(crate) scrubber_bounds: Rc<RefCell<Option<(f32, f32)>>>,
     elapsed_base: Option<f64>,
     elapsed_at: Instant,
+    /// Optimistic play/pause target: (wanted is_playing, when tapped). Holds the
+    /// UI at the tapped state until a poll confirms it or MEDIA_INTENT_WINDOW passes.
+    play_intent: Option<(bool, Instant)>,
+    /// Optimistic scrubber seek: (wanted elapsed seconds, when released). Holds
+    /// elapsed against stale polls until MediaRemote catches up or the window lapses.
+    seek_intent: Option<(f64, Instant)>,
     pub files: Vec<FileTrayItem>,
     pub events: Vec<CalendarEvent>,
     pub reminders: Vec<Reminder>,
@@ -185,6 +215,10 @@ pub struct Island {
     obsidian_watch: Option<VaultWatch>,
     obsidian_watch_vault: Option<PathBuf>,
     pub(crate) obsidian_capture: String,
+    /// Byte index of the caret in [`Self::obsidian_capture`].
+    pub(crate) obsidian_capture_caret: usize,
+    /// When true, the next edit replaces the whole capture string (cmd-a).
+    obsidian_capture_select_all: bool,
     pub(crate) obsidian_capture_focus: Option<gpui::FocusHandle>,
     pub(crate) obsidian_typing: bool,
     pub(crate) obsidian_selected: Option<String>,
@@ -208,6 +242,7 @@ pub struct Island {
     observe_history: MetricHistory,
     pub messages: MessagesSnapshot,
     pub message_draft: String,
+    #[allow(dead_code)]
     pub selected_conversation: Option<String>,
     pub(crate) message_focus: Option<gpui::FocusHandle>,
     pub(crate) observe_hover: Option<crate::widgets::ObserveHover>,
@@ -223,6 +258,16 @@ pub struct Island {
     pub notifications: Vec<NotificationEvent>,
     pub notification_unread: usize,
     pub settings: AppSettings,
+    /// On-island widget customize mode (dashed chrome + picker).
+    pub(crate) widget_edit: bool,
+    /// Settings snapshot taken when entering edit mode; restored on Cancel.
+    widget_edit_snapshot: Option<AppSettings>,
+    /// Brief "No room" caption under the picker after a blocked tap.
+    widget_edit_budget_hint_at: Option<Instant>,
+    /// Last `widget_edit` seen by [`Self::arm_content_transition`].
+    last_widget_edit: bool,
+    /// Next arm forces a content crossfade even if expand/tab/mode match.
+    content_transition_force: bool,
     pub first_run: bool,
     pub speed_mbps: Option<f64>,
     pub speed_progress: f64,
@@ -230,7 +275,6 @@ pub struct Island {
     /// Bumped on start and on Stop so an in-flight test cannot apply after it
     /// was cancelled (Stop then Run would otherwise take the old result).
     pub speed_gen: u64,
-    /// Pending slider value waiting on the TCC pre-prompt.
     pub weather: Option<WeatherSnapshot>,
     pub weather_error: Option<String>,
     pub(crate) weather_inflight: bool,
@@ -261,6 +305,10 @@ pub struct Island {
     content_y: SpringValue,
     /// Play/pause scrim over the compact album art, 0..1 on `motion::REVEAL`.
     overlay_fade: SpringValue,
+    /// Brand glow around the island while an agent is working, 0..1 on
+    /// `motion::REVEAL`. Color is latched so the fade-out still has a tint.
+    agent_border: SpringValue,
+    agent_border_color: Option<gpui::Rgba>,
     /// Mute HUD flash on the meeting face; overlay springs to 1 while this is live.
     meeting_flash_until: Option<Instant>,
     /// Mirrors Accessibility › Display › "Reduce motion"; refreshed by the
@@ -270,6 +318,10 @@ pub struct Island {
     /// blur in `content_stack`; exactly 0 once the spring has settled.
     blur: f32,
     last_expanded: bool,
+    /// Cheap agent/chrome paint until an expand/collapse or mode/tab context
+    /// shift rests (size + content travel). Hover morphs must not flip this —
+    /// that was the compact-hover flicker.
+    agent_morph_lite: bool,
     last_mode: CompactMode,
     last_tab: Tab,
     file_drag: bool,
@@ -283,12 +335,9 @@ pub struct Island {
     reposition_grab_y: f32,
     /// Mirrors NSWindow.ignoresMouseEvents so we only cross into ObjC on change.
     click_through: bool,
-    /// Ticks since the flag above was last pushed to AppKit. The overlay strip
-    /// covers the menu bar and the top of every app, so a window left grabbing
-    /// events would eat those clicks — too costly to trust a mirrored bool that AppKit or GPUI
-    /// can invalidate behind our back (a restyle drops it). Re-asserted about
-    /// once a second regardless of whether we think it changed.
-    click_through_age: u32,
+    /// Last wall time we pushed ignoresMouseEvents. Re-assert about once a
+    /// second — AppKit/GPUI can drop the flag on restyle.
+    click_through_at: Instant,
     /// Ignore extra wheel events from the same two-finger swipe / momentum.
     wheel_locked: bool,
     last_wheel_at: Instant,
@@ -297,11 +346,12 @@ pub struct Island {
     /// Origin for the working-agent Dot Matrix loader (seconds * speed).
     pixel_origin: Instant,
     pixel_t: f32,
+    /// Last time we advanced [`pixel_t`] enough to request a paint. Capped at
+    /// ~30fps so the brand shimmer does not starve the expand morph.
+    last_pixel_frame: Instant,
     pub(crate) mirror_on: bool,
     mirror_gen: u64,
     pub(crate) mirror_frame: Option<std::sync::Arc<gpui::RenderImage>>,
-    /// Compact-face snap confirmation; driven by window_snap::flash_is_live.
-    snap_flashing: bool,
     pub(super) hud: Option<HudState>,
     hud_fill: SpringValue,
     hud_dragging: bool,
@@ -314,6 +364,8 @@ pub struct Island {
     /// Output-device list for the media-card picker. Rebuilt when the HAL dirty flag flips.
     pub(crate) output_devices: Vec<nook_core::audio_devices::OutputDevice>,
     pub(crate) output_picker_open: bool,
+    /// Side panel with Playing Next / Up Next; toggled by the list control.
+    pub(crate) queue_open: bool,
     output_hud_name: Option<String>,
     output_hud_until: Option<Instant>,
     pub recording: bool,
@@ -321,18 +373,25 @@ pub struct Island {
     pub live_transcript: String,
     pub recordings: Vec<nook_core::recorder::RecordingItem>,
     pub recorder_level: f32,
+    pub recorder_wave: VecDeque<f32>,
+    pub(crate) recorder_wave_at: Instant,
     pub recorder_error: Option<String>,
     pub playing_recording: Option<i64>,
     recorder_last_notify: Instant,
-    pub search_open: bool,
-    pub(crate) search_editor: Option<Entity<search::SearchEditor>>,
-    search_sub: Option<Subscription>,
-    pub(crate) search_results: Vec<search::SearchResult>,
-    pub search_selected: usize,
-    pub search_clipboard_only: bool,
-    pub search_query: String,
-    search_gen: u64,
-    search_loading: bool,
+    /// Keyboard focus for the island chrome (`Island::new` fills this).
+    focus: Option<gpui::FocusHandle>,
+    /// Outside-bounds clock for expanded hover-exit dwell.
+    hover_exit_at: Option<Instant>,
+    /// Option key held over the island (reposition affordance).
+    alt_held: bool,
+    /// Cleared tray stash for Undo (files.rs renders the Undo chip).
+    pub(crate) last_cleared_files: Option<(Vec<FileTrayItem>, Instant)>,
+    /// Transient flash when a tray path vanishes.
+    pub(crate) tray_flash: Option<(String, Instant)>,
+    /// Calendar TCC asked once from `refresh_calendar`.
+    calendar_access_requested: bool,
+    /// One-shot warn when expanding while the settings DB is a temp fallback.
+    fallback_db_noticed: bool,
 }
 
 struct PendingFileDrag {
@@ -363,13 +422,15 @@ impl Island {
             notch_height: if info.has_notch {
                 info.notch_height as f32
             } else {
-                32.0
+                theme::NOTCH_MIN_H
             },
             screen_width: info.screen_width as f32,
             screen_height: info.screen_height as f32,
             hovered: false,
             expanded: false,
+            user_preferred: None,
             preferred: None,
+            alert_preferred: None,
             tab: Tab::Widgets,
             now_playing: NowPlayingData::default(),
             visualizer_color: None,
@@ -392,6 +453,8 @@ impl Island {
             scrubber_bounds: Rc::new(RefCell::new(None)),
             elapsed_base: None,
             elapsed_at: Instant::now(),
+            play_intent: None,
+            seek_intent: None,
             files,
             events: Vec::new(),
             reminders: Vec::new(),
@@ -405,6 +468,8 @@ impl Island {
             obsidian_watch: None,
             obsidian_watch_vault: None,
             obsidian_capture: String::new(),
+            obsidian_capture_caret: 0,
+            obsidian_capture_select_all: false,
             obsidian_capture_focus: None,
             obsidian_typing: false,
             obsidian_selected: None,
@@ -437,6 +502,11 @@ impl Island {
             notifications: nook_core::notifications::snapshot(),
             notification_unread: nook_core::notifications::unread_count(),
             settings,
+            widget_edit: false,
+            widget_edit_snapshot: None,
+            widget_edit_budget_hint_at: None,
+            last_widget_edit: false,
+            content_transition_force: false,
             first_run,
             speed_mbps: None,
             speed_progress: 0.0,
@@ -459,10 +529,13 @@ impl Island {
             content_x: SpringValue::at(0.0),
             content_y: SpringValue::at(0.0),
             overlay_fade: SpringValue::at(0.0),
+            agent_border: SpringValue::at(0.0),
+            agent_border_color: None,
             meeting_flash_until: None,
             reduce_motion: platform::reduce_motion(),
             blur: 0.0,
             last_expanded: false,
+            agent_morph_lite: false,
             last_mode: CompactMode::Idle,
             last_tab: Tab::Widgets,
             file_drag: false,
@@ -473,17 +546,17 @@ impl Island {
             reposition_grab_y: 0.0,
             // NSWindow starts out grabbing events; the first poll tick corrects it.
             click_through: false,
-            click_through_age: u32::MAX,
+            click_through_at: Instant::now() - Duration::from_secs(2),
             wheel_locked: false,
             last_wheel_at: Instant::now(),
             wheel_acc_x: 0.0,
             wheel_acc_y: 0.0,
             pixel_origin: Instant::now(),
             pixel_t: 0.0,
+            last_pixel_frame: Instant::now(),
             mirror_on: false,
             mirror_gen: 0,
             mirror_frame: None,
-            snap_flashing: false,
             hud: None,
             hud_fill: SpringValue::at(0.0),
             hud_dragging: false,
@@ -495,6 +568,7 @@ impl Island {
             shell_focused: false,
             output_devices: nook_core::audio_devices::snapshot(),
             output_picker_open: false,
+            queue_open: false,
             output_hud_name: None,
             output_hud_until: None,
             recording: false,
@@ -502,18 +576,18 @@ impl Island {
             live_transcript: String::new(),
             recordings: nook_core::recorder::list(),
             recorder_level: 0.0,
+            recorder_wave: VecDeque::new(),
+            recorder_wave_at: Instant::now(),
             recorder_error: None,
             playing_recording: None,
             recorder_last_notify: Instant::now(),
-            search_open: false,
-            search_editor: None,
-            search_sub: None,
-            search_results: Vec::new(),
-            search_selected: 0,
-            search_clipboard_only: false,
-            search_query: String::new(),
-            search_gen: 0,
-            search_loading: false,
+            focus: Some(cx.focus_handle()),
+            hover_exit_at: None,
+            alt_held: false,
+            last_cleared_files: None,
+            tray_flash: None,
+            calendar_access_requested: false,
+            fallback_db_noticed: false,
         };
         // Start at the compact idle size so the first paint isn't a jump.
         let (w, h) = this.target_size();
@@ -525,12 +599,7 @@ impl Island {
         platform::install_osd_wake_observer();
         platform::install_weather_observers();
         platform::install_meeting_observers();
-        platform::install_screen_lock_observer();
-        platform::sync_search_hotkey(this.settings.search.enabled, &this.settings.search.hotkey);
         nook_core::notifications::sync_backends(&this.settings);
-        nook_core::runtime().spawn(async {
-            let _ = nook_core::calendar::request_calendar_access().await;
-        });
         // Do not touch GPUI's Window handle here — HasWindowHandle RefCell-panics
         // during construction. Chrome is applied via NSApp window enumeration.
         let _ = window;
@@ -563,7 +632,9 @@ impl Island {
                 if this.update(cx, |_, _| ()).is_err() {
                     break;
                 }
-                if needed || platform::take_pin_needed() {
+                // Always clear PIN_NEEDED; `||` would skip take and spin forever.
+                let taken = platform::take_pin_needed();
+                if needed || taken {
                     platform::pin_island_windows();
                 }
             }
@@ -573,15 +644,17 @@ impl Island {
 
     fn spawn_loops(&self, cx: &mut Context<Self>) {
         cx.spawn(async move |this, cx| {
-            // Adaptive cadence: 20ms while anything is live (hover, springs,
-            // drags, media) or the cursor is near enough to reach the island
-            // within one slow tick; 80ms otherwise. The idle tick is the
-            // steady-state cost of the whole app, so it is the one to keep
-            // cheap and rare.
+            // Event-driven: park on ui_tick wake (mouse near/drag, settings)
+            // with a 1 s backstop when idle. Keep 20 ms only while something
+            // is live or the cursor is near enough to reach the island.
             let mut wait_ms = 20u64;
             loop {
+                let timeout = Duration::from_millis(wait_ms);
                 cx.background_executor()
-                    .timer(Duration::from_millis(wait_ms))
+                    .spawn(async move {
+                        nook_core::runtime()
+                            .block_on(nook_core::ui_tick::wait_or_timeout(timeout))
+                    })
                     .await;
                 match this
                     .update(cx, |this, cx| {
@@ -623,18 +696,11 @@ impl Island {
                         if !this.settings.terminal_enabled {
                             this.close_terminal(cx);
                         }
-                        // Per-settings-change syncs (VPN, motion art, search hotkey).
+                        this.correct_hidden_tab();
+                        // Per-settings-change syncs (VPN, motion art).
                         nook_core::vpn::refresh();
                         this.sync_motion_art_from_settings(cx);
-                        platform::sync_search_hotkey(
-                            this.settings.search.enabled,
-                            &this.settings.search.hotkey,
-                        );
                         nook_core::notifications::sync_backends(&this.settings);
-                        dirty = true;
-                    }
-                    if platform::take_search_hotkey() {
-                        this.open_search(None, cx);
                         dirty = true;
                     }
                     if this.repositioning {
@@ -644,21 +710,13 @@ impl Island {
                     if !platform::island_glass_setting_on() {
                         platform::sync_island_glass(None);
                     }
-                    if platform::take_open_settings() {
-                        this.open_settings(cx);
-                        dirty = true;
-                    }
-                    let flash = nook_core::window_snap::flash_is_live();
-                    if flash || this.snap_flashing {
-                        this.snap_flashing = flash;
-                }
                     if this.sync_output_devices() {
                         dirty = true;
                     }
                     let want_suppress = this.settings.hide_when_maximized
                         && !this.repositioning
                         && !this.settings_open
-                        && !this.search_open
+                        && !this.widget_edit
                         && nook_core::occupancy::frontmost_fills_display();
                     if this.suppressed != want_suppress {
                         this.suppressed = want_suppress;
@@ -667,7 +725,6 @@ impl Island {
                             if this.expanded {
                                 this.expanded = false;
                                 this.close_notes_editor(cx);
-                                this.close_search(cx);
                                 this.stop_mirror(cx);
                                 this.park_terminal();
                             }
@@ -698,6 +755,7 @@ impl Island {
                             dirty = true;
                         }
                     }
+                    let now = Instant::now();
                     // The overlay strip paints over the menu bar and the top of
                     // the screen; click-through is what keeps the menu bar,
                     // Settings, and apps underneath usable.
@@ -711,10 +769,11 @@ impl Island {
                     // must not pin this overlay capturing.
                     let ignore = this.overlay_ignores_mouse(on_ui, drag_capture);
                     let changed = this.click_through != ignore;
-                    // 20 ms per tick, so this re-asserts roughly every second.
-                    if changed || this.click_through_age >= 50 {
+                    // Re-assert about once a second — AppKit/GPUI can drop the flag.
+                    if changed || now.duration_since(this.click_through_at) >= Duration::from_secs(1)
+                    {
                         this.click_through = ignore;
-                        this.click_through_age = 0;
+                        this.click_through_at = now;
                         platform::set_click_through_current(ignore);
                         if changed {
                             log::debug!(
@@ -724,38 +783,51 @@ impl Island {
                                 this.expanded
                             );
                         }
-                    } else {
-                        this.click_through_age += 1;
                     }
-                    if !this.suppressed && !this.repositioning && this.hovered != inside {
-                        this.hovered = inside;
+                    if !this.suppressed && !this.repositioning {
                         if inside {
-                            nook_core::haptics::trigger(None);
-                            if this.file_drag {
-                                this.arm_dropzone(cx);
+                            this.hover_exit_at = None;
+                            if !this.hovered {
+                                this.hovered = true;
+                                nook_core::haptics::trigger(None);
+                                if this.file_drag {
+                                    this.arm_dropzone(cx);
+                                }
+                                dirty = true;
                             }
-                        } else if this.expanded
-                            && !this.settings_open
-                            && !this.notes_editing
-                            && !this.obsidian_typing
-                            && !this.shell_focused
-                            && !this.search_open
-                            && !this.mirror_on
-                            && !this.file_drag
-                            && !nook_core::files::outbound_drag_active()
-                        {
-                            this.expanded = false;
-                            this.close_notes_editor(cx);
-                            this.park_terminal();
-                            this.obsidian_typing = false;
+                        } else if this.hovered {
+                            let can_collapse = this.expanded
+                                && !this.settings_open
+                                && !this.widget_edit
+                                && !this.notes_editing
+                                && !this.obsidian_typing
+                                && !this.shell_focused
+                                && !this.mirror_on
+                                && !this.file_drag
+                                && !nook_core::files::outbound_drag_active();
+                            if can_collapse {
+                                let exit_at = *this.hover_exit_at.get_or_insert(now);
+                                if now.duration_since(exit_at) >= motion::HOVER_EXIT_DWELL {
+                                    this.hover_exit_at = None;
+                                    this.hovered = false;
+                                    this.expanded = false;
+                                    this.close_notes_editor(cx);
+                                    this.park_terminal();
+                                    this.obsidian_typing = false;
+                                    dirty = true;
+                                }
+                            } else {
+                                this.hover_exit_at = None;
+                                this.hovered = false;
+                                dirty = true;
+                            }
                         }
-                        dirty = true;
                     }
-                    let now = Instant::now();
+                    this.sync_alert_preferred();
                     // `SpringValue::step` substeps at 120Hz internally, so a
                     // large dt is numerically fine — but it would fast-forward
                     // a freshly retargeted spring, visibly skipping the start
-                    // of an animation after an idle (80ms) tick. Cap perceived
+                    // of an animation after an idle tick. Cap perceived
                     // time at one 30fps frame.
                     let dt = now
                         .duration_since(this.last_frame)
@@ -766,21 +838,16 @@ impl Island {
                     let elapsed_secs = now.duration_since(this.last_tick).as_secs() as u32;
                     if elapsed_secs >= 1 {
                         this.last_tick += Duration::from_secs(elapsed_secs as u64);
-                        // Clipboard history piggybacks this 1 Hz gate — no new timer.
-                        if this.settings.search.clipboard_history
-                            && nook_core::clipboard::change_count_moved()
-                        {
-                            let exclusions = this.settings.search.clipboard_exclude_apps.clone();
-                            let cap = this.settings.search.clipboard_history_size;
-                            let _ = nook_core::clipboard::capture_current(&exclusions, cap);
-                        }
                         // Repaint only when a countdown actually moved — an
                         // unconditional dirty here kept the island rendering
                         // (and Metal submitting) once a second forever.
+                        let paint_live = this.paints_live_widgets();
                         for t in &mut this.timers {
                             if t.running && t.remaining > 0 {
                                 t.remaining = t.remaining.saturating_sub(elapsed_secs);
-                                dirty = true;
+                                if paint_live {
+                                    dirty = true;
+                                }
                                 if t.remaining == 0 {
                                     t.running = false;
                                     crate::notify::cancel_island_timer(t.id);
@@ -788,25 +855,26 @@ impl Island {
                                         pattern: nook_core::haptics::HapticPattern::Success,
                                         intensity: 1.0,
                                     }));
+                                    dirty = true;
                                 }
                             }
                     }
-                        if this.apply_timer_tick(SystemTime::now(), elapsed_secs) {
+                        if this.apply_timer_tick(SystemTime::now(), elapsed_secs) && paint_live {
                             dirty = true;
                         }
                         if this.sync_high_alert_ui(Instant::now()) {
                             dirty = true;
-                        } else if this.expanded && this.awake_active {
+                        } else if this.paints_live_widgets() && this.expanded && this.awake_active {
                             // Card readout only; idle face is an on/off glyph.
                             dirty = true;
                         }
-                        if this.clock_timer_visible() {
+                        if this.paints_live_widgets() && this.clock_timer_visible() {
                             dirty = true;
                         }
-                        if this.vpn_elapsed_should_tick() {
+                        if this.paints_live_widgets() && this.vpn_elapsed_should_tick() {
                             dirty = true;
                         }
-                        if this.recording {
+                        if this.paints_live_widgets() && this.recording {
                             dirty = true;
                         }
                     }
@@ -816,10 +884,16 @@ impl Island {
                         this.recording = true;
                         this.recording_started = snap.started;
                         this.recorder_level = snap.level;
-                        if this.preferred.is_none() {
-                            this.preferred = Some(CompactMode::Recording);
+                        if this.paints_live_widgets()
+                            && this.sample_recorder_wave(snap.level, Instant::now())
+                        {
+                            dirty = true;
                         }
-                        if this.expanded
+                        if this.user_preferred.is_none() && this.alert_preferred.is_none() {
+                            this.alert_preferred = Some(CompactMode::Recording);
+                        }
+                        if this.paints_live_widgets()
+                            && this.expanded
                             && snap.transcript != this.live_transcript
                             && this.recorder_last_notify.elapsed() >= Duration::from_millis(250)
                         {
@@ -830,42 +904,66 @@ impl Island {
                     } else if this.recording {
                         this.recording = false;
                         this.recording_started = None;
-                        this.recorder_level = 0.0;
+                        this.clear_recorder_wave();
                         this.recordings = nook_core::recorder::list();
                         this.live_transcript = nook_core::recorder::snapshot().transcript;
-                        if this.preferred == Some(CompactMode::Recording) {
-                            this.preferred = None;
+                        if this.alert_preferred == Some(CompactMode::Recording) {
+                            this.alert_preferred = None;
                         }
                         dirty = true;
                     }
                     if this.clear_expired_vpn_reveal() {
                         dirty = true;
                     }
-                    let levels = nook_core::audio::get_audio_levels();
-                    if this.now_playing.audio_levels.as_deref() != Some(levels.as_slice()) {
-                        this.now_playing.audio_levels = Some(levels);
+                    if this.share.maybe_reset_failure() {
                         dirty = true;
                     }
-                    if this.interpolate_elapsed() {
-                        dirty = true;
+                    if this.expanded && !this.fallback_db_noticed {
+                        this.fallback_db_noticed = true;
+                        if nook_core::database::FALLBACK_DB_IN_USE.load(Ordering::Relaxed) {
+                            // No in-island toast path renders arbitrary notices;
+                            // log once so the temporary DB is visible in Console.
+                            log::warn!(
+                                "Settings are stored in a temporary database and won't survive a restart."
+                            );
+                        }
                     }
-                    if this.expanded && nook_core::queue::take_artwork_ready() {
-                        dirty = true;
+                    // Customize keeps real widget previews but freezes these
+                    // frame pumps so dashed chrome is not rebuilt ~30–50×/s.
+                    if this.paints_live_widgets() {
+                        if this.interpolate_elapsed() {
+                            dirty = true;
+                        }
+                        if this.expanded && nook_core::queue::take_artwork_ready() {
+                            dirty = true;
+                        }
                     }
                     if this.step_spring(dt) {
                         dirty = true;
                     }
                     let any_working = this.agents.iter().any(|a| a.status.is_working());
-                    if any_working || (!this.expanded && this.shell_running) {
-                        // Full-rate on purpose: this repaints the island every
-                        // tick while an agent runs, which costs real battery,
-                        // but the Dot Matrix loader is the app's signature
-                        // animation and smoothness wins here. A live shell
-                        // on the compact face is the same class of "working".
-                        this.pixel_t = now.duration_since(this.pixel_origin).as_secs_f32();
-                        dirty = true;
+                    if this.paints_live_widgets()
+                        && !this.agent_morph_lite
+                        && (any_working
+                            || this.speed_running
+                            || (!this.expanded && this.shell_running))
+                    {
+                        // ~30fps is enough for the brand shimmer; painting the
+                        // glyph matrix every 20ms tick starved the expand morph
+                        // and Files↔Agents context shifts. Size/content springs
+                        // still dirty via `step_spring` at full rate; skip
+                        // pixel notifies entirely while lite is held.
+                        if now.duration_since(this.last_pixel_frame)
+                            >= Duration::from_millis(33)
+                        {
+                            this.last_pixel_frame = now;
+                            this.pixel_t =
+                                now.duration_since(this.pixel_origin).as_secs_f32();
+                            dirty = true;
+                        }
                     }
-                    if this.aura_should_animate()
+                    if this.paints_live_widgets()
+                        && this.aura_should_animate()
                         && now.duration_since(this.last_aura_frame)
                             >= Duration::from_millis(33)
                     {
@@ -878,7 +976,7 @@ impl Island {
                         this.motion_art_bounds = Some(rect);
                     }
                     this.apply_motion_art_layer();
-                    if this.mirror_on {
+                    if this.paints_live_widgets() && this.mirror_on {
                         if let Some((gen, bgra)) = platform::mirror_frame(this.mirror_gen) {
                             this.mirror_gen = gen;
                             if let Some(rendered) = mirror_render_image(bgra) {
@@ -907,12 +1005,11 @@ impl Island {
                         || this.mirror_on
                         || this.settings_open
                         || any_working
+                        || this.speed_running
                         || this.hud_active()
-                        || this.shell_running
-                        || this.search_open;
-                    // Media playing promotes itself through `dirty` (the
-                    // visualizer levels change every frame), so it needs no
-                    // term of its own here.
+                        || this.shell_running;
+                    // Media visualizer paints via request_animation_frame on
+                    // the Media face — it does not keep this loop hot.
                     let near = nook_core::mouse::hit_test_near(mx, my);
                     if this.cursor_near != near {
                         this.cursor_near = near;
@@ -923,7 +1020,7 @@ impl Island {
                     if active || near {
                         20
                     } else {
-                        80
+                        1000
                     }
                     }) {
                     Ok(next_wait) => wait_ms = next_wait,
@@ -943,6 +1040,8 @@ impl Island {
                     .await;
                 let alive = this.update(cx, |this, cx| {
                     let was_media = this.has_media();
+                    let track_changed = this.now_playing.title != playing.title
+                        || this.now_playing.bundle_id != playing.bundle_id;
                     let changed = this.now_playing.title != playing.title
                         || this.now_playing.artist != playing.artist
                         || this.now_playing.is_playing != playing.is_playing
@@ -958,11 +1057,46 @@ impl Island {
                     this.now_playing.artwork_base64 = playing.artwork_base64;
                     this.now_playing.duration = playing.duration;
                     if this.scrubber_drag.is_none() {
-                        this.now_playing.elapsed_time = playing.elapsed_time;
-                        this.elapsed_base = playing.elapsed_time;
-                        this.elapsed_at = Instant::now();
+                        // Optimistic hold: while a fresh seek disagrees with the backend
+                        // (command still in flight), keep the scrubbed elapsed so the thumb
+                        // does not snap back. Accept once MediaRemote is near the target,
+                        // once the window lapses, or when the track itself changes.
+                        match this.seek_intent {
+                            Some((want, since))
+                                if hold_seek_intent(
+                                    want,
+                                    since,
+                                    playing.elapsed_time,
+                                    track_changed,
+                                ) =>
+                            {
+                                // hold: do not overwrite elapsed this poll
+                            }
+                            _ => {
+                                this.seek_intent = None;
+                                this.now_playing.elapsed_time = playing.elapsed_time;
+                                this.elapsed_base = playing.elapsed_time;
+                                this.elapsed_at = Instant::now();
+                            }
+                        }
                     }
-                    this.now_playing.is_playing = playing.is_playing;
+                    // Optimistic hold: while a fresh play/pause intent disagrees with the
+                    // backend (command still in flight), keep the tapped state so the button
+                    // does not flip back and forth. Accept the poll once it catches up, once
+                    // the window lapses, or when the track itself changes.
+                    match this.play_intent {
+                        Some((want, since))
+                            if !track_changed
+                                && since.elapsed() < MEDIA_INTENT_WINDOW
+                                && playing.is_playing != want =>
+                        {
+                            // hold: do not overwrite is_playing this poll
+                        }
+                        _ => {
+                            this.play_intent = None;
+                            this.now_playing.is_playing = playing.is_playing;
+                        }
+                    }
                     this.now_playing.app_name = playing.app_name;
                     this.now_playing.bundle_id = playing.bundle_id;
                     this.lyrics_anchor_elapsed = this.now_playing.elapsed_time.unwrap_or(0.0);
@@ -981,7 +1115,7 @@ impl Island {
                     }
                     this.apply_motion_art_layer();
                     if !was_media && this.has_media() {
-                        this.preferred = Some(CompactMode::Media);
+                        this.alert_preferred = Some(CompactMode::Media);
                     }
                     this.sync_lyrics(cx);
                     let fetch = this.maybe_start_queue_fetch();
@@ -1010,8 +1144,7 @@ impl Island {
                         .await;
                     if this
                         .update(cx, |this, cx| {
-                            this.queue = queue;
-                            this.queue_inflight = false;
+                            this.apply_queue_fetch_result(queue);
                             cx.notify();
                         })
                         .is_err()
@@ -1091,9 +1224,10 @@ impl Island {
                     this.agents = agents;
                     if was_empty
                         && !this.agents.is_empty()
-                        && this.preferred != Some(CompactMode::Media)
+                        && this.user_preferred != Some(CompactMode::Media)
+                        && this.alert_preferred != Some(CompactMode::Media)
                     {
-                        this.preferred = Some(CompactMode::Agents);
+                        this.alert_preferred = Some(CompactMode::Agents);
                     }
                     if changed {
                         cx.notify();
@@ -1127,7 +1261,7 @@ impl Island {
                     let was_quiet = !this.observe.has_outage();
                     this.apply_observe_snapshot(snapshot, range, cx);
                     if was_quiet && this.observe.has_outage() {
-                        this.preferred = Some(CompactMode::Observe);
+                        this.alert_preferred = Some(CompactMode::Observe);
                         nook_core::haptics::trigger(None);
                     }
                 })
@@ -1186,14 +1320,14 @@ impl Island {
                         let was_quiet = this.messages.incoming.is_none();
                         this.messages = snapshot;
                         if was_quiet && this.messages.incoming.is_some() {
-                            this.preferred = Some(CompactMode::Messages);
+                            this.alert_preferred = Some(CompactMode::Messages);
                             this.message_draft.clear();
                             nook_core::haptics::trigger(None);
                         }
                         if this.messages.incoming.is_none()
-                            && this.preferred == Some(CompactMode::Messages)
+                            && this.alert_preferred == Some(CompactMode::Messages)
                         {
-                            this.preferred = None;
+                            this.alert_preferred = None;
                         }
                         cx.notify();
                     })
@@ -1229,7 +1363,7 @@ impl Island {
                         this.system_timers = timers;
                         if this.settings.show_timers && this.settings.sync_clock_timers {
                             if !was_running && now_running {
-                                this.preferred = Some(CompactMode::Timer);
+                                this.alert_preferred = Some(CompactMode::Timer);
                             }
                             if !was_fired && now_fired {
                                 nook_core::haptics::trigger(Some(
@@ -1312,7 +1446,7 @@ impl Island {
                         this.notifications = items;
                         this.notification_unread = unread;
                         if this.settings.show_notifications && unread > was {
-                            this.preferred = Some(CompactMode::Notifications);
+                            this.alert_preferred = Some(CompactMode::Notifications);
                             nook_core::haptics::trigger(None);
                         }
                         cx.notify();
@@ -1367,10 +1501,10 @@ impl Island {
         self.power = snap;
         let now_alert = self.has_battery_alert();
         if !was_alert && now_alert {
-            self.preferred = Some(CompactMode::Battery);
+            self.alert_preferred = Some(CompactMode::Battery);
             nook_core::haptics::trigger(None);
-        } else if was_alert && !now_alert && self.preferred == Some(CompactMode::Battery) {
-            self.preferred = None;
+        } else if was_alert && !now_alert && self.alert_preferred == Some(CompactMode::Battery) {
+            self.alert_preferred = None;
         }
         nook_core::power::set_detail_watch(self.expanded && self.settings.show_battery);
         cx.notify();
@@ -1418,8 +1552,8 @@ impl Island {
         let changed = self.vpn != snap;
         self.vpn = snap;
         if was != self.vpn.connected {
-            self.preferred = Some(CompactMode::Vpn);
-            self.vpn_reveal_until = Some(Instant::now() + Duration::from_secs(4));
+            self.alert_preferred = Some(CompactMode::Vpn);
+            self.vpn_reveal_until = Some(Instant::now() + motion::VPN_REVEAL);
             nook_core::haptics::trigger(None);
         }
         if changed {
@@ -1444,8 +1578,8 @@ impl Island {
             return false;
         }
         self.vpn_reveal_until = None;
-        if !self.vpn.connected && self.preferred == Some(CompactMode::Vpn) {
-            self.preferred = None;
+        if !self.vpn.connected && self.alert_preferred == Some(CompactMode::Vpn) {
+            self.alert_preferred = None;
         }
         true
     }
@@ -1504,7 +1638,7 @@ impl Island {
                     let changed = this.meeting != snap;
                     this.meeting = snap;
                     if !was && this.meeting.in_meeting() {
-                        this.preferred = Some(CompactMode::Meeting);
+                        this.alert_preferred = Some(CompactMode::Meeting);
                         nook_core::haptics::trigger(None);
                     }
                     if changed {
@@ -1564,6 +1698,10 @@ impl Island {
             self.output_picker_open = false;
             dirty = true;
         }
+        if (!self.settings.show_media_queue || !self.expanded) && self.queue_open {
+            self.queue_open = false;
+            dirty = true;
+        }
         if nook_core::audio_devices::take_dirty() {
             let devices = nook_core::audio_devices::snapshot();
             let old_id = self
@@ -1578,7 +1716,7 @@ impl Island {
                 if let Some(dev) = new_default {
                     if Some(dev.id) != old_id {
                         self.output_hud_name = Some(dev.name);
-                        self.output_hud_until = Some(Instant::now() + Duration::from_millis(1500));
+                        self.output_hud_until = Some(Instant::now() + motion::OUTPUT_HUD_TTL);
                     }
                 }
             }
@@ -1627,16 +1765,69 @@ impl Island {
             self.output_devices = nook_core::audio_devices::snapshot();
             let _ = nook_core::audio_devices::take_dirty();
             self.output_picker_open = true;
+            self.queue_open = false;
         }
         cx.notify();
     }
 
-    pub(crate) fn select_output_device(&mut self, id: u32, cx: &mut Context<Self>) {
-        let _ = nook_core::audio_devices::set_default_output(id);
-        for device in &mut self.output_devices {
-            device.is_default = device.id == id;
+    pub(crate) fn toggle_queue_panel(&mut self, cx: &mut Context<Self>) {
+        if !self.settings.show_media_queue
+            || !self.has_media()
+            || !nook_core::queue::supports_local_queue(
+                self.now_playing.app_name.as_deref(),
+                self.now_playing.bundle_id.as_deref(),
+            )
+        {
+            self.queue_open = false;
+            cx.notify();
+            return;
         }
-        self.output_picker_open = false;
+        self.queue_open = !self.queue_open;
+        if self.queue_open {
+            self.output_picker_open = false;
+            // Always re-pull on open so a prior empty/error does not stick,
+            // and so a stuck inflight flag cannot block the panel forever.
+            self.queue_key = None;
+            self.queue_inflight = false;
+            if self.maybe_start_queue_fetch() {
+                let np = self.now_playing.clone();
+                cx.spawn(async move |this, cx| {
+                    let queue = cx
+                        .background_executor()
+                        .spawn(async move {
+                            nook_core::runtime()
+                                .block_on(nook_core::queue::fetch_playback_queue(&np))
+                        })
+                        .await;
+                    let _ = this.update(cx, |this, cx| {
+                        this.apply_queue_fetch_result(queue);
+                        cx.notify();
+                    });
+                })
+                .detach();
+            }
+        }
+        cx.notify();
+    }
+
+    /// Width the Music cell claims: base cells plus the open queue panel.
+    pub(crate) fn music_pane_width(&self, cells: u8) -> f32 {
+        cells as f32 * theme::NOOK_CELL + self.queue_extra_width()
+    }
+
+    pub(crate) fn select_output_device(&mut self, id: u32, cx: &mut Context<Self>) {
+        match nook_core::audio_devices::set_default_output(id) {
+            Ok(()) => {
+                for device in &mut self.output_devices {
+                    device.is_default = device.id == id;
+                }
+                self.output_picker_open = false;
+            }
+            Err(_) => {
+                self.output_hud_name = Some("Couldn't switch output".into());
+                self.output_hud_until = Some(Instant::now() + motion::OUTPUT_HUD_TTL);
+            }
+        }
         cx.notify();
     }
 
@@ -1659,25 +1850,41 @@ impl Island {
             && self.expanded
             && self.tab == Tab::Widgets
             && self.has_media()
+            && nook_core::queue::supports_local_queue(
+                self.now_playing.app_name.as_deref(),
+                self.now_playing.bundle_id.as_deref(),
+            )
     }
 
-    /// Extra island height once upcoming rows are in hand. Header + up to 4
-    /// 40px rows; empty/hidden queues add nothing.
-    pub(crate) fn queue_extra_height(&self) -> f32 {
-        if !self.settings.show_media || !self.settings.show_media_queue {
-            return 0.0;
-        }
-        queue_list_height(self.queue.items.len())
-    }
-
-    /// Overlay-strip reserve so a queue arrival does not resize the NSWindow
-    /// mid-animation.
-    fn queue_reserve_height(settings: &AppSettings) -> f32 {
-        if settings.show_media && settings.show_media_queue {
-            queue_list_height(4)
+    /// Extra island width while the Playing Next side panel is open.
+    pub(crate) fn queue_extra_width(&self) -> f32 {
+        if self.queue_panel_visible() {
+            QUEUE_PANEL_W + QUEUE_SIDE_CHROME
         } else {
             0.0
         }
+    }
+
+    /// Width reserved for Now Playing (art / scrubber / transport) while the
+    /// queue panel is open. Matches the Music cell's closed size so controls
+    /// are not flex-shrunk away.
+    pub(crate) fn music_player_width(&self) -> f32 {
+        self.settings
+            .cells_for(nook_core::settings::WidgetModule::Music) as f32
+            * theme::NOOK_CELL
+    }
+
+    pub(crate) fn queue_panel_visible(&self) -> bool {
+        self.queue_open
+            && self.settings.show_media
+            && self.settings.show_media_queue
+            && self.expanded
+            && self.tab == Tab::Widgets
+            && self.has_media()
+            && nook_core::queue::supports_local_queue(
+                self.now_playing.app_name.as_deref(),
+                self.now_playing.bundle_id.as_deref(),
+            )
     }
 
     fn maybe_start_queue_fetch(&mut self) -> bool {
@@ -1691,9 +1898,24 @@ impl Island {
         if self.queue_key.as_ref() == Some(&key) {
             return false;
         }
-        self.queue_key = Some(key);
+        // Key is applied when the fetch finishes so a transient empty/error
+        // does not block retries for the same track.
         self.queue_inflight = true;
         true
+    }
+
+    fn apply_queue_fetch_result(&mut self, queue: nook_core::models::PlaybackQueue) {
+        let key = nook_core::queue::queue_identity(&self.now_playing);
+        // Cache anything that isn't a bare default (transient script/osascript
+        // failure). Empty-but-labeled Music snapshots and hide reasons stick.
+        let cacheable = queue != nook_core::models::PlaybackQueue::default();
+        self.queue = queue;
+        self.queue_inflight = false;
+        if cacheable {
+            self.queue_key = Some(key);
+        } else {
+            self.queue_key = None;
+        }
     }
 
     fn interpolate_elapsed(&mut self) -> bool {
@@ -1737,9 +1959,7 @@ impl Island {
             return true;
         };
         let position = duration * ratio as f64;
-        self.elapsed_base = Some(position);
-        self.elapsed_at = Instant::now();
-        // Re-anchors the lyrics clock and sets now_playing.elapsed_time.
+        // Re-anchors the lyrics clock, sets elapsed, and arms seek_intent.
         self.note_media_seek(position, cx);
         nook_core::runtime().spawn(async move {
             let _ = nook_core::audio::media_seek(position).await;
@@ -1758,6 +1978,9 @@ impl Island {
     pub(crate) fn note_media_seek(&mut self, position: f64, cx: &mut Context<Self>) {
         let position = position.max(0.0);
         self.now_playing.elapsed_time = Some(position);
+        self.elapsed_base = Some(position);
+        self.elapsed_at = Instant::now();
+        self.seek_intent = Some((position, Instant::now()));
         self.lyrics_anchor_elapsed = position;
         self.lyrics_anchor_at = Instant::now();
         self.arm_lyrics_line_timer(cx);
@@ -1767,7 +1990,20 @@ impl Island {
     pub(crate) fn note_media_play_pause(&mut self, cx: &mut Context<Self>) {
         let pos = self.lyrics_position();
         self.now_playing.is_playing = !self.now_playing.is_playing;
+        self.play_intent = Some((self.now_playing.is_playing, Instant::now()));
         self.lyrics_anchor_elapsed = pos;
+        self.lyrics_anchor_at = Instant::now();
+        self.arm_lyrics_line_timer(cx);
+        cx.notify();
+    }
+
+    pub(crate) fn note_media_skip(&mut self, cx: &mut Context<Self>) {
+        // Optimistically reset the position; the next poll brings the new track's
+        // metadata, but the scrubber should not linger at the old elapsed.
+        self.now_playing.elapsed_time = Some(0.0);
+        self.elapsed_base = Some(0.0);
+        self.elapsed_at = Instant::now();
+        self.lyrics_anchor_elapsed = 0.0;
         self.lyrics_anchor_at = Instant::now();
         self.arm_lyrics_line_timer(cx);
         cx.notify();
@@ -2056,11 +2292,11 @@ impl Island {
     pub(crate) fn toggle_face_timer(&mut self) {
         match self.face_timer().map(|t| t.source) {
             Some(FaceTimerSource::Local(id)) => self.toggle_local_timer(id),
-            Some(FaceTimerSource::Clock(_)) => {
+            Some(FaceTimerSource::Clock(id)) => {
                 if self.clock_timers().any(|t| t.state.is_running()) {
-                    nook_core::shortcuts::pause_timer();
+                    nook_core::shortcuts::pause_timer(&id);
                 } else {
-                    nook_core::shortcuts::resume_timer();
+                    nook_core::shortcuts::resume_timer(&id);
                 }
             }
             None => {}
@@ -2276,9 +2512,9 @@ impl Island {
 
     pub(crate) fn control_clock_timer(&self, action: ClockTimerAction) {
         match action {
-            ClockTimerAction::Pause => nook_core::shortcuts::pause_timer(),
-            ClockTimerAction::Resume => nook_core::shortcuts::resume_timer(),
-            ClockTimerAction::Cancel => nook_core::shortcuts::cancel_timer(),
+            ClockTimerAction::Pause(id) => nook_core::shortcuts::pause_timer(&id),
+            ClockTimerAction::Resume(id) => nook_core::shortcuts::resume_timer(&id),
+            ClockTimerAction::Cancel(id) => nook_core::shortcuts::cancel_timer(&id),
             ClockTimerAction::Open(id) => nook_core::shortcuts::open_timer(&id),
         }
     }
@@ -2329,6 +2565,8 @@ impl Island {
         window.activate_window();
         platform::activate_app();
         self.obsidian_typing = true;
+        self.obsidian_capture_caret = self.obsidian_capture.len();
+        self.obsidian_capture_select_all = false;
         cx.notify();
     }
 
@@ -2345,12 +2583,18 @@ impl Island {
         }
         if ks.key == "escape" {
             self.obsidian_typing = false;
+            self.obsidian_capture_select_all = false;
+            cx.notify();
+            return;
+        }
+        if ks.modifiers.secondary() && ks.key == "a" {
+            self.obsidian_capture_select_all = !self.obsidian_capture.is_empty();
             cx.notify();
             return;
         }
         if ks.modifiers.secondary() && ks.key == "v" {
             if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
-                self.obsidian_capture = text.trim().to_string();
+                self.obsidian_insert_text(&text);
                 cx.notify();
             }
             return;
@@ -2359,19 +2603,77 @@ impl Island {
             return;
         }
         match ks.key.as_str() {
+            "left" => {
+                self.obsidian_capture_select_all = false;
+                self.obsidian_capture_caret =
+                    prev_char_boundary(&self.obsidian_capture, self.obsidian_capture_caret);
+                cx.notify();
+            }
+            "right" => {
+                self.obsidian_capture_select_all = false;
+                self.obsidian_capture_caret =
+                    next_char_boundary(&self.obsidian_capture, self.obsidian_capture_caret);
+                cx.notify();
+            }
             "backspace" => {
-                self.obsidian_capture.pop();
+                self.obsidian_delete_backward();
+                cx.notify();
+            }
+            "delete" => {
+                self.obsidian_delete_forward();
                 cx.notify();
             }
             _ => {
                 if let Some(ch) = &ks.key_char {
                     if !ch.chars().any(|c| c.is_control()) {
-                        self.obsidian_capture.push_str(ch);
+                        self.obsidian_insert_text(ch);
                         cx.notify();
                     }
                 }
             }
         }
+    }
+
+    fn obsidian_insert_text(&mut self, text: &str) {
+        if self.obsidian_capture_select_all {
+            self.obsidian_capture.clear();
+            self.obsidian_capture_caret = 0;
+            self.obsidian_capture_select_all = false;
+        }
+        let caret = self.obsidian_capture_caret.min(self.obsidian_capture.len());
+        self.obsidian_capture.insert_str(caret, text);
+        self.obsidian_capture_caret = caret + text.len();
+    }
+
+    fn obsidian_delete_backward(&mut self) {
+        if self.obsidian_capture_select_all {
+            self.obsidian_capture.clear();
+            self.obsidian_capture_caret = 0;
+            self.obsidian_capture_select_all = false;
+            return;
+        }
+        let caret = self.obsidian_capture_caret.min(self.obsidian_capture.len());
+        if caret == 0 {
+            return;
+        }
+        let start = prev_char_boundary(&self.obsidian_capture, caret);
+        self.obsidian_capture.replace_range(start..caret, "");
+        self.obsidian_capture_caret = start;
+    }
+
+    fn obsidian_delete_forward(&mut self) {
+        if self.obsidian_capture_select_all {
+            self.obsidian_capture.clear();
+            self.obsidian_capture_caret = 0;
+            self.obsidian_capture_select_all = false;
+            return;
+        }
+        let caret = self.obsidian_capture_caret.min(self.obsidian_capture.len());
+        if caret >= self.obsidian_capture.len() {
+            return;
+        }
+        let end = next_char_boundary(&self.obsidian_capture, caret);
+        self.obsidian_capture.replace_range(caret..end, "");
     }
 
     pub(crate) fn submit_obsidian_capture(&mut self, cx: &mut Context<Self>) {
@@ -2385,6 +2687,8 @@ impl Island {
             return;
         };
         self.obsidian_capture.clear();
+        self.obsidian_capture_caret = 0;
+        self.obsidian_capture_select_all = false;
         self.obsidian_typing = false;
         let heading = self.settings.obsidian_capture_heading.clone();
         let use_uri = self.settings.obsidian_uri_capture;
@@ -2606,6 +2910,15 @@ impl Island {
     }
 
     pub(crate) fn refresh_calendar(&mut self, cx: &mut Context<Self>) {
+        if !self.settings.show_calendar && !self.settings.show_reminders {
+            return;
+        }
+        if !self.calendar_access_requested {
+            self.calendar_access_requested = true;
+            nook_core::runtime().spawn(async {
+                let _ = nook_core::calendar::request_calendar_access().await;
+            });
+        }
         cx.spawn(async move |this, cx| {
             let events = cx
                 .background_executor()
@@ -2634,10 +2947,30 @@ impl Island {
 
     pub(super) fn mode(&self) -> CompactMode {
         let modes = self.available_modes();
-        if let Some(preferred) = self.preferred.filter(|mode| modes.contains(mode)) {
+        if let Some(preferred) = self.alert_preferred.filter(|mode| modes.contains(mode)) {
+            return preferred;
+        }
+        let user = self.user_preferred.or(self.preferred);
+        if let Some(preferred) = user.filter(|mode| modes.contains(mode)) {
             return preferred;
         }
         modes.into_iter().next().unwrap_or(CompactMode::Idle)
+    }
+
+    fn sync_alert_preferred(&mut self) {
+        if let Some(mode) = self.alert_preferred {
+            if !self.available_modes().contains(&mode) {
+                self.alert_preferred = None;
+            }
+        }
+        // files.rs may still assign `preferred` directly.
+        if self.preferred != self.user_preferred {
+            if self.user_preferred.is_none() && self.preferred.is_some() {
+                self.user_preferred = self.preferred;
+            } else {
+                self.preferred = self.user_preferred;
+            }
+        }
     }
 
     fn has_agents(&self) -> bool {
@@ -2663,7 +2996,7 @@ impl Island {
 
     pub(crate) fn flash_meeting_mute(&mut self) {
         self.overlay_fade.set(1.0);
-        self.meeting_flash_until = Some(Instant::now() + Duration::from_millis(450));
+        self.meeting_flash_until = Some(Instant::now() + motion::MUTE_FLASH);
     }
 
     pub(crate) fn toggle_meeting_mute(&mut self, cx: &mut Context<Self>) {
@@ -2720,23 +3053,25 @@ impl Island {
         if self.share.is_live() {
             modes.push(CompactMode::Share);
         }
-        if self.settings.show_recorder && self.recording {
-            modes.push(CompactMode::Recording);
-        }
-        if self.has_meeting() {
-            modes.push(CompactMode::Meeting);
-        }
-        if self.has_observe_outage() {
-            modes.push(CompactMode::Observe);
-        }
-        if self.has_incoming_message() {
-            modes.push(CompactMode::Messages);
-        }
-        if self.has_vpn_face() {
-            modes.push(CompactMode::Vpn);
-        }
-        if self.has_notifications() {
-            modes.push(CompactMode::Notifications);
+        if self.settings.experimental_widgets {
+            if self.settings.show_recorder && self.recording {
+                modes.push(CompactMode::Recording);
+            }
+            if self.has_meeting() {
+                modes.push(CompactMode::Meeting);
+            }
+            if self.has_observe_outage() {
+                modes.push(CompactMode::Observe);
+            }
+            if self.has_incoming_message() {
+                modes.push(CompactMode::Messages);
+            }
+            if self.has_vpn_face() {
+                modes.push(CompactMode::Vpn);
+            }
+            if self.has_notifications() {
+                modes.push(CompactMode::Notifications);
+            }
         }
         if self.has_media() {
             modes.push(CompactMode::Media);
@@ -2744,7 +3079,6 @@ impl Island {
         if self.has_agents() {
             modes.push(CompactMode::Agents);
         }
-        if self.settings.show_timers && self.has_live_timer() {}
         if self.settings.show_timers && self.has_live_timer() {
             modes.push(CompactMode::Timer);
         }
@@ -2827,34 +3161,42 @@ impl Island {
         }
     }
 
+    /// Extra compact-flank inset in Liquid Glass so content clears the camera.
+    /// Resting idle is a 1px wrap around the housing and has no flanks.
+    pub(crate) fn glass_notch_gap(&self) -> f32 {
+        if !crate::platform::island_glass_setting_on() || self.suppressed {
+            return 0.0;
+        }
+        if self.mode() == CompactMode::Idle && !self.hovered && !self.hud_active() {
+            return 0.0;
+        }
+        theme::GLASS_NOTCH_GAP
+    }
+
+    fn lockup_size(&self, body: f32) -> (f32, f32) {
+        let w = (self.screen_width - theme::SCREEN_MARGIN)
+            .min(theme::LOCKUP_MAX_WIDTH)
+            .max(self.notch_width.max(180.0) + theme::COMPACT_HUD_EXTRA);
+        (w, self.notch_height.max(theme::NOTCH_MIN_H) + body)
+    }
+
     fn target_size(&self) -> (f32, f32) {
         let base_w = self.notch_width.max(180.0);
-        let base_h = self.notch_height.max(32.0);
-        if self.search_open {
-            let w = self.expanded_width().min(search::SEARCH_WIDTH);
-            return (w, self.notch_height.max(32.0) + self.search_body_height());
-        }
+        let base_h = self.notch_height.max(theme::NOTCH_MIN_H);
         if self.expanded {
             if self.tab == Tab::Widgets
+                && !self.widget_edit
                 && self.has_incoming_message()
                 && self.mode() == CompactMode::Messages
             {
-                let w = (self.screen_width - 40.0)
-                    .min(420.0)
-                    .max(self.notch_width.max(180.0) + 120.0);
-                return (
-                    w,
-                    self.notch_height.max(32.0) + theme::NOOK_INSET + theme::NOOK_BODY,
-                );
+                return self.lockup_size(theme::NOOK_INSET + theme::NOOK_BODY);
             }
             if self.tab == Tab::Widgets
+                && !self.widget_edit
                 && self.settings.show_recorder
                 && self.mode() == CompactMode::Recording
             {
-                let w = (self.screen_width - 40.0)
-                    .min(420.0)
-                    .max(self.notch_width.max(180.0) + 120.0);
-                return (w, self.notch_height.max(32.0) + theme::NOOK_INSET + 260.0);
+                return self.lockup_size(theme::NOOK_INSET + theme::RECORDER_BODY);
             }
             let w = self.expanded_width();
             let body = if self.tab == Tab::Terminal {
@@ -2867,15 +3209,45 @@ impl Island {
                 let extra = if self.share.shows_picker() { 88.0 } else { 0.0 };
                 theme::EXPANDED_PAD * 2.0 + files::files_pane_min_height(w) + extra
             } else {
-                theme::NOOK_INSET + theme::NOOK_BODY + self.queue_extra_height()
+                let (rows, _) = self.nook_row_count_for_render();
+                let rows = rows as f32;
+                let mut body = theme::NOOK_INSET
+                    + rows * theme::NOOK_BODY
+                    + (rows - 1.0) * theme::NOOK_ROW_GAP;
+                if self.widget_edit {
+                    body += theme::WIDGET_EDIT_PICKER_H + theme::NOOK_INSET;
+                }
+                body
             };
-            return (w, self.notch_height.max(32.0) + body);
+            let h = (self.notch_height.max(theme::NOTCH_MIN_H) + body)
+                .min(self.screen_height - theme::SCREEN_MARGIN);
+            return (w, h);
+        }
+        let glass_gap = 2.0 * self.glass_notch_gap();
+        if self.mode() == CompactMode::Recording {
+            let extra = if self.hovered {
+                crate::widgets::RECORDER_COMPACT_HOVER_EXTRA
+            } else {
+                crate::widgets::RECORDER_COMPACT_EXTRA
+            };
+            let h = if self.hovered {
+                base_h + theme::COMPACT_HOVER_CHIN
+            } else {
+                base_h + theme::COMPACT_HEIGHT_OVERFLOW
+            };
+            return (base_w + extra + glass_gap, h);
         }
         if self.hovered {
-            return (base_w + 88.0, base_h + 11.0);
+            return (
+                base_w + theme::COMPACT_HOVER_EXTRA + glass_gap,
+                base_h + theme::COMPACT_HOVER_CHIN,
+            );
         }
         if self.hud_active() {
-            return (base_w + 120.0, base_h + theme::COMPACT_HEIGHT_OVERFLOW);
+            return (
+                base_w + theme::COMPACT_HUD_EXTRA + glass_gap,
+                base_h + theme::COMPACT_HEIGHT_OVERFLOW,
+            );
         }
         if self.mode() == CompactMode::Idle {
             let h = if self.settings.non_notch_mode {
@@ -2883,33 +3255,168 @@ impl Island {
             } else {
                 self.notch_height + theme::IDLE_NOTCH_OVERFLOW + theme::COMPACT_HEIGHT_OVERFLOW
             };
+            // Glass gap is for live-activity flanks, not the idle housing wrap.
             return (self.notch_width + theme::IDLE_NOTCH_OVERFLOW, h);
         }
-        (base_w + 72.0, base_h + theme::COMPACT_HEIGHT_OVERFLOW)
+        (
+            base_w + theme::COMPACT_LIVE_EXTRA + glass_gap,
+            base_h + theme::COMPACT_HEIGHT_OVERFLOW,
+        )
     }
 
     pub(super) fn expanded_width(&self) -> f32 {
-        (self.screen_width - 40.0).min(theme::EXPANDED_MAX_WIDTH)
+        // Every expanded tab uses the full default width (the Terminal width) so
+        // the island stays one consistent size across Nook / Tray / Term.
+        let screen_cap = (self.screen_width - theme::SCREEN_MARGIN)
+            .min(theme::EXPANDED_MAX_WIDTH + self.queue_extra_width());
+        let base = (self.screen_width - theme::SCREEN_MARGIN).min(theme::EXPANDED_MAX_WIDTH);
+        // Music "Up Next" widens beyond the base when open.
+        let width = base + self.queue_extra_width();
+        width.min(screen_cap)
     }
 
-    /// Lowest screen edge the island can reach if it expands right now, over
-    /// either tab. Used to pre-size the overlay strip while the cursor hovers,
-    /// so the NSWindow resize happens before an expand can start instead of
-    /// stuttering inside the animation.
+    /// Modules `render_nook` would actually paint, in order, with cell widths.
+    pub(super) fn visible_nook_items(&self) -> Vec<(WidgetModule, u8)> {
+        use nook_core::messages::FdaStatus;
+        let editing = self.widget_edit;
+        let mut out = Vec::new();
+        for module in self.settings.ordered_widgets() {
+            if !self.settings.widget_visible(module) {
+                continue;
+            }
+            let show = match module {
+                WidgetModule::Music => self.settings.show_media,
+                WidgetModule::Calendar => self.settings.show_calendar,
+                WidgetModule::Mirror => self.settings.show_mirror,
+                WidgetModule::Agents => self.settings.show_agents,
+                WidgetModule::Meeting => self.settings.is_enabled(module),
+                WidgetModule::Observe => self.settings.show_observe,
+                WidgetModule::Reminders => self.settings.show_reminders,
+                WidgetModule::Timers => self.settings.show_timers,
+                WidgetModule::Notes => self.settings.show_notes,
+                WidgetModule::Obsidian => self.settings.is_enabled(module),
+                WidgetModule::Speed => self.settings.show_speed,
+                WidgetModule::Battery => self.settings.show_battery,
+                WidgetModule::Messages => {
+                    self.settings.show_messages
+                        && (editing
+                            || self.messages.incoming.is_some()
+                            || self.messages.fda != FdaStatus::Granted)
+                }
+                WidgetModule::Weather => self.settings.weather.enabled,
+                WidgetModule::Vpn => self.settings.show_vpn,
+                WidgetModule::HighAlert => self.settings.show_high_alert,
+                WidgetModule::SysStats => self.settings.show_sysstats,
+                WidgetModule::Recorder => self.settings.show_recorder,
+                WidgetModule::Notifications => self.settings.show_notifications,
+                WidgetModule::Files => false,
+            };
+            if show {
+                out.push((module, self.settings.cells_for(module)));
+            }
+        }
+        out
+    }
+
+    /// Packed Nook rows for sizing / layout (same greedy pack as Settings).
+    pub(super) fn nook_rows_for_render(&self) -> Vec<Vec<(WidgetModule, u8)>> {
+        nook_core::settings::pack_rows(&self.visible_nook_items(), AppSettings::TOTAL_CELLS)
+    }
+
+    /// Row count (and last-row leftover cells) matching what `render_nook` paints,
+    /// including the customize append slot when the last row is full.
+    pub(super) fn nook_row_count_for_render(&self) -> (usize, u8) {
+        let mut packed = self.nook_rows_for_render();
+        packed.truncate(AppSettings::MAX_ROWS);
+        let last_remaining = match packed.last() {
+            Some(row) => {
+                let used = row
+                    .iter()
+                    .map(|(_, cells)| *cells)
+                    .fold(0u8, |sum, cells| sum.saturating_add(cells));
+                AppSettings::TOTAL_CELLS.saturating_sub(used)
+            }
+            None => AppSettings::TOTAL_CELLS,
+        };
+        let last_row_full = !packed.is_empty() && last_remaining == 0;
+        let mut rows = packed.len();
+        if self.widget_edit && last_row_full && rows < AppSettings::MAX_ROWS {
+            rows += 1;
+        }
+        (rows.clamp(1, AppSettings::MAX_ROWS), last_remaining)
+    }
+
+    /// Enter on-island widget customize mode.
+    pub(crate) fn begin_widget_edit(&mut self, cx: &mut Context<Self>) {
+        if self.widget_edit {
+            return;
+        }
+        self.widget_edit_snapshot = Some(self.settings.clone());
+        self.widget_edit = true;
+        self.widget_edit_budget_hint_at = None;
+        self.tab = Tab::Widgets;
+        self.expanded = true;
+        self.close_notes_editor(cx);
+        self.obsidian_typing = false;
+        self.shell_focused = false;
+        self.repositioning = false;
+        // Size morph runs via MORPH; force a content dissolve even when already
+        // expanded on Widgets (arm would otherwise no-op).
+        self.arm_content_transition();
+        cx.notify();
+    }
+
+    /// While customizing, keep real widget previews on screen but freeze the
+    /// per-frame pumps (visualizer, LED shimmer, aura, mirror frames) so edit
+    /// chrome does not repaint at ~30–50 Hz.
+    pub(crate) fn paints_live_widgets(&self) -> bool {
+        !self.widget_edit
+    }
+
+    pub(crate) fn finish_widget_edit(&mut self, cx: &mut Context<Self>) {
+        self.widget_edit = false;
+        self.widget_edit_snapshot = None;
+        self.widget_edit_budget_hint_at = None;
+        // Live tweaks already persisted; refresh local cache from store.
+        self.settings = nook_core::settings::get_app_settings();
+        self.arm_content_transition();
+        cx.notify();
+    }
+
+    pub(crate) fn cancel_widget_edit(&mut self, cx: &mut Context<Self>) {
+        if let Some(snapshot) = self.widget_edit_snapshot.take() {
+            nook_core::settings::update_app_settings(snapshot.clone());
+            self.settings = snapshot;
+        }
+        self.widget_edit = false;
+        self.widget_edit_budget_hint_at = None;
+        self.arm_content_transition();
+        cx.notify();
+    }
+
+    /// Lowest screen edge the island can reach over every expanded tab.
+    /// Files height uses the Files-tab width (screen-capped
+    /// [`theme::EXPANDED_MAX_WIDTH`]), not the content-sized Widgets width.
+    /// Used to reserve the overlay strip so a tab switch or expand never
+    /// resizes the NSWindow mid-animation (CoreAnimation would show one
+    /// stretched stale frame).
     pub(super) fn expanded_bottom(&self) -> f32 {
-        let w = self.expanded_width();
-        let mut body =
-            theme::NOOK_INSET + theme::NOOK_BODY + Self::queue_reserve_height(&self.settings);
+        let files_w = (self.screen_width - theme::SCREEN_MARGIN).min(theme::EXPANDED_MAX_WIDTH);
+        let mut widgets_body = theme::NOOK_INSET + theme::NOOK_BODY;
+        if self.widget_edit {
+            widgets_body += theme::WIDGET_EDIT_PICKER_H + theme::NOOK_INSET;
+        }
+        let mut body = widgets_body;
         if self.settings.show_files {
-            body = body.max(theme::EXPANDED_PAD * 2.0 + files::files_pane_min_height(w));
+            let extra = if self.share.shows_picker() { 88.0 } else { 0.0 };
+            body =
+                body.max(theme::EXPANDED_PAD * 2.0 + files::files_pane_min_height(files_w) + extra);
         }
         if self.settings.terminal_enabled {
             body = body.max(theme::EXPANDED_PAD + crate::widgets::terminal_pane_min_height());
         }
-        if self.search_open || self.settings.search.enabled {
-            body = body.max(self.search_body_height());
-        }
-        let h = self.notch_height.max(32.0) + body;
+        let h = self.notch_height.max(theme::NOTCH_MIN_H) + body;
+        let w = self.expanded_width().max(files_w);
         let (_, top) = self.settings.island_origin(
             self.screen_width,
             self.screen_height,
@@ -2964,25 +3471,61 @@ impl Island {
         (0.0, 0.0)
     }
 
+    /// Arm the content crossfade at the moment expand/tab/mode/edit changes.
+    /// No-op when nothing changed — safe to call before every notify.
+    /// Use [`Self::force_content_transition`] for in-place edit add/remove/reorder.
+    pub(super) fn arm_content_transition(&mut self) {
+        let mode = self.mode();
+        let force = self.content_transition_force;
+        if !force
+            && self.expanded == self.last_expanded
+            && mode == self.last_mode
+            && self.tab == self.last_tab
+            && self.widget_edit == self.last_widget_edit
+        {
+            return;
+        }
+        self.content_transition_force = false;
+        let (x, y) = if force {
+            (0.0, 0.0)
+        } else {
+            self.content_transition_offset(mode)
+        };
+        self.content_fade.set(0.0);
+        self.content_x.set(x);
+        self.content_y.set(y);
+        if !self.reduce_motion {
+            // Hold lite for the whole morph/shift, including the last
+            // pixels — a mid-spring threshold flipped full paint back on
+            // too early. Mode/tab swaps need this too: size may already
+            // be parked while content_x still travels.
+            self.agent_morph_lite = true;
+        }
+        self.last_expanded = self.expanded;
+        self.last_mode = mode;
+        self.last_tab = self.tab;
+        self.last_widget_edit = self.widget_edit;
+    }
+
+    /// Crossfade after an in-place widget edit layout change (tap/drop/−).
+    pub(super) fn force_content_transition(&mut self) {
+        self.content_transition_force = true;
+        self.arm_content_transition();
+    }
+
     /// Advance every animated value one frame on its `motion` spring.
     /// Returns whether we still need frames.
     fn step_spring(&mut self, dt: f32) -> bool {
         let (tw, th) = self.target_size();
-        let mode = self.mode();
-        if self.expanded != self.last_expanded
-            || mode != self.last_mode
-            || self.tab != self.last_tab
-        {
-            let (x, y) = self.content_transition_offset(mode);
-            self.content_fade.set(0.0);
-            self.content_x.set(x);
-            self.content_y.set(y);
-            self.last_expanded = self.expanded;
-            self.last_mode = mode;
-            self.last_tab = self.tab;
-        }
+        self.arm_content_transition();
 
         let mut moving = false;
+        if let Some(at) = self.widget_edit_budget_hint_at {
+            if at.elapsed() >= Duration::from_secs(2) {
+                self.widget_edit_budget_hint_at = None;
+                moving = true;
+            }
+        }
         if self.reduce_motion {
             // HIG › Motion: motion must be optional. Size and spatial travel
             // park instantly and the blur stays off; the crossfade below still
@@ -2991,6 +3534,7 @@ impl Island {
             self.anim_h.set(th);
             self.content_x.set(0.0);
             self.content_y.set(0.0);
+            self.agent_morph_lite = false;
         } else {
             moving |= self.anim_w.step(motion::MORPH, tw, dt, motion::REST_PX);
             moving |= self.anim_h.step(motion::MORPH, th, dt, motion::REST_PX);
@@ -3004,6 +3548,16 @@ impl Island {
         moving |= self
             .content_fade
             .step(motion::CROSSFADE, 1.0, dt, motion::REST_ALPHA);
+        if !self.reduce_motion
+            && self.agent_morph_lite
+            && (self.anim_w.value - tw).abs() <= motion::REST_PX
+            && (self.anim_h.value - th).abs() <= motion::REST_PX
+            && self.content_x.value.abs() <= motion::REST_PX
+            && self.content_y.value.abs() <= motion::REST_PX
+            && (1.0 - self.content_fade.value).abs() <= motion::REST_ALPHA
+        {
+            self.agent_morph_lite = false;
+        }
         let overlay = if self.mode() == CompactMode::Meeting {
             if self
                 .meeting_flash_until
@@ -3020,6 +3574,15 @@ impl Island {
         moving |= self
             .overlay_fade
             .step(motion::REVEAL, overlay, dt, motion::REST_ALPHA);
+        self.latch_agent_border_color();
+        let border_target = if self.agent_is_working() { 1.0 } else { 0.0 };
+        if self.reduce_motion {
+            self.agent_border.set(border_target);
+        } else {
+            moving |= self
+                .agent_border
+                .step(motion::REVEAL, border_target, dt, motion::REST_ALPHA);
+        }
         let hud_target = self
             .hud
             .filter(|_| self.hud_enabled())
@@ -3053,6 +3616,32 @@ impl Island {
         moving
     }
 
+    fn agent_is_working(&self) -> bool {
+        self.agents.iter().any(|agent| agent.status.is_working())
+    }
+
+    /// True from expand/collapse or a mode/tab context shift until size,
+    /// content travel, and the crossfade fully rest. Brand faces and chrome
+    /// drop glow detail for that window only — not on compact hover, which
+    /// was flickering when keyed off size delta.
+    pub(crate) fn size_morphing(&self) -> bool {
+        self.agent_morph_lite
+    }
+
+    fn latch_agent_border_color(&mut self) {
+        if let Some(agent) = crate::widgets::face_agent(&self.agents) {
+            if agent.status.is_working() {
+                self.agent_border_color = Some(crate::dotmatrix::led_color_on(
+                    agent.kind,
+                    theme::island_fill(self.settings.island_color),
+                ));
+            }
+        }
+        if self.agent_border.value <= motion::REST_ALPHA && !self.agent_is_working() {
+            self.agent_border_color = None;
+        }
+    }
+
     /// Offset (px) for the motion-blur side taps, or `None` while the island is
     /// close enough to rest that the content should be a single crisp layer.
     fn blur_offset(&self) -> Option<(f32, f32)> {
@@ -3079,7 +3668,113 @@ impl Island {
         Some((ux * smear, uy * smear))
     }
 
+    /// Close the topmost open layer, then collapse.
+    pub(crate) fn dismiss(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let _ = window;
+        if self.widget_edit {
+            self.cancel_widget_edit(cx);
+            return;
+        }
+        if self.output_picker_open {
+            self.output_picker_open = false;
+            cx.notify();
+            return;
+        }
+        if self.queue_open {
+            self.queue_open = false;
+            cx.notify();
+            return;
+        }
+        if self.timer_composer {
+            self.timer_composer = false;
+            cx.notify();
+            return;
+        }
+        if self.mirror_on {
+            self.stop_mirror(cx);
+            return;
+        }
+        if self.notes_editing {
+            self.close_notes_editor(cx);
+            return;
+        }
+        if self.expanded {
+            self.expanded = false;
+            self.close_notes_editor(cx);
+            self.stop_mirror(cx);
+            self.park_terminal();
+            nook_core::power::set_detail_watch(false);
+            nook_core::haptics::trigger(None);
+            self.arm_lyrics_line_timer(cx);
+            self.arm_content_transition();
+            cx.notify();
+        }
+    }
+
+    fn on_island_key(
+        &mut self,
+        event: &gpui::KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let ks = &event.keystroke;
+        if ks.modifiers.platform && ks.key == "," {
+            self.open_settings(cx);
+            return;
+        }
+        let own = self.focus.as_ref().is_some_and(|f| f.is_focused(window));
+        if !own {
+            return;
+        }
+        if ks.key == "escape" {
+            self.dismiss(window, cx);
+            return;
+        }
+        if ks.modifiers.platform && ks.key == "w" {
+            self.dismiss(window, cx);
+            return;
+        }
+        if ks.key == "up" {
+            if self.expanded {
+                self.dismiss(window, cx);
+            }
+            return;
+        }
+        if ks.key == "down" {
+            if !self.expanded {
+                self.toggle_expanded(cx);
+            }
+            return;
+        }
+        if ks.key == "space" || ks.key == "enter" {
+            self.toggle_expanded(cx);
+            return;
+        }
+        if ks.key == "left" || ks.key == "right" {
+            let next = ks.key == "right";
+            let acted = if self.expanded {
+                self.cycle_tab(next);
+                true
+            } else {
+                self.cycle_mode(next)
+            };
+            if acted {
+                if !self.expanded {
+                    self.close_notes_editor(cx);
+                    self.stop_mirror(cx);
+                    self.park_terminal();
+                }
+                self.arm_lyrics_line_timer(cx);
+                self.arm_content_transition();
+                cx.notify();
+            }
+        }
+    }
+
     fn toggle_expanded(&mut self, cx: &mut Context<Self>) {
+        if self.widget_edit {
+            return;
+        }
         self.expanded = !self.expanded;
         if self.expanded {
             if self.tab != Tab::Terminal || !self.settings.terminal_enabled {
@@ -3088,6 +3783,7 @@ impl Island {
                     _ => Tab::Widgets,
                 };
             }
+            self.correct_hidden_tab();
             nook_core::audio::note_media_event();
             if self.first_run {
                 self.first_run = false;
@@ -3095,13 +3791,13 @@ impl Island {
             }
         } else {
             self.close_notes_editor(cx);
-            self.close_search(cx);
             self.stop_mirror(cx);
             self.park_terminal();
         }
         nook_core::power::set_detail_watch(self.expanded && self.settings.show_battery);
         nook_core::haptics::trigger(None);
         self.arm_lyrics_line_timer(cx);
+        self.arm_content_transition();
         cx.notify();
     }
 
@@ -3117,7 +3813,9 @@ impl Island {
         } else {
             (idx + modes.len() - 1) % modes.len()
         };
-        self.preferred = Some(modes[new_idx]);
+        self.user_preferred = Some(modes[new_idx]);
+        self.preferred = self.user_preferred;
+        self.alert_preferred = None;
         nook_core::haptics::trigger(None);
         true
     }
@@ -3127,7 +3825,6 @@ impl Island {
         if self.apply_wheel(delta.x.into(), delta.y.into(), event.touch_phase) {
             if !self.expanded {
                 self.close_notes_editor(cx);
-                self.close_search(cx);
                 self.stop_mirror(cx);
                 self.park_terminal();
             }
@@ -3138,12 +3835,15 @@ impl Island {
 
     /// One physical two-finger swipe → one compact-mode / expand / tab change.
     fn apply_wheel(&mut self, dx: f32, dy: f32, phase: TouchPhase) -> bool {
-        const THRESHOLD: f32 = 20.0;
-        const IDLE: Duration = Duration::from_millis(280);
+        if self.widget_edit {
+            return false;
+        }
+        let threshold = motion::SWIPE_THRESHOLD;
+        let idle = motion::SWIPE_IDLE;
 
         let now = Instant::now();
         if matches!(phase, TouchPhase::Started)
-            || now.saturating_duration_since(self.last_wheel_at) >= IDLE
+            || now.saturating_duration_since(self.last_wheel_at) >= idle
         {
             self.wheel_locked = false;
             self.wheel_acc_x = 0.0;
@@ -3161,7 +3861,7 @@ impl Island {
         let ay = self.wheel_acc_y;
 
         let acted = if ax.abs() > ay.abs() {
-            if ax.abs() <= THRESHOLD {
+            if ax.abs() <= threshold {
                 false
             } else if self.expanded {
                 self.cycle_tab(ax > 0.0);
@@ -3169,7 +3869,7 @@ impl Island {
             } else {
                 self.cycle_mode(ax > 0.0)
             }
-        } else if ay.abs() <= THRESHOLD {
+        } else if ay.abs() <= threshold {
             false
         } else if !self.expanded && ay > 0.0 {
             // AppKit scrollingDeltaY: two-finger swipe *down* is positive.
@@ -3191,6 +3891,7 @@ impl Island {
             self.wheel_locked = true;
             self.wheel_acc_x = 0.0;
             self.wheel_acc_y = 0.0;
+            self.arm_content_transition();
         }
         acted
     }
@@ -3220,6 +3921,9 @@ impl Island {
     }
 
     fn on_island_press(&mut self, event: &MouseDownEvent, cx: &mut Context<Self>) {
+        if self.widget_edit {
+            return;
+        }
         if event.modifiers.alt {
             self.begin_reposition(event);
             cx.notify();
@@ -3263,6 +3967,18 @@ impl Island {
     }
 
     fn open_settings(&mut self, cx: &mut Context<Self>) {
+        if self.widget_edit {
+            self.cancel_widget_edit(cx);
+        }
+        if self.expanded {
+            self.expanded = false;
+            self.close_notes_editor(cx);
+            self.stop_mirror(cx);
+            self.park_terminal();
+            nook_core::power::set_detail_watch(false);
+            self.arm_lyrics_line_timer(cx);
+            self.arm_content_transition();
+        }
         if let Some(handle) = self.settings_window {
             if handle
                 .update(cx, |_, window, _| window.activate_window())
@@ -3278,11 +3994,16 @@ impl Island {
         let (w, h) = settings::SETTINGS_SIZE;
         let (min_w, min_h) = settings::SETTINGS_MIN;
         let bounds = gpui::Bounds::centered(None, size(px(w), px(h)), cx);
+        let background = if platform::reduce_transparency() {
+            WindowBackgroundAppearance::Opaque
+        } else {
+            WindowBackgroundAppearance::Blurred
+        };
         let Ok(handle) = cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 titlebar: Some(gpui::TitlebarOptions {
-                    title: Some("Settings".into()),
+                    title: Some("openNook Settings".into()),
                     appears_transparent: true,
                     ..Default::default()
                 }),
@@ -3290,7 +4011,7 @@ impl Island {
                 is_resizable: true,
                 focus: true,
                 show: true,
-                window_background: WindowBackgroundAppearance::Blurred,
+                window_background: background,
                 window_min_size: Some(size(px(min_w), px(min_h))),
                 ..Default::default()
             },
@@ -3314,7 +4035,7 @@ impl Island {
     }
 
     pub(super) fn airdrop_paths(&mut self, paths: &ExternalPaths, cx: &mut Context<Self>) {
-        let files: Vec<std::path::PathBuf> = paths.paths().iter().cloned().collect();
+        let files: Vec<std::path::PathBuf> = paths.paths().to_vec();
         if files.is_empty() {
             return;
         }
@@ -3324,53 +4045,91 @@ impl Island {
     }
 
     fn ingest_paths(&mut self, paths: &ExternalPaths, cx: &mut Context<Self>) {
-        self.ingest_external_paths(paths.paths().iter().cloned().collect(), cx);
+        self.ingest_external_paths(paths.paths().to_vec(), cx);
     }
 
     /// Shared by drag-drop, `opennook://tray/add`, and Finder Services.
     pub(crate) fn ingest_external_paths(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
         let mut added = false;
+        let mut dupes = 0u32;
+        let mut invalid = 0u32;
         for path in paths {
             let raw = path.to_string_lossy().into_owned();
             let Ok(resolved) = nook_core::automation::validate_tray_path(&raw) else {
+                invalid += 1;
                 continue;
             };
             if self.files.iter().any(|f| f.path == resolved) {
+                dupes += 1;
                 continue;
             }
-            if let Ok(item) = nook_core::files::add_dropped_path(&resolved) {
-                self.files.push(item);
-                added = true;
+            match nook_core::files::add_dropped_path(&resolved) {
+                Ok(item) => {
+                    self.files.push(item);
+                    added = true;
+                }
+                Err(_) => invalid += 1,
             }
+        }
+        if dupes > 0 {
+            self.output_hud_name = Some(format!("{dupes} already in the tray"));
+            self.output_hud_until = Some(Instant::now() + motion::OUTPUT_HUD_TTL);
+        } else if invalid > 0 {
+            self.output_hud_name = Some(format!("{invalid} couldn't be added"));
+            self.output_hud_until = Some(Instant::now() + motion::OUTPUT_HUD_TTL);
         }
         if added {
             let _ = nook_core::files::save_file_tray(self.files.clone());
-            self.preferred = Some(CompactMode::Files);
+            self.user_preferred = Some(CompactMode::Files);
+            self.preferred = self.user_preferred;
+            self.alert_preferred = None;
             self.tab = Tab::Files;
             self.expanded = true;
             nook_core::audio::note_media_event();
             nook_core::haptics::trigger(None);
+            self.arm_content_transition();
+        }
+        if added || dupes > 0 || invalid > 0 {
             cx.notify();
         }
     }
 
     pub(crate) fn apply_external_action(&mut self, action: ExternalAction, cx: &mut Context<Self>) {
+        if self.widget_edit && !matches!(action, ExternalAction::EditWidgets) {
+            return;
+        }
         match action {
             ExternalAction::TrayAdd(paths) => self.ingest_external_paths(paths, cx),
             ExternalAction::TrayClear => {
-                self.files.clear();
-                let _ = nook_core::files::save_file_tray(self.files.clone());
+                if !self.files.is_empty() {
+                    // files.rs renders the Undo chip
+                    self.last_cleared_files =
+                        Some((std::mem::take(&mut self.files), Instant::now()));
+                    let _ = nook_core::files::save_file_tray(self.files.clone());
+                }
                 cx.notify();
             }
             ExternalAction::TimerStart { seconds } => {
                 self.add_timer(seconds);
-                self.expanded = true;
-                self.tab = Tab::Widgets;
+                if self.hovered {
+                    self.expanded = true;
+                    self.tab = Tab::Widgets;
+                    self.arm_content_transition();
+                } else {
+                    self.alert_preferred = Some(CompactMode::Timer);
+                }
                 cx.notify();
             }
             ExternalAction::Expand => {
                 self.expanded = true;
+                self.arm_content_transition();
                 cx.notify();
+            }
+            ExternalAction::OpenSettings => {
+                self.open_settings(cx);
+            }
+            ExternalAction::EditWidgets => {
+                self.begin_widget_edit(cx);
             }
         }
     }
@@ -3402,10 +4161,51 @@ impl Island {
         tabs
     }
 
+    /// Keep `self.tab` on a visible tab after settings hide Files/Terminal.
+    fn correct_hidden_tab(&mut self) {
+        let tabs = self.shown_tabs();
+        if !tabs.contains(&self.tab) {
+            self.tab = tabs.first().copied().unwrap_or(Tab::Widgets);
+        }
+    }
+}
+
+fn prev_char_boundary(text: &str, index: usize) -> usize {
+    if index == 0 {
+        return 0;
+    }
+    let mut i = index.min(text.len());
+    while i > 0 {
+        i -= 1;
+        if text.is_char_boundary(i) {
+            return i;
+        }
+    }
+    0
+}
+
+fn next_char_boundary(text: &str, index: usize) -> usize {
+    let len = text.len();
+    let mut i = index.min(len);
+    if i >= len {
+        return len;
+    }
+    i += 1;
+    while i < len && !text.is_char_boundary(i) {
+        i += 1;
+    }
+    i
+}
+
+impl Island {
     fn cycle_tab(&mut self, next: bool) {
+        if self.widget_edit {
+            return;
+        }
         let tabs = self.shown_tabs();
         if tabs.is_empty() {
             self.tab = Tab::Widgets;
+            self.arm_content_transition();
             return;
         }
         let idx = tabs.iter().position(|tab| *tab == self.tab).unwrap_or(0);
@@ -3415,6 +4215,7 @@ impl Island {
             (idx + tabs.len() - 1) % tabs.len()
         };
         self.tab = tabs[new_idx];
+        self.arm_content_transition();
     }
 
     pub(crate) fn ensure_terminal(
@@ -3485,7 +4286,7 @@ impl Island {
         });
         self.next_timer_id += 1;
         self.timer_composer = false;
-        self.preferred = Some(CompactMode::Timer);
+        self.alert_preferred = Some(CompactMode::Timer);
         crate::notify::schedule_island_timer(id, seconds, "");
     }
 
@@ -3509,7 +4310,7 @@ impl Island {
         });
         self.next_timer_id += 1;
         self.timer_composer = false;
-        self.preferred = Some(CompactMode::Timer);
+        self.alert_preferred = Some(CompactMode::Timer);
         self.on_pomodoro_edge(true);
         self.sync_pomodoro_awake();
     }
@@ -3531,7 +4332,7 @@ impl Island {
         let (mx, my) = nook_core::mouse::current_mouse_logical();
         let dx = mx - pending.screen_x;
         let dy = my - pending.screen_y;
-        if dx * dx + dy * dy < 16.0 {
+        if dx * dx + dy * dy < motion::DRAG_SLOP as f64 {
             return false;
         }
         let path = self.pending_file_drag.take().unwrap().path;
@@ -3560,26 +4361,35 @@ impl Island {
             return false;
         }
         log::warn!("drag-out skipped; missing {path}");
+        let name = std::path::Path::new(path)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or(path)
+            .to_string();
         let n = self.files.len();
         self.files.retain(|f| f.path != path);
         if self.files.len() == n {
             return true;
         }
+        self.tray_flash = Some((format!("{name} is missing"), Instant::now()));
         let _ = nook_core::files::save_file_tray(self.files.clone());
         true
+    }
+
+    /// Restore the last cleared tray. files.rs renders the Undo chip.
+    pub(crate) fn undo_clear_files(&mut self, cx: &mut Context<Self>) {
+        if let Some((files, _)) = self.last_cleared_files.take() {
+            self.files = files;
+            let _ = nook_core::files::save_file_tray(self.files.clone());
+            cx.notify();
+        }
     }
 }
 
 pub(crate) const QUEUE_ROW_H: f32 = 40.0;
-const QUEUE_HEADER_H: f32 = 18.0;
-const QUEUE_LIST_PAD: f32 = 8.0;
-
-pub(crate) fn queue_list_height(item_count: usize) -> f32 {
-    if item_count == 0 {
-        return 0.0;
-    }
-    QUEUE_HEADER_H + item_count.min(4) as f32 * QUEUE_ROW_H + QUEUE_LIST_PAD
-}
+pub(crate) const QUEUE_PANEL_W: f32 = 240.0;
+/// Flex gaps (12 + 12) plus the 1px rule between player and queue.
+pub(crate) const QUEUE_SIDE_CHROME: f32 = 25.0;
 
 /// Paint camera pixels immediately. `img(Image)` goes through GPUI's async
 /// decoder (200ms placeholder), so a new JPEG every tick looks like a reinit.
@@ -3603,7 +4413,7 @@ mod tests {
     use crate::island::ui::format_timer;
     use nook_core::agents::{AgentKind, AgentStatus};
     use nook_core::notifications::NotificationEvent;
-    use std::collections::HashMap;
+    use std::collections::{HashMap, VecDeque};
     use std::rc::Rc;
     use std::sync::{Mutex, MutexGuard};
 
@@ -3623,7 +4433,9 @@ mod tests {
             screen_height: 982.0,
             hovered: false,
             expanded: false,
+            user_preferred: None,
             preferred: None,
+            alert_preferred: None,
             tab: Tab::Widgets,
             now_playing: NowPlayingData::default(),
             visualizer_color: None,
@@ -3646,6 +4458,8 @@ mod tests {
             scrubber_bounds: Rc::new(RefCell::new(None)),
             elapsed_base: None,
             elapsed_at: Instant::now(),
+            play_intent: None,
+            seek_intent: None,
             files: Vec::new(),
             events: Vec::new(),
             reminders: Vec::new(),
@@ -3659,6 +4473,8 @@ mod tests {
             obsidian_watch: None,
             obsidian_watch_vault: None,
             obsidian_capture: String::new(),
+            obsidian_capture_caret: 0,
+            obsidian_capture_select_all: false,
             obsidian_capture_focus: None,
             obsidian_typing: false,
             obsidian_selected: None,
@@ -3691,6 +4507,11 @@ mod tests {
             notifications: Vec::new(),
             notification_unread: 0,
             settings: AppSettings::default(),
+            widget_edit: false,
+            widget_edit_snapshot: None,
+            widget_edit_budget_hint_at: None,
+            last_widget_edit: false,
+            content_transition_force: false,
             first_run: false,
             speed_mbps: None,
             speed_progress: 0.0,
@@ -3713,10 +4534,13 @@ mod tests {
             content_x: SpringValue::at(0.0),
             content_y: SpringValue::at(0.0),
             overlay_fade: SpringValue::at(0.0),
+            agent_border: SpringValue::at(0.0),
+            agent_border_color: None,
             meeting_flash_until: None,
             reduce_motion: false,
             blur: 0.0,
             last_expanded: false,
+            agent_morph_lite: false,
             last_mode: CompactMode::Idle,
             last_tab: Tab::Widgets,
             file_drag: false,
@@ -3726,17 +4550,17 @@ mod tests {
             reposition_grab_x: 0.0,
             reposition_grab_y: 0.0,
             click_through: true,
-            click_through_age: 0,
+            click_through_at: Instant::now(),
             wheel_locked: false,
             last_wheel_at: Instant::now() - Duration::from_secs(1),
             wheel_acc_x: 0.0,
             wheel_acc_y: 0.0,
             pixel_origin: Instant::now(),
             pixel_t: 0.0,
+            last_pixel_frame: Instant::now(),
             mirror_on: false,
             mirror_gen: 0,
             mirror_frame: None,
-            snap_flashing: false,
             hud: None,
             hud_fill: SpringValue::at(0.0),
             hud_dragging: false,
@@ -3748,6 +4572,7 @@ mod tests {
             shell_focused: false,
             output_devices: Vec::new(),
             output_picker_open: false,
+            queue_open: false,
             output_hud_name: None,
             output_hud_until: None,
             recording: false,
@@ -3755,18 +4580,18 @@ mod tests {
             live_transcript: String::new(),
             recordings: Vec::new(),
             recorder_level: 0.0,
+            recorder_wave: VecDeque::new(),
+            recorder_wave_at: Instant::now(),
             recorder_error: None,
             playing_recording: None,
             recorder_last_notify: Instant::now(),
-            search_open: false,
-            search_editor: None,
-            search_sub: None,
-            search_results: Vec::new(),
-            search_selected: 0,
-            search_clipboard_only: false,
-            search_query: String::new(),
-            search_gen: 0,
-            search_loading: false,
+            focus: None,
+            hover_exit_at: None,
+            alt_held: false,
+            last_cleared_files: None,
+            tray_flash: None,
+            calendar_access_requested: false,
+            fallback_db_noticed: false,
         }
     }
 
@@ -3829,6 +4654,7 @@ mod tests {
                 radius: 18.0,
                 wing: 6.0,
                 tint: None,
+                border: None,
             })),
             "native glass must not attach when the setting is off"
         );
@@ -3863,9 +4689,10 @@ mod tests {
     #[test]
     fn format_timer_pads_seconds() {
         assert_eq!(format_timer(0), "0:00");
+        assert_eq!(format_timer(60), "1:00");
         assert_eq!(format_timer(65), "1:05");
         assert_eq!(format_timer(1500), "25:00");
-        assert_eq!(format_timer(3600), "1:00");
+        assert_eq!(format_timer(3600), "1:00:00");
         assert_eq!(super::ui::format_timer_compact(0), "0s");
         assert_eq!(super::ui::format_timer_compact(45), "45s");
         assert_eq!(super::ui::format_timer_compact(65), "1m05");
@@ -3874,7 +4701,7 @@ mod tests {
     }
 
     #[test]
-    fn speed_run_starts_the_readout_at_zero() {
+    fn speed_run_starts_at_zero_and_clears_on_cancel() {
         let mut island = test_island();
         island.speed_mbps = Some(99.0);
         island.speed_progress = 100.0;
@@ -3888,7 +4715,7 @@ mod tests {
         island.cancel_speed_test();
         assert!(!island.speed_running);
         assert_eq!(island.speed_progress, 0.0);
-        assert_eq!(island.speed_mbps, Some(14.2));
+        assert_eq!(island.speed_mbps, None);
     }
 
     #[test]
@@ -3909,13 +4736,130 @@ mod tests {
     }
 
     #[test]
-    fn queue_list_height_is_zero_when_empty_and_caps_visible_rows() {
-        assert_eq!(queue_list_height(0), 0.0);
-        assert_eq!(
-            queue_list_height(1),
-            QUEUE_HEADER_H + QUEUE_ROW_H + QUEUE_LIST_PAD
+    fn queue_panel_adds_width_when_toggled_open() {
+        let mut island = test_island();
+        island.now_playing.title = Some("Track".into());
+        island.now_playing.app_name = Some("Music".into());
+        island.settings.show_media = true;
+        island.settings.show_media_queue = true;
+        island.expanded = true;
+        island.tab = Tab::Widgets;
+        let closed = island.expanded_width();
+        let closed_music = island.music_pane_width(5);
+        assert!(!island.queue_panel_visible());
+        assert_eq!(island.queue_extra_width(), 0.0);
+        assert_eq!(closed_music, 5.0 * theme::NOOK_CELL);
+
+        island.queue_open = true;
+        assert!(island.queue_panel_visible());
+        assert!(island.queue_extra_width() > 0.0);
+        assert!(island.expanded_width() > closed);
+        // Music cell must claim the extra width — otherwise the panel
+        // crushes the player inside a fixed cell while the island grows empty.
+        assert!(
+            (island.music_pane_width(5) - closed_music - island.queue_extra_width()).abs() < 0.5
         );
-        assert_eq!(queue_list_height(4), queue_list_height(12));
+        assert_eq!(
+            island.music_player_width(),
+            5.0 * theme::NOOK_CELL,
+            "queue open must keep the player column at the closed Music width"
+        );
+    }
+
+    #[test]
+    fn queue_panel_raises_expanded_max_so_full_row_still_fits() {
+        let mut island = test_island();
+        island.now_playing.title = Some("Track".into());
+        island.now_playing.app_name = Some("Music".into());
+        island.settings.show_media = true;
+        island.settings.show_media_queue = true;
+        island.settings.show_calendar = true;
+        island.settings.show_timers = true;
+        island
+            .settings
+            .set_cells(nook_core::settings::WidgetModule::Music, 5);
+        island
+            .settings
+            .set_cells(nook_core::settings::WidgetModule::Calendar, 4);
+        island
+            .settings
+            .set_cells(nook_core::settings::WidgetModule::Timers, 2);
+        island.expanded = true;
+        island.tab = Tab::Widgets;
+        island.screen_width = 1800.0;
+        island.queue_open = true;
+        let w = island.expanded_width();
+        let need = island.settings.nook_content_width(
+            theme::NOOK_CELL,
+            theme::NOOK_DIVIDER,
+            theme::NOOK_INSET,
+        ) + island.queue_extra_width();
+        assert!(
+            w + 0.5 >= need.min(island.screen_width - 40.0),
+            "expanded_width={w} need={need} max={}",
+            theme::EXPANDED_MAX_WIDTH
+        );
+        assert!(w > theme::EXPANDED_MAX_WIDTH);
+    }
+
+    #[test]
+    fn nook_stays_one_row_within_budget() {
+        let mut island = test_island();
+        island.expanded = true;
+        island.tab = Tab::Widgets;
+        island.settings.show_media = true;
+        island.settings.show_calendar = true;
+        island.settings.show_timers = true;
+        island.settings.show_battery = true;
+        island.settings.weather.enabled = true;
+        island
+            .settings
+            .set_cells(nook_core::settings::WidgetModule::Music, 5);
+        island
+            .settings
+            .set_cells(nook_core::settings::WidgetModule::Calendar, 4);
+        island
+            .settings
+            .set_cells(nook_core::settings::WidgetModule::Timers, 2);
+        island
+            .settings
+            .set_cells(nook_core::settings::WidgetModule::Weather, 3);
+        island
+            .settings
+            .set_cells(nook_core::settings::WidgetModule::Battery, 3);
+        // Music 5 + Calendar 4 + Timers 2 + Weather 3 + Battery 3 = 17.
+        assert_eq!(island.nook_rows_for_render().len(), 1);
+        let h1 = island.target_size().1;
+        let h2 = island.target_size().1;
+        assert_eq!(h1, h2);
+    }
+
+    #[test]
+    fn visible_nook_items_matches_settings_rows_when_nothing_special() {
+        let mut island = test_island();
+        island.settings.show_media = true;
+        island.settings.show_calendar = true;
+        island.settings.show_timers = true;
+        island.settings.show_messages = false;
+        island.messages.incoming = None;
+        let visible = island.visible_nook_items();
+        assert_eq!(visible, island.settings.nook_items());
+    }
+
+    #[test]
+    fn queue_fetch_skips_spotify_without_web_api() {
+        let mut island = test_island();
+        island.now_playing.title = Some("Track".into());
+        island.now_playing.app_name = Some("Spotify".into());
+        island.now_playing.bundle_id = Some("com.spotify.client".into());
+        island.settings.show_media = true;
+        island.settings.show_media_queue = true;
+        island.expanded = true;
+        island.tab = Tab::Widgets;
+        assert!(!island.queue_visible());
+        assert!(!island.maybe_start_queue_fetch());
+        island.queue_open = true;
+        assert!(!island.queue_panel_visible());
     }
 
     #[test]
@@ -3939,13 +4883,81 @@ mod tests {
         island.expanded = false;
         assert!(!island.maybe_start_queue_fetch());
     }
-    fn search_summon_uses_a_compact_card() {
+
+    #[test]
+    fn queue_fetch_result_caches_rows_but_retries_bare_defaults() {
         let mut island = test_island();
-        island.search_open = true;
-        let (w, h) = island.target_size();
-        assert!(w <= search::SEARCH_WIDTH + 1.0);
-        assert!(h > island.notch_height);
-        assert!(h < 400.0);
+        island.now_playing.title = Some("Track".into());
+        island.now_playing.app_name = Some("Music".into());
+        island.settings.show_media = true;
+        island.settings.show_media_queue = true;
+        island.expanded = true;
+        island.tab = Tab::Widgets;
+
+        assert!(island.maybe_start_queue_fetch());
+        island.apply_queue_fetch_result(PlaybackQueue::default());
+        assert!(island.queue_key.is_none());
+        assert!(!island.queue_inflight);
+        // Transient failure must not block the next pull for the same track.
+        assert!(island.maybe_start_queue_fetch());
+
+        let filled = PlaybackQueue {
+            source: Some(nook_core::models::QueueSource::MusicPlaylist),
+            label: "Up Next in playlist".into(),
+            items: vec![nook_core::models::QueueItem {
+                id: "music-2".into(),
+                title: "Next".into(),
+                artist: "A".into(),
+                artwork_url: None,
+                artwork_base64: None,
+                source: nook_core::models::QueueSource::MusicPlaylist,
+                jump: nook_core::models::QueueJump::MusicTrack { index: 2 },
+            }],
+            hidden: None,
+            context_uri: None,
+        };
+        island.apply_queue_fetch_result(filled);
+        assert!(island.queue_key.is_some());
+        assert_eq!(island.queue.items.len(), 1);
+        assert!(!island.maybe_start_queue_fetch());
+    }
+
+    #[test]
+    fn expanded_bottom_covers_files_and_widgets_tabs() {
+        let mut island = test_island();
+        island.expanded = true;
+        island.settings.show_files = true;
+        island.notch_height = 38.0;
+        island.screen_width = 1800.0;
+
+        island.tab = Tab::Widgets;
+        let (ww, wh) = island.target_size();
+        let (_, wtop) = island.settings.island_origin(
+            island.screen_width,
+            island.screen_height,
+            ww.max(1.0),
+            wh.max(1.0),
+        );
+        island.tab = Tab::Files;
+        let (fw, fh) = island.target_size();
+        let (_, ftop) = island.settings.island_origin(
+            island.screen_width,
+            island.screen_height,
+            fw.max(1.0),
+            fh.max(1.0),
+        );
+
+        let reserved = island.expanded_bottom();
+        assert!(
+            reserved + 0.05 >= wtop + wh,
+            "expanded_bottom={reserved} widgets bottom={}",
+            wtop + wh
+        );
+        assert!(
+            reserved + 0.05 >= ftop + fh,
+            "expanded_bottom={reserved} files bottom={}",
+            ftop + fh
+        );
     }
 
     #[test]
@@ -4177,6 +5189,7 @@ mod tests {
     #[test]
     fn available_modes_includes_agents() {
         let mut island = test_island();
+        island.settings.show_agents = true;
         island.agents = vec![AgentSession {
             kind: AgentKind::Grok,
             pid: 42,
@@ -4199,6 +5212,8 @@ mod tests {
     #[test]
     fn available_modes_includes_incoming_messages() {
         let mut island = test_island();
+        island.settings.experimental_widgets = true;
+        island.settings.show_messages = true;
         island.messages.incoming = Some(nook_core::messages::IncomingPeek {
             conversation_id: "iMessage;-;+1".into(),
             sender: "Ada".into(),
@@ -4220,6 +5235,8 @@ mod tests {
     fn expanded_incoming_message_uses_lockup_width() {
         let mut island = test_island();
         island.expanded = true;
+        island.settings.experimental_widgets = true;
+        island.settings.show_messages = true;
         island.messages.incoming = Some(nook_core::messages::IncomingPeek {
             conversation_id: "iMessage;-;+1".into(),
             sender: "Ada".into(),
@@ -4240,12 +5257,81 @@ mod tests {
     fn expanded_recording_uses_memo_lockup_size() {
         let mut island = test_island();
         island.expanded = true;
+        island.settings.experimental_widgets = true;
         island.settings.show_recorder = true;
         island.recording = true;
         let (w, h) = island.target_size();
         assert_eq!(w, 420.0);
         assert_eq!(h, 32.0 + theme::NOOK_INSET + 260.0);
     }
+
+    #[test]
+    fn compact_recording_grows_for_waveform_and_stop() {
+        let mut island = test_island();
+        island.settings.experimental_widgets = true;
+        island.settings.show_recorder = true;
+        island.recording = true;
+        let (w, h) = island.target_size();
+        assert_eq!(w, 180.0 + crate::widgets::RECORDER_COMPACT_EXTRA);
+        assert_eq!(h, 32.0 + theme::COMPACT_HEIGHT_OVERFLOW);
+        island.hovered = true;
+        let (hw, hh) = island.target_size();
+        assert_eq!(hw, 180.0 + crate::widgets::RECORDER_COMPACT_HOVER_EXTRA);
+        assert_eq!(hh, 32.0 + 11.0);
+        assert!(hw > w && hh > h);
+    }
+
+    #[test]
+    fn compact_widths_unchanged_when_glass_is_off() {
+        let mut island = test_island();
+        assert!(
+            !crate::platform::island_glass_setting_on(),
+            "tests start with Liquid Glass island off"
+        );
+        assert_eq!(island.glass_notch_gap(), 0.0);
+        assert_eq!(island.target_size().0, 180.0 + theme::IDLE_NOTCH_OVERFLOW);
+
+        island.now_playing.title = Some("Track".into());
+        island.now_playing.is_playing = true;
+        island.settings.show_media = true;
+        assert_eq!(island.target_size().0, 180.0 + 72.0);
+        island.hovered = true;
+        assert_eq!(island.target_size().0, 180.0 + 88.0);
+        island.hovered = false;
+
+        island.hud = Some(HudState {
+            kind: HudKind::Volume,
+            value: 0.5,
+            shown_at: Instant::now(),
+            gen: 1,
+        });
+        assert_eq!(island.target_size().0, 180.0 + 120.0);
+        island.hud = None;
+
+        island.settings.experimental_widgets = true;
+        island.settings.show_recorder = true;
+        island.recording = true;
+        assert_eq!(
+            island.target_size().0,
+            180.0 + crate::widgets::RECORDER_COMPACT_EXTRA
+        );
+    }
+
+    #[test]
+    fn recorder_wave_samples_at_interval_and_keeps_newest_first() {
+        let mut island = test_island();
+        let t0 = island.recorder_wave_at + Duration::from_millis(50);
+        assert!(island.sample_recorder_wave(0.4, t0));
+        assert!(!island.sample_recorder_wave(0.1, t0 + Duration::from_millis(10)));
+        assert!(island.sample_recorder_wave(0.9, t0 + Duration::from_millis(50)));
+        assert_eq!(island.recorder_wave.len(), 2);
+        assert!((island.recorder_wave[0] - 0.9).abs() < f32::EPSILON);
+        assert!((island.recorder_wave[1] - 0.4).abs() < f32::EPSILON);
+        island.clear_recorder_wave();
+        assert!(island.recorder_wave.is_empty());
+        assert_eq!(island.recorder_level, 0.0);
+    }
+    #[test]
     fn available_modes_share_while_transfer_is_live() {
         let mut island = test_island();
         assert!(!island.available_modes().contains(&CompactMode::Share));
@@ -4254,12 +5340,14 @@ mod tests {
         assert_eq!(island.available_modes()[0], CompactMode::Share);
         assert_eq!(island.mode(), CompactMode::Share);
         island.share.phase = nook_core::share::SharePhase::Idle;
-        island.share.hud = Some("Link copied".into());
+        island.share.hud = Some("Sent".into());
         assert_eq!(island.mode(), CompactMode::Share);
         island.share.hud = None;
     }
+    #[test]
     fn available_modes_includes_recording() {
         let mut island = test_island();
+        island.settings.experimental_widgets = true;
         island.settings.show_recorder = true;
         assert_eq!(island.available_modes(), vec![CompactMode::Idle]);
         island.recording = true;
@@ -4270,9 +5358,12 @@ mod tests {
         assert_eq!(island.mode(), CompactMode::Recording);
         island.settings.show_recorder = false;
     }
+    #[test]
     fn available_modes_includes_meeting() {
         use nook_core::meetings::{MeetingApp, MeetingState};
         let mut island = test_island();
+        island.settings.experimental_widgets = true;
+        island.settings.show_meetings = true;
         island.meeting.state = MeetingState::InMeeting {
             app: MeetingApp::Zoom,
             pid: 7,
@@ -4286,8 +5377,10 @@ mod tests {
         assert_eq!(island.mode(), CompactMode::Meeting);
         island.settings.show_meetings = false;
     }
+    #[test]
     fn available_modes_includes_notifications() {
         let mut island = test_island();
+        island.settings.experimental_widgets = true;
         island.settings.show_notifications = true;
         island.notification_unread = 2;
         island.notifications.push(NotificationEvent::new(
@@ -4313,6 +5406,7 @@ mod tests {
     #[test]
     fn available_modes_observe_only_when_user_alert_fires() {
         let mut island = test_island();
+        island.settings.experimental_widgets = true;
         island.settings.show_observe = true;
         assert_eq!(island.available_modes(), vec![CompactMode::Idle]);
         island.observe.alerts = vec![nook_core::observe::FiringAlert {
@@ -4363,8 +5457,10 @@ mod tests {
         island.power.has_battery = true;
         island.settings.show_battery = false;
     }
+    #[test]
     fn available_modes_includes_vpn_while_connected() {
         let mut island = test_island();
+        island.settings.experimental_widgets = true;
         island.settings.show_vpn = true;
         assert_eq!(island.available_modes(), vec![CompactMode::Idle]);
         island.vpn.connected = true;
@@ -4382,16 +5478,18 @@ mod tests {
     #[test]
     fn vpn_reveal_keeps_the_face_after_disconnect() {
         let mut island = test_island();
+        island.settings.experimental_widgets = true;
+        island.settings.show_vpn = true;
         island.vpn.connected = false;
         island.vpn.service_name = "Tailscale".into();
         island.vpn_reveal_until = Some(Instant::now() + Duration::from_secs(4));
-        island.preferred = Some(CompactMode::Vpn);
+        island.alert_preferred = Some(CompactMode::Vpn);
         assert!(island.has_vpn_face());
         assert_eq!(island.mode(), CompactMode::Vpn);
         island.vpn_reveal_until = Some(Instant::now() - Duration::from_secs(1));
         assert!(island.clear_expired_vpn_reveal());
         assert!(!island.has_vpn_face());
-        assert_eq!(island.preferred, None);
+        assert_eq!(island.alert_preferred, None);
         assert_eq!(island.mode(), CompactMode::Idle);
     }
 
@@ -4501,7 +5599,7 @@ mod tests {
     fn compact_swipe_cycles_once_per_gesture() {
         let mut island = test_island();
         with_file(&mut island);
-        island.preferred = Some(CompactMode::Idle);
+        island.user_preferred = Some(CompactMode::Idle);
         assert_eq!(
             island.available_modes(),
             vec![CompactMode::Files, CompactMode::Idle]
@@ -4529,7 +5627,7 @@ mod tests {
     fn compact_swipe_accumulates_small_deltas() {
         let mut island = test_island();
         with_file(&mut island);
-        island.preferred = Some(CompactMode::Idle);
+        island.user_preferred = Some(CompactMode::Idle);
 
         assert!(!island.apply_wheel(8.0, 0.0, TouchPhase::Moved));
         assert!(!island.apply_wheel(8.0, 0.0, TouchPhase::Moved));
@@ -4561,7 +5659,7 @@ mod tests {
     fn compact_swipe_rearms_after_idle() {
         let mut island = test_island();
         with_file(&mut island);
-        island.preferred = Some(CompactMode::Idle);
+        island.user_preferred = Some(CompactMode::Idle);
 
         assert!(island.apply_wheel(-40.0, 0.0, TouchPhase::Moved));
         let after_first = island.mode();
@@ -4573,8 +5671,50 @@ mod tests {
     }
 
     #[test]
+    fn widget_edit_cancel_restores_snapshot() {
+        let mut island = test_island();
+        island.settings.show_timers = true;
+        let before = island.settings.clone();
+        island.widget_edit_snapshot = Some(before.clone());
+        island.widget_edit = true;
+        island.settings.show_timers = false;
+        // Simulate cancel without GPUI context: restore snapshot fields.
+        if let Some(snapshot) = island.widget_edit_snapshot.take() {
+            island.settings = snapshot;
+        }
+        island.widget_edit = false;
+        assert!(island.settings.show_timers);
+        assert_eq!(island.settings.show_media, before.show_media);
+    }
+
+    #[test]
+    fn widget_edit_freezes_live_widget_paints() {
+        let mut island = test_island();
+        assert!(island.paints_live_widgets());
+        island.widget_edit = true;
+        // Tick-loop frame pumps pause while editing; real widget previews still
+        // render, they just stop updating every visualizer tick.
+        assert!(!island.paints_live_widgets());
+    }
+
+    #[test]
+    fn widgets_tab_uses_default_width() {
+        let mut island = test_island();
+        island.tab = Tab::Widgets;
+        island.settings.show_media = true;
+        island.settings.show_calendar = false;
+        island.settings.show_timers = false;
+        island
+            .settings
+            .set_cells(nook_core::settings::WidgetModule::Music, 5);
+        let w = island.expanded_width();
+        let expected = (island.screen_width - 40.0).min(theme::EXPANDED_MAX_WIDTH);
+        assert!((w - expected).abs() < f32::EPSILON);
+    }
+
+    #[test]
     fn tray_tiles_stay_at_expanded_size_during_compact_spring() {
-        let island = test_island();
+        let mut island = test_island();
         let compact_w = island.notch_width + 120.0;
         let (compact_cols, compact_tile) = file_grid_metrics(compact_w);
         let (layout_cols, layout_tile) = island.file_layout();
@@ -4587,7 +5727,12 @@ mod tests {
             island.file_layout(),
             file_grid_metrics(island.expanded_width())
         );
-        assert!((island.expanded_width() - theme::EXPANDED_MAX_WIDTH).abs() < f32::EPSILON);
+        // Files and Widgets share the full default width (Terminal width).
+        let expected = (island.screen_width - 40.0).min(theme::EXPANDED_MAX_WIDTH);
+        island.tab = Tab::Widgets;
+        assert!((island.expanded_width() - expected).abs() < f32::EPSILON);
+        island.tab = Tab::Files;
+        assert!((island.expanded_width() - expected).abs() < f32::EPSILON);
     }
 
     #[test]
@@ -4632,6 +5777,19 @@ mod tests {
     }
 
     #[test]
+    fn arm_content_transition_zeros_fade_and_shifts_on_tab_change() {
+        let mut island = test_island();
+        island.expanded = true;
+        island.last_expanded = true;
+        island.last_tab = Tab::Widgets;
+        island.tab = Tab::Files;
+        island.arm_content_transition();
+        assert_eq!(island.content_fade.value, 0.0);
+        assert_ne!(island.content_x.value, 0.0);
+        assert_eq!(island.last_tab, Tab::Files);
+    }
+
+    #[test]
     fn expansion_enters_from_the_notch() {
         let mut island = test_island();
         while island.step_spring(0.016) {}
@@ -4650,14 +5808,64 @@ mod tests {
     fn compact_mode_changes_follow_horizontal_order() {
         let mut island = test_island();
         with_file(&mut island);
-        island.preferred = Some(CompactMode::Idle);
+        island.user_preferred = Some(CompactMode::Idle);
         while island.step_spring(0.016) {}
 
-        island.preferred = Some(CompactMode::Files);
+        island.user_preferred = Some(CompactMode::Files);
         island.step_spring(0.016);
 
         assert!(island.content_x.value.abs() > 1.0);
         assert_eq!(island.content_y.value, 0.0);
+    }
+
+    /// Mode swaps often leave size already parked; lite must still hold while
+    /// content_x travels so agent LED glow does not starve the context shift.
+    #[test]
+    fn mode_swap_holds_lite_until_content_travel_rests() {
+        let mut island = test_island();
+        with_file(&mut island);
+        island.settings.show_agents = true;
+        island.agents = vec![AgentSession {
+            kind: AgentKind::Grok,
+            pid: 7,
+            project: "~".into(),
+            cwd: "/tmp".into(),
+            status: AgentStatus::Working,
+            session_id: None,
+            name: None,
+            model: None,
+        }];
+        island.user_preferred = Some(CompactMode::Files);
+        while island.step_spring(0.016) {}
+        assert!(!island.size_morphing());
+        assert_eq!(island.content_x.value, 0.0);
+
+        island.user_preferred = Some(CompactMode::Agents);
+        island.step_spring(0.016);
+
+        assert!(island.size_morphing(), "lite should arm on mode swap");
+        assert!(
+            island.content_x.value.abs() > motion::REST_PX,
+            "content should still be traveling: {}",
+            island.content_x.value
+        );
+        let (tw, th) = island.target_size();
+        assert!((island.anim_w.value - tw).abs() <= motion::REST_PX);
+        assert!((island.anim_h.value - th).abs() <= motion::REST_PX);
+
+        let mut moving = true;
+        for _ in 0..200 {
+            moving = island.step_spring(0.016);
+            if !island.size_morphing() {
+                break;
+            }
+        }
+        assert!(
+            !island.size_morphing(),
+            "lite must clear once content rests"
+        );
+        assert!(island.content_x.value.abs() <= motion::REST_PX);
+        assert!(!moving || island.content_fade.value >= 1.0 - motion::REST_ALPHA);
     }
 
     #[test]
@@ -4769,6 +5977,17 @@ mod tests {
         assert!(island.lyrics_timer_should_run());
         island.expanded = false;
         assert!(!island.lyrics_timer_should_run());
+    }
+
+    #[test]
+    fn seek_intent_holds_stale_polls_until_caught_up() {
+        let since = Instant::now();
+        assert!(hold_seek_intent(90.0, since, Some(12.0), false));
+        assert!(hold_seek_intent(90.0, since, None, false));
+        assert!(!hold_seek_intent(90.0, since, Some(90.4), false));
+        assert!(!hold_seek_intent(90.0, since, Some(12.0), true));
+        let expired = Instant::now() - MEDIA_INTENT_WINDOW - Duration::from_millis(1);
+        assert!(!hold_seek_intent(90.0, expired, Some(12.0), false));
     }
 
     #[test]
@@ -4995,5 +6214,57 @@ mod tests {
         island.reduce_motion = false;
         island.settings.ambient_art_glow = false;
         assert!(!island.aura_should_animate());
+    }
+
+    fn working_agent() -> AgentSession {
+        AgentSession {
+            kind: AgentKind::Grok,
+            pid: 42,
+            project: "~".into(),
+            cwd: "/tmp".into(),
+            status: AgentStatus::Working,
+            session_id: None,
+            name: Some("border".into()),
+            model: None,
+        }
+    }
+
+    #[test]
+    fn agent_border_springs_in_when_work_starts() {
+        let mut island = test_island();
+        island.agents = vec![working_agent()];
+        assert_eq!(island.agent_border.value, 0.0);
+        assert!(island.agent_border_color.is_none());
+        assert!(island.step_spring(1.0 / 60.0));
+        assert!(
+            island.agent_border.value > 0.0 && island.agent_border.value < 1.0,
+            "border popped instead of revealing, value={}",
+            island.agent_border.value
+        );
+        assert!(island.agent_border_color.is_some());
+        island.reduce_motion = true;
+        island.step_spring(1.0 / 60.0);
+        assert_eq!(island.agent_border.value, 1.0);
+    }
+
+    #[test]
+    fn agent_border_springs_out_when_work_stops() {
+        let mut island = test_island();
+        island.agents = vec![working_agent()];
+        island.reduce_motion = true;
+        island.step_spring(1.0 / 60.0);
+        assert_eq!(island.agent_border.value, 1.0);
+        island.reduce_motion = false;
+        island.agents[0].status = AgentStatus::Waiting;
+        assert!(island.step_spring(1.0 / 60.0));
+        assert!(
+            island.agent_border.value > 0.0 && island.agent_border.value < 1.0,
+            "border dropped instead of fading, value={}",
+            island.agent_border.value
+        );
+        assert!(
+            island.agent_border_color.is_some(),
+            "fade-out must keep the brand tint"
+        );
     }
 }

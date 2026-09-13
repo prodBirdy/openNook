@@ -3,7 +3,8 @@
 //! Calendar-style range chips, a featured headline, and one Nightwatch-style
 //! status chart with a hover popover.
 
-use crate::island::ui::{label, nook_display, nook_empty, nook_pane, slide_label};
+use crate::icons::lucide_color;
+use crate::island::ui::{label, nook_display, nook_empty, nook_pane, text_btn};
 use crate::island::Island;
 use crate::theme;
 use gpui::{
@@ -64,13 +65,13 @@ pub(crate) fn observe_card(
         body = body.child(nook_empty("activity", "No metrics URL"));
     } else if snap.metrics.is_empty() {
         if let Some(err) = &snap.error {
-            body = body.child(slide_label(err.clone(), theme::SUBHEADLINE, false).w_full());
+            body = body.child(observe_error_row(err, cx));
         } else {
             body = body.child(nook_empty("activity", "No samples"));
         }
     } else {
         if let Some(err) = &snap.error {
-            body = body.child(slide_label(err.clone(), theme::SUBHEADLINE, false).w_full());
+            body = body.child(observe_error_row(err, cx));
         }
         let statuses = status_series(snap);
         let has_statuses = !statuses.is_empty();
@@ -132,13 +133,7 @@ pub(crate) fn observe_card(
                 .child(chips),
         )
         .when_some(featured_label, |d, name| {
-            d.child(
-                div()
-                    .text_size(px(12.))
-                    .font_weight(gpui::FontWeight::MEDIUM)
-                    .text_color(theme::SECONDARY_LABEL)
-                    .child(name),
-            )
+            d.child(label(name, theme::CALLOUT, false))
         })
         .child(body)
 }
@@ -176,22 +171,8 @@ fn range_chip(option: ObserveRange, active: bool, cx: &mut Context<Island>) -> i
                 this.refresh_observe(cx);
             }),
         )
-        .child(
-            div()
-                .text_size(px(9.))
-                .line_height(px(11.))
-                .font_weight(gpui::FontWeight::SEMIBOLD)
-                .text_color(label_color)
-                .child(unit),
-        )
-        .child(
-            div()
-                .text_size(px(15.))
-                .line_height(px(18.))
-                .font_weight(gpui::FontWeight::SEMIBOLD)
-                .text_color(color)
-                .child(num),
-        )
+        .child(label(unit, theme::FOOTNOTE, true).text_color(label_color))
+        .child(label(num, theme::TITLE_3, true).text_color(color))
 }
 
 fn range_parts(option: ObserveRange) -> (&'static str, &'static str) {
@@ -203,24 +184,28 @@ fn range_parts(option: ObserveRange) -> (&'static str, &'static str) {
     }
 }
 
-fn rgba_white(a: f32) -> Rgba {
-    Rgba {
-        r: 1.0,
-        g: 1.0,
-        b: 1.0,
-        a,
-    }
+fn observe_error_row(err: &str, cx: &mut Context<Island>) -> impl IntoElement {
+    div()
+        .w_full()
+        .flex()
+        .items_center()
+        .gap(px(8.))
+        .child(lucide_color("triangle-alert", 14.0, theme::DESTRUCTIVE))
+        .child(
+            label(err.to_string(), theme::SUBHEADLINE, false)
+                .flex_1()
+                .min_w(px(0.))
+                .text_color(theme::DESTRUCTIVE),
+        )
+        .child(text_btn("Retry", cx, |this, _, cx| {
+            this.refresh_observe(cx);
+        }))
 }
 
 fn chart_color(query: &str) -> Rgba {
     match query.trim() {
         "5xx" | "errors" => theme::DESTRUCTIVE,
-        "4xx" => Rgba {
-            r: 1.0,
-            g: 0.608,
-            b: 0.396,
-            a: 1.0,
-        },
+        "4xx" => theme::SYSTEM_ORANGE,
         "slow" => theme::SUCCESS,
         _ => theme::accent(),
     }
@@ -499,7 +484,7 @@ fn status_chart(
                 .rounded(px(theme::CONTROL_RADIUS))
                 .bg(theme::GROUPED_BG)
                 .border_1()
-                .border_color(rgba_white(0.2))
+                .border_color(theme::FILL_SECONDARY)
                 .shadow_sm()
                 .px_2()
                 .py(px(3.))
@@ -697,7 +682,7 @@ fn mini_chart(
                 .rounded(px(theme::CONTROL_RADIUS))
                 .bg(theme::GROUPED_BG)
                 .border_1()
-                .border_color(rgba_white(0.2))
+                .border_color(theme::FILL_SECONDARY)
                 .shadow_sm()
                 .px_2()
                 .py(px(3.))

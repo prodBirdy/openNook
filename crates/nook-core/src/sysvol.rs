@@ -143,20 +143,17 @@ static AVAILABLE: AtomicBool = AtomicBool::new(false);
 #[cfg(target_os = "macos")]
 mod macos {
     use super::{clamp_unit, publish, HudKind, AVAILABLE};
+    use crate::ffi::macos::{
+        AudioObjectAddPropertyListener, AudioObjectGetPropertyData, AudioObjectHasProperty,
+        AudioObjectID, AudioObjectPropertyAddress, AudioObjectSetPropertyData, OSStatus,
+    };
     use std::ffi::c_void;
     use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::Once;
 
-    type AudioObjectId = u32;
-    type OsStatus = i32;
-
-    #[repr(C)]
-    #[derive(Clone, Copy)]
-    struct PropertyAddress {
-        selector: u32,
-        scope: u32,
-        element: u32,
-    }
+    type PropertyAddress = AudioObjectPropertyAddress;
+    type AudioObjectId = AudioObjectID;
+    type OsStatus = OSStatus;
 
     const SYSTEM_OBJECT: AudioObjectId = 1;
     const ELEMENT_MAIN: u32 = 0;
@@ -166,38 +163,6 @@ mod macos {
     const VIRTUAL_MAIN_VOLUME: u32 = u32::from_be_bytes(*b"vmvc");
     const VOLUME_SCALAR: u32 = u32::from_be_bytes(*b"volm");
     const MUTE: u32 = u32::from_be_bytes(*b"mute");
-
-    #[link(name = "CoreAudio", kind = "framework")]
-    unsafe extern "C" {
-        fn AudioObjectHasProperty(object: AudioObjectId, address: *const PropertyAddress) -> u8;
-        fn AudioObjectGetPropertyData(
-            object: AudioObjectId,
-            address: *const PropertyAddress,
-            qualifier_size: u32,
-            qualifier: *const c_void,
-            data_size: *mut u32,
-            data: *mut c_void,
-        ) -> OsStatus;
-        fn AudioObjectSetPropertyData(
-            object: AudioObjectId,
-            address: *const PropertyAddress,
-            qualifier_size: u32,
-            qualifier: *const c_void,
-            data_size: u32,
-            data: *const c_void,
-        ) -> OsStatus;
-        fn AudioObjectAddPropertyListener(
-            object: AudioObjectId,
-            address: *const PropertyAddress,
-            listener: unsafe extern "C" fn(
-                AudioObjectId,
-                u32,
-                *const PropertyAddress,
-                *mut c_void,
-            ) -> OsStatus,
-            client: *mut c_void,
-        ) -> OsStatus;
-    }
 
     static STARTED: Once = Once::new();
     static DEVICE: AtomicU32 = AtomicU32::new(0);
@@ -376,7 +341,7 @@ mod macos {
         // Process-lifetime: keep the callback pointer alive for CoreAudio.
         let client = Box::leak(Box::new(on_change)) as *mut fn() as *mut c_void;
         let status =
-            unsafe { AudioObjectAddPropertyListener(object, &address, on_property, client) };
+            unsafe { AudioObjectAddPropertyListener(object, &address, Some(on_property), client) };
         if status != 0 {
             log::warn!("CoreAudio listener failed ({status:#x})");
         }

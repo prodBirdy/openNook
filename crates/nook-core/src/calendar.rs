@@ -28,13 +28,11 @@ mod macos {
     use objc2::rc::Retained;
     use objc2_event_kit::{EKAuthorizationStatus, EKEntityType, EKEventStore};
     use objc2_foundation::{MainThreadMarker, NSCalendar, NSCalendarUnit, NSDate};
-    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::OnceLock;
     use tokio::sync::oneshot::Sender;
 
-    // Flags to prevent duplicate concurrent access requests
-    static ACCESS_REQUEST_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
-    static ACCESS_ALREADY_REQUESTED: AtomicBool = AtomicBool::new(false);
+    // Serialize system prompts; recheck OS authorization after each completed request.
+    static ACCESS_REQUEST: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     // Wrapper to force Sync implementation for EKEventStore
     // EKEventStore is generally thread-safe on macOS
@@ -77,6 +75,24 @@ mod macos {
 
     const CACHE_TTL: Duration = Duration::from_secs(30);
 
+    fn authorized_for(entity: EKEntityType) -> Option<bool> {
+        let status = unsafe { EKEventStore::authorizationStatusForEntityType(entity) };
+        match status {
+            EKAuthorizationStatus::FullAccess | EKAuthorizationStatus::WriteOnly => Some(true),
+            EKAuthorizationStatus::Denied | EKAuthorizationStatus::Restricted => Some(false),
+            EKAuthorizationStatus::NotDetermined => None,
+            _ => None,
+        }
+    }
+
+    pub fn calendar_authorized() -> Option<bool> {
+        authorized_for(EKEntityType::Event)
+    }
+
+    pub fn reminders_authorized() -> Option<bool> {
+        authorized_for(EKEntityType::Reminder)
+    }
+
     pub fn init_store() {
         if EVENT_STORE.get().is_some() {
             return;
@@ -93,30 +109,12 @@ mod macos {
         EVENT_STORE.get()
     }
 
-    pub async fn request_access() -> Result<bool, String> {
-        // If already requested, return immediately
-        if ACCESS_ALREADY_REQUESTED.load(Ordering::SeqCst) {
-            return Ok(true);
-        }
-
-        // Prevent concurrent requests
-        if ACCESS_REQUEST_IN_PROGRESS
-            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-            .is_err()
-        {
-            return Ok(true);
-        }
-
-        let result = request_access_inner().await;
-
-        // Mark as requested regardless of outcome
-        ACCESS_ALREADY_REQUESTED.store(true, Ordering::SeqCst);
-        ACCESS_REQUEST_IN_PROGRESS.store(false, Ordering::SeqCst);
-
-        result
+    pub async fn request_access(reminders: bool) -> Result<bool, String> {
+        let _request = ACCESS_REQUEST.lock().await;
+        request_access_inner(reminders).await
     }
 
-    async fn request_access_inner() -> Result<bool, String> {
+    async fn request_access_inner(reminders: bool) -> Result<bool, String> {
         let store = get_store().ok_or("Failed to initialize EventStore")?;
 
         let status_events =
@@ -148,7 +146,7 @@ mod macos {
                 );
 
                 unsafe {
-                    request_entity_access(&store.0, EKEntityType::Event, &*handler);
+                    request_entity_access(&store.0, EKEntityType::Event, &handler);
                 }
             }
 
@@ -162,7 +160,7 @@ mod macos {
         }
 
         // Check Reminders - only request if NotDetermined
-        if status_reminders == EKAuthorizationStatus::NotDetermined {
+        if reminders && status_reminders == EKAuthorizationStatus::NotDetermined {
             log::info!("Requesting Reminders Access...");
             let (tx, rx) = tokio::sync::oneshot::channel::<bool>();
             let tx: std::sync::Mutex<Option<Sender<bool>>> = std::sync::Mutex::new(Some(tx));
@@ -179,7 +177,7 @@ mod macos {
                 );
 
                 unsafe {
-                    request_entity_access(&store.0, EKEntityType::Reminder, &*handler);
+                    request_entity_access(&store.0, EKEntityType::Reminder, &handler);
                 }
             }
             match rx.await {
@@ -428,17 +426,22 @@ mod macos {
                                                         CGColorGetComponents(cg_color);
 
                                                     if !components_ptr.is_null() {
-                                                        let components = std::slice::from_raw_parts(
+                                                        // SAFETY: CGColor components buffer is
+                                                        // valid for `num_components` CGFloats.
+                                                        let components = crate::ffi::slice(
                                                             components_ptr,
                                                             num_components,
                                                         );
 
-                                                        // Convert RGB components (0.0-1.0) to hex
-                                                        let r = (components[0] * 255.0) as u8;
-                                                        let g = (components[1] * 255.0) as u8;
-                                                        let b = (components[2] * 255.0) as u8;
+                                                        if components.len() >= 3 {
+                                                            let r = (components[0] * 255.0) as u8;
+                                                            let g = (components[1] * 255.0) as u8;
+                                                            let b = (components[2] * 255.0) as u8;
 
-                                                        format!("#{:02x}{:02x}{:02x}", r, g, b)
+                                                            format!("#{:02x}{:02x}{:02x}", r, g, b)
+                                                        } else {
+                                                            "#0a84ff".to_string()
+                                                        }
                                                     } else {
                                                         "#0a84ff".to_string() // Default blue
                                                     }
@@ -573,22 +576,15 @@ mod macos {
                 }
 
                 // Save
-                let _ = store.saveReminder_commit_error(&reminder, true);
+                store
+                    .saveReminder_commit_error(&reminder, true)
+                    .map_err(|e| e.to_string())?;
             }
 
-            // Invalidate cache
+            // Invalidate cache so the next fetch picks up the new reminder.
             if let Some(cache_mutex) = REMINDERS_CACHE.get() {
                 if let Ok(mut cache) = cache_mutex.lock() {
-                    // We don't have the full object to add to cache easily without fetching, so just clear it or invalidate
-                    // For simplicity, let's just clear for now so next fetch gets it.
-                    // Or better, we can re-fetch?
-                    // Let's just invalidate/remove all to force refresh or just let the user's refresh button handle it if needed.
-                    // Actually, better to just invalidate effectively.
                     cache.data.clear();
-                    // Wait, clearing might show empty list. Maybe better to leave it stale until refresh?
-                    // The user asked for "Add reminder", assume they want to see it.
-                    // So we should probably return the new list or let the frontend trigger a refresh.
-                    // The frontend stores local state too.
                 }
             }
 
@@ -635,11 +631,9 @@ mod macos {
                 }
 
                 // EKSpan::ThisEvent is usually 0
-                let _ = store.saveEvent_span_commit_error(
-                    &event,
-                    objc2_event_kit::EKSpan::ThisEvent,
-                    true,
-                );
+                store
+                    .saveEvent_span_commit_error(&event, objc2_event_kit::EKSpan::ThisEvent, true)
+                    .map_err(|e| e.to_string())?;
             }
 
             // Invalidate cache
@@ -664,13 +658,45 @@ pub fn init_store() {
     macos::init_store();
 }
 
-pub async fn request_calendar_access() -> Result<bool, String> {
+/// `Some(true)` granted, `Some(false)` denied or restricted, `None` if
+/// undetermined or EventKit is unavailable.
+pub fn calendar_authorized() -> Option<bool> {
     #[cfg(target_os = "macos")]
     {
-        macos::request_access().await
+        macos::calendar_authorized()
     }
     #[cfg(not(target_os = "macos"))]
-    Ok(true)
+    {
+        None
+    }
+}
+
+/// Same as [`calendar_authorized`] for the Reminders entity.
+pub fn reminders_authorized() -> Option<bool> {
+    #[cfg(target_os = "macos")]
+    {
+        macos::reminders_authorized()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        None
+    }
+}
+
+pub async fn request_calendar_access() -> Result<bool, String> {
+    request_calendar_access_with(crate::settings::get_app_settings().show_reminders).await
+}
+
+pub async fn request_calendar_access_with(reminders: bool) -> Result<bool, String> {
+    #[cfg(target_os = "macos")]
+    {
+        macos::request_access(reminders).await
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = reminders;
+        Ok(true)
+    }
 }
 
 pub async fn get_upcoming_events(

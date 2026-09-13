@@ -119,7 +119,7 @@ pub fn set_default_output(id: u32) -> Result<(), String> {
     }
     #[cfg(target_os = "macos")]
     {
-        return macos::set_default(id);
+        macos::set_default(id)
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -207,21 +207,20 @@ mod macos {
         is_output_capable, mark_default, output_channels_from_stream_config, publish, OutputDevice,
         OutputTransport, AVAILABLE,
     };
+    use crate::ffi::macos::{
+        kCFStringEncodingUTF8, AudioObjectAddPropertyListener, AudioObjectGetPropertyData,
+        AudioObjectGetPropertyDataSize, AudioObjectHasProperty, AudioObjectID,
+        AudioObjectPropertyAddress, AudioObjectSetPropertyData, CFIndex, CFRelease,
+        CFStringGetCString, CFStringGetLength, CFStringGetMaximumSizeForEncoding, OSStatus,
+    };
     use std::ffi::c_void;
     use std::sync::atomic::Ordering;
     use std::sync::Once;
 
-    type AudioObjectId = u32;
-    type OsStatus = i32;
-    type CfIndex = isize;
-
-    #[repr(C)]
-    #[derive(Clone, Copy)]
-    struct PropertyAddress {
-        selector: u32,
-        scope: u32,
-        element: u32,
-    }
+    type PropertyAddress = AudioObjectPropertyAddress;
+    type AudioObjectId = AudioObjectID;
+    type OsStatus = OSStatus;
+    type CfIndex = CFIndex;
 
     const SYSTEM_OBJECT: AudioObjectId = 1;
     const ELEMENT_MAIN: u32 = 0;
@@ -233,54 +232,6 @@ mod macos {
     const OBJECT_NAME: u32 = u32::from_be_bytes(*b"lnam");
     const TRANSPORT: u32 = u32::from_be_bytes(*b"tran");
     const STREAM_CONFIG: u32 = u32::from_be_bytes(*b"slay");
-    const CF_STRING_ENCODING_UTF8: u32 = 0x0800_0100;
-
-    #[link(name = "CoreAudio", kind = "framework")]
-    unsafe extern "C" {
-        fn AudioObjectHasProperty(object: AudioObjectId, address: *const PropertyAddress) -> u8;
-        fn AudioObjectGetPropertyDataSize(
-            object: AudioObjectId,
-            address: *const PropertyAddress,
-            qualifier_size: u32,
-            qualifier: *const c_void,
-            data_size: *mut u32,
-        ) -> OsStatus;
-        fn AudioObjectGetPropertyData(
-            object: AudioObjectId,
-            address: *const PropertyAddress,
-            qualifier_size: u32,
-            qualifier: *const c_void,
-            data_size: *mut u32,
-            data: *mut c_void,
-        ) -> OsStatus;
-        fn AudioObjectSetPropertyData(
-            object: AudioObjectId,
-            address: *const PropertyAddress,
-            qualifier_size: u32,
-            qualifier: *const c_void,
-            data_size: u32,
-            data: *const c_void,
-        ) -> OsStatus;
-        fn AudioObjectAddPropertyListener(
-            object: AudioObjectId,
-            address: *const PropertyAddress,
-            listener: unsafe extern "C" fn(
-                AudioObjectId,
-                u32,
-                *const PropertyAddress,
-                *mut c_void,
-            ) -> OsStatus,
-            client_data: *mut c_void,
-        ) -> OsStatus;
-    }
-
-    #[link(name = "CoreFoundation", kind = "framework")]
-    unsafe extern "C" {
-        fn CFRelease(cf: *const c_void);
-        fn CFStringGetLength(s: *const c_void) -> CfIndex;
-        fn CFStringGetMaximumSizeForEncoding(len: CfIndex, encoding: u32) -> CfIndex;
-        fn CFStringGetCString(s: *const c_void, buf: *mut i8, size: CfIndex, encoding: u32) -> u8;
-    }
 
     static STARTED: Once = Once::new();
 
@@ -361,7 +312,7 @@ mod macos {
         if len < 0 {
             return None;
         }
-        let max = unsafe { CFStringGetMaximumSizeForEncoding(len, CF_STRING_ENCODING_UTF8) };
+        let max = unsafe { CFStringGetMaximumSizeForEncoding(len, kCFStringEncodingUTF8) };
         if max < 0 {
             return None;
         }
@@ -371,7 +322,7 @@ mod macos {
                 cf,
                 buf.as_mut_ptr(),
                 buf.len() as CfIndex,
-                CF_STRING_ENCODING_UTF8,
+                kCFStringEncodingUTF8,
             )
         };
         if ok == 0 {
@@ -427,7 +378,10 @@ mod macos {
         let status = unsafe {
             AudioObjectGetPropertyDataSize(SYSTEM_OBJECT, &address, 0, std::ptr::null(), &mut size)
         };
-        if status != 0 || size == 0 || size as usize % std::mem::size_of::<AudioObjectId>() != 0 {
+        if status != 0
+            || size == 0
+            || !(size as usize).is_multiple_of(std::mem::size_of::<AudioObjectId>())
+        {
             return Vec::new();
         }
         let count = size as usize / std::mem::size_of::<AudioObjectId>();
@@ -511,7 +465,12 @@ mod macos {
 
     fn listen(object: AudioObjectId, address: PropertyAddress) {
         let status = unsafe {
-            AudioObjectAddPropertyListener(object, &address, on_hal_change, std::ptr::null_mut())
+            AudioObjectAddPropertyListener(
+                object,
+                &address,
+                Some(on_hal_change),
+                std::ptr::null_mut(),
+            )
         };
         if status != 0 {
             log::warn!("CoreAudio output-device listener failed ({status:#x})");

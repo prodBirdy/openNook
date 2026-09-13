@@ -12,11 +12,15 @@
 mod brand;
 mod engine;
 mod grid3;
+mod material;
 
 use engine::{bloom_level, Ctx, N};
 
 pub use brand::{element as brand_element, led_color_on};
 use gpui::{canvas, fill, point, prelude::*, px, Bounds, IntoElement, Pixels, Rgba, Window};
+/// Global LED grid — change [`LED`].resolution to retune every face.
+#[allow(unused_imports)]
+pub use material::{LedMaterial, LED};
 
 pub use grid3::Kind;
 
@@ -36,12 +40,16 @@ const IDLE_ALPHA: f32 = 0.45;
 /// tinted with the accent.
 pub(super) const IDLE_TINT: Rgba = crate::theme::SECONDARY_LABEL;
 /// Upstream `size={16}` / `dotSize={4}` cluster (14px span), not the compact face.
+#[allow(dead_code)]
 pub const COMPACT_SIZE: f32 = 16.0;
+#[allow(dead_code)]
 pub const WIDGET_SIZE: f32 = 16.0;
 
+#[allow(dead_code)]
 const POOL: [Kind; 3] = [Kind::DriftTl, Kind::CoreEcho, Kind::SmileySpin];
 
 /// Deterministic pick: the same seed always lands on the same loader.
+#[allow(dead_code)]
 pub fn pick(seed: u32) -> Kind {
     POOL[(seed as usize) % POOL.len()]
 }

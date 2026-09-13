@@ -49,8 +49,7 @@ pub fn drag_active() -> bool {
     DRAG_ACTIVE.load(Ordering::Relaxed)
 }
 
-/// Bumped on each `drag_active` edge. Window snap can watch this instead of
-/// polling AX while the pointer is still.
+/// Bumped on each `drag_active` edge so observers can detect drag transitions.
 pub fn drag_generation() -> u64 {
     DRAG_GEN.load(Ordering::Relaxed)
 }
@@ -111,9 +110,9 @@ pub fn exact_bounds() -> UiBounds {
 }
 
 /// Whether the cursor is within approach distance of the island. The UI tick
-/// loop uses this to stay at its fast cadence while the pointer could reach
-/// the island within one slow tick, and to idle down otherwise. Plain math on
-/// the published bounds — no AppKit calls.
+/// stays at its fast cadence while the pointer could reach the island within
+/// one idle backstop, and parks otherwise. Plain math on the published
+/// bounds — no AppKit calls.
 pub fn hit_test_near(mouse_x: f64, mouse_y: f64) -> bool {
     const NEAR: f64 = 96.0;
     let b = exact_bounds();
@@ -192,10 +191,10 @@ fn contains((x0, x1, y0, y1): (f64, f64, f64, f64), x: f64, y: f64) -> bool {
     x >= x0 && x <= x1 && y >= y0 && y <= y1
 }
 
-/// Sample the cursor. On macOS this is a 250 ms backstop — NSEvent global
-/// and local monitors (installed on the main thread from `platform`) write
-/// the same atomics on every move/drag. Monitors can drop during secure
-/// input or some full-screen games; the slow poll is how hover still exits.
+/// Sample the cursor. On macOS this is a 1 s backstop — NSEvent monitors
+/// (installed on the main thread from `platform`) write the same atomics on
+/// move/drag and poke the island wake. Monitors can drop during secure input
+/// or some full-screen games; the slow poll is how hover still exits.
 /// Windows/Linux keep the tighter poll (no AppKit monitors).
 pub fn start_polling() {
     if POLL_STARTED.swap(true, Ordering::SeqCst) {
@@ -214,7 +213,7 @@ pub fn start_polling() {
 fn poll_interval_ms() -> u64 {
     #[cfg(target_os = "macos")]
     {
-        250
+        1000
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -232,28 +231,43 @@ fn poll_interval_ms() -> u64 {
 
 /// Read cursor + drag into the atomics.
 ///
-/// Mouse position is safe from the 250 ms backstop thread. The drag
+/// Mouse position is safe from the 1 s backstop thread. The drag
 /// pasteboard is not: sample it only on the main thread (NSEvent monitors
 /// and the island UI tick). Off-main, we may clear a finished drag when the
 /// button is up, but we must not arm or disarm one while the button is down.
+///
+/// Pokes [`crate::ui_tick`] when the pointer is near the island or a drag
+/// edge flips — far-away moves update atomics without waking the UI loop.
 pub fn sample_now() {
     let (x, y) = read_mouse_logical();
-    MOUSE_X.store(x.to_bits(), Ordering::Relaxed);
-    MOUSE_Y.store(y.to_bits(), Ordering::Relaxed);
+    let prev_x = MOUSE_X.swap(x.to_bits(), Ordering::Relaxed);
+    let prev_y = MOUSE_Y.swap(y.to_bits(), Ordering::Relaxed);
+    let moved = prev_x != x.to_bits() || prev_y != y.to_bits();
     #[cfg(target_os = "macos")]
     if !on_main_thread() {
+        let mut drag_edge = false;
         if !left_button_down() {
-            publish_drag(false);
+            drag_edge = publish_drag(false);
+        }
+        if drag_edge || (moved && (hit_test_near(x, y) || hit_test(x, y))) {
+            crate::ui_tick::poke();
         }
         return;
     }
-    publish_drag(crate::files::file_drag_active());
+    let drag_edge = publish_drag(crate::files::file_drag_active());
+    if drag_edge || (moved && (hit_test_near(x, y) || hit_test(x, y) || drag_active())) {
+        crate::ui_tick::poke();
+    }
 }
 
-fn publish_drag(drag: bool) {
+/// Returns true when the drag flag flipped.
+fn publish_drag(drag: bool) -> bool {
     let was = DRAG_ACTIVE.swap(drag, Ordering::Relaxed);
     if was != drag {
         DRAG_GEN.fetch_add(1, Ordering::Relaxed);
+        true
+    } else {
+        false
     }
 }
 

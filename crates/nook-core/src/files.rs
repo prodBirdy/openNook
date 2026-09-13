@@ -345,7 +345,7 @@ mod tests {
         // `i64::MIN` when the pasteboard call fails — and then inbound Finder
         // drags never arm the tray.
         DRAG_PB_WAS_DOWN.store(true, Ordering::Relaxed);
-        let _ = std::thread::spawn(|| file_drag_active())
+        let _ = std::thread::spawn(file_drag_active)
             .join()
             .expect("probe thread");
         assert_eq!(

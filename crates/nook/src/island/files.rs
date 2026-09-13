@@ -1,25 +1,26 @@
 //! Expanded files tab: drop zone, grid, and tiles.
 
-use super::ui::label;
+use super::ui::{label, text_btn};
 use super::{Island, Tab};
 use crate::icons::{lucide, lucide_color};
 use crate::theme;
 use gpui::{
-    div, img, prelude::*, px, rgb, rgba, AnyElement, Context, CursorStyle, FontWeight, MouseButton,
+    div, img, prelude::*, px, AnyElement, Context, CursorStyle, FontWeight, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, ObjectFit, ScrollWheelEvent, SharedString,
 };
 use nook_core::files::FileTrayItem;
 use nook_core::share::{self, DeviceInfo, ShareKind, SharePhase};
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 /// Dashed drop-zone chrome. Tiles are a compact horizontal row, not a grid.
 const FILES_BORDER: f32 = 2.0;
 const FILES_GAP: f32 = 16.0;
 const FILES_MIN_TILE: f32 = 64.0;
-const TILE_RADIUS: f32 = 8.0;
+const TILE_RADIUS: f32 = theme::CONTROL_RADIUS;
 const TRAY_PREVIEW: f32 = 48.0;
 const TRAY_PAD: f32 = 16.0;
-const TRAY_ZONE_RADIUS: f32 = 22.0;
+const TRAY_ZONE_RADIUS: f32 = theme::ROW_RADIUS;
 const AIRDROP_W: f32 = 132.0;
 /// Same face as compact lucide glyphs.
 const COMPACT_PREVIEW: f32 = theme::COMPACT_FACE;
@@ -27,17 +28,20 @@ const COMPACT_PREVIEW_RADIUS: f32 = 5.0;
 const COMPACT_STACK_MAX: usize = 3;
 const COMPACT_STACK_DX: f32 = 4.0;
 const COMPACT_STACK_DY: f32 = 3.0;
-const FILES_NAME: f32 = 12.0;
+const FILES_NAME: f32 = theme::CALLOUT.size;
+const RELEASE_HINT: &str = "Release to add";
 const FILES_CAPTION_GAP: f32 = 2.0;
 const FILES_CAPTION_PT: f32 = 8.0;
 
 /// Content width the grid tracks actually lay out in: expanded island minus
 /// the widgets/files pane inset, the dashed drop-zone border, and the grid pad.
+#[allow(dead_code)]
 pub(crate) fn file_grid_inner(island_w: f32) -> f32 {
     (island_w - theme::EXPANDED_PAD * 2.0 - FILES_BORDER * 2.0 - FILES_GAP * 2.0)
         .max(FILES_MIN_TILE)
 }
 
+#[allow(dead_code)]
 pub(crate) fn file_grid_metrics(island_w: f32) -> (u16, f32) {
     let inner = file_grid_inner(island_w);
     let cols = ((inner + FILES_GAP) / (FILES_MIN_TILE + FILES_GAP))
@@ -77,9 +81,9 @@ fn compact_stack_card(file: &FileTrayItem, size: f32, x: f32, y: f32) -> impl In
         .size(px(size))
         .rounded(px(COMPACT_PREVIEW_RADIUS))
         .border_1()
-        .border_color(rgba(0xFFFFFF4D))
+        .border_color(theme::tertiary_label())
         .shadow_sm()
-        .bg(rgba(0xffffff14))
+        .bg(theme::FILL_TERTIARY)
         .flex()
         .items_center()
         .justify_center()
@@ -92,7 +96,7 @@ fn compact_stack_card(file: &FileTrayItem, size: f32, x: f32, y: f32) -> impl In
             )
         })
         .when(!is_img, |d| {
-            d.child(lucide_color("files", 14.0, theme::TERTIARY_LABEL))
+            d.child(lucide_color("files", 14.0, theme::tertiary_label()))
         })
 }
 
@@ -105,11 +109,11 @@ pub(super) fn compact_left(files: &[FileTrayItem]) -> AnyElement {
             .size(px(COMPACT_PREVIEW))
             .flex_shrink_0()
             .rounded(px(COMPACT_PREVIEW_RADIUS))
-            .bg(rgba(0xffffff14))
+            .bg(theme::FILL_TERTIARY)
             .flex()
             .items_center()
             .justify_center()
-            .child(lucide_color("files", 14.0, theme::TERTIARY_LABEL))
+            .child(lucide_color("files", 14.0, theme::tertiary_label()))
             .into_any_element();
     }
     let n = items.len();
@@ -136,14 +140,14 @@ pub(super) fn drop_veil() -> impl IntoElement {
     div()
         .absolute()
         .inset_0()
-        .bg(rgba(0x000000B3))
+        .bg(theme::SCRIM)
         .flex()
         .flex_col()
         .items_center()
         .justify_center()
         .gap_1()
-        .child(lucide("plus", 18.0))
-        .child(label("Release to Add", theme::BODY, true))
+        .child(lucide("plus", theme::COMPACT_FACE))
+        .child(label(RELEASE_HINT, theme::BODY, true))
 }
 
 const AIRDROP_BLUE: gpui::Rgba = gpui::Rgba {
@@ -178,19 +182,20 @@ fn drop_target(
         .can_drop(|drag: &dyn std::any::Any, _, _| {
             drag.downcast_ref::<gpui::ExternalPaths>().is_some()
         })
+        .drag_over::<gpui::ExternalPaths>(|s, _, _, _| s.border_2().border_color(theme::LABEL))
         .on_drop(
             cx.listener(move |this, paths: &gpui::ExternalPaths, _, cx| {
                 cx.stop_propagation();
                 on_drop(this, paths, cx);
             }),
         )
-        .child(lucide_color(icon, 28.0, rgb(0xffffff)))
+        .child(lucide_color(icon, 28.0, theme::LABEL))
         .child(
             div()
-                .text_size(px(14.))
-                .line_height(px(17.))
+                .text_size(px(theme::TITLE_3.size))
+                .line_height(px(theme::TITLE_3.leading))
                 .font_weight(FontWeight::SEMIBOLD)
-                .text_color(rgb(0xffffff))
+                .text_color(theme::LABEL)
                 .child(title),
         )
 }
@@ -201,13 +206,6 @@ const LOCALSEND_GREEN: gpui::Rgba = gpui::Rgba {
     b: 0.47,
     a: 1.0,
 };
-const LINK_AMBER: gpui::Rgba = gpui::Rgba {
-    r: 0.78,
-    g: 0.48,
-    b: 0.12,
-    a: 1.0,
-};
-
 fn airdrop_target(cx: &mut Context<Island>) -> impl IntoElement {
     drop_target(
         "airdrop-target",
@@ -230,64 +228,72 @@ fn localsend_target(cx: &mut Context<Island>) -> impl IntoElement {
     )
 }
 
-fn get_link_target(cx: &mut Context<Island>) -> impl IntoElement {
-    drop_target(
-        "get-link-target",
-        "Get a link",
-        "link",
-        LINK_AMBER,
-        cx,
-        |this, paths, cx| this.get_link_paths(paths, cx),
-    )
-}
-
-fn is_pdf(file: &FileTrayItem) -> bool {
-    file.mime_type.to_ascii_lowercase().contains("pdf")
-        || file.name.to_ascii_lowercase().ends_with(".pdf")
+fn extension_badge(file: &FileTrayItem) -> Option<String> {
+    let name = file.name.to_ascii_lowercase();
+    let ext = std::path::Path::new(&name)
+        .extension()
+        .and_then(|e| e.to_str())?
+        .to_ascii_uppercase();
+    if ext.is_empty() {
+        return None;
+    }
+    let mut chars = ext.chars();
+    let head: String = chars.by_ref().take(4).collect();
+    Some(head)
 }
 
 fn file_preview(file: &FileTrayItem) -> impl IntoElement {
     let show_img = file.mime_type.starts_with("image");
     let img_path = file.path.clone();
+    let badge = if show_img {
+        None
+    } else {
+        extension_badge(file)
+    };
     div()
         .size(px(TRAY_PREVIEW))
         .flex_shrink_0()
         .rounded(px(TILE_RADIUS))
         .overflow_hidden()
-        .bg(rgb(0xffffff))
+        .bg(theme::FILL_TERTIARY)
         .flex()
         .items_center()
         .justify_center()
         .when(show_img, |d| {
-            d.bg(rgba(0xffffff14)).child(
+            d.bg(theme::FILL_TERTIARY).child(
                 img(PathBuf::from(img_path))
                     .object_fit(ObjectFit::Fill)
                     .size(px(TRAY_PREVIEW))
                     .rounded(px(TILE_RADIUS)),
             )
         })
-        .when(is_pdf(file) && !show_img, |d| {
+        .when_some(badge.clone(), |d, badge| {
             d.flex_col().gap(px(2.)).child(
                 div()
-                    .text_size(px(9.))
+                    .text_size(px(theme::FOOTNOTE.size))
+                    .line_height(px(theme::FOOTNOTE.leading))
                     .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(rgb(0xE23D3D))
-                    .child("PDF"),
+                    .bg(theme::SECONDARY_LABEL)
+                    .text_color(theme::LABEL)
+                    .child(badge),
             )
         })
-        .when(!show_img && !is_pdf(file), |d| {
-            d.bg(rgba(0xffffff14))
-                .child(lucide_color("files", 22.0, theme::TERTIARY_LABEL))
+        .when(!show_img && badge.is_none(), |d| {
+            d.bg(theme::FILL_TERTIARY)
+                .child(lucide_color("files", 22.0, theme::tertiary_label()))
         })
 }
 
 fn file_card(file: &FileTrayItem, cx: &mut Context<Island>) -> impl IntoElement {
     let path = file.path.clone();
     let path_send = path.clone();
+    let path_rm = path.clone();
     let name = file.name.clone();
 
     div()
         .id(SharedString::from(format!("file-{}", file.path)))
+        .group("file-card")
+        .relative()
         .w(px(FILES_MIN_TILE))
         .flex()
         .flex_col()
@@ -321,17 +327,43 @@ fn file_card(file: &FileTrayItem, cx: &mut Context<Island>) -> impl IntoElement 
         )
         .on_mouse_down(
             MouseButton::Right,
-            cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+            cx.listener(move |this, _: &MouseDownEvent, _, cx| {
                 cx.stop_propagation();
                 let paths = vec![PathBuf::from(path_send.clone())];
-                if event.modifiers.secondary() {
-                    this.start_link_upload(paths, cx);
-                } else if share::localsend::app_installed() {
+                if share::localsend::app_installed() {
                     this.start_localsend(paths, cx);
+                } else {
+                    nook_core::haptics::trigger(None);
+                    crate::platform::share_via_airdrop(&paths);
+                    cx.notify();
                 }
             }),
         )
         .child(file_preview(file))
+        .child(
+            div()
+                .id(SharedString::from(format!("rm-{}", name)))
+                .absolute()
+                .top(px(-4.))
+                .right(px(-4.))
+                .size(px(theme::HIT_MIN))
+                .rounded_full()
+                .bg(theme::SCRIM)
+                .flex()
+                .items_center()
+                .justify_center()
+                .opacity(0.)
+                .group_hover("file-card", |s| s.opacity(1.0))
+                .cursor(CursorStyle::PointingHand)
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                        cx.stop_propagation();
+                        this.remove_file(&path_rm, cx);
+                    }),
+                )
+                .child(lucide_color("x", 12.0, theme::LABEL)),
+        )
         .child(
             div()
                 .w_full()
@@ -374,19 +406,15 @@ impl Island {
                     .gap(px(6.))
                     .child(lucide_color(
                         if hot { "plus" } else { "upload-thin" },
-                        28.0,
+                        theme::COMPACT_FACE,
                         if hot {
                             theme::LABEL
                         } else {
-                            theme::TERTIARY_LABEL
+                            theme::tertiary_label()
                         },
                     ))
                     .child(label(
-                        if hot {
-                            "Release to add"
-                        } else {
-                            "Drop files here"
-                        },
+                        if hot { RELEASE_HINT } else { "Drop files here" },
                         theme::CALLOUT,
                         true,
                     )),
@@ -404,27 +432,79 @@ impl Island {
             .border_2()
             .border_dashed()
             .border_color(if hot {
-                rgba(0xFFFFFF55)
+                theme::SEPARATOR
             } else {
-                rgba(0xFFFFFF2E)
+                theme::tertiary_label()
             })
             .child(row)
             .when(picking, |d| d.child(self.localsend_picker(cx)));
 
-        let mut pane = div().flex().size_full().gap(px(12.)).child(zone);
-        if hot {
-            pane = pane.child(airdrop_target(cx));
-            if share::localsend::app_installed() {
-                pane = pane.child(localsend_target(cx));
-            }
-            pane = pane.child(get_link_target(cx));
-        }
-        pane
+        let undo_live = self
+            .last_cleared_files
+            .as_ref()
+            .is_some_and(|(_, at)| at.elapsed() < Duration::from_secs(5));
+        let header = div()
+            .w_full()
+            .flex()
+            .items_center()
+            .justify_end()
+            .gap(px(6.))
+            .when(!self.files.is_empty(), |d| {
+                d.child(text_btn("Clear", cx, |this, _, cx| this.clear_files(cx)))
+            })
+            .when(undo_live, |d| {
+                d.child(text_btn("Undo", cx, |this, _, cx| {
+                    this.undo_clear_files(cx)
+                }))
+            });
+
+        div()
+            .flex()
+            .flex_col()
+            .size_full()
+            .gap(px(6.))
+            .child(header)
+            .child(
+                div()
+                    .flex()
+                    .flex_1()
+                    .min_h(px(0.))
+                    .w_full()
+                    .gap(px(12.))
+                    .child(zone)
+                    .when(hot, |row| {
+                        let mut row = row.child(airdrop_target(cx));
+                        if share::localsend::app_installed() {
+                            row = row.child(localsend_target(cx));
+                        }
+                        row
+                    }),
+            )
     }
 
     fn localsend_picker(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let mut list = div().flex().flex_col().gap(px(6.)).w_full();
-        if self.share.phase == SharePhase::Discovering {
+        if self.share.phase == SharePhase::Failed {
+            let msg: SharedString = self
+                .share
+                .error
+                .clone()
+                .unwrap_or_else(|| "Share failed".into())
+                .into();
+            list = list.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .child(lucide_color(
+                        "alert-triangle",
+                        theme::GLYPH_SM,
+                        theme::DESTRUCTIVE,
+                    ))
+                    .child(label(msg, theme::CALLOUT, false))
+                    .child(text_btn("Dismiss", cx, |this, _, cx| this.cancel_share(cx))),
+            );
+        } else if self.share.phase == SharePhase::Discovering {
             list = list.child(label(
                 "Looking for LocalSend devices…",
                 theme::CALLOUT,
@@ -453,14 +533,14 @@ impl Island {
                 list = list.child(
                     div()
                         .id(SharedString::from(format!("peer-{}", peer.fingerprint)))
-                        .h(px(32.))
+                        .h(px(theme::HIT_MIN))
                         .px(px(10.))
-                        .rounded(px(8.))
-                        .bg(rgba(0xffffff18))
+                        .rounded(px(theme::CONTROL_RADIUS))
+                        .bg(theme::FILL)
                         .flex()
                         .items_center()
                         .cursor(CursorStyle::PointingHand)
-                        .hover(|s| s.bg(rgba(0xffffff28)))
+                        .hover(|s| s.bg(theme::FILL_SECONDARY))
                         .on_mouse_down(
                             MouseButton::Left,
                             cx.listener(move |this, _: &MouseDownEvent, _, cx| {
@@ -472,10 +552,11 @@ impl Island {
                 );
             }
         }
+        let title = "Send with LocalSend";
         div()
             .absolute()
             .inset_0()
-            .bg(rgba(0x000000CC))
+            .bg(theme::SCRIM)
             .flex()
             .flex_col()
             .p(px(12.))
@@ -485,31 +566,23 @@ impl Island {
                     .flex()
                     .items_center()
                     .justify_between()
-                    .child(label("Send with LocalSend", theme::BODY, true))
-                    .child(
-                        div()
-                            .id("share-cancel")
-                            .cursor(CursorStyle::PointingHand)
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(|this, _: &MouseDownEvent, _, cx| {
-                                    cx.stop_propagation();
-                                    this.cancel_share(cx);
-                                }),
-                            )
-                            .child(label("Cancel", theme::CALLOUT, false)),
-                    ),
+                    .child(label(title, theme::BODY, true))
+                    .child(text_btn("Cancel", cx, |this, _, cx| this.cancel_share(cx))),
             )
             .child(list)
     }
 
+    #[allow(dead_code)]
     pub(super) fn file_layout(&self) -> (u16, f32) {
         file_grid_metrics(self.expanded_width())
     }
 
-    #[allow(dead_code)]
     pub(crate) fn clear_files(&mut self, cx: &mut Context<Self>) {
-        self.files.clear();
+        if self.files.is_empty() {
+            return;
+        }
+        // files.rs renders the Undo chip
+        self.last_cleared_files = Some((std::mem::take(&mut self.files), Instant::now()));
         let _ = nook_core::files::save_file_tray(self.files.clone());
         cx.notify();
     }
@@ -525,15 +598,12 @@ impl Island {
         self.tab = Tab::Files;
         self.preferred = Some(super::CompactMode::Files);
         nook_core::haptics::trigger(None);
+        self.arm_content_transition();
         cx.notify();
     }
 
     pub(super) fn localsend_paths(&mut self, paths: &gpui::ExternalPaths, cx: &mut Context<Self>) {
-        self.start_localsend(paths.paths().iter().cloned().collect(), cx);
-    }
-
-    pub(super) fn get_link_paths(&mut self, paths: &gpui::ExternalPaths, cx: &mut Context<Self>) {
-        self.start_link_upload(paths.paths().iter().cloned().collect(), cx);
+        self.start_localsend(paths.paths().to_vec(), cx);
     }
 
     fn begin_share(&mut self, kind: ShareKind, paths: Vec<PathBuf>, cx: &mut Context<Self>) -> u64 {
@@ -549,6 +619,7 @@ impl Island {
         self.tab = Tab::Files;
         self.preferred = Some(super::CompactMode::Share);
         nook_core::haptics::trigger(None);
+        self.arm_content_transition();
         cx.notify();
         self.share.gen
     }
@@ -599,8 +670,7 @@ impl Island {
                         };
                     }
                     Err(err) => {
-                        this.share.phase = SharePhase::Failed;
-                        this.share.error = Some(err);
+                        this.share.mark_failed(err);
                     }
                 }
                 cx.notify();
@@ -689,8 +759,7 @@ impl Island {
                         this.share.hud = Some("Sent".into());
                     }
                     Err(err) => {
-                        this.share.phase = SharePhase::Failed;
-                        this.share.error = Some(err);
+                        this.share.mark_failed(err);
                     }
                 }
                 cx.notify();
@@ -715,60 +784,6 @@ impl Island {
         })
         .detach();
         cx.notify();
-    }
-
-    pub(crate) fn start_link_upload(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
-        let Some(path) = paths.into_iter().find(|path| path.is_file()) else {
-            return;
-        };
-        let gen = self.begin_share(ShareKind::Link, vec![path.clone()], cx);
-        self.share.phase = SharePhase::Transferring;
-        self.share.status = "Uploading".into();
-        let settings = self.settings.share.clone();
-        cx.spawn(async move |this, cx| {
-            let result = cx
-                .background_executor()
-                .spawn(async move {
-                    nook_core::runtime().block_on(share::upload::upload_path(&settings, &path))
-                })
-                .await;
-            this.update(cx, |this, cx| {
-                if this.share.gen != gen {
-                    return;
-                }
-                match result {
-                    Ok(uploaded) => {
-                        this.share.phase = SharePhase::Done;
-                        this.share.progress = 1.0;
-                        this.share.status = uploaded.url.clone();
-                        this.share.hud = Some("Link copied".into());
-                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(uploaded.url));
-                    }
-                    Err(err) => {
-                        this.share.phase = SharePhase::Failed;
-                        this.share.error = Some(err);
-                    }
-                }
-                cx.notify();
-            })
-            .ok();
-            cx.background_executor()
-                .timer(std::time::Duration::from_secs(2))
-                .await;
-            this.update(cx, |this, cx| {
-                if this.share.gen != gen {
-                    return;
-                }
-                this.share.hud = None;
-                if matches!(this.share.phase, SharePhase::Done) {
-                    this.share.phase = SharePhase::Idle;
-                    this.share.kind = ShareKind::Idle;
-                }
-                cx.notify();
-            })
-            .ok();
-        })
-        .detach();
     }
 }
 

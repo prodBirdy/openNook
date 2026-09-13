@@ -1,5 +1,9 @@
 # vt100
 
+Vendored from crates.io `vt100` 0.15.2 with a `Grid::visible_rows`
+overflow fix (`saturating_sub` when `scrollback_offset > rows`). Upstream:
+https://github.com/doy/vt100-rust
+
 This crate parses a terminal byte stream and provides an in-memory
 representation of the rendered contents.
 

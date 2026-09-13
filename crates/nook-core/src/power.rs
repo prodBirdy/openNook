@@ -195,6 +195,15 @@ pub async fn list_shortcuts() -> Vec<String> {
 #[cfg(target_os = "macos")]
 mod macos {
     use super::*;
+    use crate::ffi::macos::{
+        kCFStringEncodingUTF8, CFArrayGetCount, CFArrayGetValueAtIndex, CFBooleanGetTypeID,
+        CFBooleanGetValue, CFBooleanRef as CfBooleanRef, CFDictionaryGetValue,
+        CFDictionaryRef as CfDictionaryRef, CFGetTypeID, CFNumberGetTypeID, CFNumberGetValue,
+        CFNumberRef as CfNumberRef, CFRelease, CFStringCreateWithCString, CFStringGetCString,
+        CFStringGetTypeID, CFStringRef as CfStringRef, CFTypeRef as CfTypeRef,
+        IOPSCopyPowerSourcesInfo, IOPSCopyPowerSourcesList, IOPSGetBatteryWarningLevel,
+        IOPSGetPowerSourceDescription, IOPSGetTimeRemainingEstimate,
+    };
     use std::ffi::CStr;
     use std::os::raw::{c_char, c_int, c_void};
     use std::ptr;
@@ -203,11 +212,11 @@ mod macos {
     use std::time::Duration;
 
     const NOTIFY_STATUS_OK: u32 = 0;
-    const K_CFSTRING_ENCODING_UTF8: u32 = 0x0800_0100;
     const K_CF_NUMBER_SINT32_TYPE: i32 = 3;
     const K_CF_NUMBER_DOUBLE_TYPE: i32 = 13;
     const K_IOPS_TIME_REMAINING_UNKNOWN: f64 = -1.0;
     const K_IOPS_TIME_REMAINING_UNLIMITED: f64 = -2.0;
+    #[allow(dead_code)] // IOPS warning-level sentinel alongside EARLY/FINAL
     const K_IOPS_WARNING_NONE: i32 = 1;
     const K_IOPS_WARNING_EARLY: i32 = 2;
     const K_IOPS_WARNING_FINAL: i32 = 3;
@@ -218,46 +227,10 @@ mod macos {
     const NOTIFY_LOW: &CStr = c"com.apple.system.powersources.lowbattery";
     const NOTIFY_TIME: &CStr = c"com.apple.system.powersources.timeremaining";
 
-    type CfTypeRef = *const c_void;
-    type CfStringRef = *const c_void;
-    type CfArrayRef = *const c_void;
-    type CfDictionaryRef = *const c_void;
-    type CfNumberRef = *const c_void;
-    type CfBooleanRef = *const c_void;
-    type CfAllocatorRef = *const c_void;
     type DispatchQueue = *mut c_void;
 
-    #[link(name = "IOKit", kind = "framework")]
-    #[link(name = "CoreFoundation", kind = "framework")]
+    // notify + libdispatch are not in crate::ffi::macos — keep local.
     unsafe extern "C" {
-        fn IOPSCopyPowerSourcesInfo() -> CfTypeRef;
-        fn IOPSCopyPowerSourcesList(blob: CfTypeRef) -> CfArrayRef;
-        fn IOPSGetPowerSourceDescription(blob: CfTypeRef, ps: CfTypeRef) -> CfDictionaryRef;
-        fn IOPSGetBatteryWarningLevel() -> i32;
-        fn IOPSGetTimeRemainingEstimate() -> f64;
-
-        fn CFRelease(cf: CfTypeRef);
-        fn CFGetTypeID(cf: CfTypeRef) -> usize;
-        fn CFArrayGetCount(array: CfArrayRef) -> isize;
-        fn CFArrayGetValueAtIndex(array: CfArrayRef, idx: isize) -> CfTypeRef;
-        fn CFDictionaryGetValue(dict: CfDictionaryRef, key: CfTypeRef) -> CfTypeRef;
-        fn CFStringCreateWithCString(
-            alloc: CfAllocatorRef,
-            c_str: *const c_char,
-            encoding: u32,
-        ) -> CfStringRef;
-        fn CFStringGetTypeID() -> usize;
-        fn CFStringGetCString(
-            string: CfStringRef,
-            buffer: *mut c_char,
-            buffer_size: isize,
-            encoding: u32,
-        ) -> u8;
-        fn CFNumberGetTypeID() -> usize;
-        fn CFNumberGetValue(number: CfNumberRef, the_type: i32, value_ptr: *mut c_void) -> u8;
-        fn CFBooleanGetTypeID() -> usize;
-        fn CFBooleanGetValue(boolean: CfBooleanRef) -> u8;
-
         fn notify_register_dispatch(
             name: *const c_char,
             out_token: *mut c_int,
@@ -413,7 +386,7 @@ mod macos {
         snap.warning_level = match unsafe { IOPSGetBatteryWarningLevel() } {
             K_IOPS_WARNING_EARLY => BatteryWarning::Early,
             K_IOPS_WARNING_FINAL => BatteryWarning::Final,
-            K_IOPS_WARNING_NONE | _ => BatteryWarning::None,
+            _ => BatteryWarning::None,
         };
 
         unsafe {
@@ -477,7 +450,7 @@ mod macos {
     }
 
     fn cf_key(name: &CStr) -> CfStringRef {
-        unsafe { CFStringCreateWithCString(ptr::null(), name.as_ptr(), K_CFSTRING_ENCODING_UTF8) }
+        unsafe { CFStringCreateWithCString(ptr::null(), name.as_ptr(), kCFStringEncodingUTF8) }
     }
 
     fn cf_dict_get(dict: CfDictionaryRef, key: &CStr) -> CfTypeRef {
@@ -560,7 +533,7 @@ mod macos {
                 value as CfStringRef,
                 buf.as_mut_ptr(),
                 buf.len() as isize,
-                K_CFSTRING_ENCODING_UTF8,
+                kCFStringEncodingUTF8,
             ) == 0
             {
                 return None;

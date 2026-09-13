@@ -1,6 +1,8 @@
 //! Expanded island: Nook (media / calendar / mirror) vs Tray (files).
 
+use super::edit::{edit_chrome, empty_edit_slot};
 use super::media::nook_media_pane;
+use super::ui::{empty_state, pill_btn};
 use super::{CompactMode, Island, Tab};
 use crate::icons::lucide_color;
 use crate::theme;
@@ -10,21 +12,29 @@ use crate::widgets::{
     speed_card, sysstats_card, terminal_card, timer_card, vpn_card, weather_card,
 };
 use gpui::{
-    div, img, prelude::*, px, rgba, AnyElement, Context, CursorStyle, FontWeight, MouseButton,
+    div, img, prelude::*, px, AnyElement, Context, CursorStyle, FontWeight, MouseButton,
     MouseDownEvent, ObjectFit, RenderImage, ScrollWheelEvent,
 };
-use nook_core::messages::FdaStatus;
-use nook_core::settings::WidgetModule;
+use nook_core::settings::{AppSettings, WidgetModule};
+
+/// Browse rows at or above this cell sum stretch to fill the island width.
+/// Below it, panes stay proportional and centered (single-row layout).
+const ROW_STRETCH_MIN_CELLS: u8 = AppSettings::TOTAL_CELLS - 2;
 
 impl Island {
+    /// Effective Nook cell width for the current expanded island width.
+    /// Shared by browse and customize so partial rows do not stretch or clip.
+    pub(super) fn nook_cell_width(&self) -> f32 {
+        let avail = self.expanded_width() - 2.0 * theme::NOOK_INSET;
+        // Allowance for ~6 pane dividers on a wide single row.
+        (avail - 5.0 * theme::NOOK_DIVIDER) / AppSettings::TOTAL_CELLS as f32
+    }
+
     pub(super) fn render_expanded(
         &mut self,
         notch_w: f32,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        if self.search_open {
-            return self.render_search(cx).into_any_element();
-        }
         let tab = if self.tab == Tab::Files && !self.settings.show_files {
             Tab::Widgets
         } else {
@@ -52,10 +62,53 @@ impl Island {
     }
 
     fn render_topbar(&self, notch_w: f32, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.widget_edit {
+            return div()
+                .w_full()
+                .flex_shrink_0()
+                .h(px(self.notch_height.max(theme::NOTCH_MIN_H)))
+                .flex()
+                .items_center()
+                .justify_between()
+                .px(px(theme::NOOK_INSET))
+                .child(
+                    div()
+                        .text_size(px(theme::SUBHEADLINE.size))
+                        .line_height(px(theme::SUBHEADLINE.leading))
+                        .font_weight(theme::SUBHEADLINE.weight)
+                        .text_color(theme::secondary_label())
+                        .child("Customize"),
+                )
+                .child(div().w(px(notch_w)))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(10.))
+                        .child(super::edit::edit_action_btn(
+                            "widget-edit-cancel",
+                            "Cancel",
+                            theme::FILL,
+                            theme::LABEL,
+                            cx,
+                            |this, cx| this.cancel_widget_edit(cx),
+                        ))
+                        .child(super::edit::edit_action_btn(
+                            "widget-edit-done",
+                            "Done",
+                            theme::accent(),
+                            theme::LABEL,
+                            cx,
+                            |this, cx| this.finish_widget_edit(cx),
+                        )),
+                )
+                .into_any_element();
+        }
+
         div()
             .w_full()
             .flex_shrink_0()
-            .h(px(self.notch_height.max(32.0)))
+            .h(px(self.notch_height.max(theme::NOTCH_MIN_H)))
             .flex()
             .items_center()
             .justify_between()
@@ -67,27 +120,54 @@ impl Island {
             .child(div().w(px(notch_w)))
             .child(
                 div()
-                    .id("settings-btn")
-                    .size(px(theme::HIT_MIN))
                     .flex()
                     .items_center()
-                    .justify_center()
-                    .hover(|s| s.opacity(0.85))
-                    .active(|s| s.opacity(0.7))
-                    .cursor(CursorStyle::PointingHand)
-                    .child(lucide_color("settings", 16.0, theme::SECONDARY_LABEL))
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|this, _: &MouseDownEvent, _, cx| {
-                            cx.stop_propagation();
-                            this.open_settings(cx);
-                        }),
+                    .gap(px(4.))
+                    .child(
+                        div()
+                            .id("customize-widgets-btn")
+                            .size(px(theme::HIT_MIN))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .hover(|s| s.opacity(0.85))
+                            .active(|s| s.opacity(0.7))
+                            .cursor(CursorStyle::PointingHand)
+                            .child(lucide_color("layout-grid", 16.0, theme::secondary_label()))
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                                    cx.stop_propagation();
+                                    this.begin_widget_edit(cx);
+                                }),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .id("settings-btn")
+                            .size(px(theme::HIT_MIN))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .hover(|s| s.opacity(0.85))
+                            .active(|s| s.opacity(0.7))
+                            .cursor(CursorStyle::PointingHand)
+                            .child(lucide_color("settings", 16.0, theme::secondary_label()))
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                                    cx.stop_propagation();
+                                    this.open_settings(cx);
+                                }),
+                            ),
                     ),
             )
+            .into_any_element()
     }
 
     fn render_nook(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
-        if self.has_incoming_message() && self.mode() == CompactMode::Messages {
+        if !self.widget_edit && self.has_incoming_message() && self.mode() == CompactMode::Messages
+        {
             return div()
                 .id("nook-row")
                 .size_full()
@@ -96,7 +176,8 @@ impl Island {
                 .child(messages_card(self, cx))
                 .into_any_element();
         }
-        if self.settings.show_recorder && self.mode() == CompactMode::Recording {
+        if !self.widget_edit && self.settings.show_recorder && self.mode() == CompactMode::Recording
+        {
             return div()
                 .id("nook-row")
                 .size_full()
@@ -110,169 +191,337 @@ impl Island {
         } else {
             None
         };
-        let mut kids: Vec<AnyElement> = Vec::new();
-        let add = |kids: &mut Vec<AnyElement>, child: AnyElement| {
-            if !kids.is_empty() {
-                kids.push(pane_divider().into_any_element());
-            }
-            kids.push(child);
-        };
+        let editing = self.widget_edit;
+        let mut panes: Vec<(WidgetModule, u8, AnyElement)> = Vec::new();
+        let push = |panes: &mut Vec<(WidgetModule, u8, AnyElement)>,
+                    module: WidgetModule,
+                    cells: u8,
+                    child: AnyElement| { panes.push((module, cells, child)) };
 
-        for module in self.settings.ordered_widgets() {
+        for (module, cells) in self.visible_nook_items() {
             match module {
-                WidgetModule::Music if self.settings.show_media => add(
-                    &mut kids,
-                    cell_pane(self.settings.cells_for(module), nook_media_pane(self, cx)),
+                WidgetModule::Music => push(
+                    &mut panes,
+                    module,
+                    cells,
+                    nook_media_pane(self, cx).into_any_element(),
                 ),
-                WidgetModule::Calendar if self.settings.show_calendar => add(
-                    &mut kids,
-                    cell_pane(
-                        self.settings.cells_for(module),
-                        calendar_card(&self.events, self.calendar_day, cx),
-                    ),
+                WidgetModule::Calendar => push(
+                    &mut panes,
+                    module,
+                    cells,
+                    calendar_card(&self.events, self.calendar_day, cx).into_any_element(),
                 ),
-                WidgetModule::Mirror if self.settings.show_mirror => add(
-                    &mut kids,
-                    cell_pane(self.settings.cells_for(module), mirror_pane(self, cx)),
+                WidgetModule::Mirror => push(
+                    &mut panes,
+                    module,
+                    cells,
+                    mirror_pane(self, cx).into_any_element(),
                 ),
-                WidgetModule::Agents if self.settings.show_agents => add(
-                    &mut kids,
-                    cell_pane(
-                        self.settings.cells_for(module),
-                        agents_card(
-                            &self.agents,
-                            self.pixel_t,
-                            theme::island_fill(self.settings.island_color),
-                            cx,
-                        ),
-                    ),
-                ),
-                WidgetModule::Meeting if self.settings.is_enabled(module) => add(
-                    &mut kids,
-                    cell_pane(
-                        self.settings.cells_for(module),
-                        meeting_card(&self.meeting, cx),
-                    ),
-                ),
-                WidgetModule::Observe if self.settings.show_observe => add(
-                    &mut kids,
-                    cell_pane(
-                        self.settings.cells_for(module),
-                        observe_card(
-                            &self.observe,
-                            &self.settings,
-                            self.observe_hover.as_ref(),
-                            cx,
-                        ),
-                    ),
-                ),
-                WidgetModule::Reminders if self.settings.show_reminders => add(
-                    &mut kids,
-                    cell_pane(
-                        self.settings.cells_for(module),
-                        reminders_card(&self.reminders, reminders_qa.clone(), cx),
-                    ),
-                ),
-                WidgetModule::Timers if self.settings.show_timers => add(
-                    &mut kids,
-                    cell_pane(self.settings.cells_for(module), timer_card(self, cx)),
-                ),
-                WidgetModule::Notes if self.settings.show_notes => add(
-                    &mut kids,
-                    cell_pane(self.settings.cells_for(module), notes_card(self, cx)),
-                ),
-                WidgetModule::Obsidian if self.settings.is_enabled(module) => add(
-                    &mut kids,
-                    cell_pane(self.settings.cells_for(module), obsidian_card(self, cx)),
-                ),
-                WidgetModule::Speed if self.settings.show_speed => add(
-                    &mut kids,
-                    cell_pane(
-                        self.settings.cells_for(module),
-                        speed_card(self.speed_mbps, self.speed_progress, self.speed_running, cx),
-                    ),
-                ),
-                WidgetModule::Battery if self.settings.show_battery => add(
-                    &mut kids,
-                    cell_pane(self.settings.cells_for(module), battery_card(self, cx)),
-                ),
-                WidgetModule::Messages
-                    if self.settings.show_messages
-                        && (self.messages.incoming.is_some()
-                            || self.messages.fda != FdaStatus::Granted) =>
-                {
-                    add(
-                        &mut kids,
-                        cell_pane(self.settings.cells_for(module), messages_card(self, cx)),
+                WidgetModule::Agents => push(
+                    &mut panes,
+                    module,
+                    cells,
+                    agents_card(
+                        &self.agents,
+                        self.pixel_t,
+                        theme::island_fill(self.settings.island_color),
+                        self.size_morphing(),
+                        cx,
                     )
-                }
-                WidgetModule::Weather if self.settings.weather.enabled => add(
-                    &mut kids,
-                    cell_pane(self.settings.cells_for(module), weather_card(self, cx)),
+                    .into_any_element(),
                 ),
-                WidgetModule::Vpn if self.settings.show_vpn => add(
-                    &mut kids,
-                    cell_pane(self.settings.cells_for(module), vpn_card(&self.vpn)),
+                WidgetModule::Meeting => push(
+                    &mut panes,
+                    module,
+                    cells,
+                    meeting_card(&self.meeting, cx).into_any_element(),
                 ),
-                WidgetModule::HighAlert if self.settings.show_high_alert => add(
-                    &mut kids,
-                    cell_pane(self.settings.cells_for(module), high_alert_card(self, cx)),
+                WidgetModule::Observe => push(
+                    &mut panes,
+                    module,
+                    cells,
+                    observe_card(
+                        &self.observe,
+                        &self.settings,
+                        self.observe_hover.as_ref(),
+                        cx,
+                    )
+                    .into_any_element(),
                 ),
-                WidgetModule::SysStats if self.settings.show_sysstats => add(
-                    &mut kids,
-                    cell_pane(self.settings.cells_for(module), sysstats_card(self, cx)),
+                WidgetModule::Reminders => push(
+                    &mut panes,
+                    module,
+                    cells,
+                    reminders_card(&self.reminders, reminders_qa.clone(), cx).into_any_element(),
                 ),
-                WidgetModule::Recorder if self.settings.show_recorder => add(
-                    &mut kids,
-                    cell_pane(self.settings.cells_for(module), recorder_card(self, cx)),
+                WidgetModule::Timers => push(
+                    &mut panes,
+                    module,
+                    cells,
+                    timer_card(self, cx).into_any_element(),
                 ),
-                WidgetModule::Notifications if self.settings.show_notifications => add(
-                    &mut kids,
-                    cell_pane(
-                        self.settings.cells_for(module),
-                        notifications_card(&self.notifications, cx),
-                    ),
+                WidgetModule::Notes => push(
+                    &mut panes,
+                    module,
+                    cells,
+                    notes_card(self, cx).into_any_element(),
                 ),
-                _ => {}
+                WidgetModule::Obsidian => push(
+                    &mut panes,
+                    module,
+                    cells,
+                    obsidian_card(self, cx).into_any_element(),
+                ),
+                WidgetModule::Speed => push(
+                    &mut panes,
+                    module,
+                    cells,
+                    speed_card(self.speed_mbps, self.speed_progress, self.speed_running, cx)
+                        .into_any_element(),
+                ),
+                WidgetModule::Battery => push(
+                    &mut panes,
+                    module,
+                    cells,
+                    battery_card(self, cx).into_any_element(),
+                ),
+                WidgetModule::Messages => push(
+                    &mut panes,
+                    module,
+                    cells,
+                    messages_card(self, cx).into_any_element(),
+                ),
+                WidgetModule::Weather => push(
+                    &mut panes,
+                    module,
+                    cells,
+                    weather_card(self, cx).into_any_element(),
+                ),
+                WidgetModule::Vpn => push(
+                    &mut panes,
+                    module,
+                    cells,
+                    vpn_card(&self.vpn).into_any_element(),
+                ),
+                WidgetModule::HighAlert => push(
+                    &mut panes,
+                    module,
+                    cells,
+                    high_alert_card(self, cx).into_any_element(),
+                ),
+                WidgetModule::SysStats => push(
+                    &mut panes,
+                    module,
+                    cells,
+                    sysstats_card(self, cx).into_any_element(),
+                ),
+                WidgetModule::Recorder => push(
+                    &mut panes,
+                    module,
+                    cells,
+                    recorder_card(self, cx).into_any_element(),
+                ),
+                WidgetModule::Notifications => push(
+                    &mut panes,
+                    module,
+                    cells,
+                    notifications_card(&self.notifications, cx).into_any_element(),
+                ),
+                WidgetModule::Files => {}
             }
         }
 
-        let mut row = div()
+        let queue_extra = self.queue_extra_width();
+        let cell_w = self.nook_cell_width();
+        let mut packed = pack_pane_rows(panes, AppSettings::TOTAL_CELLS);
+        packed.truncate(AppSettings::MAX_ROWS);
+        // Remainder from the last packed visible row (not settings.remaining_cells,
+        // which includes widgets the lockup paths may hide).
+        let (_, last_remaining) = self.nook_row_count_for_render();
+        let remaining = if editing { last_remaining } else { 0 };
+        let last_row_full = !packed.is_empty() && remaining == 0;
+        let append_new_row = editing && last_row_full && packed.len() < AppSettings::MAX_ROWS;
+        // Customize always needs a drop row when nothing is enabled yet.
+        if editing && packed.is_empty() {
+            packed.push(Vec::new());
+        }
+        if append_new_row {
+            packed.push(Vec::new());
+        }
+
+        let mut grid = div()
             .id("nook-row")
             .flex()
-            .flex_row()
+            .flex_col()
             .w_full()
-            .h_full()
+            .flex_1()
+            .min_h(px(0.))
             .px(px(theme::NOOK_INSET))
+            .pt(px(0.))
             .pb(px(theme::NOOK_INSET))
-            .overflow_hidden()
-            .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _, cx| {
-                this.on_wheel(event, cx);
-            }));
-        for child in kids {
-            row = row.child(child);
+            .when(!editing, |d| d.overflow_hidden())
+            .when(!editing, |d| {
+                d.on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _, cx| {
+                    this.on_wheel(event, cx);
+                }))
+            });
+
+        if packed.is_empty() {
+            grid = grid.child(
+                empty_state(
+                    "No widgets enabled",
+                    pill_btn("Customize", cx, |this, _, cx| this.begin_widget_edit(cx)),
+                )
+                .into_any_element(),
+            );
+        } else {
+            let row_count = packed.len();
+            for (ri, row_panes) in packed.into_iter().enumerate() {
+                if ri > 0 {
+                    grid = grid.child(
+                        div()
+                            .h(px(1.))
+                            .w_full()
+                            .my(px(theme::CONTENT_INSET))
+                            .bg(if editing {
+                                theme::with_alpha(theme::SEPARATOR, 0.0)
+                            } else {
+                                theme::SEPARATOR
+                            })
+                            .flex_shrink_0(),
+                    );
+                }
+                let is_last = ri + 1 == row_count;
+                let row_was_empty = row_panes.is_empty();
+                let row_cells = row_panes
+                    .iter()
+                    .map(|(_, cells, _)| *cells)
+                    .fold(0u8, |sum, cells| sum.saturating_add(cells));
+                let row_stretches = row_cells >= ROW_STRETCH_MIN_CELLS;
+                let mut row = div()
+                    .flex()
+                    .flex_row()
+                    .w_full()
+                    .h(px(theme::NOOK_BODY))
+                    .flex_shrink_0()
+                    .when(editing || row_stretches, |d| d.justify_start())
+                    .when(!editing && !row_stretches, |d| d.justify_center())
+                    .when(editing, |d| d.gap(px(12.)));
+
+                for (i, (module, cells, child)) in row_panes.into_iter().enumerate() {
+                    if !editing && i > 0 {
+                        row = row.child(pane_divider());
+                    }
+                    let child = if editing {
+                        edit_chrome(module, child, cx)
+                    } else {
+                        child
+                    };
+                    if editing {
+                        let width = cells as f32 * cell_w;
+                        row = row.child(cell_pane(width, child));
+                    } else if row_stretches {
+                        let basis = if module == WidgetModule::Music {
+                            queue_extra
+                        } else {
+                            0.0
+                        };
+                        let mut pane = div()
+                            .h_full()
+                            .min_w(px(0.))
+                            .overflow_hidden()
+                            .flex_basis(px(basis))
+                            .child(child);
+                        pane.style().flex_grow = Some(cells as f32);
+                        pane.style().flex_shrink = Some(1.0);
+                        row = row.child(pane);
+                    } else {
+                        let width = cells as f32 * cell_w
+                            + if module == WidgetModule::Music {
+                                queue_extra
+                            } else {
+                                0.0
+                            };
+                        row = row.child(
+                            div()
+                                .w(px(width))
+                                .h_full()
+                                .min_w(px(0.))
+                                .overflow_hidden()
+                                .flex_shrink_0()
+                                .child(child),
+                        );
+                    }
+                }
+
+                // Leftover budget → dashed drop slot spanning the free cells;
+                // a fresh empty row (full last row under MAX_ROWS) flex-fills.
+                if editing && is_last && (remaining > 0 || row_was_empty) {
+                    let slot_w = if row_was_empty {
+                        0.0
+                    } else {
+                        remaining as f32 * cell_w
+                    };
+                    row = row.child(empty_edit_slot(slot_w, cx));
+                }
+
+                grid = grid.child(row);
+            }
         }
-        row.into_any_element()
+
+        if editing {
+            div()
+                .id("nook-edit")
+                .flex()
+                .flex_col()
+                .size_full()
+                .overflow_hidden()
+                .child(grid)
+                .child(self.render_widget_edit_picker(cx))
+                .into_any_element()
+        } else {
+            grid.into_any_element()
+        }
     }
 }
 
-fn cell_pane(cells: u8, child: impl IntoElement) -> AnyElement {
-    let mut pane = div()
-        .w(px(cells as f32 * theme::NOOK_CELL))
+/// Greedy first-fit pack matching `nook_core::settings::pack_rows`, for panes.
+fn pack_pane_rows(
+    panes: Vec<(WidgetModule, u8, AnyElement)>,
+    cap: u8,
+) -> Vec<Vec<(WidgetModule, u8, AnyElement)>> {
+    let mut rows: Vec<Vec<(WidgetModule, u8, AnyElement)>> = Vec::new();
+    let mut used: u8 = 0;
+    for (module, raw, child) in panes {
+        let cells = raw.min(cap);
+        if rows.is_empty() || used.saturating_add(cells) > cap {
+            rows.push(Vec::new());
+            used = 0;
+        }
+        used = used.saturating_add(cells);
+        rows.last_mut().unwrap().push((module, cells, child));
+    }
+    rows
+}
+
+fn cell_pane(width: f32, child: impl IntoElement) -> AnyElement {
+    div()
+        .w(px(width))
         .h_full()
         .min_w(px(0.))
-        .overflow_hidden()
-        .child(child);
-    pane.style().flex_shrink = Some(cells.max(1) as f32);
-    pane.into_any_element()
+        .flex_shrink_0()
+        // Edit − badges hang outside the dashed frame; don't clip them.
+        .child(child)
+        .into_any_element()
 }
 
 fn pane_divider() -> impl IntoElement {
     div()
         .w(px(1.))
         .h_full()
-        .mx(px(12.))
-        .bg(rgba(0xffffff1A))
+        .mx(px(theme::CONTENT_INSET))
+        .bg(theme::SEPARATOR)
         .flex_shrink_0()
 }
 
@@ -319,14 +568,20 @@ fn labeled_tab(
 ) -> impl IntoElement {
     div()
         .id(id)
-        .h(px(28.))
+        .h(px(theme::HIT_MIN))
         .px(px(10.))
         .flex()
         .items_center()
         .gap(px(6.))
         .rounded_full()
-        .when(selected, |d| d.bg(rgba(0xffffff18)))
-        .hover(|s| if selected { s } else { s.bg(rgba(0xffffff0D)) })
+        .when(selected, |d| d.bg(theme::FILL))
+        .hover(|s| {
+            if selected {
+                s.bg(theme::FILL_SECONDARY)
+            } else {
+                s.bg(theme::FILL_TERTIARY)
+            }
+        })
         .active(|s| s.opacity(0.85))
         .cursor(CursorStyle::PointingHand)
         .child(lucide_color(
@@ -335,18 +590,18 @@ fn labeled_tab(
             if selected {
                 theme::LABEL
             } else {
-                theme::SECONDARY_LABEL
+                theme::secondary_label()
             },
         ))
         .child(
             div()
-                .text_size(px(12.))
-                .line_height(px(16.))
+                .text_size(px(theme::CALLOUT.size))
+                .line_height(px(theme::CALLOUT.leading))
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(if selected {
                     theme::LABEL
                 } else {
-                    theme::SECONDARY_LABEL
+                    theme::secondary_label()
                 })
                 .child(title),
         )
@@ -355,6 +610,7 @@ fn labeled_tab(
             cx.listener(move |this, _: &MouseDownEvent, _, cx| {
                 cx.stop_propagation();
                 this.tab = tab;
+                this.arm_content_transition();
                 cx.notify();
             }),
         )
@@ -376,9 +632,9 @@ fn mirror_pane(island: &Island, cx: &mut Context<Island>) -> impl IntoElement {
                 .id("mirror-btn")
                 .size(px(theme::MIRROR_FACE))
                 .rounded_full()
-                .bg(rgba(0xffffff14))
+                .bg(theme::FILL_TERTIARY)
                 .cursor(CursorStyle::PointingHand)
-                .hover(|s| if live { s } else { s.bg(rgba(0xffffff1F)) })
+                .hover(|s| if live { s } else { s.bg(theme::FILL) })
                 .active(|s| s.opacity(0.9))
                 .on_mouse_down(
                     MouseButton::Left,
@@ -394,13 +650,13 @@ fn mirror_pane(island: &Island, cx: &mut Context<Island>) -> impl IntoElement {
                         .items_center()
                         .justify_center()
                         .gap(px(8.))
-                        .child(lucide_color("webcam", 28.0, theme::SECONDARY_LABEL))
+                        .child(lucide_color("webcam", 28.0, theme::secondary_label()))
                         .child(
                             div()
-                                .text_size(px(12.))
-                                .line_height(px(15.))
+                                .text_size(px(theme::CALLOUT.size))
+                                .line_height(px(theme::CALLOUT.leading))
                                 .font_weight(FontWeight::MEDIUM)
-                                .text_color(theme::SECONDARY_LABEL)
+                                .text_color(theme::secondary_label())
                                 .child("Mirror"),
                         )
                 }),

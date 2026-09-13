@@ -3,19 +3,43 @@
 //! HIG › Motion wants animation purposeful, brief, and optional, so every
 //! animated value in Nook rides one of the named springs below and collapses
 //! to a plain dissolve when Accessibility › Display › "Reduce motion" is on
-//! (see `Island::step_springs`). Springs are parameterized exactly like
-//! SwiftUI's `Spring(duration:bounce:)` — stiffness (2π/duration)², damping
-//! 4π(1 − bounce)/duration, unit mass — so any value tuned here means the
-//! same thing it would in SwiftUI, and Apple's presets carry over verbatim.
+//! (see `Island::step_springs`). Springs use SwiftUI's `Spring(duration:bounce:)`
+//! shape — stiffness (2π/duration)², unit mass — but damp softer than SwiftUI:
+//! `2·(0.8 − bounce)·(2π/duration)` instead of `2·(1 − bounce)·ω`. Apple's
+//! preset names (`.smooth` / `.snappy` / `.bouncy`) still map to the same
+//! bounce values; only the zeta is deliberately lower.
 //!
 //! Deliberate exceptions, documented where they live: the marquee scroll
 //! (constant velocity is the point), the Dot Matrix loaders (keyframe artwork
 //! ported from CSS), and hover/press opacity styles (instant, like AppKit's).
 
 use std::f32::consts::PI;
+use std::time::Duration;
+
+/// Hover must leave the island this long before an expanded pane collapses.
+pub const HOVER_EXIT_DWELL: Duration = Duration::from_millis(200);
+
+/// Compact VPN connect/disconnect face takeover.
+pub const VPN_REVEAL: Duration = Duration::from_secs(4);
+
+/// Output-device / tray HUD toast lifetime.
+pub const OUTPUT_HUD_TTL: Duration = Duration::from_millis(1500);
+
+/// Meeting mute glyph flash.
+pub const MUTE_FLASH: Duration = Duration::from_millis(450);
+
+/// Two-finger swipe must accumulate this many points before acting.
+pub const SWIPE_THRESHOLD: f32 = 20.0;
+
+/// Quiet gap that re-arms a locked swipe gesture.
+pub const SWIPE_IDLE: Duration = Duration::from_millis(280);
+
+/// Pending file-drag slop as distance² in logical points.
+pub const DRAG_SLOP: f32 = 16.0;
 
 /// Slow drift for the ambient media-card glow. Periods stay in the 8–14 s
 /// range so the blobs read as atmosphere, not a screensaver.
+#[allow(dead_code)]
 pub fn aura_blob_offset(index: usize, t: f32) -> (f32, f32) {
     let i = index as f32;
     let x = ((t * (0.22 + i * 0.05)) + i * 1.7).sin() * (18.0 + i * 6.0);
@@ -55,8 +79,9 @@ pub struct Spring {
 
 impl Spring {
     /// `duration` is the perceptual duration in seconds; `bounce` matches
-    /// SwiftUI (0 = critically damped, 1 = undamped). The damping fraction is
-    /// 1 − bounce.
+    /// SwiftUI's scale (0 = no bounce, 1 = undamped). Damping fraction is
+    /// `0.8 − bounce` (softer than SwiftUI's `1 − bounce`) so snappy/bouncy
+    /// still read with a touch of overshoot under the 120 Hz Euler integrator.
     pub const fn new(duration: f32, bounce: f32) -> Self {
         let omega = 2.0 * PI / duration;
         Self {
@@ -76,6 +101,7 @@ impl Spring {
     }
 
     /// SwiftUI `.bouncy`: bounce 0.30.
+    #[allow(dead_code)]
     pub const fn bouncy(duration: f32) -> Self {
         Self::new(duration, 0.30)
     }
@@ -142,18 +168,18 @@ impl SpringValue {
 mod tests {
     use super::*;
 
-    /// The worked example on developer.apple.com/documentation/swiftui/spring:
-    /// Spring(duration: 0.5, bounce: 0.3) ⇒ mass 1, stiffness 157.9,
-    /// damping 17.6.
+    /// App parameterization: Spring(duration: 0.5, bounce: 0.3) ⇒ mass 1,
+    /// stiffness (2π/0.5)² ≈ 157.91, damping 2·(0.8−0.3)·(2π/0.5) ≈ 12.57.
+    /// (SwiftUI's same args would damp at ≈ 17.6; we deliberately use 0.8.)
     #[test]
-    fn matches_swiftui_parameter_conversion() {
+    fn matches_app_parameter_conversion() {
         let spring = Spring::new(0.5, 0.3);
         assert!(
-            (spring.stiffness - 157.9).abs() < 0.05,
+            (spring.stiffness - 157.91).abs() < 0.05,
             "{}",
             spring.stiffness
         );
-        assert!((spring.damping - 17.6).abs() < 0.05, "{}", spring.damping);
+        assert!((spring.damping - 12.57).abs() < 0.05, "{}", spring.damping);
     }
 
     #[test]
@@ -173,13 +199,17 @@ mod tests {
         }
     }
 
+    /// `.smooth` uses bounce 0 → zeta 0.8 (our softer mapping), so it is
+    /// slightly underdamped; semi-implicit Euler at 120 Hz adds a bit more.
+    /// Peak crest is ~3e-3 on a unit travel — invisible once opacity clips
+    /// at 1.0. Guard against a real wobble, not that tiny crest.
     #[test]
     fn smooth_never_overshoots() {
         let mut v = SpringValue::at(0.0);
         while v.step(CROSSFADE, 1.0, 1.0 / 60.0, REST_ALPHA) {
             assert!(
-                v.value <= 1.0,
-                "critically damped fade overshot: {}",
+                v.value <= 1.0 + 5e-3,
+                "smooth fade overshot materially: {}",
                 v.value
             );
         }
@@ -197,7 +227,9 @@ mod tests {
             peak = peak.max(v.value);
         }
         assert!(peak > 800.0, "snappy should show a touch of bounce: {peak}");
-        assert!(peak < 816.0, "morph bounce too violent: {peak}");
+        // 3970418 retuned Spring::new damping (1−bounce → 0.8−bounce), which
+        // lifts snappy's zeta and the morph peak from ~800 to ~839.
+        assert!(peak < 840.0, "morph bounce too violent: {peak}");
     }
 
     /// The poll loop hands over real dt; hitches past the Euler stability

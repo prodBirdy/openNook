@@ -1,85 +1,67 @@
-**Windows:** [Download and run](https://github.com/prodBirdy/openNook/releases/download/0.0.2a/openNook_0.1.0_x64-setup.exe)
+# openNook
 
-**Linux:** [AppImage](https://github.com/prodBirdy/openNook/releases/download/0.0.2a/openNook_0.1.0_amd64.AppImage) · [deb](https://github.com/prodBirdy/openNook/releases/download/0.0.2a/openNook_0.1.0_amd64.deb) · [rpm](https://github.com/prodBirdy/openNook/releases/download/0.0.2a/openNook-0.1.0-1.x86_64.rpm)
+openNook is a native macOS and Linux Dynamic Island client, GPU-rendered with [GPUI](https://www.gpui.rs), that surfaces Now Playing, calendar, reminders, timers, weather, battery, a file tray, and live coding-agent status in the notch.
 
-Those installers are the Tauri desktop app (release `0.0.2a`). Tag `v*` or run the **Release** workflow to publish a new draft with the same artifact names.
-# openNook (GPUI)
+## What it is
 
-Native Dynamic Island client — the same macOS/Windows/Linux island as [openNook](https://github.com/prodBirdy/openNook), with the React/Tauri WebView replaced by [GPUI](https://www.gpui.rs).
+openNook is a small desktop overlay. It stays out of the Dock on macOS, expands from the notch, and keeps useful information one glance away. Linux uses the same GPUI client with desktop-friendly fallbacks.
 
-Most of the original Rust backend is reused as `nook-core`: Now Playing, EventKit calendar/reminders, file tray, notes, widgets, notch metrics, haptics, and hover hit-testing. The frontend is GPU-rendered and lives in the menu-bar notch.
+## Features
 
-## Why GPUI
+- Agents: live coding-agent status
+- Media: Now Playing controls and album art
+- Calendar and Reminders
+- Timers
+- Weather
+- Battery
+- Files: tray for opening and moving files
+- Notes
+- Speed test
+- Mirror camera preview on macOS
+- Terminal: an opt-in real login shell, off by default
+- Tray sharing through AirDrop and LocalSend
 
-openNook's Tauri shell was a transparent always-on-top WebView. GPUI gives the same overlay (transparent `WindowKind::PopUp`, no titlebar, status-item window level) without a browser process, so compact ↔ expanded animation and the visualizer run on the GPU.
+Experimental widgets are available behind a Settings toggle.
 
-UI kit: [awesome-gpui](https://github.com/zed-industries/awesome-gpui).
+## Install and build
 
-## Layout
-
-```
-crates/
-  nook-core/   Tauri-free port of src-tauri (audio, calendar, files, db, …)
-  nook/        GPUI app — compact island, expanded widgets, settings
-```
-
-## Run
-
-macOS needs a working `metal` compiler. Xcode 26’s in-app / `xcodebuild -downloadComponent` download often hangs on “Preparing to download”. If you already extracted the toolchain to `~/Library/Developer/Metal.xctoolchain` (done once on this machine):
+Build and run the macOS client with the included Metal wrapper:
 
 ```bash
-cd ~/openNook-gpui
 ./scripts/with-metal.sh cargo run -p nook
 ```
 
-`cargo run` is fine for UI iteration. Calendar, Reminders, and media Automation prompts need a real bundle (otherwise TCC has no `CFBundleIdentifier` to attach to):
+For Calendar, Reminders, Camera, Location, and Automation prompts, build the app bundle:
 
 ```bash
 ./scripts/with-metal.sh ./scripts/bundle.sh
 open target/OpenNook.app
 ```
 
-Release installer (DMG with an Applications drop):
-
-```bash
-./scripts/with-metal.sh ./scripts/installer.sh
-open target/openNook-0.3.0.dmg
-```
-
-See [CHANGELOG.md](CHANGELOG.md) for what landed in 0.3.0.
-
-On macOS the process is an accessory (`LSUIElement` / `NSApplicationActivationPolicyAccessory`): no dock icon. Hover the notch to take mouse events; click or scroll up to expand. Quit and Settings live on the **Nook** menu-bar extra.
-
-## Linux (GPUI)
-
-This is the current GPUI client (`crates/nook`), not the old Tauri `0.0.2a` AppImage.
-
-```bash
-./scripts/linux-deps.sh
-cargo run -p nook
-# or: cargo build --release -p nook
-```
-
-CI job `linux-release` uploads `openNook-0.3.0-x86_64-unknown-linux-gnu.tar.gz` (the `nook` binary). Trigger via **Actions → linux-release → Run workflow**, or push a `v*-linux` tag. That publishes GitHub Release `v0.3.0-linux` and does not rewrite the macOS `v0.3.0` dmg notes.
-
-Compact has no app title and is top-center (Idle housing wrap). Screen size comes from X11 `DisplayWidth` / `DisplayHeight`. Settings, expanded island, and the file tray work on Linux.
-
-**Unavailable on Linux:** Metal / `scripts/with-metal.sh`, camera-housing notch, MediaRemote, Liquid Glass, menu-bar extra, camera Mirror, AirDrop, AppKit file drag-out, EventKit Calendar/Reminders, hide-when-maximized, `installer.dmg`. Global hover polling is still stubbed (cursor reports 0,0). Click or scroll the painted island; Ctrl+, opens Settings; Ctrl+Q quits. Needs a Vulkan driver at runtime.
-
-## Features (v1)
-
-- Compact pill matching the hardware notch (idle / media / files / timer / observe / first-run)
-- Hover expand, click or scroll to open the island
-- Now Playing with play/pause/skip and a simulated GPU visualizer (MediaRemote on macOS, AppleScript fallback)
-- Calendar and Reminders (EventKit)
-- File tray (open / drag out to Finder / remove / clear), notes (external editor), timers, Cloudflare speed test
-- Prometheus observe widget (pinned PromQL, time-range sparklines, hover point detail, firing alerts)
-- Settings window (Nook chrome: General / Custom Widgets, per-module toggles, Observe metrics, liquid glass, island color, position, hide when an app fills the display, non-notch mode)
-
-No plugin system in this build. Built-in widgets only.
+Linux uses the same `nook` crate after installing the system packages listed by `scripts/linux-deps.sh`.
 
 ## Permissions
 
-macOS will prompt for Calendar, Reminders, and (only if MediaRemote is unavailable) Automation. Usage strings live in `Info.plist` and only apply when you run the `.app` from `scripts/bundle.sh`.
+Calendar and Reminders access is requested only when those widgets are enabled. Camera access is requested when you enable Mirror. Location access is requested when Weather uses your location; manual city entry is available instead. Automation is requested when media control needs a fallback. Microphone and Speech Recognition are requested when you enable the experimental Voice recorder. Accessibility is requested for media-key and HUD interception. Full Disk Access is requested by the experimental Messages and Notifications widgets. Local Network access is requested when LocalSend is enabled.
 
-Now Playing on macOS uses [mediaremote-adapter](https://github.com/ungive/mediaremote-adapter): `/usr/bin/perl` loads a bundled helper framework and calls `MRMediaRemoteGetNowPlayingInfo` / `MRMediaRemoteSendCommand` (`kMRATogglePlayPause` 2, `kMRANextTrack` 4, `kMRAPreviousTrack` 5). That is the path that still works on macOS 15.4+. `scripts/bundle.sh` builds and copies the framework into `OpenNook.app/Contents/Resources`. `cargo run` uses the same framework from `third_party/mediaremote-adapter` after `./scripts/build-mediaremote-adapter.sh`.
+## Keyboard
+
+Hover or click the notch to expand. Press Esc to collapse, ⌘, to open Settings, and ⌘Q to quit.
+
+## Platform notes
+
+macOS provides the notch overlay, MediaRemote, EventKit, Camera, Liquid Glass, AirDrop, and AppKit file drag-out. Linux has no camera-housing notch, MediaRemote, Liquid Glass, Camera Mirror, AirDrop, AppKit drag-out, or EventKit; global hover polling is stubbed. Linux settings and the file tray remain available, and the client needs a Vulkan driver.
+
+## Screenshots
+
+![Linux compact view](docs/linux-03-compact.png)
+![Linux expanded view](docs/linux-03-expanded.png)
+![Linux Settings](docs/linux-03-settings.png)
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the build, test, crate layout, and design rules.
+
+## License
+
+openNook is released under the MIT License. See [LICENSE](LICENSE).

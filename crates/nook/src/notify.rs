@@ -57,9 +57,7 @@ mod macos {
                 log::debug!("notification auth granted={}", granted.as_bool());
             }
         });
-        unsafe {
-            center.requestAuthorizationWithOptions_completionHandler(options, &handler);
-        }
+        center.requestAuthorizationWithOptions_completionHandler(options, &handler);
     }
 
     pub fn schedule(id: u64, remaining: u32, title: &str) {
@@ -72,17 +70,13 @@ mod macos {
         } else {
             title.to_string()
         };
-        unsafe {
-            content.setTitle(&NSString::from_str(&heading));
-            content.setBody(&NSString::from_str("Time is up"));
-            content.setSound(Some(&UNNotificationSound::defaultSound()));
-        }
-        let trigger = unsafe {
-            UNTimeIntervalNotificationTrigger::triggerWithTimeInterval_repeats(
-                remaining.max(1) as f64,
-                false,
-            )
-        };
+        content.setTitle(&NSString::from_str(&heading));
+        content.setBody(&NSString::from_str("Time is up"));
+        content.setSound(Some(&UNNotificationSound::defaultSound()));
+        let trigger = UNTimeIntervalNotificationTrigger::triggerWithTimeInterval_repeats(
+            remaining.max(1) as f64,
+            false,
+        );
         let request = UNNotificationRequest::requestWithIdentifier_content_trigger(
             &NSString::from_str(&ident),
             &content,
@@ -94,9 +88,7 @@ mod macos {
                 log::debug!("schedule timer notification: {err:?}");
             }
         });
-        unsafe {
-            center.addNotificationRequest_withCompletionHandler(&request, Some(&handler));
-        }
+        center.addNotificationRequest_withCompletionHandler(&request, Some(&handler));
     }
 
     pub fn cancel(id: u64) {

@@ -11,7 +11,7 @@ use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 #[cfg(target_os = "macos")]
 use sysinfo::Pid;
 use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
@@ -238,11 +238,11 @@ struct CachedDetail {
 }
 
 #[cfg(any(target_os = "macos", test))]
-fn cache_lookup<'a>(
-    cache: &'a HashMap<u32, CachedDetail>,
+fn cache_lookup(
+    cache: &HashMap<u32, CachedDetail>,
     pid: u32,
     start_time: u64,
-) -> Option<&'a CachedDetail> {
+) -> Option<&CachedDetail> {
     let hit = cache.get(&pid)?;
     (start_time > 0 && hit.start_time == start_time).then_some(hit)
 }
@@ -789,6 +789,7 @@ fn assemble_inner(
             AgentKind::Grok => grok_meta
                 .get(&pid)
                 .and_then(|s| grok_session_busy(&s.cwd, &s.session_id)),
+            AgentKind::Cursor => cursor_session_busy(&cwd),
             _ => None,
         };
 
@@ -1103,6 +1104,280 @@ fn cursor_worker_dir(argv: &[String]) -> Option<String> {
         }
     }
     None
+}
+
+/// Cursor stores agent transcripts at
+/// `~/.cursor/projects/<slugified-cwd>/agent-transcripts/…/*.jsonl`.
+/// `/Users/me/app` → `Users-me-app`.
+fn cursor_project_slug(cwd: &str) -> Option<String> {
+    let cwd = cwd.trim().trim_end_matches(['/', '\\']);
+    if cwd.is_empty() || cwd == "?" {
+        return None;
+    }
+    let stripped = cwd.strip_prefix('/').unwrap_or(cwd);
+    let slug = stripped.replace(['/', '\\'], "-");
+    (!slug.is_empty()).then_some(slug)
+}
+
+#[derive(Deserialize)]
+struct CursorEvent {
+    #[serde(rename = "type", default)]
+    kind: String,
+    #[serde(default)]
+    role: Option<String>,
+}
+
+fn cursor_session_busy(cwd: &str) -> Option<bool> {
+    cursor_session_busy_in(dirs::home_dir()?.as_path(), cwd)
+}
+
+fn cursor_session_busy_in(home: &Path, cwd: &str) -> Option<bool> {
+    // Composer `unfinishedRunAt` is the live signal: IDE agent transcripts
+    // often freeze after the first assistant line and may never write
+    // `turn_ended`, so mtime-based transcript heuristics go idle mid-turn.
+    let composer = cursor_composer_unfinished(home, cwd);
+    if composer == Some(true) {
+        return Some(true);
+    }
+
+    let dir = home
+        .join(".cursor")
+        .join("projects")
+        .join(cursor_project_slug(cwd)?)
+        .join("agent-transcripts");
+    let transcript = cursor_transcripts_busy(&dir);
+    match (composer, transcript) {
+        (_, Some(true)) => Some(true),
+        // DB readable and nothing unfinished for this cwd → idle, even when
+        // a transcript still ends on a stale assistant line.
+        (Some(false), _) => Some(false),
+        (_, Some(false)) => Some(false),
+        _ => None,
+    }
+}
+
+/// Cursor writes `unfinishedRunAt` on `composerHeaders` for the active run.
+/// `~/Library/Application Support/Cursor/User/globalStorage/state.vscdb`
+/// (Linux/Windows: under the same `Cursor/User/globalStorage` data dir).
+fn cursor_state_db(home: &Path) -> PathBuf {
+    #[cfg(target_os = "macos")]
+    {
+        home.join("Library/Application Support/Cursor/User/globalStorage/state.vscdb")
+    }
+    #[cfg(target_os = "windows")]
+    {
+        home.join("AppData/Roaming/Cursor/User/globalStorage/state.vscdb")
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        home.join(".config/Cursor/User/globalStorage/state.vscdb")
+    }
+}
+
+/// `Some(true)` if a composer for `cwd` has `unfinishedRunAt`, `Some(false)`
+/// if the DB opened and none matched, `None` if the DB is missing/unreadable.
+fn cursor_composer_unfinished(home: &Path, cwd: &str) -> Option<bool> {
+    let db = cursor_state_db(home);
+    if !db.is_file() {
+        return None;
+    }
+    let uri = format!("file:{}?mode=ro", db.display());
+    let conn = rusqlite::Connection::open_with_flags(
+        &uri,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI,
+    )
+    .ok()?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT workspaceId, value FROM composerHeaders \
+             WHERE value LIKE '%unfinishedRunAt%'",
+        )
+        .ok()?;
+    let mut rows = stmt.query([]).ok()?;
+    while let Ok(Some(row)) = rows.next() {
+        let workspace_id: String = row.get(0).unwrap_or_default();
+        let value: String = match row.get(1) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        if cursor_composer_matches_cwd(home, cwd, &workspace_id, &value) {
+            return Some(true);
+        }
+    }
+    Some(false)
+}
+
+#[derive(Deserialize)]
+struct CursorComposerHeader {
+    #[serde(default, rename = "unfinishedRunAt")]
+    unfinished_run_at: Option<u64>,
+    #[serde(default, rename = "trackedGitRepos")]
+    tracked_git_repos: Vec<CursorTrackedRepo>,
+}
+
+#[derive(Deserialize)]
+struct CursorTrackedRepo {
+    #[serde(default, rename = "repoPath")]
+    repo_path: Option<String>,
+}
+
+fn cursor_composer_matches_cwd(home: &Path, cwd: &str, workspace_id: &str, value: &str) -> bool {
+    let Ok(header) = serde_json::from_str::<CursorComposerHeader>(value) else {
+        return false;
+    };
+    if header.unfinished_run_at.is_none() {
+        return false;
+    }
+    let cwd = normalize_cwd(cwd);
+    if cwd.is_empty() || cwd == "?" {
+        return false;
+    }
+    for repo in &header.tracked_git_repos {
+        if let Some(path) = repo.repo_path.as_deref() {
+            if normalize_cwd(path) == cwd {
+                return true;
+            }
+        }
+    }
+    cursor_workspace_folder(home, workspace_id).is_some_and(|folder| folder == cwd)
+}
+
+fn cursor_workspace_storage_root(home: &Path) -> PathBuf {
+    #[cfg(target_os = "macos")]
+    {
+        home.join("Library/Application Support/Cursor/User/workspaceStorage")
+    }
+    #[cfg(target_os = "windows")]
+    {
+        home.join("AppData/Roaming/Cursor/User/workspaceStorage")
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        home.join(".config/Cursor/User/workspaceStorage")
+    }
+}
+
+fn cursor_workspace_folder(home: &Path, workspace_id: &str) -> Option<String> {
+    if workspace_id.is_empty() {
+        return None;
+    }
+    let path = cursor_workspace_storage_root(home)
+        .join(workspace_id)
+        .join("workspace.json");
+    let text = std::fs::read_to_string(path).ok()?;
+    #[derive(Deserialize)]
+    struct WorkspaceFile {
+        folder: Option<String>,
+    }
+    let folder = serde_json::from_str::<WorkspaceFile>(&text).ok()?.folder?;
+    let path = folder.strip_prefix("file://").unwrap_or(&folder);
+    // Percent-decode common space escapes; Cursor stores file URLs.
+    let decoded = path.replace("%20", " ");
+    Some(normalize_cwd(&decoded))
+}
+
+fn normalize_cwd(cwd: &str) -> String {
+    cwd.trim().trim_end_matches(['/', '\\']).to_string()
+}
+
+/// Newest transcripts first. An open turn (user/assistant after the last
+/// `turn_ended`) is Working — Cursor's worker does the turn in-process over
+/// the network, so descendant CPU never fires. Files that never recorded
+/// `turn_ended` only count as open while they were just written; otherwise
+/// a finished chat that ends on an assistant line would stay Working forever.
+fn cursor_transcripts_busy(dir: &Path) -> Option<bool> {
+    let mut files = Vec::new();
+    collect_jsonl(dir, 0, &mut files);
+    if files.is_empty() {
+        return None;
+    }
+    files.sort_by_key(|a| std::cmp::Reverse(a.1));
+    let mut saw_idle = false;
+    let mut saw_stale_open = false;
+    for (path, mtime) in files.into_iter().take(8) {
+        let Some(text) = read_file_tail(&path, 64 * 1024) else {
+            continue;
+        };
+        let Some(busy) = cursor_events_busy(&text) else {
+            continue;
+        };
+        if busy {
+            if cursor_open_turn_is_live(&text, mtime) {
+                return Some(true);
+            }
+            // Open turn, but no `turn_ended` history and mtime went cold —
+            // common mid-turn for IDE agents that don't stream tool lines.
+            saw_stale_open = true;
+        } else {
+            saw_idle = true;
+        }
+    }
+    if saw_stale_open {
+        return None;
+    }
+    saw_idle.then_some(false)
+}
+
+/// How long a transcript without `turn_ended` may sit on an assistant line
+/// before we treat the turn as finished. Streaming writes keep mtime fresh.
+const CURSOR_OPEN_TURN_STALE_SECS: u64 = 30;
+
+fn cursor_open_turn_is_live(text: &str, mtime: SystemTime) -> bool {
+    if cursor_transcript_has_turn_end(text) {
+        return true;
+    }
+    SystemTime::now()
+        .duration_since(mtime)
+        .map(|age| age.as_secs() < CURSOR_OPEN_TURN_STALE_SECS)
+        .unwrap_or(false)
+}
+
+fn cursor_transcript_has_turn_end(text: &str) -> bool {
+    text.lines().any(|line| {
+        serde_json::from_str::<CursorEvent>(line).is_ok_and(|ev| ev.kind == "turn_ended")
+    })
+}
+
+fn collect_jsonl(dir: &Path, depth: u8, out: &mut Vec<(PathBuf, SystemTime)>) {
+    if depth > 3 {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_jsonl(&path, depth + 1, out);
+            continue;
+        }
+        if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+            continue;
+        }
+        let mtime = entry
+            .metadata()
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .unwrap_or(SystemTime::UNIX_EPOCH);
+        out.push((path, mtime));
+    }
+}
+
+/// Last `turn_ended` vs a user/assistant line in a Cursor transcript tail.
+/// Same signal as Grok's `turn_started` / `turn_ended`.
+fn cursor_events_busy(text: &str) -> Option<bool> {
+    let mut last_turn: Option<bool> = None;
+    for line in text.lines() {
+        let Ok(ev) = serde_json::from_str::<CursorEvent>(line) else {
+            continue;
+        };
+        if ev.kind == "turn_ended" {
+            last_turn = Some(false);
+        } else if matches!(ev.role.as_deref(), Some("user" | "assistant")) {
+            last_turn = Some(true);
+        }
+    }
+    last_turn
 }
 
 #[derive(Deserialize)]
@@ -1902,6 +2177,37 @@ mod tests {
     }
 
     #[test]
+    fn cursor_idle_mcp_child_is_not_work() {
+        // The IDE worker keeps MCP servers as children. They must not flip
+        // status; an in-progress turn is read from the transcript instead.
+        let mut procs = HashMap::new();
+        let mut worker = proc(
+            80,
+            1,
+            "cursor-agent",
+            &[
+                "/bin/cursor-agent",
+                "worker",
+                "start",
+                "--worker-dir",
+                "/tmp/does-not-exist-nook-cursor",
+            ],
+        );
+        worker.cwd = Some(PathBuf::from("/tmp/does-not-exist-nook-cursor"));
+        procs.insert(80, worker);
+        let mut mcp = proc(81, 80, "node", &["node", "n8n-mcp"]);
+        mcp.cpu_pct = 2.0;
+        procs.insert(81, mcp);
+        let mut debounce = HashMap::new();
+        for _ in 0..3 {
+            let s = assemble_inner(&procs, &HashMap::new(), &HashMap::new(), &mut debounce);
+            assert_eq!(s.len(), 1);
+            assert_eq!(s[0].kind, AgentKind::Cursor);
+            assert_eq!(s[0].status, AgentStatus::Waiting);
+        }
+    }
+
+    #[test]
     fn stale_sidecar_for_reused_pid_is_ignored() {
         let mut procs = HashMap::new();
         // Unrelated process that started long after the dead session.
@@ -2007,6 +2313,196 @@ mod tests {
         );
         let argv = vec!["cursor-agent".into(), "--worker-dir=/tmp/app".into()];
         assert_eq!(cursor_worker_dir(&argv).as_deref(), Some("/tmp/app"));
+    }
+
+    #[test]
+    fn cursor_project_slug_strips_root_and_slashes() {
+        assert_eq!(
+            cursor_project_slug("/Users/jonasvogel/openNook").as_deref(),
+            Some("Users-jonasvogel-openNook")
+        );
+        assert_eq!(
+            cursor_project_slug("/Users/jonasvogel/openNook/").as_deref(),
+            Some("Users-jonasvogel-openNook")
+        );
+        assert_eq!(cursor_project_slug("?"), None);
+        assert_eq!(cursor_project_slug(""), None);
+    }
+
+    #[test]
+    fn cursor_events_busy_follows_turn_markers() {
+        assert_eq!(cursor_events_busy(""), None);
+        assert_eq!(
+            cursor_events_busy(
+                r#"{"role":"user","message":{"content":[{"type":"text","text":"hi"}]}}
+{"role":"assistant","message":{"content":[{"type":"text","text":"ok"}]}}
+"#
+            ),
+            Some(true)
+        );
+        assert_eq!(
+            cursor_events_busy(
+                r#"{"role":"user","message":{"content":[]}}
+{"role":"assistant","message":{"content":[]}}
+{"type":"turn_ended","status":"success"}
+"#
+            ),
+            Some(false)
+        );
+        // Next prompt: user line after turn_ended is an open turn, even
+        // before the first assistant chunk lands.
+        assert_eq!(
+            cursor_events_busy(
+                r#"{"type":"turn_ended","status":"success"}
+{"role":"user","message":{"content":[]}}
+"#
+            ),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn cursor_transcript_open_turn_is_working() {
+        let home = std::env::temp_dir().join(format!(
+            "nook-cursor-busy-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let dir = home
+            .join(".cursor")
+            .join("projects")
+            .join("tmp-app")
+            .join("agent-transcripts")
+            .join("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
+        std::fs::create_dir_all(&dir).unwrap();
+        let jsonl = dir.join("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee.jsonl");
+        std::fs::write(
+            &jsonl,
+            r#"{"role":"user","message":{"content":[]}}
+{"role":"assistant","message":{"content":[]}}
+{"type":"turn_ended","status":"success"}
+{"role":"user","message":{"content":[]}}
+{"role":"assistant","message":{"content":[]}}
+"#,
+        )
+        .unwrap();
+        assert_eq!(cursor_session_busy_in(&home, "/tmp/app"), Some(true));
+
+        std::fs::write(
+            &jsonl,
+            r#"{"role":"user","message":{"content":[]}}
+{"role":"assistant","message":{"content":[]}}
+{"type":"turn_ended","status":"success"}
+"#,
+        )
+        .unwrap();
+        assert_eq!(cursor_session_busy_in(&home, "/tmp/app"), Some(false));
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn cursor_open_turn_without_end_marker_needs_fresh_mtime() {
+        let now = SystemTime::now();
+        let stale = now - Duration::from_secs(CURSOR_OPEN_TURN_STALE_SECS + 5);
+        assert!(cursor_open_turn_is_live(
+            r#"{"type":"turn_ended","status":"success"}
+{"role":"assistant","message":{"content":[]}}
+"#,
+            stale
+        ));
+        assert!(!cursor_open_turn_is_live(
+            r#"{"role":"assistant","message":{"content":[]}}"#,
+            stale
+        ));
+        assert!(cursor_open_turn_is_live(
+            r#"{"role":"assistant","message":{"content":[]}}"#,
+            now
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cursor_stale_open_turn_without_end_is_uncertain() {
+        let dir = std::env::temp_dir().join(format!(
+            "nook-cursor-stale-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let jsonl = dir.join("chat.jsonl");
+        std::fs::write(
+            &jsonl,
+            r#"{"role":"user","message":{"content":[]}}
+{"role":"assistant","message":{"content":[]}}
+"#,
+        )
+        .unwrap();
+        let stale = SystemTime::now() - Duration::from_secs(CURSOR_OPEN_TURN_STALE_SECS + 5);
+        filetime_set_mtime(&jsonl, stale);
+        assert_eq!(cursor_transcripts_busy(&dir), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cursor_composer_unfinished_run_marks_working() {
+        let home = std::env::temp_dir().join(format!(
+            "nook-cursor-composer-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let db_path = cursor_state_db(&home);
+        std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+        {
+            let conn = rusqlite::Connection::open(&db_path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE composerHeaders (
+                    composerId TEXT PRIMARY KEY,
+                    workspaceId TEXT,
+                    value TEXT
+                );",
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO composerHeaders (composerId, workspaceId, value) VALUES (?1, ?2, ?3)",
+                rusqlite::params![
+                    "comp-1",
+                    "ws-1",
+                    r#"{"unfinishedRunAt":1700000000000,"trackedGitRepos":[{"repoPath":"/tmp/app"}]}"#,
+                ],
+            )
+            .unwrap();
+        }
+        assert_eq!(cursor_composer_unfinished(&home, "/tmp/app"), Some(true));
+        assert_eq!(cursor_composer_unfinished(&home, "/tmp/other"), Some(false));
+        // No transcripts at all — composer alone drives Working.
+        assert_eq!(cursor_session_busy_in(&home, "/tmp/app"), Some(true));
+        assert_eq!(cursor_session_busy_in(&home, "/tmp/other"), Some(false));
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[cfg(unix)]
+    fn filetime_set_mtime(path: &Path, when: SystemTime) {
+        let dur = when
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default();
+        let tv = libc::timeval {
+            tv_sec: dur.as_secs() as libc::time_t,
+            tv_usec: dur.subsec_micros() as libc::suseconds_t,
+        };
+        let times = [tv, tv];
+        let c = std::ffi::CString::new(path.to_str().unwrap()).unwrap();
+        unsafe {
+            assert_eq!(libc::utimes(c.as_ptr(), times.as_ptr()), 0);
+        }
     }
 
     #[test]
@@ -2194,6 +2690,7 @@ mod tests {
 #[cfg(all(test, target_os = "macos"))]
 mod focus_probe {
     #[test]
+    #[ignore = "live-environment probe; run manually"]
     fn probe() {
         for s in super::snapshot() {
             let hosts = super::host_pids(s.pid);

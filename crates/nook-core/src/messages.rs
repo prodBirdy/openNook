@@ -610,30 +610,18 @@ fn press_whatsapp_send() -> Result<(), String> {
 
 #[cfg(target_os = "macos")]
 fn accessibility_trusted() -> bool {
-    #[link(name = "ApplicationServices", kind = "framework")]
-    unsafe extern "C" {
-        fn AXIsProcessTrusted() -> bool;
-    }
-    unsafe { AXIsProcessTrusted() }
+    use crate::ffi::macos::AXIsProcessTrusted;
+    unsafe { AXIsProcessTrusted() != 0 }
 }
 
 #[cfg(target_os = "macos")]
 fn press_return_key() {
-    type CgEventRef = *mut std::ffi::c_void;
+    use crate::ffi::macos::{CFRelease, CGEventCreateKeyboardEvent, CGEventPost};
+    use std::ptr;
     const KEY_RETURN: u16 = 36;
-    #[link(name = "ApplicationServices", kind = "framework")]
-    unsafe extern "C" {
-        fn CGEventCreateKeyboardEvent(
-            source: *const std::ffi::c_void,
-            virtualKey: u16,
-            keyDown: bool,
-        ) -> CgEventRef;
-        fn CGEventPost(tap: u32, event: CgEventRef);
-        fn CFRelease(cf: CgEventRef);
-    }
     unsafe {
-        let down = CGEventCreateKeyboardEvent(std::ptr::null(), KEY_RETURN, true);
-        let up = CGEventCreateKeyboardEvent(std::ptr::null(), KEY_RETURN, false);
+        let down = CGEventCreateKeyboardEvent(ptr::null_mut(), KEY_RETURN, true);
+        let up = CGEventCreateKeyboardEvent(ptr::null_mut(), KEY_RETURN, false);
         if !down.is_null() {
             CGEventPost(0, down);
             CFRelease(down);
@@ -802,10 +790,8 @@ fn read_imessage_conversations(path: &Path) -> Result<Vec<Conversation>, String>
         .map_err(|e| e.to_string())?;
 
     let mut out = Vec::new();
-    for row in rows {
-        if let Ok(conv) = row {
-            out.push(conv);
-        }
+    for conv in rows.flatten() {
+        out.push(conv);
     }
     Ok(out)
 }

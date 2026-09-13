@@ -1,13 +1,11 @@
 //! High Alert keep-awake card: toggle + duration chips + remaining readout.
 
 use crate::icons::lucide_color;
-use crate::island::ui::{format_timer, nook_display, nook_pane};
+use crate::island::ui::{format_timer, label, nook_display, nook_pane};
 use crate::island::Island;
 use crate::theme;
-use gpui::{
-    div, prelude::*, px, rgba, Context, CursorStyle, FontWeight, MouseButton, MouseDownEvent,
-    SharedString,
-};
+use gpui::{div, prelude::*, px, Context, CursorStyle, MouseButton, MouseDownEvent, SharedString};
+use std::cell::RefCell;
 
 const CHIPS: [(&str, Option<u32>); 4] = [
     ("15m", Some(15 * 60)),
@@ -15,6 +13,11 @@ const CHIPS: [(&str, Option<u32>); 4] = [
     ("1h", Some(60 * 60)),
     ("On", None),
 ];
+
+thread_local! {
+    /// Duration chip the active session was started with (`None` = "On").
+    static ACTIVE_DURATION_SECS: RefCell<Option<Option<u32>>> = const { RefCell::new(None) };
+}
 
 pub(crate) fn high_alert_card(island: &Island, cx: &mut Context<Island>) -> impl IntoElement {
     let active = island.high_alert_active();
@@ -27,11 +30,11 @@ pub(crate) fn high_alert_card(island: &Island, cx: &mut Context<Island>) -> impl
         "Off".into()
     };
     let selected = if active {
-        island
-            .awake_deadline
-            .and_then(|_| island.high_alert_remaining_secs())
-            .map(|secs| nearest_chip(secs, island.settings.high_alert_default_duration_secs))
-            .unwrap_or(None)
+        ACTIVE_DURATION_SECS
+            .with(|d| *d.borrow())
+            .unwrap_or_else(|| {
+                Some(island.settings.high_alert_default_duration_secs).filter(|s| *s > 0)
+            })
     } else {
         Some(island.settings.high_alert_default_duration_secs).filter(|s| *s > 0)
     };
@@ -52,38 +55,25 @@ pub(crate) fn high_alert_card(island: &Island, cx: &mut Context<Island>) -> impl
             div().flex().items_center().gap(px(6.)).children(
                 CHIPS
                     .iter()
-                    .map(|(label, secs)| chip(*label, *secs, selected == *secs && active, cx)),
+                    .map(|(name, secs)| chip(name, *secs, selected == *secs, cx)),
             ),
         )
         .child(
-            div()
-                .text_size(px(9.))
-                .line_height(px(11.))
-                .text_color(theme::TERTIARY_LABEL)
-                .child("Lid-close sleep is not prevented."),
+            label("Lid-close sleep is not prevented.", theme::FOOTNOTE, false)
+                .text_color(theme::TERTIARY_LABEL),
         )
-}
-
-fn nearest_chip(remaining: u32, default_secs: u32) -> Option<u32> {
-    if remaining == 0 {
-        return None;
-    }
-    CHIPS
-        .iter()
-        .filter_map(|(_, secs)| *secs)
-        .min_by_key(|secs| secs.abs_diff(remaining.max(default_secs.min(remaining))))
 }
 
 fn toggle_btn(active: bool, cx: &mut Context<Island>) -> impl IntoElement {
     div()
         .id("high-alert-toggle")
-        .size(px(22.))
+        .size(px(theme::HIT_MIN))
         .flex()
         .items_center()
         .justify_center()
-        .opacity(0.9)
-        .hover(|s| s.opacity(1.0))
-        .active(|s| s.opacity(0.75))
+        .rounded(px(theme::CONTROL_RADIUS))
+        .hover(|s| s.bg(theme::FILL_SECONDARY))
+        .active(|s| s.opacity(0.85))
         .cursor(CursorStyle::PointingHand)
         .child(lucide_color(
             "sun",
@@ -100,9 +90,13 @@ fn toggle_btn(active: bool, cx: &mut Context<Island>) -> impl IntoElement {
                     )
                 {
                     this.set_high_alert(false, None);
+                    ACTIVE_DURATION_SECS.with(|d| *d.borrow_mut() = None);
                 } else {
                     let secs = this.settings.high_alert_default_duration_secs;
                     this.set_high_alert(true, Some(secs));
+                    ACTIVE_DURATION_SECS.with(|d| {
+                        *d.borrow_mut() = Some(if secs == 0 { None } else { Some(secs) });
+                    });
                 }
                 cx.notify();
             }),
@@ -110,14 +104,14 @@ fn toggle_btn(active: bool, cx: &mut Context<Island>) -> impl IntoElement {
 }
 
 fn chip(
-    label: &'static str,
+    name: &'static str,
     secs: Option<u32>,
     selected: bool,
     cx: &mut Context<Island>,
 ) -> impl IntoElement {
     div()
-        .id(SharedString::from(format!("high-alert-chip-{label}")))
-        .h(px(22.))
+        .id(SharedString::from(format!("high-alert-chip-{name}")))
+        .h(px(theme::HIT_MIN))
         .px(px(8.))
         .rounded(px(6.))
         .flex()
@@ -126,20 +120,17 @@ fn chip(
         .bg(if selected {
             theme::FILL_SECONDARY
         } else {
-            rgba(0xffffff14)
+            theme::FILL_TERTIARY
         })
-        .hover(|s| s.opacity(0.85))
+        .hover(|s| s.bg(theme::FILL_SECONDARY))
+        .active(|s| s.opacity(0.85))
         .cursor(CursorStyle::PointingHand)
         .child(
-            div()
-                .text_size(px(11.))
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(if selected {
-                    theme::LABEL
-                } else {
-                    theme::SECONDARY_LABEL
-                })
-                .child(label),
+            label(name, theme::SUBHEADLINE, true).text_color(if selected {
+                theme::LABEL
+            } else {
+                theme::SECONDARY_LABEL
+            }),
         )
         .on_mouse_down(
             MouseButton::Left,
@@ -149,7 +140,10 @@ fn chip(
                 nook_core::settings::tweak_app_settings(|s| {
                     s.high_alert_default_duration_secs = secs.unwrap_or(0);
                 });
-                this.set_high_alert(true, Some(secs.unwrap_or(0)));
+                if this.high_alert_active() {
+                    this.set_high_alert(true, Some(secs.unwrap_or(0)));
+                    ACTIVE_DURATION_SECS.with(|d| *d.borrow_mut() = Some(secs));
+                }
                 cx.notify();
             }),
         )

@@ -5,18 +5,14 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
 VERSION="$(sed -n 's/^version = "\([^"]*\)"/\1/p' "$ROOT/Cargo.toml" | head -1)"
-VERSION="${VERSION:-0.2.0}"
+VERSION="${VERSION:-1.0.0}"
 DMG="$ROOT/target/openNook-${VERSION}.dmg"
 STAGE="$ROOT/target/dmg"
 
 "$ROOT/scripts/bundle.sh" release
 
-APP="$ROOT/target/OpenNook.app"
+APP="$ROOT/target/openNook.app"
 
-# Local install extras (no-op on a Linux build host).
-if [[ -f "$APP/Contents/MacOS/nook" && -d /usr/local/bin ]]; then
-  ln -sf /Applications/openNook.app/Contents/MacOS/nook /usr/local/bin/nook || true
-fi
 echo "After copying openNook.app to /Applications:"
 echo "  ln -sf /Applications/openNook.app/Contents/MacOS/nook /usr/local/bin/nook"
 echo "  /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f /Applications/openNook.app"

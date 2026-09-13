@@ -77,7 +77,8 @@ pub enum QueueSource {
 }
 
 /// Why the island hides the upcoming list. Music's real Playing Next queue
-/// is unreadable; shuffle/radio is the honest fallback.
+/// is unreadable; shuffle/radio is the honest fallback. Spotify never exposes
+/// a local queue to AppleScript.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum QueueHidden {
@@ -87,6 +88,8 @@ pub enum QueueHidden {
     NeedsSpotifyAuth,
     PremiumRequired,
     AutomationDenied,
+    /// Spotify desktop scripting has no playlist/queue list.
+    SpotifyUnavailable,
 }
 
 /// Handle used by [`crate::audio::media_jump_to_queue_item`].

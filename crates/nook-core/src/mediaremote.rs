@@ -255,12 +255,9 @@ pub fn latest_now_playing() -> Option<Option<AdapterTrack>> {
     Some(interpolated_track(&state))
 }
 
+#[allow(dead_code)] // exercised by tests; kept for stream-change consumers
 pub fn take_stream_changed() -> bool {
     STREAM_CHANGED.swap(false, Ordering::Relaxed)
-}
-
-pub fn stream_is_live() -> bool {
-    STREAM_ALIVE.load(Ordering::Relaxed)
 }
 
 fn interpolated_track(state: &StreamState) -> Option<AdapterTrack> {
@@ -356,18 +353,25 @@ fn stream_supervisor() {
         match spawn_stream_child() {
             Ok(mut child) => {
                 STREAM_ALIVE.store(true, Ordering::Relaxed);
-                backoff = Duration::from_millis(200);
+                let spawned_at = Instant::now();
                 let _ = read_stream(&mut child);
                 STREAM_ALIVE.store(false, Ordering::Relaxed);
                 let _ = child.kill();
                 let _ = child.wait();
+                // Only reset the backoff after a healthy run; an adapter that
+                // exits immediately would otherwise respawn every 200 ms forever.
+                if spawned_at.elapsed() >= Duration::from_secs(5) {
+                    backoff = Duration::from_millis(200);
+                } else {
+                    backoff = (backoff * 2).min(Duration::from_secs(30));
+                }
             }
             Err(err) => {
                 log::debug!("MediaRemote stream spawn failed: {err}");
+                backoff = (backoff * 2).min(Duration::from_secs(30));
             }
         }
         std::thread::sleep(backoff);
-        backoff = (backoff * 2).min(Duration::from_secs(8));
     }
 }
 
@@ -717,7 +721,7 @@ mod tests {
         let track = latest_now_playing().unwrap().unwrap();
         assert_eq!(track.title.as_deref(), Some("Helpless"));
         let elapsed = track.elapsed_time.unwrap();
-        assert!(elapsed >= 12.0 && elapsed < 12.2, "elapsed={elapsed}");
+        assert!((12.0..12.2).contains(&elapsed), "elapsed={elapsed}");
         assert!(track.is_playing);
 
         assert!(apply_stream_event(

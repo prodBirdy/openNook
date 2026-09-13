@@ -49,7 +49,7 @@ impl Default for SysStatsSettings {
 
 /// One host reading. Rate fields are `None` until a second sample arrives
 /// (or after a stale gap / counter reset).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct SysSnapshot {
     pub cpu_pct: Option<f32>,
     pub per_core: Vec<f32>,
@@ -59,21 +59,6 @@ pub struct SysSnapshot {
     pub net_down_bps: Option<f64>,
     pub disk_used: u64,
     pub disk_total: u64,
-}
-
-impl Default for SysSnapshot {
-    fn default() -> Self {
-        Self {
-            cpu_pct: None,
-            per_core: Vec::new(),
-            mem_used: 0,
-            mem_total: 0,
-            net_up_bps: None,
-            net_down_bps: None,
-            disk_used: 0,
-            disk_total: 0,
-        }
-    }
 }
 
 /// Raw counters from one host scrape. Tests feed this into [`SysSampler::apply`].

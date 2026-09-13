@@ -167,7 +167,7 @@ pub fn parse_obsidian_json(json: &str) -> Vec<KnownVault> {
             })
         })
         .collect();
-    vaults.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    vaults.sort_by_key(|a| a.name.to_lowercase());
     vaults
 }
 
@@ -533,7 +533,7 @@ pub fn open_path_url(abs: &Path) -> String {
 pub fn new_append_url(vault: &str, file: &str, content: &str) -> String {
     let file = file.replace('\\', "/");
     let file = file.trim_start_matches('/');
-    let file = file.strip_suffix(".md").unwrap_or(&file);
+    let file = file.strip_suffix(".md").unwrap_or(file);
     format!(
         "obsidian://new?vault={}&file={}&content={}&append=true",
         encode_component(vault),

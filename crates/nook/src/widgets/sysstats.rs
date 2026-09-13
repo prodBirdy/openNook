@@ -6,7 +6,7 @@
 use crate::island::ui::{label, nook_empty, nook_pane};
 use crate::island::{Island, Tab};
 use crate::theme;
-use gpui::{div, prelude::*, px, relative, rgba, Context, FontWeight};
+use gpui::{div, prelude::*, px, relative, Context, FontWeight};
 use nook_core::sysstats;
 use std::time::Duration;
 
@@ -105,8 +105,8 @@ fn stat_label(name: &'static str) -> impl IntoElement {
     div()
         .w(px(32.))
         .flex_shrink_0()
-        .text_size(px(10.))
-        .line_height(px(12.))
+        .text_size(px(theme::FOOTNOTE.size))
+        .line_height(px(theme::FOOTNOTE.leading))
         .font_weight(FontWeight::SEMIBOLD)
         .text_color(theme::TERTIARY_LABEL)
         .child(name)
@@ -134,15 +134,15 @@ fn stat_row(name: &'static str, value: String, t: f32) -> impl IntoElement {
 fn gauge(t: f32) -> impl IntoElement {
     div()
         .w_full()
-        .h(px(3.))
-        .rounded_full()
+        .h(px(theme::TRACK_H))
+        .rounded(px(theme::TRACK_RADIUS))
         .overflow_hidden()
-        .bg(rgba(0xffffff26))
+        .bg(theme::FILL_SECONDARY)
         .child(
             div()
                 .h_full()
                 .w(relative(t.clamp(0.0, 1.0)))
-                .rounded_full()
+                .rounded(px(theme::TRACK_RADIUS))
                 .bg(theme::accent()),
         )
 }
@@ -157,7 +157,7 @@ fn core_strip(cores: &[f32]) -> impl IntoElement {
                 .flex_1()
                 .h(relative(t))
                 .rounded(px(1.))
-                .bg(rgba(0xffffff40)),
+                .bg(theme::FILL_SECONDARY),
         );
     }
     row
@@ -168,13 +168,7 @@ fn net_side(arrow: &'static str, value: String) -> impl IntoElement {
         .flex()
         .items_baseline()
         .gap(px(4.))
-        .child(
-            div()
-                .text_size(px(11.))
-                .line_height(px(13.))
-                .text_color(theme::SECONDARY_LABEL)
-                .child(arrow),
-        )
+        .child(label(arrow, theme::SUBHEADLINE, false))
         .child(label(value, theme::CALLOUT, true))
 }
 

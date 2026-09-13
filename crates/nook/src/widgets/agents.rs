@@ -6,8 +6,7 @@ use crate::island::ui::{label, nook_empty, nook_pane, nook_row, scroll_body, sli
 use crate::island::Island;
 use crate::theme;
 use gpui::{
-    div, prelude::*, px, rgba, AnyElement, Context, CursorStyle, MouseButton, MouseDownEvent, Rgba,
-    SharedString,
+    div, prelude::*, px, AnyElement, Context, MouseButton, MouseDownEvent, Rgba, SharedString,
 };
 use nook_core::agents::{AgentKind, AgentSession};
 
@@ -19,12 +18,17 @@ pub(crate) fn face_agent(agents: &[AgentSession]) -> Option<&AgentSession> {
         .or(agents.first())
 }
 
-pub(crate) fn compact_left(agents: &[AgentSession], pixel_t: f32, on: Rgba) -> AnyElement {
+pub(crate) fn compact_left(
+    agents: &[AgentSession],
+    pixel_t: f32,
+    on: Rgba,
+    lite: bool,
+) -> AnyElement {
     let agent = face_agent(agents);
     let working = agent.is_some_and(|a| a.status.is_working());
     let kind = agent.map(|a| a.kind).unwrap_or(AgentKind::Grok);
     let seed = agent.map(|a| a.pid).unwrap_or(0);
-    dotmatrix::brand_element(kind, seed, pixel_t, working, theme::COMPACT_FACE, on)
+    dotmatrix::brand_element(kind, seed, pixel_t, working, theme::COMPACT_FACE, on, lite)
         .into_any_element()
 }
 
@@ -46,14 +50,15 @@ pub(crate) fn agents_card(
     agents: &[AgentSession],
     now: f32,
     on: Rgba,
+    lite: bool,
     cx: &mut Context<Island>,
 ) -> impl IntoElement {
     let body = if agents.is_empty() {
         nook_empty("bot", "No agents").into_any_element()
     } else {
-        let mut col = div().flex().flex_col().w_full();
+        let mut col = div().flex().flex_col().w_full().flex_shrink_0();
         for agent in agents {
-            col = col.child(agent_row(agent, now, on, cx));
+            col = col.child(agent_row(agent, now, on, lite, cx));
         }
         scroll_body("agents-scroll", col).into_any_element()
     };
@@ -64,17 +69,15 @@ fn agent_row(
     agent: &AgentSession,
     now: f32,
     on: Rgba,
+    lite: bool,
     cx: &mut Context<Island>,
 ) -> impl IntoElement {
     let pid = agent.pid;
     let cwd = agent.cwd.clone();
     let working = agent.status.is_working();
     nook_row(SharedString::from(format!("agent-{pid}")))
-        .min_h(px(theme::HIT_MIN))
+        .flex_shrink_0()
         .gap(px(8.))
-        .cursor(CursorStyle::PointingHand)
-        .hover(|s| s.bg(rgba(0xFFFFFF0D)))
-        .active(|s| s.opacity(0.85))
         .on_mouse_down(
             MouseButton::Left,
             cx.listener(move |_, _: &MouseDownEvent, _, cx| {
@@ -95,6 +98,7 @@ fn agent_row(
                     working,
                     theme::HIT_MIN,
                     on,
+                    lite,
                 )),
         )
         .child(

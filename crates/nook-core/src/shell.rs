@@ -117,7 +117,9 @@ pub fn styled_rows(screen: &vt100::Screen) -> Vec<StyledRow> {
     for row in 0..rows {
         let mut spans: StyledRow = Vec::new();
         for col in 0..cols {
-            let Some(cell) = screen.cell(row, col) else { continue };
+            let Some(cell) = screen.cell(row, col) else {
+                continue;
+            };
             if cell.is_wide_continuation() {
                 continue;
             }
@@ -204,8 +206,12 @@ impl SessionHandle {
             .lock()
             .map(|g| *g)
             .unwrap_or((DEFAULT_COLS, DEFAULT_ROWS));
-        let (cursor_row, cursor_col, cursor_hidden) =
-            self.inner.cursor.lock().map(|g| *g).unwrap_or((0, 0, false));
+        let (cursor_row, cursor_col, cursor_hidden) = self
+            .inner
+            .cursor
+            .lock()
+            .map(|g| *g)
+            .unwrap_or((0, 0, false));
         SessionSnapshot {
             display: self
                 .inner
@@ -395,23 +401,7 @@ fn clear_pgid() {
 }
 
 fn kill_group(pgid: i32) {
-    if pgid <= 0 {
-        return;
-    }
-    #[cfg(unix)]
-    unsafe {
-        libc_killpg(pgid, 15);
-    }
-    #[cfg(not(unix))]
-    let _ = pgid;
-}
-
-#[cfg(unix)]
-unsafe fn libc_killpg(pgid: i32, sig: i32) {
-    extern "C" {
-        fn killpg(pgrp: i32, sig: i32) -> i32;
-    }
-    let _ = killpg(pgid, sig);
+    crate::ffi::kill_process_group(pgid);
 }
 
 /// Kill a process group left behind by a crash, then forget the pid file.
@@ -429,6 +419,10 @@ pub fn load_history() -> Vec<String> {
     database::get_setting(HISTORY_KEY)
         .and_then(|json| serde_json::from_str(&json).ok())
         .unwrap_or_default()
+}
+
+pub fn clear_history() -> Result<(), String> {
+    database::set_setting(HISTORY_KEY, "[]")
 }
 
 pub fn push_history(command: &str) {
@@ -660,10 +654,22 @@ mod tests {
 
     #[test]
     fn resolve_256_and_rgb() {
-        assert_eq!(super::resolve_color(vt100::Color::Idx(16), false), Some([0, 0, 0]));
-        assert_eq!(super::resolve_color(vt100::Color::Idx(231), false), Some([255, 255, 255]));
-        assert_eq!(super::resolve_color(vt100::Color::Idx(232), false), Some([8, 8, 8]));
-        assert_eq!(super::resolve_color(vt100::Color::Rgb(1, 2, 3), true), Some([1, 2, 3]));
+        assert_eq!(
+            super::resolve_color(vt100::Color::Idx(16), false),
+            Some([0, 0, 0])
+        );
+        assert_eq!(
+            super::resolve_color(vt100::Color::Idx(231), false),
+            Some([255, 255, 255])
+        );
+        assert_eq!(
+            super::resolve_color(vt100::Color::Idx(232), false),
+            Some([8, 8, 8])
+        );
+        assert_eq!(
+            super::resolve_color(vt100::Color::Rgb(1, 2, 3), true),
+            Some([1, 2, 3])
+        );
     }
 
     fn fill_lines(parser: &mut vt100::Parser, n: usize) {

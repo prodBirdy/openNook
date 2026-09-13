@@ -332,7 +332,7 @@ pub fn known_apps() -> Vec<(String, String)> {
             seen.push((blocked.clone(), blocked.clone()));
         }
     }
-    seen.sort_by(|a, b| a.1.to_lowercase().cmp(&b.1.to_lowercase()));
+    seen.sort_by_key(|a| a.1.to_lowercase());
     seen
 }
 
@@ -1131,6 +1131,15 @@ static GEN: OnceLock<watch::Sender<u64>> = OnceLock::new();
 
 #[cfg(target_os = "macos")]
 mod ax {
+    use crate::ffi::macos::{
+        kCFRunLoopDefaultMode, kCFStringEncodingUTF8, AXIsProcessTrustedWithOptions,
+        AXObserverAddNotification, AXObserverCreate, AXObserverGetRunLoopSource, AXObserverRef,
+        AXUIElementCopyAttributeValue, AXUIElementCreateApplication, AXUIElementRef,
+        CFArrayGetCount, CFArrayGetTypeID, CFArrayGetValueAtIndex, CFArrayRef, CFDictionaryRef,
+        CFGetTypeID, CFRelease, CFRunLoopAddSource, CFRunLoopGetCurrent, CFRunLoopRun,
+        CFStringCreateWithCString, CFStringGetCString, CFStringGetLength,
+        CFStringGetMaximumSizeForEncoding, CFStringGetTypeID, CFStringRef, CFTypeRef,
+    };
     use objc2::runtime::AnyObject;
     use objc2::*;
     use std::ffi::{c_char, c_void, CStr, CString};
@@ -1139,63 +1148,7 @@ mod ax {
     use std::sync::{Mutex, OnceLock};
     use std::thread;
 
-    type CFTypeRef = *const c_void;
-    type CFStringRef = *const c_void;
-    type CFDictionaryRef = *const c_void;
-    type CFArrayRef = *const c_void;
-    type CFRunLoopRef = *const c_void;
-    type CFRunLoopSourceRef = *const c_void;
-    type AXUIElementRef = *const c_void;
-    type AXObserverRef = *const c_void;
-
-    const K_CF_STRING_ENCODING_UTF8: u32 = 0x0800_0100;
     const AX_SUCCESS: i32 = 0;
-
-    #[link(name = "CoreFoundation", kind = "framework")]
-    extern "C" {
-        fn CFStringCreateWithCString(
-            alloc: *const c_void,
-            c_str: *const c_char,
-            encoding: u32,
-        ) -> CFStringRef;
-        fn CFStringGetCString(s: CFStringRef, buf: *mut c_char, size: isize, encoding: u32)
-            -> bool;
-        fn CFStringGetLength(s: CFStringRef) -> isize;
-        fn CFStringGetMaximumSizeForEncoding(len: isize, encoding: u32) -> isize;
-        fn CFGetTypeID(cf: CFTypeRef) -> usize;
-        fn CFStringGetTypeID() -> usize;
-        fn CFArrayGetTypeID() -> usize;
-        fn CFArrayGetCount(arr: CFArrayRef) -> isize;
-        fn CFArrayGetValueAtIndex(arr: CFArrayRef, idx: isize) -> *const c_void;
-        fn CFRelease(cf: CFTypeRef);
-        fn CFRunLoopGetCurrent() -> CFRunLoopRef;
-        fn CFRunLoopAddSource(rl: CFRunLoopRef, source: CFRunLoopSourceRef, mode: CFStringRef);
-        fn CFRunLoopRun();
-        static kCFRunLoopDefaultMode: CFStringRef;
-    }
-
-    #[link(name = "ApplicationServices", kind = "framework")]
-    extern "C" {
-        fn AXObserverCreate(
-            pid: i32,
-            callback: extern "C" fn(AXObserverRef, AXUIElementRef, CFStringRef, *mut c_void),
-            out_observer: *mut AXObserverRef,
-        ) -> i32;
-        fn AXObserverAddNotification(
-            observer: AXObserverRef,
-            element: AXUIElementRef,
-            notification: CFStringRef,
-            refcon: *mut c_void,
-        ) -> i32;
-        fn AXObserverGetRunLoopSource(observer: AXObserverRef) -> CFRunLoopSourceRef;
-        fn AXIsProcessTrustedWithOptions(options: CFDictionaryRef) -> bool;
-        fn AXUIElementCreateApplication(pid: i32) -> AXUIElementRef;
-        fn AXUIElementCopyAttributeValue(
-            element: AXUIElementRef,
-            attribute: CFStringRef,
-            value: *mut CFTypeRef,
-        ) -> i32;
-    }
 
     static STARTED: AtomicBool = AtomicBool::new(false);
 
@@ -1206,14 +1159,14 @@ mod ax {
             } else {
                 ptr::null()
             };
-            AXIsProcessTrustedWithOptions(opts)
+            AXIsProcessTrustedWithOptions(opts) != 0
         }
     }
 
     unsafe fn prompt_options() -> CFDictionaryRef {
         let key: *mut AnyObject = msg_send![
             class!(NSString),
-            stringWithUTF8String: b"AXTrustedCheckOptionPrompt\0".as_ptr()
+            stringWithUTF8String: c"AXTrustedCheckOptionPrompt".as_ptr()
         ];
         let yes: *mut AnyObject = msg_send![class!(NSNumber), numberWithBool: true];
         let dict: *mut AnyObject =
@@ -1232,8 +1185,8 @@ mod ax {
     }
 
     unsafe fn run_loop() {
-        // Prompt only from this first start, after the user enabled the widget.
-        let _ = is_trusted(true);
+        // Settings requests access only after an explicit user toggle.
+        let _ = is_trusted(false);
         let Some(pid) = notification_center_pid() else {
             log::info!("notification shelf: Notification Center not running; AX observer idle");
             wait_for_notification_center();
@@ -1355,7 +1308,7 @@ mod ax {
 
     unsafe fn cfstr(name: &str) -> CFStringRef {
         let cstr = CString::new(name).unwrap_or_default();
-        CFStringCreateWithCString(ptr::null(), cstr.as_ptr(), K_CF_STRING_ENCODING_UTF8)
+        CFStringCreateWithCString(ptr::null(), cstr.as_ptr(), kCFStringEncodingUTF8)
     }
 
     unsafe fn cf_string(s: CFStringRef) -> Option<String> {
@@ -1363,17 +1316,18 @@ mod ax {
             return None;
         }
         let len = CFStringGetLength(s);
-        let cap = CFStringGetMaximumSizeForEncoding(len, K_CF_STRING_ENCODING_UTF8) + 1;
+        let cap = CFStringGetMaximumSizeForEncoding(len, kCFStringEncodingUTF8) + 1;
         if cap <= 1 || cap > 8 * 1024 {
             return None;
         }
         let mut buf = vec![0u8; cap as usize];
-        if !CFStringGetCString(
+        if CFStringGetCString(
             s,
             buf.as_mut_ptr() as *mut c_char,
             cap,
-            K_CF_STRING_ENCODING_UTF8,
-        ) {
+            kCFStringEncodingUTF8,
+        ) == 0
+        {
             return None;
         }
         CStr::from_ptr(buf.as_ptr() as *const c_char)
@@ -1390,7 +1344,7 @@ mod ax {
             }
             let bid: *mut AnyObject = msg_send![
                 class!(NSString),
-                stringWithUTF8String: b"com.apple.notificationcenterui\0".as_ptr()
+                stringWithUTF8String: c"com.apple.notificationcenterui".as_ptr()
             ];
             let apps: *mut AnyObject = msg_send![ws, runningApplicationsWithBundleIdentifier: bid];
             if apps.is_null() {
@@ -1420,7 +1374,7 @@ mod ax {
             let center: *mut AnyObject = msg_send![ws, notificationCenter];
             let name: *mut AnyObject = msg_send![
                 class!(NSString),
-                stringWithUTF8String: b"NSWorkspaceDidLaunchApplicationNotification\0".as_ptr()
+                stringWithUTF8String: c"NSWorkspaceDidLaunchApplicationNotification".as_ptr()
             ];
             // Block-free: poll-free wait via distributed observation is heavier
             // than we need. Re-check once from the existing island settings

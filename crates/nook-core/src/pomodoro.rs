@@ -73,7 +73,8 @@ impl PomodoroSpec {
     pub fn advance(self) -> Self {
         match self.phase {
             PomodoroPhase::Work => {
-                let long = self.cycles_per_long > 0 && self.cycle % self.cycles_per_long == 0;
+                let long =
+                    self.cycles_per_long > 0 && self.cycle.is_multiple_of(self.cycles_per_long);
                 Self {
                     phase: if long {
                         PomodoroPhase::LongBreak

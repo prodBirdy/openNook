@@ -92,7 +92,7 @@ impl WeatherLocationMode {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct WeatherSettings {
-    #[serde(default = "default_true")]
+    #[serde(default)]
     pub enabled: bool,
     #[serde(default)]
     pub units: WeatherUnits,
@@ -105,7 +105,7 @@ pub struct WeatherSettings {
 impl Default for WeatherSettings {
     fn default() -> Self {
         Self {
-            enabled: true,
+            enabled: false,
             units: WeatherUnits::Celsius,
             location: WeatherLocationMode::default(),
             show_on_compact_face: true,
@@ -774,7 +774,7 @@ mod tests {
     #[test]
     fn empty_manual_location_has_no_coords() {
         let settings = WeatherSettings::default();
-        assert!(settings.enabled);
+        assert!(!settings.enabled);
         assert!(settings.show_on_compact_face);
         assert_eq!(settings.units, WeatherUnits::Celsius);
         assert!(settings.location.coords().is_none());

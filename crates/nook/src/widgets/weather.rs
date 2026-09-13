@@ -1,21 +1,32 @@
 //! Open-Meteo weather Nook pane.
 
 use crate::icons::lucide_color;
-use crate::island::ui::{nook_display, nook_empty, nook_pane};
+use crate::island::ui::{label, nook_display, nook_empty, nook_pane, text_btn};
 use crate::island::Island;
 use crate::theme;
-use gpui::{div, prelude::*, px, AnyElement, Context, FontWeight};
+use gpui::{div, prelude::*, px, AnyElement, Context};
 use nook_core::weather::{self, WeatherSnapshot};
 
 pub(crate) fn weather_card(island: &mut Island, cx: &mut Context<Island>) -> impl IntoElement {
     island.ensure_weather(cx);
     let body = match (&island.weather, &island.weather_error) {
         (Some(snap), _) => forecast_body(snap).into_any_element(),
-        (None, Some(err)) => nook_empty("cloud", err.clone()).into_any_element(),
+        (None, Some(_)) => div()
+            .flex_1()
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .gap(px(8.))
+            .child(nook_empty("cloud", "Couldn't load weather"))
+            .child(text_btn("Try Again", cx, |this, _, cx| {
+                this.refresh_weather(cx);
+            }))
+            .into_any_element(),
         (None, None) if island.settings.weather.location.coords().is_none() => {
-            nook_empty("map-pin", "Set a city in Settings").into_any_element()
+            nook_empty("map-pin", "Choose a city in Settings").into_any_element()
         }
-        (None, None) => nook_empty("cloud-sun", "Loading weather…").into_any_element(),
+        (None, None) => nook_empty("cloud-sun", "Loading…").into_any_element(),
     };
     nook_pane("nook-weather").w_full().child(body)
 }
@@ -41,7 +52,7 @@ fn forecast_body(snap: &WeatherSnapshot) -> impl IntoElement {
         .w_full()
         .gap(px(6.));
     for (i, hour) in snap.hourly.iter().take(6).enumerate() {
-        hours = hours.child(hour_col(i, hour));
+        hours = hours.child(hour_col(i, hour, hour_is_day(hour)));
     }
     div()
         .w_full()
@@ -70,53 +81,44 @@ fn forecast_body(snap: &WeatherSnapshot) -> impl IntoElement {
                         .flex_col()
                         .items_end()
                         .gap(px(1.))
-                        .child(
-                            div()
-                                .text_size(px(12.))
-                                .line_height(px(15.))
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(theme::LABEL)
-                                .child(place),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(11.))
-                                .line_height(px(14.))
-                                .text_color(theme::SECONDARY_LABEL)
-                                .child(hi_lo),
-                        ),
+                        .child(label(place, theme::CALLOUT, true))
+                        .child(label(hi_lo, theme::SUBHEADLINE, false)),
                 ),
         )
         .child(hours)
+        .child(label("Open-Meteo", theme::FOOTNOTE, false).text_color(theme::TERTIARY_LABEL))
 }
 
-fn hour_col(index: usize, hour: &nook_core::weather::HourlyForecast) -> impl IntoElement {
+fn hour_is_day(hour: &nook_core::weather::HourlyForecast) -> bool {
+    // Snapshot has no sunrise/sunset; treat 06:00–20:00 local as day.
+    hour.hour
+        .parse::<u32>()
+        .map(|h| (6..20).contains(&h))
+        .unwrap_or(true)
+}
+
+fn hour_col(
+    index: usize,
+    hour: &nook_core::weather::HourlyForecast,
+    is_day: bool,
+) -> impl IntoElement {
     div()
         .id(("wx-h", index))
         .flex()
         .flex_col()
         .items_center()
         .gap(px(2.))
-        .child(
-            div()
-                .text_size(px(10.))
-                .line_height(px(12.))
-                .text_color(theme::TERTIARY_LABEL)
-                .child(hour.hour.clone()),
-        )
+        .child(label(hour.hour.clone(), theme::FOOTNOTE, false).text_color(theme::TERTIARY_LABEL))
         .child(lucide_color(
-            weather::wmo_icon(hour.wmo_code, true),
+            weather::wmo_icon(hour.wmo_code, is_day),
             12.0,
             theme::SECONDARY_LABEL,
         ))
-        .child(
-            div()
-                .text_size(px(11.))
-                .line_height(px(13.))
-                .font_weight(FontWeight::MEDIUM)
-                .text_color(theme::LABEL)
-                .child(weather::format_temp(hour.temperature)),
-        )
+        .child(label(
+            weather::format_temp(hour.temperature),
+            theme::SUBHEADLINE,
+            true,
+        ))
 }
 
 pub(crate) fn compact_weather(island: &Island) -> AnyElement {
@@ -131,14 +133,11 @@ pub(crate) fn compact_weather(island: &Island) -> AnyElement {
         .items_center()
         .gap(px(6.))
         .child(lucide_color(snap.icon(), 16.0, theme::LABEL))
-        .child(
-            div()
-                .text_size(px(13.))
-                .line_height(px(16.))
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(theme::LABEL)
-                .child(weather::format_temp(snap.temperature)),
-        )
+        .child(label(
+            weather::format_temp(snap.temperature),
+            theme::BODY,
+            true,
+        ))
         .into_any_element()
 }
 

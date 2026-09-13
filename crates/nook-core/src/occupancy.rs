@@ -94,10 +94,7 @@ fn query_frontmost_fills_macos() -> bool {
     use objc2::runtime::AnyObject;
     use objc2::*;
 
-    #[link(name = "CoreGraphics", kind = "framework")]
-    extern "C" {
-        fn CGWindowListCopyWindowInfo(option: u32, relative_to: u32) -> *mut AnyObject;
-    }
+    use crate::ffi::macos::CGWindowListCopyWindowInfo;
 
     // kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements
     const OPTIONS: u32 = 1 | (1 << 4);
@@ -106,7 +103,8 @@ fn query_frontmost_fills_macos() -> bool {
         let Some((screen, visible)) = main_screen_rects() else {
             return false;
         };
-        let info: *mut AnyObject = CGWindowListCopyWindowInfo(OPTIONS, 0);
+        // CFArrayRef (*const) — cast for ObjC messaging / release.
+        let info: *mut AnyObject = CGWindowListCopyWindowInfo(OPTIONS, 0) as *mut AnyObject;
         if info.is_null() {
             return false;
         }

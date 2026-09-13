@@ -51,11 +51,11 @@ pub const CORE_SET_SYMBOL: &str = "CoreDisplay_Display_SetUserBrightness";
 #[cfg(target_os = "macos")]
 mod macos {
     use super::*;
+    use crate::ffi;
     use crate::sysvol::{clamp_unit, HudKind};
-    use std::ffi::{c_char, c_void, CString};
+    use std::ffi::{c_void, CString};
     use std::sync::Once;
 
-    const RTLD_LAZY: i32 = 1;
     const OBSERVER_ID: u32 = 0x4e4f4b31; // "NOK1"
 
     type GetBrightnessFn = unsafe extern "C" fn(u32, *mut f32) -> i32;
@@ -77,27 +77,12 @@ mod macos {
     static STARTED: Once = Once::new();
     static API: std::sync::OnceLock<Api> = std::sync::OnceLock::new();
 
-    unsafe extern "C" {
-        fn dlopen(path: *const c_char, mode: i32) -> *mut c_void;
-        fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
-    }
-
-    #[link(name = "CoreGraphics", kind = "framework")]
-    unsafe extern "C" {
-        fn CGMainDisplayID() -> u32;
-    }
+    use crate::ffi::macos::CGMainDisplayID;
 
     fn load_sym<T>(handle: *mut c_void, name: &str) -> Option<T> {
-        if handle.is_null() {
-            return None;
-        }
         let c_name = CString::new(name).ok()?;
-        let ptr = unsafe { dlsym(handle, c_name.as_ptr()) };
-        if ptr.is_null() {
-            None
-        } else {
-            Some(unsafe { std::mem::transmute_copy(&ptr) })
-        }
+        // SAFETY: `T` is one of the DisplayServices/CoreDisplay fn types above.
+        unsafe { ffi::dlsym_fn(handle, &c_name) }
     }
 
     fn open(path: &str) -> *mut c_void {
@@ -105,7 +90,8 @@ mod macos {
             Ok(p) => p,
             Err(_) => return std::ptr::null_mut(),
         };
-        unsafe { dlopen(c_path.as_ptr(), RTLD_LAZY) }
+        // SAFETY: path is a NUL-terminated CString; RTLD_LAZY is valid.
+        unsafe { libc::dlopen(c_path.as_ptr(), libc::RTLD_LAZY) }
     }
 
     fn probe() -> Api {

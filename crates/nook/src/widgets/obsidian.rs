@@ -1,14 +1,16 @@
 //! Obsidian vault Nook pane: daily-note capture, recent notes, deep links.
 
 use super::notes::markdown_preview;
-use crate::island::ui::{nook_empty, nook_icon_btn, nook_pane, nook_row, scroll_body};
+use crate::island::ui::{
+    label, nook_empty, nook_header, nook_icon_btn, nook_pane, nook_row, scroll_body,
+};
 use crate::island::Island;
 use crate::theme;
 use gpui::{
-    div, prelude::*, px, rgba, Context, CursorStyle, FontWeight, KeyDownEvent, MouseButton,
-    MouseDownEvent, SharedString,
+    div, prelude::*, px, Context, CursorStyle, KeyDownEvent, MouseButton, MouseDownEvent,
+    SharedString,
 };
-use nook_core::obsidian::{self, NoteEntry};
+use nook_core::obsidian::NoteEntry;
 
 pub(crate) fn obsidian_card(island: &mut Island, cx: &mut Context<Island>) -> impl IntoElement {
     island.flush_obsidian_dirty(cx);
@@ -22,47 +24,36 @@ pub(crate) fn obsidian_card(island: &mut Island, cx: &mut Context<Island>) -> im
     let notes = island.obsidian_notes.clone();
 
     let mut pane = nook_pane("nook-obsidian").relative().w_full();
-    pane = pane.child(
+    pane = pane.child(nook_header(
+        "Obsidian",
         div()
             .flex()
             .items_center()
-            .justify_between()
-            .flex_shrink_0()
-            .pb(px(4.))
-            .child(
-                div()
-                    .text_size(px(13.))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(theme::LABEL)
-                    .child("Obsidian"),
-            )
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(4.))
-                    .child(nook_icon_btn(
-                        "calendar",
-                        "obs-daily",
-                        cx,
-                        |this, _, window, cx| {
-                            this.open_obsidian_daily(window, cx);
-                        },
-                    ))
-                    .child(nook_icon_btn(
-                        "rotate-ccw",
-                        "obs-refresh",
-                        cx,
-                        |this, _, _, cx| {
-                            this.obsidian_dirty = true;
-                            this.flush_obsidian_dirty(cx);
-                        },
-                    )),
-            ),
-    );
+            .gap(px(4.))
+            .child(nook_icon_btn(
+                "calendar",
+                "obs-daily",
+                cx,
+                |this, _, window, cx| {
+                    this.open_obsidian_daily(window, cx);
+                },
+            ))
+            .child(nook_icon_btn(
+                "rotate-ccw",
+                "obs-refresh",
+                cx,
+                |this, _, _, cx| {
+                    this.obsidian_dirty = true;
+                    this.flush_obsidian_dirty(cx);
+                },
+            )),
+    ));
 
     if vault.is_none() {
-        return pane.child(nook_empty("book", "Choose a vault in Settings"));
+        return pane.child(nook_empty(
+            "book",
+            "Choose a vault in Settings. openNook reads and writes Markdown in that folder.",
+        ));
     }
 
     pane.child(capture_field(
@@ -96,11 +87,12 @@ fn capture_field(
         .id("obs-capture")
         .track_focus(&focus)
         .w_full()
-        .h(px(26.))
+        .flex_shrink_0()
+        .h(px(theme::HIT_MIN))
         .px(px(8.))
         .mb(px(6.))
         .rounded(px(6.))
-        .bg(rgba(0xffffff14))
+        .bg(theme::FILL_TERTIARY)
         .when(focused, |d| d.border_1().border_color(theme::accent()))
         .flex()
         .items_center()
@@ -121,7 +113,8 @@ fn capture_field(
                 .overflow_hidden()
                 .text_ellipsis()
                 .whitespace_nowrap()
-                .text_size(px(12.))
+                .text_size(px(theme::CALLOUT.size))
+                .line_height(px(theme::CALLOUT.leading))
                 .text_color(if placeholder {
                     theme::TERTIARY_LABEL
                 } else {
@@ -140,7 +133,8 @@ fn note_list(
     if notes.is_empty() {
         return nook_empty("book", "No markdown notes").into_any_element();
     }
-    let mut list = div().flex().flex_col().w_full();
+    let mut list = div().flex().flex_col().w_full().flex_shrink_0();
+    let extra = notes.len().saturating_sub(8);
     for note in notes.iter().take(8) {
         let rel = note.rel_path.clone();
         let title = note.title.clone();
@@ -153,8 +147,7 @@ fn note_list(
         list = list.child(
             nook_row(SharedString::from(format!("obs-{}", note.rel_path)))
                 .gap(px(8.))
-                .when(is_sel, |d| d.bg(rgba(0xffffff14)))
-                .cursor(CursorStyle::PointingHand)
+                .when(is_sel, |d| d.bg(theme::FILL_TERTIARY))
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener({
@@ -172,24 +165,18 @@ fn note_list(
                         .flex()
                         .flex_col()
                         .child(
-                            div()
-                                .text_size(px(12.))
-                                .font_weight(FontWeight::MEDIUM)
-                                .text_color(theme::LABEL)
+                            label(title, theme::CALLOUT, true)
                                 .overflow_hidden()
                                 .text_ellipsis()
-                                .whitespace_nowrap()
-                                .child(SharedString::from(title)),
+                                .whitespace_nowrap(),
                         )
                         .when(!folder.is_empty(), |d| {
                             d.child(
-                                div()
-                                    .text_size(px(10.))
+                                label(folder, theme::FOOTNOTE, false)
                                     .text_color(theme::TERTIARY_LABEL)
                                     .overflow_hidden()
                                     .text_ellipsis()
-                                    .whitespace_nowrap()
-                                    .child(SharedString::from(folder)),
+                                    .whitespace_nowrap(),
                             )
                         }),
                 )
@@ -218,16 +205,21 @@ fn note_list(
             }
         }
     }
+    if extra > 0 {
+        list = list.child(
+            label(format!("+{extra} more"), theme::FOOTNOTE, false)
+                .text_color(theme::tertiary_label())
+                .pt(px(4.)),
+        );
+    }
     list.into_any_element()
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[test]
     fn open_url_uses_core_builder() {
-        let url = obsidian::open_file_url("Vault", "a/b.md");
+        let url = nook_core::obsidian::open_file_url("Vault", "a/b.md");
         assert_eq!(url, "obsidian://open?vault=Vault&file=a/b");
     }
 }

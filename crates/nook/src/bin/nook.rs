@@ -7,7 +7,9 @@
 //! `cargo run` binaries are not registered with LaunchServices — use the
 //! bundled `openNook.app` (scripts/bundle.sh runs `lsregister -f`).
 
-use nook_core::automation::{expand_url, timer_start_url, tray_add_url, tray_clear_url};
+use nook_core::automation::{
+    expand_url, settings_url, timer_start_url, tray_add_url, tray_clear_url,
+};
 use std::env;
 use std::path::{Path, PathBuf};
 #[cfg(target_os = "macos")]
@@ -38,7 +40,7 @@ fn main() {
     }
 }
 
-fn build_url(args: &mut Vec<String>) -> Result<String, String> {
+fn build_url(args: &mut [String]) -> Result<String, String> {
     if args.is_empty() {
         return Err("missing command".into());
     }
@@ -46,6 +48,7 @@ fn build_url(args: &mut Vec<String>) -> Result<String, String> {
     match args[0].as_str() {
         "clear" => Ok(tray_clear_url()),
         "expand" => Ok(expand_url()),
+        "settings" => Ok(settings_url()),
         "timer" => {
             let seconds = args.get(1).ok_or("timer needs <seconds>")?;
             let seconds: u32 = seconds
@@ -60,9 +63,9 @@ fn build_url(args: &mut Vec<String>) -> Result<String, String> {
             }
             Ok(tray_add_url(&paths))
         }
-        other if looks_like_exec(other) => Err(
-            "the CLI cannot run shell commands; type them in the Termi-Notch login shell".into(),
-        ),
+        other if looks_like_exec(other) => {
+            Err("the CLI cannot run shell commands; type them in the island's Terminal tab".into())
+        }
         _ => {
             let paths = canonicalize_paths(args)?;
             if paths.is_empty() {
@@ -119,6 +122,7 @@ Usage:
   nook clear             empty the tray
   nook timer <seconds>   start a countdown
   nook expand            expand the island
+  nook settings          open Settings
 
 Requires the bundled openNook.app so LaunchServices can route opennook://.
 Does not execute shell commands."
@@ -140,16 +144,17 @@ mod tests {
 
     #[test]
     fn verbs_are_safe() {
+        assert_eq!(build_url(&mut ["clear".into()]).unwrap(), tray_clear_url());
+        assert_eq!(build_url(&mut ["expand".into()]).unwrap(), expand_url());
         assert_eq!(
-            build_url(&mut vec!["clear".into()]).unwrap(),
-            tray_clear_url()
+            build_url(&mut ["settings".into()]).unwrap(),
+            "opennook://settings"
         );
-        assert_eq!(build_url(&mut vec!["expand".into()]).unwrap(), expand_url());
         assert_eq!(
-            build_url(&mut vec!["timer".into(), "90".into()]).unwrap(),
+            build_url(&mut ["timer".into(), "90".into()]).unwrap(),
             timer_start_url(90)
         );
-        assert!(build_url(&mut vec!["exec".into(), "id".into()]).is_err());
-        assert!(build_url(&mut vec!["shell".into(), "ls".into()]).is_err());
+        assert!(build_url(&mut ["exec".into(), "id".into()]).is_err());
+        assert!(build_url(&mut ["shell".into(), "ls".into()]).is_err());
     }
 }

@@ -180,75 +180,29 @@ fn stop_battery_watch() {
 #[cfg(target_os = "macos")]
 mod macos {
     use super::*;
+    use crate::ffi::macos::{
+        kCFRunLoopDefaultMode, kCFStringEncodingUTF8, CFArrayGetCount, CFArrayGetValueAtIndex,
+        CFBooleanGetTypeID, CFBooleanGetValue, CFBooleanRef as CfBooleanRef, CFDictionaryGetValue,
+        CFDictionaryRef as CfDictionaryRef, CFGetTypeID, CFNumberGetTypeID, CFNumberGetValue,
+        CFNumberRef as CfNumberRef, CFRelease, CFRunLoopAddSource, CFRunLoopGetMain,
+        CFRunLoopRemoveSource, CFStringCreateWithCString, CFStringGetCString, CFStringGetTypeID,
+        CFStringRef as CfStringRef, CFTypeRef as CfTypeRef, IOPMAssertionCreateWithDescription,
+        IOPMAssertionRelease, IOPSCopyPowerSourcesInfo, IOPSCopyPowerSourcesList,
+        IOPSGetPowerSourceDescription, IOPSNotificationCreateRunLoopSource,
+    };
     use std::ffi::CStr;
-    use std::os::raw::{c_char, c_void};
+    use std::os::raw::c_void;
     use std::ptr;
     use std::sync::atomic::AtomicPtr;
 
-    type CfTypeRef = *const c_void;
-    type CfStringRef = *const c_void;
-    type CfArrayRef = *const c_void;
-    type CfDictionaryRef = *const c_void;
-    type CfNumberRef = *const c_void;
-    type CfBooleanRef = *const c_void;
-    type CfAllocatorRef = *const c_void;
-    type CfRunLoopRef = *mut c_void;
-    type CfRunLoopSourceRef = *mut c_void;
-    type CfRunLoopMode = *const c_void;
-
-    const K_CFSTRING_ENCODING_UTF8: u32 = 0x0800_0100;
     const K_CF_NUMBER_SINT32_TYPE: i32 = 3;
     const K_IO_RETURN_SUCCESS: i32 = 0;
-    const LEVEL_ON: i32 = 255;
 
     static ASSERTION_ID: AtomicU32 = AtomicU32::new(0);
     static BATTERY_SRC: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
 
-    #[link(name = "IOKit", kind = "framework")]
-    #[link(name = "CoreFoundation", kind = "framework")]
-    unsafe extern "C" {
-        fn IOPMAssertionCreateWithDescription(
-            assertion_type: CfStringRef,
-            name: CfStringRef,
-            details: CfStringRef,
-            human_readable_reason: CfStringRef,
-            localization_bundle_path: CfStringRef,
-            timeout: f64,
-            timeout_action: CfStringRef,
-            assertion_id: *mut u32,
-        ) -> i32;
-        fn IOPMAssertionRelease(assertion_id: u32) -> i32;
-
-        fn IOPSNotificationCreateRunLoopSource(
-            callback: Option<unsafe extern "C" fn(*mut c_void)>,
-            context: *mut c_void,
-        ) -> CfRunLoopSourceRef;
-        fn IOPSCopyPowerSourcesInfo() -> CfTypeRef;
-        fn IOPSCopyPowerSourcesList(blob: CfTypeRef) -> CfArrayRef;
-        fn IOPSGetPowerSourceDescription(blob: CfTypeRef, ps: CfTypeRef) -> CfDictionaryRef;
-
-        fn CFRelease(cf: CfTypeRef);
-        fn CFGetTypeID(cf: CfTypeRef) -> usize;
-        fn CFStringCreateWithCString(
-            alloc: CfAllocatorRef,
-            c_str: *const c_char,
-            encoding: u32,
-        ) -> CfStringRef;
-        fn CFArrayGetCount(array: CfArrayRef) -> isize;
-        fn CFArrayGetValueAtIndex(array: CfArrayRef, idx: isize) -> CfTypeRef;
-        fn CFDictionaryGetValue(dict: CfDictionaryRef, key: CfTypeRef) -> CfTypeRef;
-        fn CFNumberGetTypeID() -> usize;
-        fn CFNumberGetValue(number: CfNumberRef, the_type: i32, value_ptr: *mut c_void) -> u8;
-        fn CFBooleanGetTypeID() -> usize;
-        fn CFBooleanGetValue(boolean: CfBooleanRef) -> u8;
-        fn CFRunLoopGetMain() -> CfRunLoopRef;
-        fn CFRunLoopAddSource(rl: CfRunLoopRef, source: CfRunLoopSourceRef, mode: CfRunLoopMode);
-        fn CFRunLoopRemoveSource(rl: CfRunLoopRef, source: CfRunLoopSourceRef, mode: CfRunLoopMode);
-        static kCFRunLoopDefaultMode: CfStringRef;
-    }
-
     fn cfstr(text: &CStr) -> CfStringRef {
-        unsafe { CFStringCreateWithCString(ptr::null(), text.as_ptr(), K_CFSTRING_ENCODING_UTF8) }
+        unsafe { CFStringCreateWithCString(ptr::null(), text.as_ptr(), kCFStringEncodingUTF8) }
     }
 
     fn cf_release(cf: CfTypeRef) {
@@ -435,15 +389,6 @@ mod macos {
             return None;
         }
         // Power Source State is a CFString; reuse GetCString via a small stack buf.
-        unsafe extern "C" {
-            fn CFStringGetTypeID() -> usize;
-            fn CFStringGetCString(
-                string: CfStringRef,
-                buffer: *mut c_char,
-                buffer_size: isize,
-                encoding: u32,
-            ) -> u8;
-        }
         unsafe {
             if CFGetTypeID(value) != CFStringGetTypeID() {
                 return None;
@@ -453,7 +398,7 @@ mod macos {
                 value as CfStringRef,
                 buf.as_mut_ptr(),
                 buf.len() as isize,
-                K_CFSTRING_ENCODING_UTF8,
+                kCFStringEncodingUTF8,
             ) == 0
             {
                 return None;

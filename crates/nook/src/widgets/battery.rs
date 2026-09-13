@@ -1,13 +1,27 @@
 //! Battery Nook pane: percent, time remaining, charging state, LPM toggle.
 
 use crate::icons::lucide_color;
-use crate::island::ui::{nook_display, nook_pane};
+use crate::island::ui::{label, nook_display, nook_pane};
 use crate::island::Island;
 use crate::theme;
-use gpui::{
-    div, prelude::*, px, rgba, Context, CursorStyle, FontWeight, MouseButton, MouseDownEvent,
-};
-use nook_core::power::{self, PowerSnapshot};
+use gpui::{div, prelude::*, px, Context, CursorStyle, MouseButton, MouseDownEvent};
+use nook_core::power::{self, BatteryWarning, PowerSnapshot};
+
+/// Status-bar battery colors: green while charging, yellow in Low Power Mode,
+/// red at the OS low-battery warnings, white otherwise.
+pub(crate) fn tint(snap: PowerSnapshot) -> gpui::Rgba {
+    if snap.is_charging {
+        theme::SUCCESS
+    } else if snap.low_power_mode {
+        theme::SYSTEM_YELLOW
+    } else if snap.warning_level != BatteryWarning::None
+        || snap.percent.is_some_and(|percent| percent <= 20)
+    {
+        theme::DESTRUCTIVE
+    } else {
+        theme::LABEL
+    }
+}
 
 pub(crate) fn battery_card(island: &Island, cx: &mut Context<Island>) -> impl IntoElement {
     let snap = island.power;
@@ -36,55 +50,42 @@ fn gauge(snap: PowerSnapshot) -> impl IntoElement {
             .flex()
             .flex_col()
             .gap(px(2.))
-            .child(nook_display("AC"))
+            .child(label("Plugged in", theme::TITLE_2, true))
             .child(
-                div()
-                    .text_size(px(11.))
-                    .line_height(px(14.))
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_color(theme::SECONDARY_LABEL)
-                    .child("No battery"),
+                label("No battery", theme::SUBHEADLINE, false).text_color(theme::TERTIARY_LABEL),
             );
     }
 
-    let tint = if snap.is_alerting(20) {
-        theme::DESTRUCTIVE
-    } else if snap.is_charging {
-        theme::SUCCESS
-    } else {
-        theme::LABEL
-    };
+    let color = tint(snap);
 
     div()
         .flex()
         .items_end()
         .gap(px(8.))
-        .child(nook_display(power::format_percent(snap.percent)).text_color(tint))
+        .child(nook_display(power::format_percent(snap.percent)).text_color(color))
         .child(
             div()
                 .pb(px(4.))
                 .flex()
                 .flex_col()
+                .child(label(
+                    if snap.is_charging {
+                        "Charging"
+                    } else if snap.on_ac {
+                        "Plugged in"
+                    } else {
+                        "On battery"
+                    },
+                    theme::SUBHEADLINE,
+                    true,
+                ))
                 .child(
-                    div()
-                        .text_size(px(11.))
-                        .line_height(px(14.))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(theme::SECONDARY_LABEL)
-                        .child(if snap.is_charging {
-                            "Charging"
-                        } else if snap.on_ac {
-                            "On AC"
-                        } else {
-                            "On battery"
-                        }),
-                )
-                .child(
-                    div()
-                        .text_size(px(11.))
-                        .line_height(px(14.))
-                        .text_color(theme::TERTIARY_LABEL)
-                        .child(power::format_time_remaining(snap.time_to_empty_min)),
+                    label(
+                        power::format_time_remaining(snap.time_to_empty_min),
+                        theme::SUBHEADLINE,
+                        false,
+                    )
+                    .text_color(theme::TERTIARY_LABEL),
                 ),
         )
 }
@@ -93,33 +94,18 @@ fn status_line(snap: PowerSnapshot, error: Option<&str>) -> impl IntoElement {
     let text = if let Some(err) = error {
         err.to_string()
     } else if snap.low_power_mode {
-        "Low Power Mode on".into()
-    } else if !snap.has_battery {
-        "Low Power Mode still works on this Mac.".into()
+        "Low Power Mode is on".into()
     } else {
-        String::new()
+        "Low Power Mode is off".into()
     };
-    div()
-        .w_full()
-        .text_size(px(11.))
-        .line_height(px(14.))
-        .font_weight(FontWeight::MEDIUM)
-        .text_color(if error.is_some() {
-            theme::DESTRUCTIVE
-        } else {
-            theme::TERTIARY_LABEL
-        })
-        .child(text)
+    label(text, theme::SUBHEADLINE, false).text_color(if error.is_some() {
+        theme::DESTRUCTIVE
+    } else {
+        theme::TERTIARY_LABEL
+    })
 }
 
 fn lpm_btn(on: bool, pending: bool, cx: &mut Context<Island>) -> impl IntoElement {
-    let label = if pending {
-        "…"
-    } else if on {
-        "LPM on"
-    } else {
-        "LPM"
-    };
     div()
         .id("battery-lpm")
         .h(px(theme::HIT_MIN))
@@ -129,40 +115,104 @@ fn lpm_btn(on: bool, pending: bool, cx: &mut Context<Island>) -> impl IntoElemen
         .items_center()
         .gap(px(6.))
         .bg(if on {
-            rgba(0xf59e0b33)
+            gpui::Rgba {
+                a: 0.2,
+                ..theme::SYSTEM_YELLOW
+            }
         } else {
-            rgba(0xffffff14)
+            theme::FILL_TERTIARY
         })
         .opacity(if pending { 0.7 } else { 1.0 })
-        .hover(|s| if pending { s } else { s.bg(rgba(0xffffff22)) })
+        .hover(|s| if pending { s } else { s.bg(theme::FILL) })
         .active(|s| s.opacity(0.85))
-        .cursor(CursorStyle::PointingHand)
+        .cursor(if pending {
+            CursorStyle::Arrow
+        } else {
+            CursorStyle::PointingHand
+        })
         .child(lucide_color(
             "zap",
             14.0,
             if on {
-                theme::SYSTEM_ORANGE
+                theme::SYSTEM_YELLOW
             } else {
                 theme::LABEL
             },
         ))
         .child(
-            div()
-                .text_size(px(12.))
-                .line_height(px(16.))
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(if on {
-                    theme::SYSTEM_ORANGE
-                } else {
-                    theme::LABEL
-                })
-                .child(label),
-        )
-        .on_mouse_down(
-            MouseButton::Left,
-            cx.listener(|this, _: &MouseDownEvent, _, cx| {
-                cx.stop_propagation();
-                this.toggle_low_power_mode(cx);
+            label("Low Power Mode", theme::CALLOUT, true).text_color(if on {
+                theme::SYSTEM_YELLOW
+            } else {
+                theme::LABEL
             }),
         )
+        .when(!pending, |d| {
+            d.on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                    cx.stop_propagation();
+                    this.toggle_low_power_mode(cx);
+                }),
+            )
+        })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn snap() -> PowerSnapshot {
+        PowerSnapshot {
+            percent: Some(80),
+            is_charging: false,
+            on_ac: false,
+            time_to_empty_min: None,
+            warning_level: BatteryWarning::None,
+            low_power_mode: false,
+            has_battery: true,
+        }
+    }
+
+    #[test]
+    fn charging_is_green() {
+        let mut snap = snap();
+        snap.is_charging = true;
+        assert_eq!(tint(snap), theme::SUCCESS);
+    }
+
+    #[test]
+    fn low_power_mode_is_yellow() {
+        let mut snap = snap();
+        snap.low_power_mode = true;
+        assert_eq!(tint(snap), theme::SYSTEM_YELLOW);
+    }
+
+    #[test]
+    fn charging_wins_over_low_power_mode() {
+        let mut snap = snap();
+        snap.is_charging = true;
+        snap.low_power_mode = true;
+        assert_eq!(tint(snap), theme::SUCCESS);
+    }
+
+    #[test]
+    fn early_warning_is_red() {
+        let mut snap = snap();
+        snap.percent = Some(18);
+        snap.warning_level = BatteryWarning::Early;
+        assert_eq!(tint(snap), theme::DESTRUCTIVE);
+    }
+
+    #[test]
+    fn final_warning_is_red() {
+        let mut snap = snap();
+        snap.percent = Some(5);
+        snap.warning_level = BatteryWarning::Final;
+        assert_eq!(tint(snap), theme::DESTRUCTIVE);
+    }
+
+    #[test]
+    fn healthy_discharging_is_white() {
+        assert_eq!(tint(snap()), theme::LABEL);
+    }
 }

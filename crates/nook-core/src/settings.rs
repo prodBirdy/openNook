@@ -119,13 +119,15 @@ impl WidgetModule {
         match self {
             Self::Timers
             | Self::Speed
-            | Self::Agents
             | Self::Mirror
             | Self::Battery
             | Self::Weather
             | Self::Vpn
             | Self::HighAlert
             | Self::Meeting => 6,
+            // Raised from 6; Notes/Reminders/etc. already sit at 8 via `_`.
+            Self::Agents => 7,
+            // Music and Calendar stay at 8.
             _ => 8,
         }
     }
@@ -156,6 +158,42 @@ impl WidgetModule {
     pub fn available_if(self, installed: impl Fn(&str) -> bool) -> bool {
         let apps = self.host_apps();
         apps.is_empty() || apps.iter().copied().any(installed)
+    }
+
+    /// Non-baseline widgets hidden unless Settings › Show experimental widgets.
+    pub fn is_experimental(self) -> bool {
+        matches!(
+            self,
+            Self::Observe
+                | Self::Obsidian
+                | Self::Vpn
+                | Self::HighAlert
+                | Self::SysStats
+                | Self::Recorder
+                | Self::Meeting
+                | Self::Notifications
+                | Self::Messages
+        )
+    }
+}
+
+/// Discrete width presets for the expanded Nook row (Control Center–style).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WidgetSize {
+    Small,
+    Medium,
+    Large,
+}
+
+impl WidgetSize {
+    pub const ALL: [Self; 3] = [Self::Small, Self::Medium, Self::Large];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Small => "S",
+            Self::Medium => "M",
+            Self::Large => "L",
+        }
     }
 }
 
@@ -198,37 +236,12 @@ fn default_widget_order() -> Vec<WidgetModule> {
     ]
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Default)]
 pub struct WindowSettings {
-    #[serde(default = "default_extra_width")]
-    #[allow(dead_code)]
-    pub extra_width: f64,
-    /// Kept for config compatibility. The overlay window is the whole display
-    /// now, so neither slack value sizes anything.
-    #[serde(default = "default_extra_height")]
-    #[allow(dead_code)]
-    pub extra_height: f64,
     /// Legacy copy of [`AppSettings::non_notch_mode`]; read on load, not written.
+    /// Unknown legacy keys such as `extra_width` / `extra_height` are ignored.
     #[serde(default, skip_serializing)]
     pub non_notch_mode: bool,
-}
-
-fn default_extra_width() -> f64 {
-    400.0
-}
-
-fn default_extra_height() -> f64 {
-    800.0
-}
-
-impl Default for WindowSettings {
-    fn default() -> Self {
-        Self {
-            extra_width: default_extra_width(),
-            extra_height: default_extra_height(),
-            non_notch_mode: false,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -243,8 +256,12 @@ pub struct AppSettings {
     /// Opt-in time-synced lyrics beside Now Playing (LRCLIB, cached locally).
     #[serde(default)]
     pub show_lyrics: bool,
-    /// Upcoming list on the expanded Music pane. Off hides Music/Spotify queue
-    /// fetch entirely (no extra osascript / HTTPS when the card is open).
+    /// Opt-in browser tab artwork and Google site icons.
+    #[serde(default)]
+    pub browser_artwork: bool,
+    /// Upcoming list on the expanded Music pane. Off hides Music queue
+    /// fetch entirely (no extra osascript when the card is open). Spotify
+    /// has no local queue; the list control is Music-only.
     #[serde(default = "default_true")]
     pub show_media_queue: bool,
     /// Spotify developer-app client ID for PKCE. No client secret is stored.
@@ -252,26 +269,26 @@ pub struct AppSettings {
     pub spotify_client_id: String,
     #[serde(default = "default_true")]
     pub show_calendar: bool,
-    #[serde(default = "default_true")]
+    #[serde(default)]
     pub show_reminders: bool,
     /// Natural-language quick-add row on the Calendar and Reminders cards.
     #[serde(default = "default_true")]
     pub quick_add: bool,
-    #[serde(default = "default_true")]
+    #[serde(default)]
     pub show_agents: bool,
-    #[serde(default = "default_true")]
+    #[serde(default)]
     pub show_observe: bool,
     #[serde(default = "default_true")]
     pub show_timers: bool,
-    #[serde(default = "default_true")]
+    #[serde(default)]
     pub show_notes: bool,
-    #[serde(default = "default_true")]
+    #[serde(default)]
     pub show_speed: bool,
     #[serde(default = "default_true")]
     pub show_files: bool,
-    #[serde(default = "default_true")]
+    #[serde(default)]
     pub show_mirror: bool,
-    #[serde(default = "default_true")]
+    #[serde(default)]
     pub show_battery: bool,
     /// Percent at or below which the compact face takes over while discharging.
     #[serde(default = "default_battery_alert_threshold")]
@@ -280,15 +297,18 @@ pub struct AppSettings {
     /// shortcut falls back to the osascript-admin prompt.
     #[serde(default = "default_lpm_shortcut_name")]
     pub lpm_shortcut_name: Option<String>,
-    #[serde(default = "default_true")]
+    #[serde(default)]
     pub show_messages: bool,
     /// Fragile Accessibility CGEvent Return after opening `whatsapp://`.
     #[serde(default)]
     pub experimental_whatsapp_autosend: bool,
+    /// Reveal unfinished widgets (Observe, Obsidian, VPN, …) in Customize/Settings.
+    #[serde(default)]
+    pub experimental_widgets: bool,
     /// Mirror Apple Clock timers in the Timers widget (plist / vnode watch).
     #[serde(default = "default_true")]
     pub sync_clock_timers: bool,
-    #[serde(default = "default_true")]
+    #[serde(default)]
     pub show_obsidian: bool,
     /// User-chosen vault folder. `None` until Settings picks one.
     #[serde(default)]
@@ -301,7 +321,7 @@ pub struct AppSettings {
     pub obsidian_uri_capture: bool,
     #[serde(default)]
     pub weather: WeatherSettings,
-    #[serde(default = "default_true")]
+    #[serde(default)]
     pub show_vpn: bool,
     /// Elapsed session clock on the compact VPN face.
     #[serde(default = "default_true")]
@@ -309,7 +329,7 @@ pub struct AppSettings {
     /// Interface names the classifier must ignore (utun helpers, ZTNA, etc.).
     #[serde(default)]
     pub vpn_ignore_interfaces: Vec<String>,
-    #[serde(default = "default_true")]
+    #[serde(default)]
     pub show_high_alert: bool,
     /// Seconds; `0` means until turned off. Default is 30 minutes — never forever.
     #[serde(default = "default_high_alert_duration")]
@@ -335,16 +355,16 @@ pub struct AppSettings {
     pub focus_shortcut_work: Option<String>,
     #[serde(default)]
     pub focus_shortcut_break: Option<String>,
-    #[serde(default = "default_true")]
+    #[serde(default)]
     pub show_sysstats: bool,
     #[serde(default)]
     pub sysstats: SysStatsSettings,
-    #[serde(default = "default_true")]
+    #[serde(default)]
     pub show_recorder: bool,
     /// On-device Speech while recording. Off = record-only (cheaper).
     #[serde(default = "default_true")]
     pub recorder_transcribe: bool,
-    #[serde(default = "default_true")]
+    #[serde(default)]
     pub show_meetings: bool,
     #[serde(default)]
     pub meetings: MeetingsConfig,
@@ -389,21 +409,8 @@ pub struct AppSettings {
     #[serde(default)]
     pub island_color: Option<u32>,
     /// Per-widget widths in Nook cells. Missing entries use [`WidgetModule::default_cells`].
-    #[serde(default)]
+    #[serde(default = "default_widget_widths")]
     pub widget_widths: Vec<(WidgetModule, u8)>,
-    /// Rectangle-style halves / quarters via Carbon hotkeys. Needs Accessibility.
-    #[serde(default)]
-    pub window_snap_enabled: bool,
-    /// Stretch our own menu-bar separator so extras to its left go off-screen.
-    #[serde(default)]
-    pub thaw_enabled: bool,
-    /// Separator is currently stretched (extras hidden). Ignored when Thaw is off.
-    #[serde(default)]
-    pub thaw_hidden: bool,
-    /// Reserved for drag-to-edge (tier 2). Geometry is implemented; the live
-    /// AX tracker is not wired so idle cost stays zero.
-    #[serde(default)]
-    pub snap_drag_to_edge: bool,
     #[serde(default)]
     pub share: ShareSettings,
     /// Termi-Notch interactive login-shell card. Off until the user opts in —
@@ -414,8 +421,6 @@ pub struct AppSettings {
     /// Login shell used for `-l`. Empty means `$SHELL`.
     #[serde(default)]
     pub terminal_shell: String,
-    #[serde(default = "default_terminal_timeout")]
-    pub terminal_timeout_secs: u32,
     /// Monospace font family for the terminal card. Empty means the built-in
     /// stack (SF Mono → Menlo → Monaco). Any installed family name works.
     #[serde(default)]
@@ -430,33 +435,6 @@ pub struct AppSettings {
     /// HAL only — cannot initiate a new AirPlay route to a HomePod / Apple TV.
     #[serde(default = "default_true")]
     pub audio_output_picker: bool,
-    /// Mechey: mechanical keyboard sounds. Opt-in; needs Input Monitoring.
-    #[serde(default)]
-    pub keysounds_enabled: bool,
-    /// Builtin pack id (`nook-click` / `nook-thock`) or a user folder name.
-    #[serde(default = "default_keysound_pack")]
-    pub keysound_pack: String,
-    /// 0..=1 playback gain.
-    #[serde(default = "default_keysound_volume")]
-    pub keysound_volume: f32,
-    /// LiquidMouse: smooth pixel scrolling for discrete wheel mice.
-    #[serde(default)]
-    pub smooth_scroll_enabled: bool,
-    /// Pixel multiplier applied to each wheel notch (0.25..=4).
-    #[serde(default = "default_scroll_speed")]
-    pub scroll_speed: f32,
-    /// Exponential-decay time constant in seconds (0.08..=1.2).
-    #[serde(default = "default_scroll_duration")]
-    pub scroll_duration: f32,
-    /// Negate discrete-mouse wheel deltas (Scroll Reverser).
-    #[serde(default)]
-    pub reverse_mouse_scroll: bool,
-    /// Frontmost bundle ids that skip the scroll tap (games, VMs, remotes).
-    #[serde(default)]
-    pub scroll_excluded_apps: Vec<String>,
-    /// Reserved: per-device overrides need private sender IDs (phase 2).
-    #[serde(default)]
-    pub scroll_device_overrides: std::collections::BTreeMap<String, ScrollDeviceOverride>,
     /// Network lookup for Apple Music editorialVideo loops. Opt-in; ToS-gray.
     #[serde(default)]
     pub animated_album_art: bool,
@@ -465,111 +443,6 @@ pub struct AppSettings {
     pub ambient_art_glow: bool,
     #[serde(default)]
     pub window: WindowSettings,
-    /// Universal search + clipboard history (WP21). Clipboard capture stays
-    /// off until the user opts in.
-    #[serde(default)]
-    pub search: SearchSettings,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct SearchHotkey {
-    #[serde(default)]
-    pub alt: bool,
-    #[serde(default)]
-    pub ctrl: bool,
-    #[serde(default)]
-    pub meta: bool,
-    #[serde(default)]
-    pub shift: bool,
-    #[serde(default = "default_hotkey_key")]
-    pub key: String,
-}
-
-fn default_hotkey_key() -> String {
-    "Space".into()
-}
-
-impl Default for SearchHotkey {
-    fn default() -> Self {
-        // Option+Space — common launcher binding that does not steal Spotlight.
-        Self {
-            alt: true,
-            ctrl: false,
-            meta: false,
-            shift: false,
-            key: default_hotkey_key(),
-        }
-    }
-}
-
-impl SearchHotkey {
-    pub fn label(&self) -> String {
-        let mut parts = Vec::new();
-        if self.ctrl {
-            parts.push("⌃");
-        }
-        if self.alt {
-            parts.push("⌥");
-        }
-        if self.shift {
-            parts.push("⇧");
-        }
-        if self.meta {
-            parts.push("⌘");
-        }
-        let key = if self.key.is_empty() {
-            "Space"
-        } else {
-            self.key.as_str()
-        };
-        parts.push(key);
-        parts.join(" ")
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct SearchSettings {
-    /// Register the global hotkey. Search itself needs no TCC.
-    #[serde(default = "default_true")]
-    pub enabled: bool,
-    #[serde(default)]
-    pub hotkey: SearchHotkey,
-    /// Persist clipboard history. Default OFF — privacy.
-    #[serde(default)]
-    pub clipboard_history: bool,
-    #[serde(default = "default_clipboard_cap")]
-    pub clipboard_history_size: u32,
-    /// Bundle identifiers skipped at copy time (frontmost-app heuristic).
-    #[serde(default)]
-    pub clipboard_exclude_apps: Vec<String>,
-    /// Synthesize Cmd-V after paste-back. Off + Accessibility-gated.
-    #[serde(default)]
-    pub auto_paste: bool,
-    /// Optional magnifier on the compact idle face.
-    #[serde(default)]
-    pub show_magnifier: bool,
-}
-
-fn default_clipboard_cap() -> u32 {
-    500
-}
-
-impl Default for SearchSettings {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            hotkey: SearchHotkey::default(),
-            clipboard_history: false,
-            clipboard_history_size: default_clipboard_cap(),
-            clipboard_exclude_apps: Vec::new(),
-            auto_paste: false,
-            show_magnifier: false,
-        }
-    }
-}
-
-fn default_terminal_timeout() -> u32 {
-    30
 }
 
 fn default_terminal_font_size() -> f32 {
@@ -635,13 +508,6 @@ impl MeetControlMode {
             Self::AppleEventsJs => "Apple Events JS",
         }
     }
-
-    pub fn cycle(self) -> Self {
-        match self {
-            Self::FocusTab => Self::AppleEventsJs,
-            Self::AppleEventsJs => Self::FocusTab,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -701,29 +567,39 @@ fn default_pomo_long() -> u32 {
 fn default_pomo_cycles() -> u8 {
     4
 }
-fn default_keysound_pack() -> String {
-    "nook-click".into()
+fn default_widget_widths() -> Vec<(WidgetModule, u8)> {
+    // 11 of TOTAL_CELLS (17) — leaves room for three small widgets.
+    vec![
+        (WidgetModule::Music, 5),
+        (WidgetModule::Calendar, 4),
+        (WidgetModule::Timers, 2),
+    ]
 }
 
-fn default_keysound_volume() -> f32 {
-    0.7
-}
-
-fn default_scroll_speed() -> f32 {
-    1.0
-}
-
-fn default_scroll_duration() -> f32 {
-    0.35
-}
-
-/// Best-effort per-device scroll knobs. Unused until sender-ID matching ships.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
-pub struct ScrollDeviceOverride {
-    #[serde(default)]
-    pub reverse: Option<bool>,
-    #[serde(default)]
-    pub speed: Option<f32>,
+/// Greedy first-fit-in-order packing: walk `items`, append to the current row
+/// while the row's cell sum stays ≤ `cap`, otherwise start a new row. An item
+/// wider than `cap` is clamped to `cap` and gets its own row. Never returns
+/// empty rows; returns an empty `Vec` for empty input.
+pub fn pack_rows(items: &[(WidgetModule, u8)], cap: u8) -> Vec<Vec<(WidgetModule, u8)>> {
+    if items.is_empty() {
+        return Vec::new();
+    }
+    let mut rows: Vec<Vec<(WidgetModule, u8)>> = Vec::new();
+    let mut current: Vec<(WidgetModule, u8)> = Vec::new();
+    let mut used = 0u8;
+    for &(module, raw) in items {
+        let cells = raw.min(cap);
+        if !current.is_empty() && used.saturating_add(cells) > cap {
+            rows.push(std::mem::take(&mut current));
+            used = 0;
+        }
+        current.push((module, cells));
+        used = used.saturating_add(cells);
+    }
+    if !current.is_empty() {
+        rows.push(current);
+    }
+    rows
 }
 
 impl Default for AppSettings {
@@ -732,33 +608,35 @@ impl Default for AppSettings {
             widget_order: default_widget_order(),
             show_media: true,
             show_lyrics: false,
+            browser_artwork: false,
             show_media_queue: true,
             spotify_client_id: String::new(),
             show_calendar: true,
-            show_reminders: true,
+            show_reminders: false,
             quick_add: true,
-            show_agents: true,
-            show_observe: true,
+            show_agents: false,
+            show_observe: false,
             show_timers: true,
-            show_notes: true,
-            show_speed: true,
+            show_notes: false,
+            show_speed: false,
             show_files: true,
-            show_mirror: true,
-            show_battery: true,
+            show_mirror: false,
+            show_battery: false,
             battery_alert_threshold: default_battery_alert_threshold(),
             lpm_shortcut_name: default_lpm_shortcut_name(),
-            show_messages: true,
+            show_messages: false,
             experimental_whatsapp_autosend: false,
+            experimental_widgets: false,
             sync_clock_timers: true,
-            show_obsidian: true,
+            show_obsidian: false,
             obsidian_vault: None,
             obsidian_capture_heading: None,
             obsidian_uri_capture: false,
             weather: WeatherSettings::default(),
-            show_vpn: true,
+            show_vpn: false,
             vpn_show_timer: true,
             vpn_ignore_interfaces: Vec::new(),
-            show_high_alert: true,
+            show_high_alert: false,
             high_alert_default_duration_secs: default_high_alert_duration(),
             high_alert_kind: HighAlertKind::default(),
             low_battery_release_pct: default_low_battery_pct(),
@@ -770,11 +648,11 @@ impl Default for AppSettings {
             pomodoro_keep_awake: true,
             focus_shortcut_work: None,
             focus_shortcut_break: None,
-            show_sysstats: true,
+            show_sysstats: false,
             sysstats: SysStatsSettings::default(),
-            show_recorder: true,
+            show_recorder: false,
             recorder_transcribe: true,
-            show_meetings: true,
+            show_meetings: false,
             meetings: MeetingsConfig::default(),
             show_notifications: false,
             notification_fda_opt_in: false,
@@ -788,32 +666,17 @@ impl Default for AppSettings {
             show_volume_brightness_hud: true,
             replace_system_hud: false,
             island_color: None,
-            widget_widths: Vec::new(),
-            window_snap_enabled: false,
-            thaw_enabled: false,
-            thaw_hidden: false,
-            snap_drag_to_edge: false,
+            widget_widths: default_widget_widths(),
             share: ShareSettings::default(),
             terminal_enabled: false,
             terminal_shell: String::new(),
-            terminal_timeout_secs: default_terminal_timeout(),
             terminal_font: String::new(),
             terminal_font_size: default_terminal_font_size(),
             terminal_history: false,
             audio_output_picker: true,
-            keysounds_enabled: false,
-            keysound_pack: default_keysound_pack(),
-            keysound_volume: default_keysound_volume(),
-            smooth_scroll_enabled: false,
-            scroll_speed: default_scroll_speed(),
-            scroll_duration: default_scroll_duration(),
-            reverse_mouse_scroll: false,
-            scroll_excluded_apps: Vec::new(),
-            scroll_device_overrides: std::collections::BTreeMap::new(),
             animated_album_art: false,
             ambient_art_glow: true,
             window: WindowSettings::default(),
-            search: SearchSettings::default(),
         }
     }
 }
@@ -835,8 +698,10 @@ impl AppSettings {
             )
     }
 
-    /// Expanded Nook row budget. Widgets share these cells left to right.
-    pub const TOTAL_CELLS: u8 = 11;
+    /// Cells in the Nook row (one row; the island is 1120 pt wide).
+    pub const TOTAL_CELLS: u8 = 17;
+    /// Nook widgets live on a single row; packing never wraps.
+    pub const MAX_ROWS: usize = 1;
 
     pub fn is_enabled(&self, module: WidgetModule) -> bool {
         if !module.is_available() {
@@ -866,6 +731,12 @@ impl AppSettings {
         }
     }
 
+    /// Whether this widget may appear in the UI right now (baseline always;
+    /// experimental only when the toggle is on). Code stays regardless.
+    pub fn widget_visible(&self, module: WidgetModule) -> bool {
+        !module.is_experimental() || self.experimental_widgets
+    }
+
     pub fn notification_app_blocked(&self, id: &str) -> bool {
         self.notification_blocked_apps
             .iter()
@@ -885,30 +756,73 @@ impl AppSettings {
     }
 
     pub fn toggle_enabled(&mut self, module: WidgetModule) {
+        let _ = self.set_enabled(module, !self.is_enabled(module));
+    }
+
+    /// Turn a widget on or off. Enabling fails (returns `false`) when the
+    /// widget would need a Nook row beyond [`Self::MAX_ROWS`].
+    pub fn set_enabled(&mut self, module: WidgetModule, on: bool) -> bool {
+        if on == self.is_enabled(module) {
+            return true;
+        }
+        if on && !self.can_enable(module) {
+            return false;
+        }
+        self.write_enabled(module, on);
+        true
+    }
+
+    /// Whether enabling `module` would still pack into at most [`Self::MAX_ROWS`].
+    pub fn can_enable(&self, module: WidgetModule) -> bool {
+        if !module.is_available() {
+            return false;
+        }
+        if self.is_enabled(module) {
+            return true;
+        }
+        if !module.occupies_nook_cells() {
+            return true;
+        }
+        // Trial at the widget's ordered_widgets() slot — appending to nook_items()
+        // can under-count rows because packing is order-sensitive.
+        let mut trial = self.clone();
+        trial.write_enabled(module, true);
+        trial.nook_rows().len() <= Self::MAX_ROWS
+    }
+
+    fn write_enabled(&mut self, module: WidgetModule, on: bool) {
         match module {
-            WidgetModule::Calendar => self.show_calendar = !self.show_calendar,
-            WidgetModule::Music => self.show_media = !self.show_media,
-            WidgetModule::Files => self.show_files = !self.show_files,
-            WidgetModule::Notes => self.show_notes = !self.show_notes,
-            WidgetModule::Observe => self.show_observe = !self.show_observe,
-            WidgetModule::Timers => self.show_timers = !self.show_timers,
-            WidgetModule::Reminders => self.show_reminders = !self.show_reminders,
-            WidgetModule::Speed => self.show_speed = !self.show_speed,
-            WidgetModule::Agents => self.show_agents = !self.show_agents,
-            WidgetModule::Mirror => self.show_mirror = !self.show_mirror,
-            WidgetModule::Battery => self.show_battery = !self.show_battery,
+            WidgetModule::Calendar => self.show_calendar = on,
+            WidgetModule::Music => self.show_media = on,
+            WidgetModule::Files => self.show_files = on,
+            WidgetModule::Notes => self.show_notes = on,
+            WidgetModule::Observe => self.show_observe = on,
+            WidgetModule::Timers => self.show_timers = on,
+            WidgetModule::Reminders => self.show_reminders = on,
+            WidgetModule::Speed => self.show_speed = on,
+            WidgetModule::Agents => self.show_agents = on,
+            WidgetModule::Mirror => self.show_mirror = on,
+            WidgetModule::Battery => self.show_battery = on,
             WidgetModule::Messages => {
-                self.show_messages = !self.show_messages;
+                self.show_messages = on;
+                if on {
+                    crate::messages::start_watchers();
+                }
                 crate::messages::request_refresh();
             }
-            WidgetModule::Obsidian => self.show_obsidian = !self.show_obsidian,
-            WidgetModule::Weather => self.weather.enabled = !self.weather.enabled,
-            WidgetModule::Vpn => self.show_vpn = !self.show_vpn,
-            WidgetModule::HighAlert => self.show_high_alert = !self.show_high_alert,
-            WidgetModule::SysStats => self.show_sysstats = !self.show_sysstats,
-            WidgetModule::Recorder => self.show_recorder = !self.show_recorder,
-            WidgetModule::Meeting => self.show_meetings = !self.show_meetings,
-            WidgetModule::Notifications => self.show_notifications = !self.show_notifications,
+            WidgetModule::Obsidian => self.show_obsidian = on,
+            WidgetModule::Weather => self.weather.enabled = on,
+            WidgetModule::Vpn => {
+                self.show_vpn = on;
+                if on {
+                    crate::vpn::start();
+                }
+            }
+            WidgetModule::HighAlert => self.show_high_alert = on,
+            WidgetModule::SysStats => self.show_sysstats = on,
+            WidgetModule::Recorder => self.show_recorder = on,
+            WidgetModule::Meeting => self.show_meetings = on,
+            WidgetModule::Notifications => self.show_notifications = on,
         }
     }
 
@@ -922,8 +836,11 @@ impl AppSettings {
         raw.clamp(module.min_cells(), module.max_cells())
     }
 
-    pub fn set_cells(&mut self, module: WidgetModule, cells: u8) {
-        let cells = cells.clamp(module.min_cells(), module.max_cells());
+    /// Set a widget's width. Returns `false` and leaves the previous width when
+    /// applying the change would pack past [`Self::MAX_ROWS`].
+    pub fn set_cells(&mut self, module: WidgetModule, cells: u8) -> bool {
+        let cells = cells.clamp(module.min_cells(), self.max_cells_for(module));
+        let previous = self.cells_for(module);
         if let Some(entry) = self
             .widget_widths
             .iter_mut()
@@ -933,30 +850,122 @@ impl AppSettings {
         } else {
             self.widget_widths.push((module, cells));
         }
+        if self.is_enabled(module)
+            && module.occupies_nook_cells()
+            && self.nook_rows().len() > Self::MAX_ROWS
+        {
+            if let Some(entry) = self
+                .widget_widths
+                .iter_mut()
+                .find(|(item, _)| *item == module)
+            {
+                entry.1 = previous;
+            }
+            return false;
+        }
+        true
     }
 
-    /// Max width the slider may grow to without overflowing the island.
-    pub fn max_cells_for(&self, module: WidgetModule) -> u8 {
-        let current = self.cells_for(module);
-        if self.is_enabled(module) && module.occupies_nook_cells() {
-            module
-                .max_cells()
-                .min(current.saturating_add(self.remaining_cells()))
+    /// Map current cells onto S / M / L using min / default / one-row-capped max.
+    pub fn size_for(&self, module: WidgetModule) -> WidgetSize {
+        let cells = self.cells_for(module);
+        let min = module.min_cells();
+        let max = self.max_cells_for(module);
+        let mid = module.default_cells().clamp(min, max);
+        let dist = |a: u8, b: u8| (a as i16 - b as i16).unsigned_abs();
+        let to_min = dist(cells, min);
+        let to_mid = dist(cells, mid);
+        let to_max = dist(cells, max);
+        if to_min <= to_mid && to_min <= to_max {
+            WidgetSize::Small
+        } else if to_max < to_mid {
+            WidgetSize::Large
         } else {
-            module.max_cells()
+            WidgetSize::Medium
         }
     }
 
-    pub fn used_cells(&self) -> u8 {
+    pub fn set_size(&mut self, module: WidgetModule, size: WidgetSize) -> bool {
+        let min = module.min_cells();
+        let def = module.default_cells().max(min);
+        let max = self.max_cells_for(module);
+        let cells = match size {
+            WidgetSize::Small => min,
+            WidgetSize::Medium => def.min(max),
+            WidgetSize::Large => max,
+        };
+        self.set_cells(module, cells)
+    }
+
+    /// Max width a widget may grow to, capped by one row ([`Self::TOTAL_CELLS`]).
+    pub fn max_cells_for(&self, module: WidgetModule) -> u8 {
+        module.max_cells().min(Self::TOTAL_CELLS)
+    }
+
+    /// Enabled Nook widgets in [`Self::ordered_widgets`] order with their widths.
+    pub fn nook_items(&self) -> Vec<(WidgetModule, u8)> {
         self.ordered_widgets()
             .into_iter()
             .filter(|module| module.occupies_nook_cells() && self.is_enabled(*module))
-            .map(|module| self.cells_for(module))
+            .map(|module| (module, self.cells_for(module)))
+            .collect()
+    }
+
+    /// [`nook_items`] packed into rows of at most [`Self::TOTAL_CELLS`] cells.
+    pub fn nook_rows(&self) -> Vec<Vec<(WidgetModule, u8)>> {
+        pack_rows(&self.nook_items(), Self::TOTAL_CELLS)
+    }
+
+    /// Number of Nook rows, at least 1 even when empty.
+    pub fn nook_row_count(&self) -> usize {
+        self.nook_rows().len().max(1)
+    }
+
+    /// Sum of cells across all enabled Nook widgets.
+    pub fn used_cells(&self) -> u8 {
+        self.nook_items()
+            .into_iter()
+            .map(|(_, cells)| cells)
             .fold(0u8, |sum, cells| sum.saturating_add(cells))
     }
 
+    /// Cells still free in the last packed row ([`Self::TOTAL_CELLS`] when empty).
     pub fn remaining_cells(&self) -> u8 {
-        Self::TOTAL_CELLS.saturating_sub(self.used_cells())
+        match self.nook_rows().last() {
+            None => Self::TOTAL_CELLS,
+            Some(row) => {
+                let used = row
+                    .iter()
+                    .map(|(_, cells)| *cells)
+                    .fold(0u8, |sum, cells| sum.saturating_add(cells));
+                Self::TOTAL_CELLS.saturating_sub(used)
+            }
+        }
+    }
+
+    /// Disable trailing Nook widgets until the layout fits within [`Self::MAX_ROWS`].
+    pub fn clamp_to_budget(&mut self) {
+        while self.nook_rows().len() > Self::MAX_ROWS {
+            let Some((module, _)) = self.nook_items().into_iter().last() else {
+                break;
+            };
+            self.write_enabled(module, false);
+        }
+    }
+
+    /// Pixel width of the widest packed Nook row (insets + cells + dividers).
+    pub fn nook_content_width(&self, cell_px: f32, divider_px: f32, inset_px: f32) -> f32 {
+        let rows = self.nook_rows();
+        if rows.is_empty() {
+            return inset_px * 2.0;
+        }
+        rows.iter()
+            .map(|row| {
+                let cells: f32 = row.iter().map(|(_, c)| *c as f32).sum();
+                let dividers = (row.len().saturating_sub(1)) as f32 * divider_px;
+                inset_px * 2.0 + cells * cell_px + dividers
+            })
+            .fold(0.0_f32, f32::max)
     }
 
     pub fn move_widget_to(&mut self, module: WidgetModule, target: WidgetModule) {
@@ -970,6 +979,56 @@ impl AppSettings {
         let module = order.remove(from);
         order.insert(to, module);
         self.widget_order = order;
+    }
+
+    /// Like [`Self::move_widget_to`], but refuses a reorder that would pack past
+    /// [`Self::MAX_ROWS`] and leaves `widget_order` unchanged.
+    pub fn try_move_widget_to(&mut self, module: WidgetModule, target: WidgetModule) -> bool {
+        let snapshot = self.widget_order.clone();
+        self.move_widget_to(module, target);
+        if self.nook_rows().len() > Self::MAX_ROWS {
+            self.widget_order = snapshot;
+            return false;
+        }
+        true
+    }
+
+    /// Drop an app from the customize dock onto a filled slot.
+    ///
+    /// Already-enabled widgets reorder to `target`. New widgets replace
+    /// `target` at their current width; the swap reverts if it would exceed
+    /// [`Self::MAX_ROWS`].
+    pub fn place_widget_on(&mut self, incoming: WidgetModule, target: WidgetModule) -> bool {
+        if !incoming.occupies_nook_cells() || !incoming.is_available() {
+            return false;
+        }
+        if incoming == target {
+            return true;
+        }
+        if self.is_enabled(incoming) {
+            return self.try_move_widget_to(incoming, target);
+        }
+        if !self.is_enabled(target) || !target.occupies_nook_cells() {
+            return false;
+        }
+
+        self.write_enabled(target, false);
+        self.write_enabled(incoming, true);
+        self.move_widget_to(incoming, target);
+        if self.nook_rows().len() > Self::MAX_ROWS {
+            self.write_enabled(incoming, false);
+            self.write_enabled(target, true);
+            return false;
+        }
+        true
+    }
+
+    /// Drop an app onto an empty dashed slot — enable if the budget allows.
+    pub fn place_widget_append(&mut self, incoming: WidgetModule) -> bool {
+        if self.is_enabled(incoming) {
+            return true;
+        }
+        self.set_enabled(incoming, true)
     }
 
     /// Top-left of the island body on a display of `screen_w` × `screen_h`.
@@ -1048,15 +1107,6 @@ const METRICS_TOKEN_SERVICE: &str = "com.prodBirdy.openNook.metrics";
 #[cfg(target_os = "macos")]
 const METRICS_TOKEN_ACCOUNT: &str = "warmup-bearer";
 #[cfg(target_os = "macos")]
-const SHARE_SECRET_SERVICE: &str = "com.prodBirdy.openNook.share";
-#[cfg(target_os = "macos")]
-const SHARE_WEBDAV_ACCOUNT: &str = "webdav-password";
-#[cfg(target_os = "macos")]
-const SHARE_S3_ACCESS_ACCOUNT: &str = "s3-access-key";
-#[cfg(target_os = "macos")]
-const SHARE_S3_SECRET_ACCOUNT: &str = "s3-secret-key";
-
-#[cfg(target_os = "macos")]
 fn load_metrics_token() -> Option<String> {
     security_framework::passwords::get_generic_password(
         METRICS_TOKEN_SERVICE,
@@ -1094,64 +1144,6 @@ fn store_metrics_token(_token: &str) -> Result<(), String> {
     Ok(())
 }
 
-#[cfg(target_os = "macos")]
-fn load_share_secret(account: &str) -> Option<String> {
-    security_framework::passwords::get_generic_password(SHARE_SECRET_SERVICE, account)
-        .ok()
-        .and_then(|bytes| String::from_utf8(bytes).ok())
-}
-
-#[cfg(target_os = "macos")]
-fn store_share_secret(account: &str, secret: &str) -> Result<(), String> {
-    if secret.is_empty() {
-        let _ =
-            security_framework::passwords::delete_generic_password(SHARE_SECRET_SERVICE, account);
-        Ok(())
-    } else {
-        security_framework::passwords::set_generic_password(
-            SHARE_SECRET_SERVICE,
-            account,
-            secret.as_bytes(),
-        )
-        .map_err(|err| err.to_string())
-    }
-}
-
-#[cfg(target_os = "macos")]
-fn hydrate_share_secrets(share: &mut ShareSettings) {
-    if share.webdav_password.is_empty() {
-        if let Some(secret) = load_share_secret(SHARE_WEBDAV_ACCOUNT) {
-            share.webdav_password = secret;
-        }
-    }
-    if share.s3_access_key.is_empty() {
-        if let Some(secret) = load_share_secret(SHARE_S3_ACCESS_ACCOUNT) {
-            share.s3_access_key = secret;
-        }
-    }
-    if share.s3_secret_key.is_empty() {
-        if let Some(secret) = load_share_secret(SHARE_S3_SECRET_ACCOUNT) {
-            share.s3_secret_key = secret;
-        }
-    }
-}
-
-#[cfg(not(target_os = "macos"))]
-fn hydrate_share_secrets(_share: &mut ShareSettings) {}
-
-#[cfg(target_os = "macos")]
-fn persist_share_secrets(share: &ShareSettings) -> Result<(), String> {
-    store_share_secret(SHARE_WEBDAV_ACCOUNT, &share.webdav_password)?;
-    store_share_secret(SHARE_S3_ACCESS_ACCOUNT, &share.s3_access_key)?;
-    store_share_secret(SHARE_S3_SECRET_ACCOUNT, &share.s3_secret_key)?;
-    Ok(())
-}
-
-#[cfg(not(target_os = "macos"))]
-fn persist_share_secrets(_share: &ShareSettings) -> Result<(), String> {
-    Ok(())
-}
-
 fn window_store() -> &'static RwLock<WindowSettings> {
     WINDOW_SETTINGS.get_or_init(|| RwLock::new(WindowSettings::default()))
 }
@@ -1160,25 +1152,11 @@ fn app_store() -> &'static RwLock<AppSettings> {
     APP_SETTINGS.get_or_init(|| RwLock::new(AppSettings::default()))
 }
 
-pub fn get_window_settings() -> WindowSettings {
-    *window_store().read().unwrap_or_else(|e| e.into_inner())
-}
-
 pub fn get_app_settings() -> AppSettings {
     app_store()
         .read()
         .unwrap_or_else(|e| e.into_inner())
         .clone()
-}
-
-pub fn update_window_settings(settings: WindowSettings) {
-    if let Ok(mut guard) = window_store().write() {
-        *guard = settings;
-    }
-    if let Ok(mut app) = app_store().write() {
-        app.window = settings;
-    }
-    persist();
 }
 
 pub fn update_app_settings(settings: AppSettings) {
@@ -1190,10 +1168,7 @@ pub fn update_app_settings(settings: AppSettings) {
     }
     SETTINGS_GEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     persist();
-    crate::hotkeys::sync();
-    crate::menubar::sync();
-    crate::eventtap::sync();
-    crate::keysounds::sync();
+    crate::ui_tick::poke();
 }
 
 /// Bumped on every [`update_app_settings`]. Hot loops compare this before
@@ -1227,16 +1202,19 @@ pub fn load_from_db() {
             if settings.window.non_notch_mode {
                 settings.non_notch_mode = true;
             }
-            hydrate_share_secrets(&mut settings.share);
             let filled_url = settings.observe.prometheus_url.trim().is_empty();
             crate::observe::fill_default_url(&mut settings.observe);
+            let over_budget = settings.nook_rows().len() > AppSettings::MAX_ROWS;
+            if over_budget {
+                settings.clamp_to_budget();
+            }
             if let Ok(mut guard) = app_store().write() {
                 *guard = settings.clone();
             }
             if let Ok(mut win) = window_store().write() {
                 *win = settings.window;
             }
-            if filled_url || legacy_token {
+            if filled_url || legacy_token || over_budget {
                 persist();
             }
             return;
@@ -1262,6 +1240,14 @@ pub fn is_first_run() -> bool {
     database::get_setting("onboarded").is_none()
 }
 
+/// Show first-run tips on the next island launch.
+pub fn reset_onboarded() -> Result<(), String> {
+    let conn = database::get_connection().map_err(|err| err.to_string())?;
+    conn.execute("DELETE FROM settings WHERE key = ?1", ["onboarded"])
+        .map_err(|err| err.to_string())?;
+    Ok(())
+}
+
 pub fn mark_onboarded() {
     if let Err(err) = database::set_setting("onboarded", "1") {
         log::warn!("failed to persist onboarded flag: {err}");
@@ -1274,11 +1260,6 @@ fn persist() {
     #[cfg(target_os = "macos")]
     if let Err(err) = store_metrics_token(&settings.observe.metrics_token) {
         log::warn!("failed to persist metrics token to Keychain: {err}");
-        return;
-    }
-    if let Err(err) = persist_share_secrets(&settings.share) {
-        log::warn!("failed to persist share secrets: {err}");
-        return;
     }
     if let Ok(json) = serde_json::to_string(&settings) {
         if let Err(err) = database::set_setting("app_settings", &json) {
@@ -1292,14 +1273,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn search_defaults_keep_clipboard_off() {
-        let settings = AppSettings::default();
-        assert!(settings.search.enabled);
-        assert!(!settings.search.clipboard_history);
-        assert!(!settings.search.auto_paste);
-        assert_eq!(settings.search.hotkey.label(), "⌥ Space");
-        let parsed: SearchSettings = serde_json::from_str("{}").unwrap();
-        assert_eq!(parsed, SearchSettings::default());
+    fn unknown_settings_are_ignored() {
+        let parsed: AppSettings =
+            serde_json::from_str(r#"{"retired_feature":true,"search":{"enabled":true}}"#).unwrap();
+        assert_eq!(parsed, AppSettings::default());
     }
 
     #[test]
@@ -1309,7 +1286,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_widget_flags_default_on() {
+    fn missing_widget_flags_follow_curated_defaults() {
         let parsed: AppSettings = serde_json::from_str(r#"{"liquid_glass_mode":true}"#).unwrap();
         assert_eq!(parsed.widget_order, default_widget_order());
         assert!(parsed.show_media);
@@ -1317,34 +1294,34 @@ mod tests {
         assert!(parsed.show_media_queue);
         assert!(parsed.spotify_client_id.is_empty());
         assert!(parsed.show_calendar);
-        assert!(parsed.show_reminders);
+        assert!(!parsed.show_reminders);
         assert!(parsed.quick_add);
-        assert!(parsed.show_agents);
-        assert!(parsed.show_observe);
+        assert!(!parsed.show_agents);
+        assert!(!parsed.show_observe);
         assert!(parsed.show_timers);
-        assert!(parsed.show_notes);
-        assert!(parsed.show_speed);
+        assert!(!parsed.show_notes);
+        assert!(!parsed.show_speed);
         assert!(parsed.show_files);
-        assert!(parsed.show_mirror);
-        assert!(parsed.show_battery);
+        assert!(!parsed.show_mirror);
+        assert!(!parsed.show_battery);
         assert_eq!(parsed.battery_alert_threshold, 20);
         assert_eq!(
             parsed.lpm_shortcut_name.as_deref(),
             Some(crate::power::default_lpm_shortcut_name())
         );
-        assert!(parsed.show_messages);
+        assert!(!parsed.show_messages);
         assert!(!parsed.experimental_whatsapp_autosend);
         assert!(parsed.sync_clock_timers);
-        assert!(parsed.show_obsidian);
+        assert!(!parsed.show_obsidian);
         assert_eq!(parsed.obsidian_vault, None);
         assert_eq!(parsed.obsidian_capture_heading, None);
         assert!(!parsed.obsidian_uri_capture);
-        assert!(parsed.weather.enabled);
+        assert!(!parsed.weather.enabled);
         assert!(parsed.weather.show_on_compact_face);
-        assert!(parsed.show_vpn);
+        assert!(!parsed.show_vpn);
         assert!(parsed.vpn_show_timer);
         assert!(parsed.vpn_ignore_interfaces.is_empty());
-        assert!(parsed.show_high_alert);
+        assert!(!parsed.show_high_alert);
         assert_eq!(parsed.high_alert_default_duration_secs, 30 * 60);
         assert_eq!(parsed.high_alert_kind, HighAlertKind::Display);
         assert_eq!(parsed.low_battery_release_pct, 10);
@@ -1355,11 +1332,11 @@ mod tests {
         assert!(parsed.pomodoro_auto_advance);
         assert!(parsed.pomodoro_keep_awake);
         assert_eq!(parsed.focus_shortcut_work, None);
-        assert!(parsed.show_sysstats);
+        assert!(!parsed.show_sysstats);
         assert_eq!(parsed.sysstats, SysStatsSettings::default());
-        assert!(parsed.show_recorder);
+        assert!(!parsed.show_recorder);
         assert!(parsed.recorder_transcribe);
-        assert!(parsed.show_meetings);
+        assert!(!parsed.show_meetings);
         assert!(parsed.meetings.zoom);
         assert!(parsed.meetings.teams);
         assert!(parsed.meetings.meet);
@@ -1375,18 +1352,31 @@ mod tests {
         assert!(parsed.show_volume_brightness_hud);
         assert!(!parsed.replace_system_hud);
         assert_eq!(parsed.island_color, None);
-        assert!(!parsed.share.localsend_receive);
         assert_eq!(parsed.share.device_alias, "openNook");
-        assert_eq!(
-            parsed.share.link_backend,
-            crate::share::LinkBackendKind::ZeroXZero
-        );
+        assert!(parsed.share.localsend_pin.is_empty());
         assert!(!parsed.terminal_enabled);
         assert!(parsed.terminal_shell.is_empty());
-        assert_eq!(parsed.terminal_timeout_secs, 30);
         assert!(!parsed.terminal_history);
         assert!(!parsed.animated_album_art);
         assert!(parsed.ambient_art_glow);
+        assert_eq!(parsed.used_cells(), 11);
+        assert_eq!(parsed.remaining_cells(), 6);
+        assert_eq!(parsed.nook_row_count(), 1);
+    }
+
+    #[test]
+    fn browser_artwork_is_opt_in() {
+        assert!(!AppSettings::default().browser_artwork);
+        assert!(
+            !serde_json::from_str::<AppSettings>("{}")
+                .unwrap()
+                .browser_artwork
+        );
+        assert!(
+            serde_json::from_str::<AppSettings>(r#"{"browser_artwork":true}"#)
+                .unwrap()
+                .browser_artwork
+        );
     }
 
     #[test]
@@ -1402,11 +1392,6 @@ mod tests {
             parsed.ambient_art_glow,
             AppSettings::default().ambient_art_glow
         );
-        assert!(parsed.search.enabled);
-        assert!(!parsed.search.clipboard_history);
-        assert!(!parsed.search.auto_paste);
-        assert_eq!(parsed.search.clipboard_history_size, 500);
-        assert_eq!(parsed.search.hotkey, SearchHotkey::default());
     }
 
     #[test]
@@ -1448,9 +1433,63 @@ mod tests {
     }
 
     #[test]
-    fn widget_order_moves_and_repairs_saved_values() {
+    fn place_widget_on_replaces_target_slot() {
         let mut settings = AppSettings::default();
-        settings.widget_order = vec![WidgetModule::Music, WidgetModule::Music];
+        assert!(settings.show_media);
+        assert!(settings.show_calendar);
+        assert_eq!(settings.remaining_cells(), 6);
+
+        assert!(settings.place_widget_on(WidgetModule::Battery, WidgetModule::Calendar));
+        assert!(settings.show_battery);
+        assert!(!settings.show_calendar);
+        assert!(settings.show_media);
+        assert!(settings.nook_rows().len() <= AppSettings::MAX_ROWS);
+
+        let order = settings.ordered_widgets();
+        let battery = order.iter().position(|m| *m == WidgetModule::Battery);
+        let music = order.iter().position(|m| *m == WidgetModule::Music);
+        assert!(battery.is_some() && music.is_some());
+    }
+
+    #[test]
+    fn place_widget_on_reorders_when_already_enabled() {
+        let mut settings = AppSettings::default();
+        assert!(settings.show_media);
+        assert!(settings.show_timers);
+        let used = settings.used_cells();
+        assert!(settings.place_widget_on(WidgetModule::Music, WidgetModule::Timers));
+        assert!(settings.show_media);
+        assert!(settings.show_timers);
+        assert_eq!(settings.used_cells(), used);
+        // Music lands at Timers' former index in the saved order.
+        let order = settings.ordered_widgets();
+        let music = order
+            .iter()
+            .position(|m| *m == WidgetModule::Music)
+            .unwrap();
+        let timers = order
+            .iter()
+            .position(|m| *m == WidgetModule::Timers)
+            .unwrap();
+        assert!((music as isize - timers as isize).abs() <= 1);
+    }
+
+    #[test]
+    fn place_widget_append_respects_budget() {
+        let mut settings = AppSettings::default();
+        // Defaults use 11 of 17; Battery (3) still fits on the same row.
+        assert!(settings.place_widget_append(WidgetModule::Battery));
+        assert!(settings.show_battery);
+        assert_eq!(settings.nook_rows().len(), 1);
+        assert_eq!(settings.nook_row_count(), 1);
+    }
+
+    #[test]
+    fn widget_order_moves_and_repairs_saved_values() {
+        let mut settings = AppSettings {
+            widget_order: vec![WidgetModule::Music, WidgetModule::Music],
+            ..Default::default()
+        };
         assert_eq!(settings.ordered_widgets().len(), WidgetModule::ALL.len());
 
         settings.move_widget_to(WidgetModule::Music, WidgetModule::Files);
@@ -1462,17 +1501,18 @@ mod tests {
     #[test]
     fn cells_default_clamp_and_budget() {
         let mut settings = AppSettings::default();
-        assert_eq!(settings.cells_for(WidgetModule::Calendar), 5);
-        assert_eq!(settings.cells_for(WidgetModule::Timers), 3);
+        assert_eq!(settings.cells_for(WidgetModule::Calendar), 4);
+        assert_eq!(settings.cells_for(WidgetModule::Timers), 2);
         settings.set_cells(WidgetModule::Calendar, 1);
         assert_eq!(
             settings.cells_for(WidgetModule::Calendar),
             WidgetModule::Calendar.min_cells()
         );
+        // Growing past one row is clamped by max_cells_for (one-row cap).
         settings.set_cells(WidgetModule::Calendar, 99);
         assert_eq!(
             settings.cells_for(WidgetModule::Calendar),
-            WidgetModule::Calendar.max_cells()
+            settings.max_cells_for(WidgetModule::Calendar)
         );
         assert!(!WidgetModule::Files.occupies_nook_cells());
         assert!(WidgetModule::Calendar.occupies_nook_cells());
@@ -1503,12 +1543,171 @@ mod tests {
     }
 
     #[test]
-    fn enabled_widget_cannot_grow_past_the_island_cell_budget() {
+    fn pack_rows_wraps_at_cap() {
+        let items = [
+            (WidgetModule::Music, 5),
+            (WidgetModule::Calendar, 4),
+            (WidgetModule::Timers, 2),
+            (WidgetModule::Battery, 3),
+            (WidgetModule::Weather, 3),
+            (WidgetModule::Speed, 4),
+        ];
+        let rows = pack_rows(&items, 11);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(
+            rows[0].iter().map(|(_, c)| *c).collect::<Vec<_>>(),
+            vec![5, 4, 2]
+        );
+        assert_eq!(
+            rows[1].iter().map(|(_, c)| *c).collect::<Vec<_>>(),
+            vec![3, 3, 4]
+        );
+        let wide = pack_rows(&[(WidgetModule::Music, 12)], 11);
+        assert_eq!(wide.len(), 1);
+        assert_eq!(wide[0][0].1, 11);
+    }
+
+    #[test]
+    fn max_cells_for_is_capped_by_one_row() {
         let settings = AppSettings::default();
+        assert_eq!(settings.remaining_cells(), 6);
+        assert_eq!(
+            settings.max_cells_for(WidgetModule::Music),
+            WidgetModule::Music
+                .max_cells()
+                .min(AppSettings::TOTAL_CELLS)
+        );
+    }
+
+    #[test]
+    fn reorder_of_a_fitting_set_never_exceeds_one_row() {
+        // Sum 5+4+2+3 = 14 ≤ 17, so any reorder still packs into one row.
+        let mut settings = AppSettings::default();
+        assert!(settings.set_enabled(WidgetModule::Battery, true));
+        assert_eq!(settings.nook_rows().len(), 1);
+        let order_before = settings.widget_order.clone();
+        assert!(settings.try_move_widget_to(WidgetModule::Battery, WidgetModule::Music));
+        assert_ne!(settings.widget_order, order_before);
+        assert_eq!(settings.nook_rows().len(), 1);
+        assert_eq!(settings.nook_row_count(), 1);
+    }
+
+    #[test]
+    fn set_size_large_refused_when_it_would_overflow_row() {
+        let mut settings = AppSettings::default();
+        // Defaults 11 + Battery 3 + Weather 3 = 17. Growing Battery to Large (6)
+        // would need 20 cells and wrap — refused under MAX_ROWS = 1.
+        assert!(settings.set_enabled(WidgetModule::Battery, true));
+        assert!(settings.set_enabled(WidgetModule::Weather, true));
+        assert_eq!(settings.used_cells(), AppSettings::TOTAL_CELLS);
+        assert_eq!(settings.nook_rows().len(), 1);
+        let before = settings.cells_for(WidgetModule::Battery);
+        assert!(!settings.set_size(WidgetModule::Battery, WidgetSize::Large));
+        assert_eq!(settings.cells_for(WidgetModule::Battery), before);
+        assert_eq!(settings.nook_rows().len(), 1);
+    }
+
+    #[test]
+    fn can_enable_refuses_when_row_is_full() {
+        let mut settings = AppSettings::default();
+        settings.experimental_widgets = true;
+        // Defaults 11 + Battery 3 + Weather 3 = 17; HighAlert needs another row.
+        assert!(settings.set_enabled(WidgetModule::Battery, true));
+        assert!(settings.set_enabled(WidgetModule::Weather, true));
+        assert_eq!(settings.used_cells(), AppSettings::TOTAL_CELLS);
+        assert_eq!(settings.nook_row_count(), 1);
+        assert!(!settings.can_enable(WidgetModule::HighAlert));
+        assert!(!settings.set_enabled(WidgetModule::HighAlert, true));
+        assert!(settings.set_enabled(WidgetModule::Weather, false));
+        assert!(settings.can_enable(WidgetModule::HighAlert));
+        assert!(settings.set_enabled(WidgetModule::HighAlert, true));
+    }
+
+    #[test]
+    fn clamp_to_budget_disables_trailing_widgets_beyond_one_row() {
+        let mut settings = AppSettings::default();
+        settings.experimental_widgets = true;
+        // Defaults first so clamp drops later-added extras, not Timers
+        // (Timers sits after Mirror/Agents/Reminders in default_widget_order).
+        settings.widget_order = vec![
+            WidgetModule::Music,
+            WidgetModule::Calendar,
+            WidgetModule::Timers,
+            WidgetModule::Battery,
+            WidgetModule::Weather,
+            WidgetModule::Speed,
+            WidgetModule::Agents,
+            WidgetModule::Mirror,
+            WidgetModule::Reminders,
+            WidgetModule::HighAlert,
+            WidgetModule::Notes,
+        ];
+        for module in [
+            WidgetModule::Battery,
+            WidgetModule::Weather,
+            WidgetModule::Speed,
+            WidgetModule::Agents,
+            WidgetModule::Mirror,
+            WidgetModule::Reminders,
+            WidgetModule::HighAlert,
+            WidgetModule::Notes,
+        ] {
+            settings.write_enabled(module, true);
+        }
+        assert!(settings.nook_rows().len() > AppSettings::MAX_ROWS);
+        settings.clamp_to_budget();
+        assert_eq!(settings.nook_rows().len(), 1);
+        assert!(settings.used_cells() <= AppSettings::TOTAL_CELLS);
+        // Leading defaults fit in 17 and stay; everything after the overflow is off.
+        assert!(settings.show_media);
+        assert!(settings.show_calendar);
+        assert!(settings.show_timers);
+        assert!(!settings.show_high_alert);
+        assert!(!settings.show_notes);
+    }
+
+    #[test]
+    fn remaining_cells_is_last_row_remainder() {
+        let settings = AppSettings::default();
+        assert_eq!(settings.used_cells(), 11);
+        assert_eq!(settings.remaining_cells(), 6);
+        assert_eq!(settings.nook_row_count(), 1);
+
+        let mut settings = settings;
+        settings.set_cells(WidgetModule::Weather, 3);
+        assert!(settings.set_enabled(WidgetModule::Weather, true));
+        assert_eq!(settings.remaining_cells(), 3);
+        assert_eq!(settings.nook_rows().len(), 1);
+
+        settings.set_cells(WidgetModule::Battery, 3);
+        assert!(settings.set_enabled(WidgetModule::Battery, true));
         assert_eq!(settings.remaining_cells(), 0);
-        let current = settings.cells_for(WidgetModule::Music);
-        assert_eq!(settings.max_cells_for(WidgetModule::Music), current);
-        assert!(current < WidgetModule::Music.max_cells());
+        assert_eq!(settings.nook_rows().len(), 1);
+    }
+
+    #[test]
+    fn size_presets_map_to_cells() {
+        let mut settings = AppSettings {
+            show_calendar: false,
+            show_timers: false,
+            ..Default::default()
+        };
+        settings.set_size(WidgetModule::Music, WidgetSize::Small);
+        assert_eq!(
+            settings.cells_for(WidgetModule::Music),
+            WidgetModule::Music.min_cells()
+        );
+        assert_eq!(settings.size_for(WidgetModule::Music), WidgetSize::Small);
+        settings.set_size(WidgetModule::Music, WidgetSize::Medium);
+        assert_eq!(
+            settings.cells_for(WidgetModule::Music),
+            WidgetModule::Music.default_cells()
+        );
+        settings.set_size(WidgetModule::Music, WidgetSize::Large);
+        assert_eq!(
+            settings.cells_for(WidgetModule::Music),
+            settings.max_cells_for(WidgetModule::Music)
+        );
     }
 
     #[test]
@@ -1518,7 +1717,9 @@ mod tests {
         assert!(!parsed.notification_fda_opt_in);
         assert!(!parsed.is_enabled(WidgetModule::Notifications));
         let mut settings = AppSettings::default();
-        settings.toggle_enabled(WidgetModule::Notifications);
+        assert!(settings.set_enabled(WidgetModule::Calendar, false));
+        assert!(settings.set_enabled(WidgetModule::Timers, false));
+        assert!(settings.set_enabled(WidgetModule::Notifications, true));
         assert!(settings.show_notifications);
         settings.toggle_notification_app("com.apple.mail");
         assert!(settings.notification_app_blocked("com.apple.mail"));
@@ -1541,13 +1742,6 @@ mod tests {
     }
 
     #[test]
-    fn window_management_flags_default_off() {
-        let parsed: AppSettings = serde_json::from_str("{}").unwrap();
-        assert!(!parsed.window_snap_enabled);
-        assert!(!parsed.thaw_enabled);
-        assert!(!parsed.thaw_hidden);
-        assert!(!parsed.snap_drag_to_edge);
-    }
     fn audio_output_picker_defaults_on() {
         let parsed: AppSettings = serde_json::from_str("{}").unwrap();
         assert!(parsed.audio_output_picker);
@@ -1555,18 +1749,6 @@ mod tests {
             parsed.audio_output_picker,
             AppSettings::default().audio_output_picker
         );
-    }
-    fn input_feel_flags_default_off() {
-        let parsed: AppSettings = serde_json::from_str("{}").unwrap();
-        assert!(!parsed.keysounds_enabled);
-        assert!(!parsed.smooth_scroll_enabled);
-        assert!(!parsed.reverse_mouse_scroll);
-        assert_eq!(parsed.keysound_pack, "nook-click");
-        assert!((parsed.keysound_volume - 0.7).abs() < f32::EPSILON);
-        assert!((parsed.scroll_speed - 1.0).abs() < f32::EPSILON);
-        assert!((parsed.scroll_duration - 0.35).abs() < f32::EPSILON);
-        assert!(parsed.scroll_excluded_apps.is_empty());
-        assert!(parsed.scroll_device_overrides.is_empty());
     }
 
     #[test]

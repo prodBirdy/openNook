@@ -19,8 +19,8 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
-const FONT_SIZE: f32 = 12.0;
-const LINE_HEIGHT: f32 = 16.0;
+const FONT_SIZE: f32 = theme::BODY.size;
+const LINE_HEIGHT: f32 = theme::BODY.leading;
 
 pub(crate) enum QuickAddEvent {
     Saved,
@@ -40,11 +40,13 @@ pub(crate) struct QuickAdd {
     placeholder: SharedString,
     parsed: Option<ParsedEntry>,
     confirmed: Option<String>,
+    failed: Option<String>,
     saving: bool,
 }
 
 struct ShapedLine {
     line: Option<WrappedLine>,
+    #[allow(dead_code)]
     text: String,
 }
 
@@ -66,6 +68,7 @@ impl QuickAdd {
             placeholder: placeholder.into(),
             parsed: None,
             confirmed: None,
+            failed: None,
             saving: false,
         }
     }
@@ -114,6 +117,7 @@ impl QuickAdd {
 
     fn reparse(&mut self) {
         self.confirmed = None;
+        self.failed = None;
         self.parsed = nl_parse::parse_now_as(&self.text, self.default_kind);
     }
 
@@ -121,8 +125,7 @@ impl QuickAdd {
         let start = self.snap(range.start);
         let end = self.snap(range.end).max(start);
         let normalized = insertion
-            .replace('\n', " ")
-            .replace('\r', " ")
+            .replace(['\n', '\r'], " ")
             .chars()
             .filter(|c| *c != '\u{2028}' && *c != '\u{2029}')
             .collect::<String>();
@@ -135,6 +138,7 @@ impl QuickAdd {
         cx.notify();
     }
 
+    #[allow(dead_code)]
     fn clear(&mut self, cx: &mut Context<Self>) {
         self.text.clear();
         self.anchor = 0;
@@ -176,6 +180,8 @@ impl QuickAdd {
                         });
                     })
                     .detach();
+                } else {
+                    this.failed = Some("Couldn't save. Try again.".into());
                 }
                 cx.notify();
             });
@@ -212,7 +218,6 @@ impl QuickAdd {
             "end" => self.move_head(self.text.len(), m.shift),
             "enter" => self.commit(cx),
             "escape" => {
-                self.clear(cx);
                 window.blur();
             }
             "a" if cmd => {
@@ -371,7 +376,7 @@ impl EntityInputHandler for QuickAdd {
         );
         let start = range.start;
         self.splice(cx, range, new_text);
-        let inserted = new_text.replace('\n', " ").replace('\r', " ");
+        let inserted = new_text.replace(['\n', '\r'], " ");
         self.marked_range = Some(
             utf8_to_utf16(&self.text, start)..utf8_to_utf16(&self.text, start + inserted.len()),
         );
@@ -519,11 +524,18 @@ impl Render for QuickAdd {
         let focus = self.focus.clone();
         let layout_cell = self.layout.clone();
         let bounds_cell = self.bounds.clone();
-        let chip = self.confirmed.clone().or_else(|| {
-            self.parsed
-                .as_ref()
-                .map(|e| format!("→ {}", e.preview_label()))
-        });
+        let chip = if self.saving {
+            Some("Saving…".to_string())
+        } else {
+            self.failed
+                .clone()
+                .or_else(|| self.confirmed.clone())
+                .or_else(|| {
+                    self.parsed
+                        .as_ref()
+                        .map(|e| format!("→ {}", e.preview_label()))
+                })
+        };
 
         div()
             .id("quick-add")
@@ -536,10 +548,15 @@ impl Render for QuickAdd {
                 div()
                     .id("quick-add-field")
                     .w_full()
-                    .h(px(22.))
+                    .h(px(theme::HIT_MIN))
                     .px(px(8.))
-                    .rounded(px(8.))
-                    .bg(theme::FILL)
+                    .rounded(px(theme::CONTROL_RADIUS))
+                    .bg(theme::FILL_TERTIARY)
+                    .opacity(if self.saving {
+                        theme::DISABLED_OPACITY
+                    } else {
+                        1.0
+                    })
                     .flex()
                     .items_center()
                     .cursor(CursorStyle::IBeam)
@@ -575,10 +592,12 @@ impl Render for QuickAdd {
                         .id("quick-add-chip")
                         .w_full()
                         .px(px(8.))
-                        .text_size(px(10.))
-                        .line_height(px(12.))
+                        .text_size(px(theme::FOOTNOTE.size))
+                        .line_height(px(theme::FOOTNOTE.leading))
                         .font_weight(FontWeight::MEDIUM)
-                        .text_color(if self.confirmed.is_some() {
+                        .text_color(if self.failed.is_some() {
+                            theme::DESTRUCTIVE
+                        } else if self.confirmed.is_some() {
                             theme::accent()
                         } else {
                             theme::SECONDARY_LABEL

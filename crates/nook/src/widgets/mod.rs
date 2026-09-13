@@ -25,7 +25,7 @@ pub(crate) use agents::{
     agents_card, compact_left as agents_compact_left, compact_right as agents_compact_right,
     face_agent,
 };
-pub(crate) use battery::battery_card;
+pub(crate) use battery::{battery_card, tint as battery_tint};
 pub(crate) use calendar::calendar_card;
 pub(crate) use high_alert::high_alert_card;
 pub(crate) use meeting::{
@@ -43,7 +43,10 @@ pub(crate) use notifications::{
 pub(crate) use observe::{observe_card, ObserveHover};
 pub(crate) use obsidian::obsidian_card;
 pub(crate) use quick_add::{QuickAdd, QuickAddEvent};
-pub(crate) use recorder::recorder_card;
+pub(crate) use recorder::{
+    compact_left as recorder_compact_left, compact_right as recorder_compact_right, recorder_card,
+    COMPACT_EXTRA as RECORDER_COMPACT_EXTRA, COMPACT_HOVER_EXTRA as RECORDER_COMPACT_HOVER_EXTRA,
+};
 pub(crate) use reminders::reminders_card;
 pub(crate) use speed::speed_card;
 pub(crate) use sysstats::sysstats_card;

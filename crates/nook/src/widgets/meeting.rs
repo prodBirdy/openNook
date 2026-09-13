@@ -1,12 +1,11 @@
 //! Meeting card: mute + leave for Zoom / Teams / Google Meet.
 
 use crate::icons::lucide_color;
-use crate::island::ui::{label, nook_display, nook_empty, nook_pane};
+use crate::island::ui::{label, nook_display, nook_empty, nook_pane, open_privacy_pane, text_btn};
 use crate::island::Island;
 use crate::theme;
 use gpui::{
-    div, prelude::*, px, rgba, AnyElement, Context, CursorStyle, FontWeight, MouseButton,
-    MouseDownEvent, Rgba,
+    div, prelude::*, px, rgba, AnyElement, Context, CursorStyle, MouseButton, MouseDownEvent, Rgba,
 };
 use nook_core::meetings::{MeetingApp, MeetingSnapshot};
 
@@ -56,7 +55,7 @@ pub(crate) fn meeting_card(snap: &MeetingSnapshot, cx: &mut Context<Island>) -> 
             "Live"
         }
     } else {
-        "Unverified state"
+        "Meeting controls need Accessibility"
     };
 
     nook_pane("nook-meeting")
@@ -78,41 +77,47 @@ pub(crate) fn meeting_card(snap: &MeetingSnapshot, cx: &mut Context<Island>) -> 
                         .child(label(app.label(), theme::CALLOUT, true)),
                 ),
         )
-        .child(
-            div()
-                .text_size(px(12.))
-                .font_weight(FontWeight::MEDIUM)
-                .text_color(if verified {
-                    mic_color
-                } else {
-                    theme::TERTIARY_LABEL
-                })
-                .child(state_line),
-        )
+        .child(div().child(
+            label(state_line, theme::CALLOUT, true).text_color(if verified {
+                mic_color
+            } else {
+                theme::TERTIARY_LABEL
+            }),
+        ))
         .child(
             div()
                 .flex()
                 .items_center()
                 .gap(px(8.))
                 .pt(px(4.))
-                .child(action_btn(
-                    "meeting-mute",
-                    mic_icon,
-                    mute_caption,
-                    mic_color,
-                    snap.accessibility_trusted || app == MeetingApp::Meet,
-                    cx,
-                    |this, cx| this.toggle_meeting_mute(cx),
-                ))
-                .child(action_btn(
-                    "meeting-leave",
-                    "phone-off",
-                    "Leave",
-                    theme::DESTRUCTIVE,
-                    snap.accessibility_trusted || app == MeetingApp::Meet,
-                    cx,
-                    |this, cx| this.leave_meeting(cx),
-                )),
+                .when(
+                    !snap.accessibility_trusted && app != MeetingApp::Meet,
+                    |d| {
+                        d.child(text_btn("Allow Accessibility", cx, |_, _, _| {
+                            open_privacy_pane("Privacy_Accessibility");
+                        }))
+                    },
+                )
+                .when(snap.accessibility_trusted || app == MeetingApp::Meet, |d| {
+                    d.child(action_btn(
+                        "meeting-mute",
+                        mic_icon,
+                        mute_caption,
+                        mic_color,
+                        true,
+                        cx,
+                        |this, cx| this.toggle_meeting_mute(cx),
+                    ))
+                    .child(action_btn(
+                        "meeting-leave",
+                        "phone-off",
+                        "Leave",
+                        theme::DESTRUCTIVE,
+                        true,
+                        cx,
+                        |this, cx| this.leave_meeting(cx),
+                    ))
+                }),
         )
         .into_any_element()
 }

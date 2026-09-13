@@ -223,7 +223,7 @@ pub async fn start(transcribe: bool) -> Result<(), String> {
     }
     #[cfg(target_os = "macos")]
     {
-        return macos::start(transcribe).await;
+        macos::start(transcribe).await
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -238,7 +238,7 @@ pub fn stop() -> Result<Option<RecordingItem>, String> {
     }
     #[cfg(target_os = "macos")]
     {
-        return macos::stop();
+        macos::stop()
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -259,7 +259,7 @@ pub fn play(id: i64) -> Result<(), String> {
     }
     #[cfg(target_os = "macos")]
     {
-        return macos::play(&path, id);
+        macos::play(&path, id)
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -278,7 +278,7 @@ pub fn stop_playback() {
 pub fn permission_hint() -> Option<String> {
     #[cfg(target_os = "macos")]
     {
-        return macos::permission_hint();
+        macos::permission_hint()
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -347,6 +347,8 @@ mod macos {
     // RcBlock must stay alive for the tap / result handler. RcBlock itself is
     // neither Send nor Sync, but we only hold it to keep the block alive while
     // AVFoundation/Speech invoke it from their own threads.
+    // Field kept alive so AVFoundation/Speech blocks are not dropped.
+    #[allow(dead_code)]
     struct TapKeep(Box<dyn std::any::Any>);
     unsafe impl Send for TapKeep {}
     unsafe impl Sync for TapKeep {}
@@ -737,7 +739,11 @@ mod macos {
             if data.is_null() || (*data).is_null() {
                 return 0.0;
             }
-            let samples = std::slice::from_raw_parts(*data, frames as usize);
+            // SAFETY: AVAudioPCMBuffer channel 0 is valid for `frameLength` samples.
+            let samples = crate::ffi::slice(*data, frames as usize);
+            if samples.is_empty() {
+                return 0.0;
+            }
             let sum: f32 = samples.iter().map(|s| s * s).sum();
             (sum / frames as f32).sqrt().min(1.0)
         }

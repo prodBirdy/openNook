@@ -88,8 +88,9 @@ impl MeetingApp {
 
 /// Idle → AppRunning → MicLive → InMeeting. `muted` is `Some` only when the
 /// host can verify it (Zoom AX title). Teams/Meet stay `None`.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub enum MeetingState {
+    #[default]
     Idle,
     AppRunning {
         app: MeetingApp,
@@ -145,25 +146,10 @@ impl MeetingState {
     }
 }
 
-impl Default for MeetingState {
-    fn default() -> Self {
-        Self::Idle
-    }
-}
-
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct MeetingSnapshot {
     pub state: MeetingState,
     pub accessibility_trusted: bool,
-}
-
-impl Default for MeetingSnapshot {
-    fn default() -> Self {
-        Self {
-            state: MeetingState::Idle,
-            accessibility_trusted: false,
-        }
-    }
 }
 
 impl MeetingSnapshot {
@@ -598,6 +584,17 @@ fn meet_mode() -> MeetControlMode {
 mod macos {
     use super::*;
     use crate::browser_media;
+    use crate::ffi::macos::{
+        kAXTrustedCheckOptionPrompt, kCFBooleanTrue, kCFStringEncodingUTF8,
+        kCFTypeDictionaryKeyCallBacks, kCFTypeDictionaryValueCallBacks,
+        AXIsProcessTrustedWithOptions, AXUIElementCopyAttributeValue, AXUIElementCreateApplication,
+        AXUIElementPerformAction, AXUIElementRef, AudioObjectAddPropertyListener,
+        AudioObjectGetPropertyData, AudioObjectGetPropertyDataSize, AudioObjectID,
+        AudioObjectPropertyAddress, AudioObjectRemovePropertyListener, CFArrayGetCount,
+        CFArrayGetTypeID, CFArrayGetValueAtIndex, CFDictionaryCreate, CFGetTypeID, CFRelease,
+        CFStringCreateWithCString, CFStringGetCString, CFStringGetLength, CFStringGetTypeID,
+        CGEventCreateKeyboardEvent, CGEventPostToPid, CGEventSetFlags, OSStatus,
+    };
     use objc2::runtime::AnyObject;
     use objc2::*;
     use std::ffi::{c_void, CStr};
@@ -613,13 +610,6 @@ mod macos {
     const PROC_BUNDLE: u32 = 0x7062_6964;
     const PROC_RUNNING_INPUT: u32 = 0x7069_7269;
 
-    #[repr(C)]
-    struct AudioObjectPropertyAddress {
-        selector: u32,
-        scope: u32,
-        element: u32,
-    }
-
     impl AudioObjectPropertyAddress {
         fn new(selector: u32) -> Self {
             Self {
@@ -630,67 +620,16 @@ mod macos {
         }
     }
 
-    type AudioObjectID = u32;
-    type OSStatus = i32;
-    type AudioListener = Option<
-        unsafe extern "C" fn(
-            AudioObjectID,
-            u32,
-            *const AudioObjectPropertyAddress,
-            *mut c_void,
-        ) -> OSStatus,
-    >;
-
-    #[link(name = "CoreAudio", kind = "framework")]
-    extern "C" {
-        fn AudioObjectGetPropertyDataSize(
-            object: AudioObjectID,
-            address: *const AudioObjectPropertyAddress,
-            qualifier_size: u32,
-            qualifier: *const c_void,
-            size: *mut u32,
-        ) -> OSStatus;
-        fn AudioObjectGetPropertyData(
-            object: AudioObjectID,
-            address: *const AudioObjectPropertyAddress,
-            qualifier_size: u32,
-            qualifier: *const c_void,
-            size: *mut u32,
-            data: *mut c_void,
-        ) -> OSStatus;
-        fn AudioObjectAddPropertyListener(
-            object: AudioObjectID,
-            address: *const AudioObjectPropertyAddress,
-            listener: AudioListener,
-            client: *mut c_void,
-        ) -> OSStatus;
-        fn AudioObjectRemovePropertyListener(
-            object: AudioObjectID,
-            address: *const AudioObjectPropertyAddress,
-            listener: AudioListener,
-            client: *mut c_void,
-        ) -> OSStatus;
-    }
-
-    #[link(name = "ApplicationServices", kind = "framework")]
-    extern "C" {
-        fn AXIsProcessTrustedWithOptions(options: *const c_void) -> bool;
-        fn AXUIElementCreateApplication(pid: i32) -> *mut c_void;
-        fn AXUIElementCopyAttributeValue(
-            element: *mut c_void,
-            attribute: *const c_void,
-            value: *mut *const c_void,
-        ) -> i32;
-        fn AXUIElementPerformAction(element: *mut c_void, action: *const c_void) -> i32;
-        static kAXTrustedCheckOptionPrompt: *const c_void;
-    }
-
     // The kAX*Attribute / kAX*Action constants are CFSTR macros in the SDK
     // headers, not exported symbols — an extern static for them cannot link.
     // Build the CFStrings once instead.
     fn ax_cfstr(slot: &'static std::sync::OnceLock<usize>, name: &'static str) -> *const c_void {
         *slot.get_or_init(|| unsafe {
-            CFStringCreateWithCString(ptr::null(), name.as_ptr() as *const i8, UTF8) as usize
+            CFStringCreateWithCString(
+                ptr::null(),
+                name.as_ptr() as *const i8,
+                kCFStringEncodingUTF8,
+            ) as usize
         }) as *const c_void
     }
 
@@ -710,46 +649,6 @@ mod macos {
     ax_const!(ax_press_action, "AXPress");
     ax_const!(ax_identifier_attr, "AXIdentifier");
 
-    #[link(name = "CoreFoundation", kind = "framework")]
-    extern "C" {
-        fn CFRelease(cf: *const c_void);
-        fn CFStringCreateWithCString(
-            alloc: *const c_void,
-            s: *const i8,
-            encoding: u32,
-        ) -> *const c_void;
-        fn CFGetTypeID(cf: *const c_void) -> usize;
-        fn CFStringGetTypeID() -> usize;
-        fn CFArrayGetTypeID() -> usize;
-        fn CFStringGetLength(s: *const c_void) -> isize;
-        fn CFStringGetCString(s: *const c_void, buf: *mut i8, size: isize, encoding: u32) -> bool;
-        fn CFArrayGetCount(arr: *const c_void) -> isize;
-        fn CFArrayGetValueAtIndex(arr: *const c_void, idx: isize) -> *const c_void;
-        fn CFDictionaryCreate(
-            allocator: *const c_void,
-            keys: *const *const c_void,
-            values: *const *const c_void,
-            n: isize,
-            key_cb: *const c_void,
-            value_cb: *const c_void,
-        ) -> *const c_void;
-        static kCFBooleanTrue: *const c_void;
-        static kCFTypeDictionaryKeyCallBacks: c_void;
-        static kCFTypeDictionaryValueCallBacks: c_void;
-    }
-
-    #[link(name = "CoreGraphics", kind = "framework")]
-    extern "C" {
-        fn CGEventCreateKeyboardEvent(
-            source: *mut c_void,
-            virtual_key: u16,
-            key_down: bool,
-        ) -> *mut c_void;
-        fn CGEventSetFlags(event: *mut c_void, flags: u64);
-        fn CGEventPostToPid(pid: i32, event: *mut c_void);
-    }
-
-    const UTF8: u32 = 0x0800_0100;
     static STARTED: Once = Once::new();
     static INPUT_DEVICE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
     static MIC_LIVE: AtomicBool = AtomicBool::new(false);
@@ -1051,7 +950,7 @@ mod macos {
     pub fn ax_trusted(prompt: bool) -> bool {
         unsafe {
             if !prompt {
-                return AXIsProcessTrustedWithOptions(ptr::null());
+                return AXIsProcessTrustedWithOptions(ptr::null()) != 0;
             }
             let key = kAXTrustedCheckOptionPrompt;
             let val = kCFBooleanTrue;
@@ -1063,7 +962,7 @@ mod macos {
                 &kCFTypeDictionaryKeyCallBacks,
                 &kCFTypeDictionaryValueCallBacks,
             );
-            let ok = AXIsProcessTrustedWithOptions(dict);
+            let ok = AXIsProcessTrustedWithOptions(dict) != 0;
             if !dict.is_null() {
                 CFRelease(dict);
             }
@@ -1077,11 +976,17 @@ mod macos {
                 return None;
             }
             let len = CFStringGetLength(cf);
-            if len < 0 || len > 8 * 1024 {
+            if !(0..=8 * 1024).contains(&len) {
                 return None;
             }
             let mut buf = vec![0i8; (len as usize) * 4 + 1];
-            if !CFStringGetCString(cf, buf.as_mut_ptr(), buf.len() as isize, UTF8) {
+            if CFStringGetCString(
+                cf,
+                buf.as_mut_ptr(),
+                buf.len() as isize,
+                kCFStringEncodingUTF8,
+            ) == 0
+            {
                 return None;
             }
             CStr::from_ptr(buf.as_ptr())
@@ -1091,7 +996,7 @@ mod macos {
         }
     }
 
-    fn ax_attr(el: *mut c_void, attr: *const c_void) -> *const c_void {
+    fn ax_attr(el: AXUIElementRef, attr: *const c_void) -> *const c_void {
         unsafe {
             if el.is_null() {
                 return ptr::null();
@@ -1104,7 +1009,7 @@ mod macos {
         }
     }
 
-    fn ax_title(el: *mut c_void) -> Option<String> {
+    fn ax_title(el: AXUIElementRef) -> Option<String> {
         unsafe {
             let cf = ax_attr(el, ax_title_attr());
             if cf.is_null() {
@@ -1116,7 +1021,7 @@ mod macos {
         }
     }
 
-    fn ax_role(el: *mut c_void) -> Option<String> {
+    fn ax_role(el: AXUIElementRef) -> Option<String> {
         unsafe {
             let cf = ax_attr(el, ax_role_attr());
             if cf.is_null() {
@@ -1128,7 +1033,7 @@ mod macos {
         }
     }
 
-    fn ax_identifier(el: *mut c_void) -> Option<String> {
+    fn ax_identifier(el: AXUIElementRef) -> Option<String> {
         unsafe {
             let cf = ax_attr(el, ax_identifier_attr());
             if cf.is_null() {
@@ -1140,7 +1045,7 @@ mod macos {
         }
     }
 
-    fn ax_children(el: *mut c_void) -> Vec<*mut c_void> {
+    fn ax_children(el: AXUIElementRef) -> Vec<AXUIElementRef> {
         unsafe {
             let arr = ax_attr(el, ax_children_attr());
             if arr.is_null() {
@@ -1152,13 +1057,13 @@ mod macos {
         }
     }
 
-    fn ax_array(arr: *const c_void) -> Vec<*mut c_void> {
+    fn ax_array(arr: *const c_void) -> Vec<AXUIElementRef> {
         unsafe {
             if arr.is_null() || CFGetTypeID(arr) != CFArrayGetTypeID() {
                 return Vec::new();
             }
             let n = CFArrayGetCount(arr);
-            if n < 0 || n > 256 {
+            if !(0..=256).contains(&n) {
                 return Vec::new();
             }
             (0..n)
@@ -1167,14 +1072,14 @@ mod macos {
                     if v.is_null() {
                         None
                     } else {
-                        Some(v as *mut c_void)
+                        Some(v)
                     }
                 })
                 .collect()
         }
     }
 
-    fn ax_press(el: *mut c_void) -> bool {
+    fn ax_press(el: AXUIElementRef) -> bool {
         unsafe {
             if el.is_null() {
                 return false;
@@ -1183,11 +1088,11 @@ mod macos {
         }
     }
 
-    fn zoom_app(pid: i32) -> *mut c_void {
+    fn zoom_app(pid: i32) -> AXUIElementRef {
         unsafe { AXUIElementCreateApplication(pid) }
     }
 
-    fn find_meeting_menu(pid: i32) -> Option<*mut c_void> {
+    fn find_meeting_menu(pid: i32) -> Option<AXUIElementRef> {
         unsafe {
             let app = zoom_app(pid);
             if app.is_null() {
@@ -1198,7 +1103,7 @@ mod macos {
             if bar.is_null() {
                 return None;
             }
-            let menus = ax_children(bar as *mut c_void);
+            let menus = ax_children(bar);
             CFRelease(bar);
             for menu_extra in menus {
                 let title = ax_title(menu_extra).unwrap_or_default();
@@ -1230,9 +1135,7 @@ mod macos {
     }
 
     fn zoom_in_meeting(pid: i32) -> Option<bool> {
-        if find_meeting_menu(pid).is_none() {
-            return None;
-        }
+        find_meeting_menu(pid)?;
         Some(zoom_mute_from_menu(pid).unwrap_or(false))
     }
 
@@ -1270,7 +1173,7 @@ mod macos {
         }
     }
 
-    fn press_leave_in(el: *mut c_void, depth: u8) -> bool {
+    fn press_leave_in(el: AXUIElementRef, depth: u8) -> bool {
         if el.is_null() || depth > 6 {
             return false;
         }

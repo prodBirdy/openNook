@@ -3,22 +3,23 @@
 //! Keys and IME commits go to the child's stdin. The URL scheme / CLI /
 //! Services paths never call into `nook_core::shell`.
 
-use crate::island::ui::{nook_icon_btn, nook_pane};
+use crate::island::ui::{label, nook_icon_btn, nook_pane};
 use crate::island::Island;
 use crate::platform;
 use crate::theme;
 use gpui::{
-    canvas, div, point, prelude::*, px, rgba, size, App, Bounds, ClipboardItem, Context,
-    CursorStyle, ElementInputHandler, Entity, EntityInputHandler, EventEmitter, FocusHandle,
-    Focusable, Font, FontFallbacks, FontFeatures, FontStyle, FontWeight, Hsla, KeyDownEvent,
-    MouseButton, MouseDownEvent, Pixels, Point, Render, ScrollWheelEvent, SharedString, TextRun,
-    UTF16Selection, UnderlineStyle, Window,
+    canvas, div, point, prelude::*, px, size, App, Bounds, ClipboardItem, Context, CursorStyle,
+    ElementInputHandler, Entity, EntityInputHandler, EventEmitter, FocusHandle, Focusable, Font,
+    FontFallbacks, FontFeatures, FontStyle, FontWeight, Hsla, KeyDownEvent, MouseButton,
+    MouseDownEvent, Pixels, Point, Render, ScrollWheelEvent, SharedString, TextRun, UTF16Selection,
+    UnderlineStyle, Window,
 };
 use nook_core::shell::{self, SessionHandle, SessionSnapshot, StyledRow};
 use std::cell::RefCell;
 use std::ops::Range;
 use std::rc::Rc;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 const DEFAULT_FONT_SIZE: f32 = 11.0;
 /// Fallback metrics until the first paint measures the real font.
@@ -78,11 +79,13 @@ pub(crate) struct TerminalView {
     line_h: f32,
     cols: u16,
     rows: u16,
+    ever_started: bool,
+    copied_at: Option<Instant>,
 }
 
 impl TerminalView {
     pub(crate) fn new(shell: String, cx: &mut Context<Self>) -> Self {
-        let mut this = Self {
+        let this = Self {
             shell,
             session: None,
             session_gen: 0,
@@ -94,7 +97,7 @@ impl TerminalView {
             running: false,
             exit: None,
             focus: cx.focus_handle(),
-            want_focus: true,
+            want_focus: false,
             marked: String::new(),
             wheel_accum: 0.0,
             bounds: Rc::new(RefCell::new(None)),
@@ -105,9 +108,25 @@ impl TerminalView {
             line_h: DEFAULT_LINE_HEIGHT,
             cols: DEFAULT_COLS,
             rows: DEFAULT_ROWS,
+            ever_started: false,
+            copied_at: None,
         };
-        this.start_session(cx);
+        cx.spawn(async move |this, cx| {
+            let _ = this.update(cx, |this, cx| {
+                if !this.ever_started {
+                    cx.emit(TerminalEvent::State {
+                        running: false,
+                        exit: None,
+                    });
+                }
+            });
+        })
+        .detach();
         this
+    }
+
+    pub(crate) fn is_started(&self) -> bool {
+        self.ever_started
     }
 
     pub(crate) fn shutdown(&mut self) {
@@ -127,6 +146,7 @@ impl TerminalView {
     }
 
     fn start_session(&mut self, cx: &mut Context<Self>) {
+        self.ever_started = true;
         self.shutdown();
         self.session_gen = self.session_gen.wrapping_add(1);
         let gen = self.session_gen;
@@ -290,8 +310,18 @@ impl TerminalView {
         let cmd = m.secondary();
 
         if cmd && key == "c" {
-            cx.write_to_clipboard(ClipboardItem::new_string(self.display.clone()));
+            cx.write_to_clipboard(ClipboardItem::new_string(self.visible_screen()));
+            self.copied_at = Some(Instant::now());
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(Duration::from_secs(1)).await;
+                let _ = this.update(cx, |this, cx| {
+                    this.copied_at = None;
+                    cx.notify();
+                });
+            })
+            .detach();
             cx.stop_propagation();
+            cx.notify();
             return;
         }
         if cmd && key == "v" {
@@ -335,6 +365,24 @@ impl TerminalView {
         }
 
         let _ = window;
+    }
+
+    fn visible_screen(&self) -> String {
+        if !self.styled.is_empty() {
+            return self
+                .styled
+                .iter()
+                .map(|row| {
+                    row.iter()
+                        .map(|span| span.text.as_str())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+        }
+        let lines: Vec<&str> = self.display.lines().collect();
+        let start = lines.len().saturating_sub(self.rows as usize);
+        lines[start..].join("\n")
     }
 }
 
@@ -648,7 +696,7 @@ fn measure_cell(font: &Font, font_size: f32, window: &mut Window) -> (f32, f32) 
 
 impl Render for TerminalView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if self.want_focus {
+        if self.want_focus && self.ever_started {
             self.want_focus = false;
             window.focus(&self.focus);
             window.activate_window();
@@ -658,8 +706,12 @@ impl Render for TerminalView {
         let entity = cx.entity();
         let focus = self.focus.clone();
         let bounds_cell = self.bounds.clone();
+        let copied = self
+            .copied_at
+            .is_some_and(|at| at.elapsed() < Duration::from_secs(1));
         div()
             .id("nook-pty")
+            .relative()
             .w_full()
             .flex_1()
             .min_h_0()
@@ -710,6 +762,13 @@ impl Render for TerminalView {
                 .w_full()
                 .h_full(),
             )
+            .when(copied, |d| {
+                d.child(div().absolute().top(px(4.)).right(px(8.)).child(label(
+                    "Copied screen",
+                    theme::FOOTNOTE,
+                    true,
+                )))
+            })
     }
 }
 
@@ -720,8 +779,49 @@ pub(crate) fn terminal_card(island: &mut Island, cx: &mut Context<Island>) -> im
         island.settings.terminal_font_size,
     );
     view.update(cx, |v, _| v.set_font(&family, size));
+    let started = view.read(cx).is_started();
     let running = island.shell_running;
     let chip = exit_chip(island);
+    if !started {
+        return nook_pane("nook-terminal")
+            .w_full()
+            .px(px(theme::EXPANDED_PAD))
+            .pb(px(theme::EXPANDED_PAD))
+            .child(
+                div()
+                    .flex_1()
+                    .w_full()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .justify_center()
+                    .gap(px(10.))
+                    .child(crate::icons::lucide_color("terminal", 16.0, theme::LABEL))
+                    .child(
+                        div()
+                            .id("term-start")
+                            .px(px(16.))
+                            .py(px(8.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded(px(theme::ROW_RADIUS))
+                            .bg(theme::FILL)
+                            .hover(|s| s.bg(theme::FILL_SECONDARY))
+                            .active(|s| s.opacity(0.85))
+                            .cursor(CursorStyle::PointingHand)
+                            .child(label("Start Shell", theme::BODY, true))
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|this, _: &MouseDownEvent, window, cx| {
+                                    cx.stop_propagation();
+                                    this.restart_terminal(window, cx);
+                                }),
+                            ),
+                    ),
+            )
+            .into_any_element();
+    }
     nook_pane("nook-terminal")
         .w_full()
         .px(px(theme::EXPANDED_PAD))
@@ -747,6 +847,7 @@ pub(crate) fn terminal_card(island: &mut Island, cx: &mut Context<Island>) -> im
             )
         })
         .child(view)
+        .into_any_element()
 }
 
 fn exit_chip(island: &Island) -> Option<impl IntoElement> {
@@ -761,15 +862,22 @@ fn exit_chip(island: &Island) -> Option<impl IntoElement> {
             .h(px(20.))
             .rounded_full()
             .bg(if ok {
-                rgba(0x30d15833)
+                gpui::Rgba {
+                    a: 0.2,
+                    ..theme::SUCCESS
+                }
             } else {
-                rgba(0xff453a33)
+                gpui::Rgba {
+                    a: 0.2,
+                    ..theme::DESTRUCTIVE
+                }
             })
             .flex()
             .items_center()
             .child(
                 div()
-                    .text_size(px(11.))
+                    .text_size(px(theme::SUBHEADLINE.size))
+                    .line_height(px(theme::SUBHEADLINE.leading))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(if ok {
                         theme::SUCCESS

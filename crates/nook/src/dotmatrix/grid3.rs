@@ -18,10 +18,13 @@ use super::engine::*;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
     /// `dotm-3x3-3` — diagonal bands drifting top-left to bottom-right.
+    #[allow(dead_code)]
     DriftTl,
     /// `dotm-3x3-6` — Manhattan rings rippling out of the centre.
+    #[allow(dead_code)]
     CoreEcho,
     /// `dotm-3x3-16` — a pixel smiley turning a quarter at a time.
+    #[allow(dead_code)]
     SmileySpin,
 }
 

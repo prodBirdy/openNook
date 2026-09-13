@@ -12,7 +12,7 @@ use std::time::{Duration, SystemTime};
 use tokio::sync::watch;
 
 /// One classified tunnel plus the island-facing summary.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct VpnSnapshot {
     pub connected: bool,
     pub service_name: String,
@@ -22,19 +22,6 @@ pub struct VpnSnapshot {
     /// real connect timestamp from scutil / a watched down→up edge.
     pub since_estimated: bool,
     pub tunnel_count: usize,
-}
-
-impl Default for VpnSnapshot {
-    fn default() -> Self {
-        Self {
-            connected: false,
-            service_name: String::new(),
-            interface: String::new(),
-            since: None,
-            since_estimated: false,
-            tunnel_count: 0,
-        }
-    }
 }
 
 impl VpnSnapshot {

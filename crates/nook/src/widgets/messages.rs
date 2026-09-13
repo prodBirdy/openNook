@@ -5,16 +5,21 @@
 //! opening the host app.
 
 use crate::icons::lucide_color;
-use crate::island::ui::{label, nook_empty, nook_pane};
+use crate::island::ui::{label, nook_empty, nook_icon_btn, nook_pane, open_privacy_pane, text_btn};
 use crate::island::Island;
 use crate::theme;
 use gpui::{
-    div, prelude::*, px, rgba, Context, CursorStyle, FocusHandle, FontWeight, KeyDownEvent,
+    canvas, div, prelude::*, px, Context, CursorStyle, FocusHandle, FontWeight, KeyDownEvent,
     MouseButton, MouseDownEvent, SharedString,
 };
 use nook_core::messages::{FdaStatus, IncomingPeek, MessageService};
 use nook_core::notifications::relative_age;
+use std::cell::RefCell;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+thread_local! {
+    static SEND_FAILED: RefCell<bool> = const { RefCell::new(false) };
+}
 
 const AVATAR: f32 = 36.0;
 const REPLY_H: f32 = 28.0;
@@ -38,24 +43,44 @@ pub(crate) fn messages_card(island: &mut Island, cx: &mut Context<Island>) -> im
                 div()
                     .id("msg-fda")
                     .flex_1()
-                    .cursor(CursorStyle::PointingHand)
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|_, _: &MouseDownEvent, _, cx| {
-                            cx.stop_propagation();
-                            let _ = nook_core::messages::open_fda_settings();
-                        }),
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .justify_center()
+                    .gap(px(6.))
+                    .child(
+                        div()
+                            .text_size(px(theme::BODY.size))
+                            .line_height(px(theme::BODY.leading))
+                            .font_weight(theme::BODY.emphasized)
+                            .text_color(theme::LABEL)
+                            .child("Messages needs Full Disk Access"),
                     )
-                    .child(nook_empty("message-circle", "Grant Full Disk Access")),
+                    .child(
+                        div()
+                            .text_size(px(theme::FOOTNOTE.size))
+                            .line_height(px(theme::FOOTNOTE.leading))
+                            .text_color(theme::SECONDARY_LABEL)
+                            .child("Reads your local iMessage database. Nothing leaves this Mac."),
+                    )
+                    .child(text_btn("Open Privacy Settings", cx, |_, _, _| {
+                        open_privacy_pane("Privacy_AllFiles");
+                    })),
             )
             .into_any_element(),
         FdaStatus::Unavailable => nook_pane("nook-messages")
             .w_full()
-            .child(nook_empty("message-circle", "Messages on this Mac"))
+            .child(nook_empty(
+                "message-circle",
+                "No Messages database on this Mac",
+            ))
             .into_any_element(),
         FdaStatus::Granted => match snap.incoming.clone() {
             Some(peek) => incoming_card(peek, &draft, focus, cx).into_any_element(),
-            None => div().into_any_element(),
+            None => nook_pane("nook-messages")
+                .w_full()
+                .child(nook_empty("message-circle", "No new messages"))
+                .into_any_element(),
         },
     }
 }
@@ -75,6 +100,7 @@ fn incoming_card(
     let send_tint = service_tint(peek.service);
     let empty = draft.is_empty();
     let shown = if empty { "Reply" } else { draft };
+    let send_failed = SEND_FAILED.with(|f| *f.borrow());
 
     nook_pane("nook-messages")
         .w_full()
@@ -103,7 +129,10 @@ fn incoming_card(
                                         .flex_1()
                                         .min_w(px(0.)),
                                 )
-                                .child(label(age, theme::SUBHEADLINE, false).flex_shrink_0()),
+                                .child(label(age, theme::SUBHEADLINE, false).flex_shrink_0())
+                                .child(nook_icon_btn("x", "msg-dismiss", cx, |this, _, _, cx| {
+                                    dismiss_incoming(this, cx);
+                                })),
                         )
                         .child(
                             div()
@@ -116,7 +145,7 @@ fn incoming_card(
                         ),
                 ),
         )
-        .child(reply_row(shown, empty, focus, send_tint, cx))
+        .child(reply_row(shown, empty, focus, send_tint, send_failed, cx))
 }
 
 fn reply_row(
@@ -124,6 +153,7 @@ fn reply_row(
     empty: bool,
     focus: Option<FocusHandle>,
     send_tint: gpui::Rgba,
+    send_failed: bool,
     cx: &mut Context<Island>,
 ) -> impl IntoElement {
     let mut row = div()
@@ -160,9 +190,16 @@ fn reply_row(
                         cx.notify();
                     }),
                 )
-                .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+                .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                     if event.keystroke.key == "escape" {
-                        dismiss_incoming(this, cx);
+                        if !this.message_draft.is_empty() {
+                            this.message_draft.clear();
+                            SEND_FAILED.with(|f| *f.borrow_mut() = false);
+                            cx.notify();
+                        } else {
+                            window.blur();
+                        }
+                        cx.stop_propagation();
                         return;
                     }
                     if event.keystroke.key == "enter" {
@@ -170,6 +207,7 @@ fn reply_row(
                         return;
                     }
                     if apply_draft_key(&mut this.message_draft, event, cx) {
+                        SEND_FAILED.with(|f| *f.borrow_mut() = false);
                         cx.notify();
                     }
                 }))
@@ -194,20 +232,34 @@ fn reply_row(
                                 })
                                 .child(SharedString::from(shown.to_string())),
                         )
-                        .child(
-                            div()
-                                .w(px(CARET_W))
-                                .h(px(CARET_H))
-                                .ml(px(1.))
-                                .flex_shrink_0()
-                                .rounded(px(1.))
-                                .bg(theme::accent()),
-                        ),
+                        .child({
+                            let focus_caret = focus.clone();
+                            canvas(
+                                |_, _, _| {},
+                                move |bounds, _, window, _| {
+                                    if focus_caret.is_focused(window) {
+                                        window.paint_quad(gpui::fill(bounds, theme::accent()));
+                                    }
+                                },
+                            )
+                            .w(px(CARET_W))
+                            .h(px(CARET_H))
+                            .ml(px(1.))
+                            .flex_shrink_0()
+                            .rounded(px(1.))
+                        }),
                 ),
         );
     }
 
-    row.child(send_btn(empty, send_tint, cx))
+    row.when(send_failed, |d| {
+        d.child(
+            label("Couldn't send", theme::FOOTNOTE, false)
+                .text_color(theme::DESTRUCTIVE)
+                .flex_shrink_0(),
+        )
+    })
+    .child(send_btn(empty, send_tint, cx))
 }
 
 fn send_btn(empty: bool, tint: gpui::Rgba, cx: &mut Context<Island>) -> impl IntoElement {
@@ -242,7 +294,7 @@ fn avatar(name: &str, service: MessageService, size: f32, badge: bool) -> impl I
         .rounded_full()
         .bg(theme::FILL_SECONDARY)
         .border_1()
-        .border_color(rgba(0xffffff1A))
+        .border_color(theme::FILL)
         .flex()
         .items_center()
         .justify_center()
@@ -338,31 +390,48 @@ fn send_incoming(island: &mut Island, cx: &mut Context<Island>) {
     if text.is_empty() {
         return;
     }
-    island.message_draft.clear();
-    island.messages.incoming = None;
+    SEND_FAILED.with(|f| *f.borrow_mut() = false);
     let auto = island.settings.experimental_whatsapp_autosend;
     let id = conv.id.clone();
     let rowid = conv.last_rowid;
-    nook_core::runtime().spawn(async move {
-        let result = match conv.service {
-            MessageService::WhatsApp => {
-                let phone = conv.handle.as_deref().unwrap_or(&conv.title);
-                nook_core::messages::reply_whatsapp(phone, &text, auto)
+    let service = conv.service;
+    let phone = conv.handle.clone().unwrap_or_else(|| conv.title.clone());
+    let chat_guid = conv.chat_guid.clone();
+    cx.spawn(async move |this, cx| {
+        let result = cx
+            .background_executor()
+            .spawn(async move {
+                match service {
+                    MessageService::WhatsApp => {
+                        nook_core::messages::reply_whatsapp(&phone, &text, auto)
+                    }
+                    MessageService::IMessage | MessageService::Sms => {
+                        let Some(guid) = chat_guid.as_deref() else {
+                            return Err("No chat GUID".into());
+                        };
+                        nook_core::messages::send_imessage(guid, &text)
+                    }
+                }
+            })
+            .await;
+        let _ = this.update(cx, |this, cx| {
+            match result {
+                Ok(()) => {
+                    this.message_draft.clear();
+                    this.messages.incoming = None;
+                    SEND_FAILED.with(|f| *f.borrow_mut() = false);
+                    nook_core::messages::mark_conversation_seen(&id, rowid);
+                    nook_core::messages::request_refresh();
+                }
+                Err(err) => {
+                    log::warn!("messages send: {err}");
+                    SEND_FAILED.with(|f| *f.borrow_mut() = true);
+                }
             }
-            MessageService::IMessage | MessageService::Sms => {
-                let Some(guid) = conv.chat_guid.as_deref() else {
-                    return;
-                };
-                nook_core::messages::send_imessage(guid, &text)
-            }
-        };
-        if let Err(err) = result {
-            log::warn!("messages send: {err}");
-        } else {
-            nook_core::messages::mark_conversation_seen(&id, rowid);
-            nook_core::messages::request_refresh();
-        }
-    });
+            cx.notify();
+        });
+    })
+    .detach();
     cx.notify();
 }
 
@@ -371,6 +440,7 @@ fn dismiss_incoming(island: &mut Island, cx: &mut Context<Island>) {
         return;
     };
     island.message_draft.clear();
+    SEND_FAILED.with(|f| *f.borrow_mut() = false);
     if island.preferred == Some(crate::island::CompactMode::Messages) {
         island.preferred = None;
     }
@@ -383,7 +453,7 @@ fn apply_draft_key(draft: &mut String, event: &KeyDownEvent, cx: &Context<Island
     let ks = &event.keystroke;
     if ks.modifiers.secondary() && ks.key == "v" {
         if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
-            *draft = text.trim().to_string();
+            draft.push_str(text.trim());
             return true;
         }
         return false;

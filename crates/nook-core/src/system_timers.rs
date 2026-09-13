@@ -643,7 +643,7 @@ fn timer_from_sqlite_row(row: &rusqlite::Row<'_>, names: &[String]) -> Option<Sy
     }
     let duration = get_f64("ZDURATION").unwrap_or(0.0);
     let fire = get_blob("ZFIRETIME")
-        .and_then(|bytes| Some(decode_fire_time(Some(&plist::Value::Data(bytes)))))
+        .map(|bytes| decode_fire_time(Some(&plist::Value::Data(bytes))))
         .unwrap_or_default();
     let fired = get_f64("ZFIREDDATE").map(normalize_store_date);
     let fire_date = match state {
@@ -690,6 +690,9 @@ fn normalize_store_date(n: f64) -> f64 {
 #[cfg(target_os = "macos")]
 mod macos {
     use super::*;
+    use crate::ffi::macos::{
+        kCFStringEncodingUTF8, CFPreferencesAppSynchronize, CFRelease, CFStringCreateWithCString,
+    };
     use std::ffi::CString;
     use std::os::fd::RawFd;
     use std::os::unix::ffi::OsStrExt;
@@ -810,16 +813,16 @@ mod macos {
         }
         let file = std::fs::File::open(path).ok()?;
         let fd = file.as_raw_fd();
-        let flags = (libc::NOTE_DELETE
+        let flags = libc::NOTE_DELETE
             | libc::NOTE_WRITE
             | libc::NOTE_EXTEND
             | libc::NOTE_RENAME
             | libc::NOTE_REVOKE
-            | libc::NOTE_ATTRIB) as u32;
+            | libc::NOTE_ATTRIB;
         let ev = libc::kevent {
             ident: fd as usize,
             filter: libc::EVFILT_VNODE,
-            flags: (libc::EV_ADD | libc::EV_ENABLE | libc::EV_CLEAR) as u16,
+            flags: libc::EV_ADD | libc::EV_ENABLE | libc::EV_CLEAR,
             fflags: flags,
             data: 0,
             udata: std::ptr::null_mut(),
@@ -836,19 +839,6 @@ mod macos {
             file: Some(file),
             ident: fd as usize, // kqueue ident; kept so the File outlives the watch
         })
-    }
-
-    const kCFStringEncodingUTF8: u32 = 0x0800_0100;
-
-    #[link(name = "CoreFoundation", kind = "framework")]
-    extern "C" {
-        fn CFPreferencesAppSynchronize(applicationID: *const std::ffi::c_void) -> u8;
-        fn CFStringCreateWithCString(
-            alloc: *const std::ffi::c_void,
-            cStr: *const i8,
-            encoding: u32,
-        ) -> *mut std::ffi::c_void;
-        fn CFRelease(cf: *const std::ffi::c_void);
     }
 }
 

@@ -2,7 +2,11 @@
 //!
 //! Music.app: AppleScript `current playlist` window after the current index.
 //! This is **not** Music's real Playing Next queue — hide it under shuffle
-//! or radio/autoplay. Spotify: Web API via [`crate::spotify`].
+//! or radio/autoplay.
+//!
+//! Spotify: no local queue. Its AppleScript dictionary only exposes the
+//! current track; Reading Next requires the Web API, which we deliberately
+//! do not use.
 
 use crate::models::{
     NowPlayingData, PlaybackQueue, QueueHidden, QueueItem, QueueJump, QueueSource,
@@ -83,6 +87,11 @@ pub fn is_spotify_app(app_name: Option<&str>, bundle_id: Option<&str>) -> bool {
     bundle.eq_ignore_ascii_case("com.spotify.client") || name.eq_ignore_ascii_case("Spotify")
 }
 
+/// Up Next is local AppleScript against Music.app only.
+pub fn supports_local_queue(app_name: Option<&str>, bundle_id: Option<&str>) -> bool {
+    is_music_app(app_name, bundle_id)
+}
+
 pub fn queue_identity(np: &NowPlayingData) -> (Option<String>, Option<String>, Option<String>) {
     (np.title.clone(), np.artist.clone(), np.app_name.clone())
 }
@@ -102,12 +111,12 @@ pub fn music_window(
     if radio {
         return Err(QueueHidden::Radio);
     }
-    if current_index == 0 {
+    if current_index == 0 && tracks.is_empty() {
         return Err(QueueHidden::Idle);
     }
     let items = tracks
         .iter()
-        .filter(|(index, _, _)| *index > current_index)
+        .filter(|(index, _, _)| current_index == 0 || *index > current_index)
         .take(limit)
         .map(|(index, title, artist)| QueueItem {
             id: format!("music-{index}"),
@@ -126,7 +135,10 @@ pub fn music_window(
 /// first line `ok|idx|total` / `hide|shuffle` / `hide|radio` / `denied|-1743` / `idle`
 /// then `index\ttitle\tartist` rows.
 pub fn parse_music_snapshot(stdout: &str) -> PlaybackQueue {
-    let mut lines = stdout.lines();
+    // AppleScript `return` is CR. Rust's `str::lines` only splits on LF / CRLF,
+    // so normalize before parsing or every row collapses into the header.
+    let normalized = stdout.replace("\r\n", "\n").replace('\r', "\n");
+    let mut lines = normalized.lines();
     let header = lines.next().unwrap_or("").trim();
     if header.is_empty() || header == "idle" {
         return hidden(QueueHidden::Idle);
@@ -143,6 +155,10 @@ pub fn parse_music_snapshot(stdout: &str) -> PlaybackQueue {
         };
         return hidden(reason);
     }
+    if header.starts_with("error|") {
+        log::debug!("music queue script: {header}");
+        return PlaybackQueue::default();
+    }
     if !header.starts_with("ok|") {
         return PlaybackQueue::default();
     }
@@ -151,6 +167,10 @@ pub fn parse_music_snapshot(stdout: &str) -> PlaybackQueue {
     let current_index = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
     let tracks = lines
         .filter_map(|line| {
+            let line = line.trim();
+            if line.is_empty() {
+                return None;
+            }
             let mut cols = line.splitn(3, '\t');
             let index = cols.next()?.parse().ok()?;
             let title = cols.next()?.to_string();
@@ -158,6 +178,7 @@ pub fn parse_music_snapshot(stdout: &str) -> PlaybackQueue {
             Some((index, title, artist))
         })
         .collect::<Vec<_>>();
+    // AppleScript already returns only upcoming rows; still filter defensively.
     match music_window(current_index, &tracks, false, false, MUSIC_WINDOW) {
         Ok(items) => {
             MUSIC_TCC_DENIED.store(false, Ordering::Relaxed);
@@ -207,7 +228,7 @@ tell application "Music"
             try
                 set tArtist to artist of t
             end try
-            set out to out & return & i & tab & tName & tab & tArtist
+            set out to out & linefeed & i & tab & tName & tab & tArtist
         end repeat
         return out
     on error errMsg number errNum
@@ -256,17 +277,7 @@ async fn fetch_music_queue() -> PlaybackQueue {
 
 pub async fn fetch_playback_queue(np: &NowPlayingData) -> PlaybackQueue {
     if is_spotify_app(np.app_name.as_deref(), np.bundle_id.as_deref()) {
-        match crate::spotify::fetch_queue().await {
-            Ok(queue) => queue,
-            Err(err) => {
-                log::debug!("spotify queue: {err}");
-                PlaybackQueue {
-                    source: Some(QueueSource::Spotify),
-                    label: "Playing Next".into(),
-                    ..PlaybackQueue::default()
-                }
-            }
-        }
+        spotify_local_queue()
     } else if is_music_app(np.app_name.as_deref(), np.bundle_id.as_deref()) {
         fetch_music_queue().await
     } else {
@@ -274,11 +285,23 @@ pub async fn fetch_playback_queue(np: &NowPlayingData) -> PlaybackQueue {
     }
 }
 
+/// Spotify desktop scripting has no playlist/queue list — only the current
+/// track. Refuse the Web API rather than pretend we can read Playing Next.
+pub fn spotify_local_queue() -> PlaybackQueue {
+    PlaybackQueue {
+        source: Some(QueueSource::Spotify),
+        label: "Playing Next".into(),
+        hidden: Some(QueueHidden::SpotifyUnavailable),
+        ..PlaybackQueue::default()
+    }
+}
+
 pub async fn jump_to_item(item: &QueueItem, context_uri: Option<&str>) -> Result<(), String> {
     match &item.jump {
         QueueJump::MusicTrack { index } => jump_music(*index),
-        QueueJump::Spotify { skip_count, uri } => {
-            crate::spotify::jump_to(*skip_count, uri, context_uri).await
+        QueueJump::Spotify { .. } => {
+            let _ = context_uri;
+            Err("Spotify queue jump needs the Web API, which is disabled".into())
         }
     }
 }
@@ -350,5 +373,25 @@ mod tests {
         assert!(is_music_app(None, Some("com.apple.Music")));
         assert!(is_spotify_app(Some("Spotify"), None));
         assert!(!is_spotify_app(Some("Safari"), Some("com.apple.Safari")));
+        assert!(supports_local_queue(Some("Music"), None));
+        assert!(!supports_local_queue(Some("Spotify"), None));
+    }
+
+    #[test]
+    fn spotify_queue_stays_local_without_web_api() {
+        let queue = spotify_local_queue();
+        assert_eq!(queue.source, Some(QueueSource::Spotify));
+        assert_eq!(queue.hidden, Some(QueueHidden::SpotifyUnavailable));
+        assert!(queue.items.is_empty());
+    }
+
+    #[test]
+    fn snapshot_accepts_classic_mac_cr_line_endings() {
+        let text = "ok|9|74\r10\tNext One\tArtist\r11\tLater\tB";
+        let queue = parse_music_snapshot(text);
+        assert_eq!(queue.hidden, None);
+        assert_eq!(queue.items.len(), 2);
+        assert_eq!(queue.items[0].title, "Next One");
+        assert_eq!(queue.items[1].title, "Later");
     }
 }

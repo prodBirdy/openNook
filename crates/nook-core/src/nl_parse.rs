@@ -324,7 +324,7 @@ fn match_relative(lower: &str, i: usize) -> Option<(usize, i64, i64)> {
         let rest = rest.trim_start();
         let offset = lower.len() - rest.len();
         if rest.starts_with("an hour") || rest.starts_with("a hour") {
-            let end = consume_word_from(lower, offset, if rest.starts_with("an ") { 2 } else { 2 });
+            let end = consume_word_from(lower, offset, 2);
             return Some((end, 1, 0));
         }
         let (n, after_n) = take_u32(rest)?;

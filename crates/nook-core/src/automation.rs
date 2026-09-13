@@ -15,14 +15,20 @@ pub enum OpenNookCommand {
     TrayClear,
     TimerStart { seconds: u32 },
     Expand,
+    Settings,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExternalAction {
     TrayAdd(Vec<PathBuf>),
     TrayClear,
-    TimerStart { seconds: u32 },
+    TimerStart {
+        seconds: u32,
+    },
     Expand,
+    OpenSettings,
+    /// Open on-island widget customize mode (Settings → Widgets).
+    EditWidgets,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -146,6 +152,7 @@ pub fn parse_opennook_url(raw: &str) -> Result<OpenNookCommand, UrlError> {
             Ok(OpenNookCommand::TimerStart { seconds })
         }
         "expand" => Ok(OpenNookCommand::Expand),
+        "settings" => Ok(OpenNookCommand::Settings),
         _ => Err(UrlError::UnknownAction),
     }
 }
@@ -191,6 +198,10 @@ pub fn timer_start_url(seconds: u32) -> String {
 
 pub fn expand_url() -> String {
     "opennook://expand".into()
+}
+
+pub fn settings_url() -> String {
+    "opennook://settings".into()
 }
 
 /// Resolve and validate raw path strings from a parsed `tray/add`.
@@ -240,6 +251,7 @@ pub fn ingest_open_urls(urls: &[String]) {
                 push_action(ExternalAction::TimerStart { seconds });
             }
             Ok(OpenNookCommand::Expand) => push_action(ExternalAction::Expand),
+            Ok(OpenNookCommand::Settings) => push_action(ExternalAction::OpenSettings),
             Err(UrlError::Forbidden) => {
                 log::warn!("ignored forbidden opennook URL (no shell mapping)");
             }
@@ -323,6 +335,13 @@ mod tests {
 
     #[test]
     fn parse_accepts_slash_variants() {
+        for url in [
+            settings_url(),
+            "opennook:settings".into(),
+            "opennook:///settings/".into(),
+        ] {
+            assert_eq!(parse_opennook_url(&url).unwrap(), OpenNookCommand::Settings);
+        }
         assert_eq!(
             parse_opennook_url("opennook:tray/clear").unwrap(),
             OpenNookCommand::TrayClear
@@ -344,7 +363,7 @@ mod tests {
             Err(UrlError::WrongScheme)
         );
         assert_eq!(
-            parse_opennook_url("opennook://settings"),
+            parse_opennook_url("opennook://unknown"),
             Err(UrlError::UnknownAction)
         );
         assert_eq!(
@@ -397,6 +416,12 @@ mod tests {
             parse_opennook_url(&expand_url()).unwrap(),
             OpenNookCommand::Expand
         );
+    }
+
+    #[test]
+    fn settings_url_enqueues_open_settings() {
+        ingest_open_urls(&[settings_url()]);
+        assert_eq!(pop_action(), Some(ExternalAction::OpenSettings));
     }
 
     #[test]

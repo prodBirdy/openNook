@@ -140,16 +140,19 @@ fn spawn_shortcut(name: &'static str, input: Option<String>) {
     });
 }
 
-/// Pause the current Clock timer, or open Clock if the shortcut is missing.
-pub fn pause_timer() {
+/// Pause a Clock timer via Shortcuts.
+///
+/// The bundled Pause intent has no timer-id input, so `_timer_id` is ignored and
+/// Shortcuts acts on whichever timer Clock considers current.
+pub fn pause_timer(_timer_id: &str) {
     dispatch(NAME_PAUSE);
 }
 
-pub fn resume_timer() {
+pub fn resume_timer(_timer_id: &str) {
     dispatch(NAME_RESUME);
 }
 
-pub fn cancel_timer() {
+pub fn cancel_timer(_timer_id: &str) {
     dispatch(NAME_CANCEL);
 }
 
@@ -230,10 +233,10 @@ pub fn import_bundled_shortcuts() -> Result<(), String> {
     if let Ok(entries) = std::fs::read_dir(&dir) {
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) == Some("shortcut") {
-                if open::that_detached(&path).is_ok() {
-                    opened += 1;
-                }
+            if path.extension().and_then(|e| e.to_str()) == Some("shortcut")
+                && open::that_detached(&path).is_ok()
+            {
+                opened += 1;
             }
         }
     }
