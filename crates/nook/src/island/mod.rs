@@ -50,8 +50,6 @@ pub enum Tab {
 #[derive(Clone)]
 pub struct Timer {
     pub id: u64,
-    #[allow(dead_code)]
-    pub name: String,
     pub remaining: u32,
     pub total: u32,
     pub running: bool,
@@ -1330,7 +1328,6 @@ impl Island {
     pub(crate) fn add_timer(&mut self, seconds: u32) {
         self.timers.push(Timer {
             id: self.next_timer_id,
-            name: String::new(),
             remaining: seconds,
             total: seconds,
             running: true,
@@ -1666,7 +1663,6 @@ mod tests {
         with_file(&mut island);
         island.timers.push(Timer {
             id: 1,
-            name: String::new(),
             remaining: 30,
             total: 60,
             running: true,

@@ -233,7 +233,7 @@ fn featured_timer(timer: &Timer, cx: &mut Context<Island>) -> impl IntoElement {
                         .text_size(px(14.))
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(theme::LABEL)
-                        .child(if timer.name.is_empty() {
+                        .child(
                             if done {
                                 "Done"
                             } else if timer.running {
@@ -241,10 +241,8 @@ fn featured_timer(timer: &Timer, cx: &mut Context<Island>) -> impl IntoElement {
                             } else {
                                 "Paused"
                             }
-                            .to_string()
-                        } else {
-                            timer.name.clone()
-                        }),
+                            .to_string(),
+                        ),
                 )
                 .child(
                     div()
