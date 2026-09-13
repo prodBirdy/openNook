@@ -5,7 +5,10 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
 VERSION="$(sed -n 's/^version = "\([^"]*\)"/\1/p' "$ROOT/Cargo.toml" | head -1)"
-VERSION="${VERSION:-0.2.0}"
+if [[ -z "$VERSION" ]]; then
+  echo "installer: failed to read version from Cargo.toml" >&2
+  exit 1
+fi
 DMG="$ROOT/target/openNook-${VERSION}.dmg"
 STAGE="$ROOT/target/dmg"
 

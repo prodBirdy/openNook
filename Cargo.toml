@@ -7,7 +7,7 @@ version = "0.3.0"
 edition = "2021"
 license = "MIT"
 authors = ["Jonas Vögel"]
-repository = "https://github.com/prodBirdy/openNook-gpui"
+repository = "https://github.com/prodBirdy/openNook"
 
 [workspace.dependencies]
 nook-core = { path = "crates/nook-core" }
@@ -21,7 +21,7 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 base64 = "0.22"
 log = "0.4"
 env_logger = "0.11"
-reqwest = { version = "0.12", features = ["json", "stream"] }
+reqwest = { version = "0.12", features = ["stream"] }
 futures-util = "0.3"
 open = "5"
 image = "0.25"
