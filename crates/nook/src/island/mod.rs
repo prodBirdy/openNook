@@ -50,8 +50,6 @@ pub enum Tab {
 #[derive(Clone)]
 pub struct Timer {
     pub id: u64,
-    #[allow(dead_code)]
-    pub name: String,
     pub remaining: u32,
     pub total: u32,
     pub running: bool,
@@ -81,8 +79,6 @@ pub struct Island {
     pub next_timer_id: u64,
     /// Index into the 7-day week strip (today − 3 … today + 3). 3 is today.
     pub calendar_day: u8,
-    /// Preset chips for a new timer, matching the React add dialog.
-    pub timer_composer: bool,
     pub observe: ObserveSnapshot,
     observe_history: MetricHistory,
     pub(crate) observe_hover: Option<crate::widgets::ObserveHover>,
@@ -209,7 +205,6 @@ impl Island {
             timers: Vec::new(),
             next_timer_id: 1,
             calendar_day: 3,
-            timer_composer: false,
             observe: ObserveSnapshot::default(),
             observe_history: nook_core::observe::load_history(),
             observe_hover: None,
@@ -456,7 +451,6 @@ impl Island {
                                     t.running = false;
                                     nook_core::haptics::trigger(Some(nook_core::haptics::HapticConfig {
                                         pattern: nook_core::haptics::HapticPattern::Success,
-                                        intensity: 1.0,
                                     }));
                                 }
                             }
@@ -607,16 +601,22 @@ impl Island {
                 .await;
             if this
                 .update(cx, |this, cx| {
+                    // Fetch still runs every 30s; notify only when the
+                    // published events, reminders, or notes actually change.
+                    let mut changed = this.events != events || this.reminders != reminders;
                     this.events = events;
                     this.reminders = reminders;
                     if !this.notes_editing {
                         if let Ok(notes) = nook_core::notes::load_notes() {
                             if this.notes != notes {
                                 this.notes = notes;
+                                changed = true;
                             }
                         }
                     }
-                    cx.notify();
+                    if changed {
+                        cx.notify();
+                    }
                 })
                 .is_err()
             {
@@ -704,8 +704,11 @@ impl Island {
         let mut snapshot = snapshot;
         nook_core::observe::record_history_range(&mut self.observe_history, &mut snapshot, range);
         nook_core::observe::apply_user_alerts(&self.settings.observe, &mut snapshot);
+        let repaint = nook_core::observe::should_repaint(&self.observe, &snapshot);
         self.observe = snapshot;
-        cx.notify();
+        if repaint {
+            cx.notify();
+        }
     }
 
     pub(crate) fn refresh_observe(&mut self, cx: &mut Context<Self>) {
@@ -755,9 +758,6 @@ impl Island {
 
     pub(crate) fn remove_timer(&mut self, id: u64) {
         self.timers.retain(|t| t.id != id);
-        if self.timers.is_empty() {
-            self.timer_composer = false;
-        }
     }
 
     /// Swap the Notes card into its raw-markdown editor, ready to type.
@@ -892,7 +892,7 @@ impl Island {
             let body = if self.tab == Tab::Files {
                 // Tall enough for one full dropzone tile (flush preview + caption)
                 // plus Clear All, so a single file is not clipped behind a scroll.
-                theme::EXPANDED_PAD * 2.0 + files::files_pane_min_height(w)
+                theme::EXPANDED_PAD * 2.0 + files::files_pane_min_height()
             } else {
                 theme::NOOK_INSET + theme::NOOK_BODY
             };
@@ -924,7 +924,7 @@ impl Island {
         let w = self.expanded_width();
         let mut body = theme::NOOK_INSET + theme::NOOK_BODY;
         if self.settings.show_files {
-            body = body.max(theme::EXPANDED_PAD * 2.0 + files::files_pane_min_height(w));
+            body = body.max(theme::EXPANDED_PAD * 2.0 + files::files_pane_min_height());
         }
         let h = self.notch_height.max(32.0) + body;
         let (_, top) = self.settings.island_origin(
@@ -1327,13 +1327,11 @@ impl Island {
     pub(crate) fn add_timer(&mut self, seconds: u32) {
         self.timers.push(Timer {
             id: self.next_timer_id,
-            name: String::new(),
             remaining: seconds,
             total: seconds,
             running: true,
         });
         self.next_timer_id += 1;
-        self.timer_composer = false;
         self.preferred = Some(CompactMode::Timer);
     }
 
@@ -1411,7 +1409,7 @@ fn mirror_render_image(bgra: Vec<u8>) -> Option<std::sync::Arc<gpui::RenderImage
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::island::files::{file_grid_metrics, file_tile_height, files_pane_min_height};
+    use crate::island::files::{file_tile_height, files_pane_min_height};
     use crate::island::ui::format_timer;
     use nook_core::agents::{AgentKind, AgentStatus};
     use std::collections::HashMap;
@@ -1448,7 +1446,6 @@ mod tests {
             timers: Vec::new(),
             next_timer_id: 1,
             calendar_day: 3,
-            timer_composer: false,
             observe: ObserveSnapshot::default(),
             observe_history: HashMap::new(),
             observe_hover: None,
@@ -1522,14 +1519,13 @@ mod tests {
         let window_h = 1169.0;
         let (_, y, _, h) =
             crate::platform::cocoa_rect_from_gpui(200.0, 0.0, 400.0, island_h, window_h);
-        let under = crate::platform::glass_underlay_height(h, radius, true);
+        // Production `glass_extra` adds radius when the island is attached (y < 1).
+        let under = h + radius;
         assert_eq!(y, window_h - island_h, "bottom of the island stays put");
         assert!(
             y + under > window_h,
             "top rounding sits past the window edge and is clipped"
         );
-        let detached = crate::platform::glass_underlay_height(h, radius, false);
-        assert_eq!(detached, h, "detached glass matches the island height");
     }
 
     #[test]
@@ -1554,7 +1550,6 @@ mod tests {
                 w: 180.0,
                 h: 32.0,
                 radius: 18.0,
-                wing: 6.0,
                 tint: None,
             })),
             "native glass must not attach when the setting is off"
@@ -1642,18 +1637,17 @@ mod tests {
         island.tab = Tab::Files;
         island.notch_height = 38.0;
         island.screen_width = 1800.0;
-        let (w, h) = island.target_size();
+        let (_, h) = island.target_size();
         let leftover = h - island.notch_height.max(32.0) - theme::EXPANDED_PAD * 2.0;
-        let (_, tile) = file_grid_metrics(w);
         assert!(
-            leftover + 0.05 >= files_pane_min_height(w),
+            leftover + 0.05 >= files_pane_min_height(),
             "h={h} leftover={leftover} need={}",
-            files_pane_min_height(w)
+            files_pane_min_height()
         );
         assert!(
-            leftover + 0.05 >= file_tile_height(tile),
+            leftover + 0.05 >= file_tile_height(),
             "leftover={leftover} tile_h={}",
-            file_tile_height(tile)
+            file_tile_height()
         );
     }
 
@@ -1663,7 +1657,6 @@ mod tests {
         with_file(&mut island);
         island.timers.push(Timer {
             id: 1,
-            name: String::new(),
             remaining: 30,
             total: 60,
             running: true,
@@ -1919,24 +1912,6 @@ mod tests {
         island.last_wheel_at = Instant::now() - Duration::from_millis(400);
         assert!(island.apply_wheel(-40.0, 0.0, TouchPhase::Moved));
         assert_ne!(island.mode(), after_first);
-    }
-
-    #[test]
-    fn tray_tiles_stay_at_expanded_size_during_compact_spring() {
-        let island = test_island();
-        let compact_w = island.notch_width + 120.0;
-        let (compact_cols, compact_tile) = file_grid_metrics(compact_w);
-        let (layout_cols, layout_tile) = island.file_layout();
-        assert_ne!(
-            (compact_cols, compact_tile.to_bits()),
-            (layout_cols, layout_tile.to_bits()),
-            "compact island width would pick a different tile size"
-        );
-        assert_eq!(
-            island.file_layout(),
-            file_grid_metrics(island.expanded_width())
-        );
-        assert!((island.expanded_width() - theme::EXPANDED_MAX_WIDTH).abs() < f32::EPSILON);
     }
 
     #[test]

@@ -16,6 +16,8 @@ const MAX_ALERTS: usize = 8;
 const MAX_SERIES: usize = 3;
 const MAX_POINTS: usize = 48;
 const WARMUP_METRICS_PATH: &str = "/admin/metrics";
+const WARMUP_TOKEN_NEEDED: &str =
+    "warmUP /admin/metrics needs a bearer token (Settings or WARMUP_METRICS_TOKEN)";
 const CHART_POINTS: usize = 60;
 const STORE_SLACK_MS: u64 = 120_000;
 const DAY_MS: u64 = 24 * 60 * 60 * 1000;
@@ -376,7 +378,7 @@ pub struct SeriesValue {
     pub value: f64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct FiringAlert {
     pub name: String,
     pub severity: String,
@@ -444,6 +446,24 @@ fn warmup_bearer(config: &ObserveConfig) -> Option<String> {
     is_warmup_url(&config.prometheus_url)
         .then(|| metrics_token(config))
         .filter(|token| !token.is_empty())
+}
+
+/// The approved warmUP origin requires a bearer. Hitting it without one is a
+/// guaranteed 401 — and the island retries that miss every 5s by default.
+fn missing_warmup_token(config: &ObserveConfig) -> bool {
+    is_warmup_url(&config.prometheus_url) && warmup_bearer(config).is_none()
+}
+
+/// Whether publishing `next` should dirty the island.
+///
+/// A stable disconnect (same error, still down, no alerts) must not trigger a
+/// Metal frame. The poll loop retries that path every 5s. Live data always
+/// repaints so sparklines keep moving.
+pub fn should_repaint(prev: &ObserveSnapshot, next: &ObserveSnapshot) -> bool {
+    if next.connected || prev.connected {
+        return true;
+    }
+    prev.error != next.error || prev.alerts != next.alerts
 }
 
 async fn response_text(response: reqwest::Response) -> Result<String, String> {
@@ -543,14 +563,6 @@ pub type MetricHistory = HashMap<String, Vec<(u64, f64)>>;
 /// Append this poll's samples onto `store` and copy a chart series onto each
 /// reading. Counters are stored raw and charted as per-minute rates so a 30
 /// min / 5 h window stays comparable.
-pub fn record_history(
-    store: &mut MetricHistory,
-    snap: &mut ObserveSnapshot,
-    window: ObserveWindow,
-) {
-    record_history_at(store, snap, window.duration_ms(), now_ms(), true);
-}
-
 pub fn record_history_range(
     store: &mut MetricHistory,
     snap: &mut ObserveSnapshot,
@@ -728,15 +740,6 @@ fn chart_values_for(
 
 /// Requests (and other counters) in `[now - window, now]`: last sample minus
 /// the last sample at or before the window start. Resets count as the new total.
-pub fn window_count(
-    query: &str,
-    history: &[(u64, f64)],
-    window: ObserveWindow,
-    now: u64,
-) -> Option<f64> {
-    window_count_for(query, history, window.duration_ms(), now)
-}
-
 fn window_count_for(
     query: &str,
     history: &[(u64, f64)],
@@ -840,42 +843,6 @@ pub fn format_chart_sample(query: &str, value: f64) -> String {
     }
 }
 
-pub fn format_chart_age(t: f32, window: ObserveWindow) -> String {
-    let ago_ms = (1.0 - t.clamp(0.0, 1.0)) as f64 * window.duration_ms() as f64;
-    if ago_ms < 20_000.0 {
-        return "now".into();
-    }
-    let mins = (ago_ms / 60_000.0).round().max(1.0) as u64;
-    if mins < 60 {
-        if mins == 1 {
-            "1 min ago".into()
-        } else {
-            format!("{mins} min ago")
-        }
-    } else {
-        let hours = mins / 60;
-        let rem = mins % 60;
-        if rem == 0 {
-            if hours == 1 {
-                "1 h ago".into()
-            } else {
-                format!("{hours} h ago")
-            }
-        } else {
-            format!("{hours} h {rem} min ago")
-        }
-    }
-}
-
-pub fn nearest_chart_point(series: &[ChartPoint], t: f32) -> Option<ChartPoint> {
-    series.iter().copied().min_by(|a, b| {
-        (a.t - t)
-            .abs()
-            .partial_cmp(&(b.t - t).abs())
-            .unwrap_or(std::cmp::Ordering::Equal)
-    })
-}
-
 pub fn format_sample(value: f64) -> String {
     if !value.is_finite() {
         return "—".into();
@@ -921,6 +888,12 @@ pub async fn poll(config: &ObserveConfig) -> ObserveSnapshot {
 }
 
 async fn poll_warmup(config: &ObserveConfig) -> ObserveSnapshot {
+    if missing_warmup_token(config) {
+        return ObserveSnapshot {
+            error: Some(WARMUP_TOKEN_NEEDED.into()),
+            ..ObserveSnapshot::default()
+        };
+    }
     let base = match normalize_base_url(&config.prometheus_url) {
         Ok(url) => url,
         Err(err) => {
@@ -952,10 +925,7 @@ async fn poll_warmup(config: &ObserveConfig) -> ObserveSnapshot {
                 Ok(body) => {
                     if status.as_u16() == 401 {
                         return ObserveSnapshot {
-                            error: Some(
-                                "warmUP /admin/metrics needs a bearer token (Settings or WARMUP_METRICS_TOKEN)"
-                                    .into(),
-                            ),
+                            error: Some(WARMUP_TOKEN_NEEDED.into()),
                             ..ObserveSnapshot::default()
                         };
                     }
@@ -1426,16 +1396,6 @@ mod tests {
         assert_eq!(format_sample(2_500_000.0), "2.50M");
         assert_eq!(format_chart_sample("total_requests", 60.0), "60/min");
         assert_eq!(format_chart_sample("slow", 3.0), "3");
-        assert_eq!(format_chart_age(1.0, ObserveWindow::ThirtyMinutes), "now");
-        assert_eq!(
-            format_chart_age(0.0, ObserveWindow::ThirtyMinutes),
-            "30 min ago"
-        );
-        let pts = [
-            ChartPoint { t: 0.1, value: 1.0 },
-            ChartPoint { t: 0.8, value: 9.0 },
-        ];
-        assert_eq!(nearest_chart_point(&pts, 0.75).unwrap().value, 9.0);
     }
 
     #[test]
@@ -1595,37 +1555,6 @@ mod tests {
     }
 
     #[test]
-    fn requests_sum_follows_the_visible_window() {
-        let now = 6 * 60 * 60 * 1000;
-        let history = vec![
-            (now - 6 * 60 * 60 * 1000, 0.0),
-            (now - 30 * 60 * 1000, 100.0),
-            (now, 110.0),
-        ];
-        assert_eq!(
-            window_count(
-                "total_requests",
-                &history,
-                ObserveWindow::ThirtyMinutes,
-                now
-            ),
-            Some(10.0)
-        );
-        assert_eq!(
-            window_count("total_requests", &history, ObserveWindow::FiveHours, now),
-            Some(110.0)
-        );
-        assert_eq!(
-            window_count("total_requests", &history, ObserveWindow::OneDay, now),
-            Some(110.0)
-        );
-        assert_eq!(
-            window_count("slow", &history, ObserveWindow::OneDay, now),
-            None
-        );
-    }
-
-    #[test]
     fn short_history_fills_the_plot_instead_of_a_right_sliver() {
         let now = 30 * 60 * 1000;
         let history = vec![(now - 90_000, 10.0), (now - 45_000, 20.0), (now, 30.0)];
@@ -1680,6 +1609,59 @@ mod tests {
             ..approved
         };
         assert_eq!(warmup_bearer(&unapproved), None);
+    }
+
+    #[test]
+    fn approved_warmup_without_token_is_not_fetched() {
+        assert!(missing_warmup_token(&ObserveConfig::default()));
+        let mut with_token = ObserveConfig::default();
+        with_token.metrics_token = "x".into();
+        assert!(!missing_warmup_token(&with_token));
+        let local = ObserveConfig {
+            source: ObserveSourceKind::Warmup,
+            prometheus_url: "http://127.0.0.1:9090".into(),
+            ..ObserveConfig::default()
+        };
+        assert!(
+            !missing_warmup_token(&local),
+            "a non-approved origin still polls (local warmup / tests)"
+        );
+    }
+
+    #[test]
+    fn stable_observe_miss_does_not_repaint() {
+        let miss = ObserveSnapshot {
+            error: Some(WARMUP_TOKEN_NEEDED.into()),
+            ..ObserveSnapshot::default()
+        };
+        assert!(
+            should_repaint(&ObserveSnapshot::default(), &miss),
+            "first miss must show the error"
+        );
+        assert!(
+            !should_repaint(&miss, &miss),
+            "the 5s retry must not dirty a stable miss"
+        );
+        let live = ObserveSnapshot {
+            connected: true,
+            ..ObserveSnapshot::default()
+        };
+        assert!(should_repaint(&miss, &live));
+        assert!(should_repaint(&live, &miss));
+        let other = ObserveSnapshot {
+            error: Some("Can't reach Prometheus".into()),
+            ..ObserveSnapshot::default()
+        };
+        assert!(should_repaint(&miss, &other));
+    }
+
+    #[tokio::test]
+    async fn default_warmup_without_token_skips_the_network() {
+        let snap = tokio::time::timeout(Duration::from_millis(50), poll(&ObserveConfig::default()))
+            .await
+            .expect("tokenless default warmup must not touch the network");
+        assert!(!snap.connected);
+        assert_eq!(snap.error.as_deref(), Some(WARMUP_TOKEN_NEEDED));
     }
 
     #[test]

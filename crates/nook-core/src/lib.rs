@@ -22,9 +22,6 @@ pub mod settings;
 pub mod utils;
 pub mod widgets;
 
-pub use models::{NotchInfo, NowPlayingData};
-pub use settings::{AppSettings, WindowSettings};
-
 use std::sync::{Once, OnceLock};
 use tokio::runtime::Runtime;
 

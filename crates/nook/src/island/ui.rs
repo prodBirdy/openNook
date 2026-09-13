@@ -1,4 +1,4 @@
-//! Shared island controls: labels, buttons, widget card chrome, formatters.
+//! Shared island controls: labels, buttons, and formatters.
 
 use super::Island;
 use crate::icons::lucide_color;
@@ -90,156 +90,6 @@ pub(crate) fn timer_text(text: impl Into<SharedString>, style: theme::Text) -> D
 
 pub(crate) use super::marquee::slide_label;
 
-/// A selectable row inside a card.
-///
-/// HIG › Accessibility gives macOS a 28×28 pt recommended hit target, so a row
-/// holds that height even when its text is shorter. HIG › Lists and tables asks
-/// for feedback on selection and HIG › Layout asks for alignment, so the
-/// highlight is inset back out of the card's 12 pt content margin by 6 pt and
-/// rounded concentrically with the card (14 pt outer − 6 pt gap = 8 pt inner)
-/// rather than running square-cornered to the card's edges.
-#[allow(dead_code)]
-pub(crate) fn card_row(id: impl Into<ElementId>) -> Stateful<Div> {
-    div()
-        .id(id)
-        .flex()
-        .items_center()
-        .gap_2()
-        .min_h(px(theme::HIT_MIN))
-        .mx(px(-theme::ROW_INSET))
-        .px(px(theme::ROW_INSET))
-        .rounded(px(theme::ROW_RADIUS))
-        .overflow_hidden()
-        .cursor(CursorStyle::PointingHand)
-        .hover(|s| s.bg(theme::FILL_TERTIARY))
-        .active(|s| s.bg(theme::FILL_SECONDARY))
-}
-
-#[allow(dead_code)]
-pub(crate) fn text_btn(
-    caption: impl Into<SharedString>,
-    cx: &mut Context<Island>,
-    on_click: impl Fn(&mut Island, &MouseDownEvent, &mut Context<Island>) + 'static,
-) -> impl IntoElement {
-    let caption = caption.into();
-    div()
-        .id(caption.clone())
-        .h(px(theme::HIT_MIN))
-        .px_3()
-        .flex()
-        .items_center()
-        .justify_center()
-        .rounded(px(theme::CONTROL_RADIUS))
-        .bg(theme::FILL)
-        .hover(|s| s.bg(theme::FILL_SECONDARY))
-        .active(|s| s.opacity(0.85))
-        .cursor(CursorStyle::PointingHand)
-        .child(label(caption, theme::CALLOUT, true))
-        .on_mouse_down(
-            MouseButton::Left,
-            cx.listener(move |this, event: &MouseDownEvent, _, cx| {
-                cx.stop_propagation();
-                on_click(this, event, cx);
-            }),
-        )
-}
-
-/// Header + / refresh on React widgets: 18px icon, round, white/40.
-#[allow(dead_code)]
-pub(crate) fn header_icon_btn(
-    name: &'static str,
-    elem_id: impl Into<SharedString>,
-    cx: &mut Context<Island>,
-    on_click: impl Fn(&mut Island, &MouseDownEvent, &mut Window, &mut Context<Island>) + 'static,
-) -> impl IntoElement {
-    div()
-        .id(elem_id.into())
-        .size(px(28.))
-        .rounded_full()
-        .flex()
-        .items_center()
-        .justify_center()
-        .hover(|s| s.bg(rgba(0xFFFFFF1A)))
-        .active(|s| s.opacity(0.85))
-        .cursor(CursorStyle::PointingHand)
-        .child(lucide_color(name, 18.0, rgba(0xffffff66)))
-        .on_mouse_down(
-            MouseButton::Left,
-            cx.listener(move |this, event: &MouseDownEvent, window, cx| {
-                cx.stop_propagation();
-                on_click(this, event, window, cx);
-            }),
-        )
-}
-
-/// Empty-state CTA (`Create Timer`, `Create Reminder`): `rounded-[20px]`.
-#[allow(dead_code)]
-pub(crate) fn pill_btn(
-    caption: impl Into<SharedString>,
-    cx: &mut Context<Island>,
-    on_click: impl Fn(&mut Island, &MouseDownEvent, &mut Context<Island>) + 'static,
-) -> impl IntoElement {
-    let caption = caption.into();
-    div()
-        .id(caption.clone())
-        .px(px(16.))
-        .py(px(8.))
-        .flex()
-        .items_center()
-        .justify_center()
-        .rounded(px(theme::ROW_RADIUS))
-        .bg(rgba(0xFFFFFF1A))
-        .hover(|s| s.bg(rgba(0xffffff33)))
-        .active(|s| s.opacity(0.85))
-        .cursor(CursorStyle::PointingHand)
-        .child(
-            div()
-                .text_size(px(13.))
-                .font_weight(FontWeight::MEDIUM)
-                .text_color(theme::LABEL)
-                .child(caption),
-        )
-        .on_mouse_down(
-            MouseButton::Left,
-            cx.listener(move |this, event: &MouseDownEvent, _, cx| {
-                cx.stop_propagation();
-                on_click(this, event, cx);
-            }),
-        )
-}
-
-#[allow(dead_code)]
-pub(crate) fn empty_state(
-    message: impl Into<SharedString>,
-    action: impl IntoElement,
-) -> impl IntoElement {
-    div()
-        .flex_1()
-        .w_full()
-        .flex()
-        .flex_col()
-        .items_center()
-        .justify_center()
-        .gap_3()
-        .child(
-            div()
-                .text_size(px(14.))
-                .text_color(rgba(0xFFFFFF4D))
-                .child(message.into()),
-        )
-        .child(action)
-}
-
-#[allow(dead_code)]
-pub(crate) fn widget_title(title: impl Into<SharedString>) -> Div {
-    div()
-        .text_size(px(17.))
-        .line_height(px(22.))
-        .font_weight(FontWeight::SEMIBOLD)
-        .text_color(rgba(0xFFFFFFF2))
-        .child(title.into())
-}
-
 /// Full-height Nook pane. Same chrome as Now Playing and Calendar: no fill,
 /// no card radius — content sits in the scrolling row behind a 1px divider.
 pub(crate) fn nook_pane(id: impl Into<ElementId>) -> Stateful<Div> {
@@ -330,36 +180,6 @@ pub(crate) fn nook_icon_btn(
         )
 }
 
-/// React `WidgetWrapper`: `min-w-[300px]`.
-pub(crate) const WIDGET_CARD_WIDTH: f32 = 300.0;
-
-pub(crate) const MEDIA_ART: f32 = 52.0;
-pub(crate) const MEDIA_ART_RADIUS: f32 = 12.0;
-pub(crate) const MEDIA_PLAY: f32 = 40.0;
-pub(crate) const MEDIA_PROGRESS_HIT: f32 = 12.0;
-pub(crate) const MEDIA_TIME_PAD_TOP: f32 = 2.0;
-pub(crate) const MEDIA_TIME_PAD_GAP: f32 = 6.0;
-
-/// Expanded-card chrome matching React `WidgetWrapper`: 28px corners, 16px
-/// pad, hairline, stretch to the row height.
-#[allow(dead_code)]
-pub(crate) fn card_chrome(width: f32) -> Div {
-    div()
-        .relative()
-        .flex()
-        .flex_col()
-        .flex_shrink_0()
-        .w(px(width))
-        .h_full()
-        .p(px(theme::WIDGET_PAD))
-        .bg(theme::FILL)
-        .border_1()
-        .border_color(rgba(0xFFFFFF1A))
-        .rounded(px(theme::WIDGET_RADIUS))
-        .overflow_hidden()
-        .shadow_md()
-}
-
 // Live scroll handles for the expanded cards, keyed by element id.
 //
 // A card may only claim a gesture when it has somewhere left to scroll, and
@@ -374,37 +194,6 @@ thread_local! {
 
 fn card_scroll(id: &ElementId) -> ScrollHandle {
     CARD_SCROLLS.with_borrow_mut(|handles| handles.entry(id.clone()).or_default().clone())
-}
-
-#[allow(dead_code)]
-pub(crate) fn widget_shell_actions(
-    id: impl Into<ElementId>,
-    title: impl Into<SharedString>,
-    actions: impl IntoElement,
-    child: impl IntoElement,
-) -> impl IntoElement {
-    card_chrome(WIDGET_CARD_WIDTH)
-        .gap(px(8.))
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .justify_between()
-                .flex_shrink_0()
-                .w_full()
-                .child(widget_title(title))
-                .child(div().flex().items_center().gap(px(4.)).child(actions)),
-        )
-        .child(scroll_body(id, child))
-}
-
-#[allow(dead_code)]
-pub(crate) fn widget_shell_w(
-    id: impl Into<ElementId>,
-    width: f32,
-    child: impl IntoElement,
-) -> impl IntoElement {
-    card_chrome(width).child(scroll_body(id, child))
 }
 
 pub(crate) fn scroll_body(id: impl Into<ElementId>, child: impl IntoElement) -> impl IntoElement {

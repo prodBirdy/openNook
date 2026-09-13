@@ -105,11 +105,7 @@ pub(crate) fn timer_ring(
     .h(px(size))
 }
 
-pub(crate) fn timer_card(
-    timers: &[Timer],
-    _composer: bool,
-    cx: &mut Context<Island>,
-) -> impl IntoElement {
+pub(crate) fn timer_card(timers: &[Timer], cx: &mut Context<Island>) -> impl IntoElement {
     let mut week = div().flex().items_end().gap(px(10.));
     for (id, unit, num, seconds) in PRESETS {
         week = week.child(preset_col(id, unit, num, seconds, cx));
@@ -160,7 +156,6 @@ fn preset_col(
             cx.listener(move |this, _: &MouseDownEvent, _, cx| {
                 cx.stop_propagation();
                 this.add_timer(seconds);
-                this.timer_composer = false;
                 cx.notify();
             }),
         )
@@ -233,7 +228,7 @@ fn featured_timer(timer: &Timer, cx: &mut Context<Island>) -> impl IntoElement {
                         .text_size(px(14.))
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(theme::LABEL)
-                        .child(if timer.name.is_empty() {
+                        .child(
                             if done {
                                 "Done"
                             } else if timer.running {
@@ -241,10 +236,8 @@ fn featured_timer(timer: &Timer, cx: &mut Context<Island>) -> impl IntoElement {
                             } else {
                                 "Paused"
                             }
-                            .to_string()
-                        } else {
-                            timer.name.clone()
-                        }),
+                            .to_string(),
+                        ),
                 )
                 .child(
                     div()

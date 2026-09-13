@@ -162,7 +162,6 @@ pub fn get_notch_info() -> NotchInfo {
         notch_width,
         screen_width,
         screen_height,
-        visible_height: screen_height - notch_height,
     }
 }
 
@@ -230,10 +229,6 @@ pub fn overlay_window_size() -> (f64, f64) {
         screen_width,
         height.clamp(OVERLAY_MIN.min(screen_height), screen_height),
     )
-}
-
-pub fn overlay_window_origin() -> (f64, f64) {
-    (0.0, 0.0)
 }
 
 #[cfg(test)]

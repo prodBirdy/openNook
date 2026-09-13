@@ -1,8 +1,6 @@
 use crate::database::{get_connection, log_sql};
 use serde::{Deserialize, Serialize};
 use std::fs;
-#[cfg(any(target_os = "macos", target_os = "windows"))]
-use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
@@ -70,36 +68,6 @@ pub fn load_file_tray() -> Result<Vec<FileTrayItem>, String> {
 
 pub fn open_file(path: String) -> Result<(), String> {
     open::that(&path).map_err(|e| e.to_string())
-}
-
-#[allow(unused_variables)]
-pub fn reveal_file(path: String) -> Result<(), String> {
-    #[cfg(target_os = "macos")]
-    {
-        Command::new("/usr/bin/open")
-            .args(["-R", &path])
-            .spawn()
-            .map_err(|e| e.to_string())?;
-    }
-
-    #[cfg(target_os = "windows")]
-    {
-        Command::new("explorer")
-            .args(["/select,", &path])
-            .spawn()
-            .map_err(|e| e.to_string())?;
-    }
-
-    #[cfg(target_os = "linux")]
-    {
-        if let Some(parent) = std::path::Path::new(&path).parent() {
-            open::that(parent).map_err(|e| e.to_string())?;
-        } else {
-            open::that(&path).map_err(|e| e.to_string())?;
-        }
-    }
-
-    Ok(())
 }
 
 pub fn resolve_path(path: String) -> Result<String, String> {
@@ -281,16 +249,6 @@ pub(crate) fn mime_from_path(path: &str) -> String {
     }
 }
 
-pub fn format_size(bytes: i64) -> String {
-    if bytes < 1024 {
-        format!("{bytes} B")
-    } else if bytes < 1024 * 1024 {
-        format!("{:.0} KB", bytes as f64 / 1024.0)
-    } else {
-        format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -301,13 +259,6 @@ mod tests {
         assert_eq!(mime_from_path("clip.mp4"), "video");
         assert_eq!(mime_from_path("doc.pdf"), "pdf");
         assert_eq!(mime_from_path("noext"), "file");
-    }
-
-    #[test]
-    fn format_size_buckets() {
-        assert_eq!(format_size(12), "12 B");
-        assert_eq!(format_size(2048), "2 KB");
-        assert_eq!(format_size(1_572_864), "1.5 MB");
     }
 
     #[test]

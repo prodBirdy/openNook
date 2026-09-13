@@ -93,25 +93,6 @@ pub fn apply_island_chrome() {
 #[cfg(not(target_os = "macos"))]
 pub fn apply_island_chrome() {}
 
-/// Kept for the settings window path that still has a GPUI `Window`.
-#[cfg(target_os = "macos")]
-#[allow(dead_code)]
-pub fn apply_island_chrome_on(window: &Window) {
-    install_macos();
-    unsafe {
-        set_accessory_policy();
-        if let Some(ns_win) = ns_window(window) {
-            style_island_window(ns_win);
-            pin_ns_window(ns_win);
-        } else {
-            apply_island_chrome();
-        }
-    }
-}
-
-#[cfg(not(target_os = "macos"))]
-pub fn apply_island_chrome_on(_window: &Window) {}
-
 #[cfg(target_os = "macos")]
 unsafe fn set_accessory_policy() {
     use objc2::runtime::AnyObject;
@@ -367,24 +348,6 @@ pub fn set_click_through_current(ignore: bool) {
     }
     #[cfg(not(target_os = "macos"))]
     let _ = ignore;
-}
-
-#[allow(dead_code)]
-pub fn set_click_through(window: &Window, ignore: bool) {
-    #[cfg(target_os = "macos")]
-    unsafe {
-        if let Some(ns_win) = ns_window(window) {
-            use objc2::*;
-            let _: () = msg_send![ns_win, setIgnoresMouseEvents: ignore];
-            if !ignore {
-                register_file_drops(ns_win);
-            }
-        } else {
-            set_click_through_current(ignore);
-        }
-    }
-    #[cfg(not(target_os = "macos"))]
-    let _ = (window, ignore);
 }
 
 /// Hand activation back to whatever app sits underneath before a drag-out.
@@ -1441,7 +1404,6 @@ pub struct IslandGlass {
     pub w: f64,
     pub h: f64,
     pub radius: f64,
-    pub wing: f64,
     /// Optional stained-glass tint (`NSGlassEffectView.tintColor`). `None`
     /// leaves the system default.
     pub tint: Option<(f32, f32, f32)>,
@@ -1452,7 +1414,6 @@ impl IslandGlass {
         (self.w - other.w).abs() < 0.5
             && (self.h - other.h).abs() < 0.5
             && (self.y - other.y).abs() < 0.5
-            && (self.wing - other.wing).abs() < 0.5
             && (self.radius - other.radius).abs() < 0.5
     }
 }
@@ -1460,17 +1421,6 @@ impl IslandGlass {
 /// Convert a GPUI top-left rect into AppKit view coordinates (origin bottom-left).
 pub fn cocoa_rect_from_gpui(x: f64, y: f64, w: f64, h: f64, view_h: f64) -> (f64, f64, f64, f64) {
     (x, view_h - y - h, w, h)
-}
-
-/// Glass underlay height. Attached to the top edge: island plus corner radius
-/// so the top rounding is clipped at the screen and the visible top stays
-/// flat. Detached: the island's own height, so all four corners show.
-pub fn glass_underlay_height(island_h: f64, radius: f64, attached: bool) -> f64 {
-    if attached {
-        island_h + radius.max(0.0)
-    } else {
-        island_h
-    }
 }
 
 fn glass_extra(spec: IslandGlass) -> f64 {
