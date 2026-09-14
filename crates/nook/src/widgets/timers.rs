@@ -371,7 +371,6 @@ fn preset_col(
             cx.listener(move |this, _: &MouseDownEvent, _, cx| {
                 cx.stop_propagation();
                 this.add_timer(seconds);
-                this.timer_composer = false;
                 flash_new_timer(cx);
                 cx.notify();
             }),

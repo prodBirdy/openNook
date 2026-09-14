@@ -1,4 +1,4 @@
-//! Shared island controls: labels, buttons, widget card chrome, formatters.
+//! Shared island controls: labels, buttons, formatters.
 
 use super::Island;
 use crate::icons::lucide_color;
@@ -90,7 +90,6 @@ pub(crate) fn timer_text(text: impl Into<SharedString>, style: theme::Text) -> D
 
 pub(crate) use super::marquee::slide_label;
 
-#[allow(dead_code)]
 pub(crate) fn text_btn(
     caption: impl Into<SharedString>,
     cx: &mut Context<Island>,
@@ -120,7 +119,6 @@ pub(crate) fn text_btn(
 }
 
 /// Empty-state CTA (`Create Timer`, `Create Reminder`): `rounded-[20px]`.
-#[allow(dead_code)]
 pub(crate) fn pill_btn(
     caption: impl Into<SharedString>,
     cx: &mut Context<Island>,
@@ -149,7 +147,6 @@ pub(crate) fn pill_btn(
         )
 }
 
-#[allow(dead_code)]
 pub(crate) fn empty_state(
     message: impl Into<SharedString>,
     action: impl IntoElement,
@@ -294,36 +291,6 @@ pub(crate) fn nook_icon_btn(
                 on_click(this, event, window, cx);
             }),
         )
-}
-
-/// React `WidgetWrapper`: `min-w-[300px]`.
-pub(crate) const WIDGET_CARD_WIDTH: f32 = 300.0;
-
-pub(crate) const MEDIA_ART: f32 = 52.0;
-pub(crate) const MEDIA_ART_RADIUS: f32 = 12.0;
-pub(crate) const MEDIA_PLAY: f32 = 40.0;
-pub(crate) const MEDIA_PROGRESS_HIT: f32 = 12.0;
-pub(crate) const MEDIA_TIME_PAD_TOP: f32 = 2.0;
-pub(crate) const MEDIA_TIME_PAD_GAP: f32 = 6.0;
-
-/// Expanded-card chrome matching React `WidgetWrapper`: 28px corners, 16px
-/// pad, hairline, stretch to the row height.
-#[allow(dead_code)]
-pub(crate) fn card_chrome(width: f32) -> Div {
-    div()
-        .relative()
-        .flex()
-        .flex_col()
-        .flex_shrink_0()
-        .w(px(width))
-        .h_full()
-        .p(px(theme::WIDGET_PAD))
-        .bg(theme::FILL)
-        .border_1()
-        .border_color(theme::FILL)
-        .rounded(px(theme::WIDGET_RADIUS))
-        .overflow_hidden()
-        .shadow_md()
 }
 
 // Live scroll handles for the expanded cards, keyed by element id.
