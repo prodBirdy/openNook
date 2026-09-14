@@ -4605,9 +4605,9 @@ mod tests {
 
     #[test]
     fn glass_underlay_grows_up_so_top_rounding_clips() {
-        let island_h = 160.0;
-        let radius = 36.0;
-        let window_h = 1169.0;
+        let island_h = 160.0_f64;
+        let radius = 36.0_f64;
+        let window_h = 1169.0_f64;
         let (_, y, _, h) =
             crate::platform::cocoa_rect_from_gpui(200.0, 0.0, 400.0, island_h, window_h);
         // Attached glass is island height plus corner radius so the top
