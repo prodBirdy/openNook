@@ -1,0 +1,4 @@
+{
+  "name": "openNook",
+  "install": "./.cursor/install.sh"
+}
