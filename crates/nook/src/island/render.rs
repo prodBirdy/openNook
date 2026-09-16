@@ -123,7 +123,6 @@ impl gpui::Render for Island {
                 w: chrome_w as f64,
                 h: chrome_h as f64,
                 radius: radius as f64,
-                wing: wing as f64,
                 tint,
                 border: glass_border,
             }));
