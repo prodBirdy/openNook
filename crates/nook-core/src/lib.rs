@@ -20,7 +20,6 @@ pub mod haptics;
 pub mod high_alert;
 pub mod location;
 pub mod login_item;
-#[cfg(target_os = "macos")]
 pub mod lyrics;
 #[cfg(any(target_os = "macos", test))]
 mod mediaremote;
