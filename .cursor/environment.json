@@ -1,0 +1,4 @@
+{
+  "name": "openNook (Linux)",
+  "install": "rustup update --no-self-update stable && rustup default stable && bash scripts/linux-deps.sh && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends mesa-vulkan-drivers vulkan-tools && cargo build -p nook"
+}
