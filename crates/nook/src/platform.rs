@@ -3307,6 +3307,7 @@ unsafe fn hide_motion_art_macos() {
         cap.paused = true;
     }
 }
+#[cfg(target_os = "macos")]
 #[allow(dead_code)]
 fn restore_frontmost_macos() {
     use objc2::runtime::AnyObject;
