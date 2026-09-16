@@ -10,3 +10,9 @@ sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
   libwayland-dev libvulkan-dev \
   libx11-dev libxrandr-dev libxi-dev libxcursor-dev libxinerama-dev \
   libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev
+
+# resvg/fontconfig pull in C++, so linking needs libstdc++.so from the dev
+# package that matches the *default* gcc (e.g. gcc-14 on Ubuntu 24.04). Without
+# it the final link fails with `cannot find -lstdc++`.
+GCC_MAJOR="$(gcc -dumpversion | cut -d. -f1)"
+sudo DEBIAN_FRONTEND=noninteractive apt-get install -y "libstdc++-${GCC_MAJOR}-dev"
