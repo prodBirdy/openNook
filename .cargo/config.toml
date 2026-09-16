@@ -4,3 +4,10 @@
 
 [alias]
 dev = ["watch", "-x", "run -p nook"]
+
+# On Linux a transitive dependency links against libstdc++. Rust drives the
+# link through the C compiler (`cc`), which does not add GCC's C++ library
+# directory to the search path, so `-lstdc++` fails to resolve. Using the
+# `g++` driver adds that directory automatically and is version-agnostic.
+[target.x86_64-unknown-linux-gnu]
+linker = "g++"
