@@ -217,16 +217,40 @@ fn poll_interval_ms() -> u64 {
     }
     #[cfg(not(target_os = "macos"))]
     {
-        let inside = {
-            let (mx, my) = current_mouse_logical();
-            hit_test(mx, my)
-        };
-        if inside || DRAG_ACTIVE.load(Ordering::Relaxed) {
-            20
-        } else {
-            33
+        // X11/Wayland give us no global pointer-event source, so this thread
+        // polls `QueryPointer` to drive hover-to-expand. A fixed fast cadence
+        // means an idle desktop is woken ~30x/s for an X11 round-trip that
+        // cannot change anything until the cursor comes back.
+        //
+        // Instead, sample only as often as the cursor could plausibly reach
+        // the island before the next sample: distance / max-cursor-speed is
+        // the shortest time-to-arrival, so polling at that rate keeps hover
+        // just as responsive while letting a far-away, idle cursor back off.
+        if DRAG_ACTIVE.load(Ordering::Relaxed) {
+            return 20;
         }
+        let (mx, my) = current_mouse_logical();
+        if hit_test(mx, my) {
+            return 20;
+        }
+        // ~6000 px/s covers a brisk flick; being generous here favours
+        // responsiveness over the last bit of idle savings.
+        const MAX_CURSOR_PX_PER_MS: f64 = 6.0;
+        let ms = (distance_to_island(mx, my) / MAX_CURSOR_PX_PER_MS) as u64;
+        ms.clamp(20, 250)
     }
+}
+
+/// Straight-line distance in logical pixels from the cursor to the nearest
+/// edge of the island activation rect (0 while inside it).
+#[cfg(not(target_os = "macos"))]
+fn distance_to_island(x: f64, y: f64) -> f64 {
+    let b = exact_bounds();
+    let dx = (b.x - x).max(x - (b.x + b.width)).max(0.0);
+    let dy = (b.y - y)
+        .max(y - (b.y + b.height.max(MIN_GRAB_HEIGHT)))
+        .max(0.0);
+    (dx * dx + dy * dy).sqrt()
 }
 
 /// Read cursor + drag into the atomics.
@@ -521,5 +545,45 @@ mod tests {
         let reason = super::linux_pointer_block_reason(None).expect("headless is a soft-fail");
         assert!(reason.contains("DISPLAY unset"), "{reason}");
         assert!(super::linux_pointer_block_reason(Some(std::ffi::OsStr::new(":1"))).is_none());
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn set_mouse(x: f64, y: f64) {
+        MOUSE_X.store(x.to_bits(), Ordering::Relaxed);
+        MOUSE_Y.store(y.to_bits(), Ordering::Relaxed);
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn distance_to_island_is_zero_inside_and_grows_outside() {
+        let _guard = lock();
+        update_ui_bounds(910.0, 0.0, 100.0, 34.0);
+        assert_eq!(super::distance_to_island(950.0, 10.0), 0.0);
+        // 100 px right of the right edge (x = 1010).
+        assert!((super::distance_to_island(1110.0, 10.0) - 100.0).abs() < 1e-6);
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn poll_backs_off_when_the_cursor_is_far() {
+        let _guard = lock();
+        update_ui_bounds(910.0, 0.0, 100.0, 34.0);
+
+        // On the island: fast cadence.
+        set_mouse(950.0, 10.0);
+        assert_eq!(super::poll_interval_ms(), 20);
+
+        // A flick away: still at (or near) the fast floor.
+        set_mouse(950.0, 120.0);
+        assert!(super::poll_interval_ms() <= 33);
+
+        // Idle in the far corner of a large screen: well above fast cadence.
+        set_mouse(50.0, 1150.0);
+        assert!(super::poll_interval_ms() > 100);
+
+        // A drag pins the fast cadence regardless of distance.
+        set_mouse(50.0, 1150.0);
+        DRAG_ACTIVE.store(true, Ordering::Relaxed);
+        assert_eq!(super::poll_interval_ms(), 20);
     }
 }
