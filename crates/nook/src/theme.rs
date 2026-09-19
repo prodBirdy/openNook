@@ -63,8 +63,6 @@ pub const TERTIARY_LABEL: Rgba = Rgba {
 };
 pub const TEXT: Rgba = LABEL;
 pub const TEXT_MUTED: Rgba = SECONDARY_LABEL;
-#[allow(dead_code)]
-pub const TEXT_FAINT: Rgba = TERTIARY_LABEL;
 
 pub const FILL: Rgba = Rgba {
     r: 1.0,
@@ -84,10 +82,6 @@ pub const FILL_TERTIARY: Rgba = Rgba {
     b: 1.0,
     a: 0.08,
 };
-#[allow(dead_code)]
-pub const SURFACE: Rgba = FILL;
-#[allow(dead_code)]
-pub const SURFACE_HOVER: Rgba = FILL_SECONDARY;
 
 pub const SEPARATOR: Rgba = Rgba {
     r: 1.0,
@@ -95,8 +89,6 @@ pub const SEPARATOR: Rgba = Rgba {
     b: 1.0,
     a: 0.22,
 };
-#[allow(dead_code)]
-pub const DIVIDER: Rgba = SEPARATOR;
 #[allow(dead_code)]
 pub const HAIRLINE: Rgba = Rgba {
     r: 1.0,
@@ -236,7 +228,7 @@ pub const EXPANDED_RADIUS: f32 = 36.0;
 /// compact content (album art, visualizer) does not sit against the camera.
 /// Painted mode hides the notch inside the pill and must stay at 0.
 pub const GLASS_NOTCH_GAP: f32 = 14.0;
-/// React `WidgetWrapper`: `rounded-[28px]`.
+#[allow(dead_code)]
 pub const WIDGET_RADIUS: f32 = 28.0;
 pub const INNER_RADIUS: f32 = 10.0;
 pub const CONTROL_RADIUS: f32 = 8.0;
@@ -256,9 +248,6 @@ pub const NOOK_ROW_GAP: f32 = 25.0;
 pub const EXPANDED_MAX_WIDTH: f32 = 1120.0;
 /// Bottom widget picker strip while editing the Nook row (icons + labels + actions).
 pub const WIDGET_EDIT_PICKER_H: f32 = 78.0;
-/// React widgets row `gap-4`.
-#[allow(dead_code)]
-pub const WIDGET_GAP: f32 = 16.0;
 pub const NOTCH_MIN_H: f32 = 32.0;
 pub const SCREEN_MARGIN: f32 = 40.0;
 pub const LOCKUP_MAX_WIDTH: f32 = 420.0;
@@ -268,12 +257,8 @@ pub const COMPACT_HOVER_EXTRA: f32 = 88.0;
 pub const COMPACT_HUD_EXTRA: f32 = 120.0;
 pub const COMPACT_LIVE_EXTRA: f32 = 72.0;
 pub const COMPACT_HOVER_CHIN: f32 = 11.0;
-/// React `WidgetWrapper` padding (`1rem`).
-pub const WIDGET_PAD: f32 = 16.0;
-/// How far a row highlight bleeds back out of the card's content margin. Also
-/// the concentric gap that sets the row's own corner radius.
 #[allow(dead_code)]
-pub const ROW_INSET: f32 = 6.0;
+pub const WIDGET_PAD: f32 = 16.0;
 /// React widget row chips: `rounded-[20px]`.
 pub const ROW_RADIUS: f32 = 20.0;
 

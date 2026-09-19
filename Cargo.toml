@@ -7,7 +7,7 @@ version = "1.0.0"
 edition = "2021"
 license = "MIT"
 authors = ["Jonas Vögel"]
-repository = "https://github.com/prodBirdy/openNook-gpui"
+repository = "https://github.com/prodBirdy/openNook"
 
 [workspace.dependencies]
 nook-core = { path = "crates/nook-core" }

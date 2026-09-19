@@ -55,9 +55,6 @@ pub mod vpn;
 pub mod weather;
 pub mod widgets;
 
-pub use models::NowPlayingData;
-pub use settings::AppSettings;
-
 use std::sync::{Once, OnceLock};
 use tokio::runtime::Runtime;
 

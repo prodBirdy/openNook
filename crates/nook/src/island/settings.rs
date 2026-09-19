@@ -92,8 +92,6 @@ impl SettingsCategory {
 trait WidgetModuleExt {
     fn name(self) -> &'static str;
     fn icon(self) -> &'static str;
-    #[allow(dead_code)]
-    fn subtitle(self, settings: &AppSettings) -> SharedString;
     fn enabled(self, settings: &AppSettings) -> bool;
     fn set_enabled(self, settings: &mut AppSettings);
 }
@@ -176,59 +174,6 @@ impl WidgetModuleExt for WidgetModule {
         }
     }
 
-    #[allow(dead_code)]
-    fn subtitle(self, settings: &AppSettings) -> SharedString {
-        match self {
-            Self::Calendar => "7 days".into(),
-            Self::Music => {
-                if settings.show_media_queue {
-                    "Now Playing + queue".into()
-                } else {
-                    "Now Playing".into()
-                }
-            }
-            Self::Files => "Tray tab".into(),
-            Self::Notes => "Scratchpad".into(),
-            Self::Observe => observe_subtitle(settings.observe.metrics.len()),
-            Self::Timers => {
-                if settings.sync_clock_timers {
-                    "Island + Clock".into()
-                } else {
-                    "Countdown".into()
-                }
-            }
-            Self::Reminders => "EventKit".into(),
-            Self::Speed => "Cloudflare".into(),
-            Self::Agents => "Sessions".into(),
-            Self::Mirror => "Camera".into(),
-            Self::Battery => format!(
-                "Alert Below {}%",
-                nook_core::power::clamp_alert_threshold(settings.battery_alert_threshold)
-            )
-            .into(),
-            Self::Messages => "Incoming reply".into(),
-            Self::Obsidian => settings
-                .obsidian_vault
-                .as_ref()
-                .and_then(|path| path.file_name())
-                .map(|name| SharedString::from(name.to_string_lossy().into_owned()))
-                .unwrap_or_else(|| "No vault".into()),
-            Self::Weather => weather_subtitle(settings),
-            Self::Vpn => vpn_subtitle(settings.vpn_show_timer),
-            Self::HighAlert => "Keep Awake".into(),
-            Self::SysStats => sysstats_subtitle(settings),
-            Self::Recorder => {
-                if settings.recorder_transcribe {
-                    "Live transcript".into()
-                } else {
-                    "Record only".into()
-                }
-            }
-            Self::Meeting => "Zoom / Teams / Meet".into(),
-            Self::Notifications => notify_subtitle(settings),
-        }
-    }
-
     fn enabled(self, settings: &AppSettings) -> bool {
         settings.is_enabled(self)
     }
@@ -236,43 +181,6 @@ impl WidgetModuleExt for WidgetModule {
     fn set_enabled(self, settings: &mut AppSettings) {
         let on = !settings.is_enabled(self);
         let _ = settings.set_enabled(self, on);
-    }
-}
-
-#[allow(dead_code)]
-fn weather_subtitle(settings: &AppSettings) -> SharedString {
-    let name = settings.weather.location.name();
-    if name.is_empty() {
-        "Open-Meteo".into()
-    } else {
-        name.to_string().into()
-    }
-}
-
-#[allow(dead_code)]
-fn vpn_subtitle(show_timer: bool) -> SharedString {
-    if show_timer {
-        "Session timer".into()
-    } else {
-        "Status".into()
-    }
-}
-
-#[allow(dead_code)]
-fn sysstats_subtitle(settings: &AppSettings) -> SharedString {
-    let n = [
-        settings.sysstats.show_cpu,
-        settings.sysstats.show_mem,
-        settings.sysstats.show_net,
-        settings.sysstats.show_disk,
-    ]
-    .into_iter()
-    .filter(|on| *on)
-    .count();
-    match n {
-        0 => "Hidden".into(),
-        1 => "1 readout".into(),
-        n => format!("{n} readouts").into(),
     }
 }
 
@@ -309,27 +217,6 @@ fn notification_permission_rows(cx: &mut Context<SettingsView>) -> Vec<AnyElemen
         )
         .into_any_element(),
     ]
-}
-
-#[allow(dead_code)]
-fn notify_subtitle(settings: &AppSettings) -> SharedString {
-    if !settings.show_notifications {
-        return "Off".into();
-    }
-    if crate::platform::ax_process_trusted(false) {
-        "Accessibility".into()
-    } else {
-        "Needs Accessibility".into()
-    }
-}
-
-#[allow(dead_code)]
-fn observe_subtitle(pinned: usize) -> SharedString {
-    match pinned {
-        0 => "Prometheus".into(),
-        1 => "1 metric".into(),
-        n => format!("{n} metrics").into(),
-    }
 }
 
 pub(super) struct SettingsView {
@@ -3443,102 +3330,6 @@ mod tests {
         assert!(min_w > min_h, "min size stays landscape");
         assert!(min_w >= 680.0 && min_h >= 480.0);
         assert!(w > SIDEBAR_W + 400.0, "pane has room beside the sidebar");
-    }
-
-    #[test]
-    fn weather_subtitle_uses_the_saved_city() {
-        let mut settings = AppSettings::default();
-        assert_eq!(
-            WidgetModule::Weather.subtitle(&settings).as_ref(),
-            "Open-Meteo"
-        );
-        settings.weather.location = nook_core::weather::WeatherLocationMode::Manual {
-            name: "Oslo".into(),
-            lat: 59.91,
-            lon: 10.75,
-        };
-        assert_eq!(WidgetModule::Weather.subtitle(&settings).as_ref(), "Oslo");
-    }
-
-    #[test]
-    fn calendar_subtitle_uses_the_week_strip_count() {
-        let settings = AppSettings::default();
-        assert_eq!(
-            WidgetModule::Calendar.subtitle(&settings).as_ref(),
-            "7 days"
-        );
-    }
-
-    #[test]
-    fn battery_subtitle_shows_the_alert_threshold() {
-        let mut settings = AppSettings::default();
-        assert_eq!(
-            WidgetModule::Battery.subtitle(&settings).as_ref(),
-            "Alert Below 20%"
-        );
-        settings.battery_alert_threshold = 5;
-        assert_eq!(
-            WidgetModule::Battery.subtitle(&settings).as_ref(),
-            "Alert Below 5%"
-        );
-    }
-
-    #[test]
-    fn timers_subtitle_mentions_clock_when_sync_is_on() {
-        let mut settings = AppSettings::default();
-        assert_eq!(
-            WidgetModule::Timers.subtitle(&settings).as_ref(),
-            "Island + Clock"
-        );
-        settings.sync_clock_timers = false;
-        assert_eq!(
-            WidgetModule::Timers.subtitle(&settings).as_ref(),
-            "Countdown"
-        );
-    }
-
-    #[test]
-    fn sysstats_subtitle_counts_enabled_readouts() {
-        let mut settings = AppSettings::default();
-        assert_eq!(
-            WidgetModule::SysStats.subtitle(&settings).as_ref(),
-            "4 readouts"
-        );
-        settings.sysstats.show_disk = false;
-        settings.sysstats.show_net = false;
-        settings.sysstats.show_mem = false;
-        assert_eq!(
-            WidgetModule::SysStats.subtitle(&settings).as_ref(),
-            "1 readout"
-        );
-        settings.sysstats.show_cpu = false;
-        assert_eq!(
-            WidgetModule::SysStats.subtitle(&settings).as_ref(),
-            "Hidden"
-        );
-    }
-
-    #[test]
-    fn notifications_subtitle_is_honest_when_off() {
-        let settings = AppSettings::default();
-        assert!(!settings.show_notifications);
-        assert_eq!(
-            WidgetModule::Notifications.subtitle(&settings).as_ref(),
-            "Off"
-        );
-    }
-
-    #[test]
-    fn observe_subtitle_counts_pinned_metrics() {
-        assert_eq!(observe_subtitle(0).as_ref(), "Prometheus");
-        assert_eq!(observe_subtitle(1).as_ref(), "1 metric");
-        assert_eq!(observe_subtitle(5).as_ref(), "5 metrics");
-    }
-
-    #[test]
-    fn vpn_subtitle_follows_the_timer_toggle() {
-        assert_eq!(vpn_subtitle(true).as_ref(), "Session timer");
-        assert_eq!(vpn_subtitle(false).as_ref(), "Status");
     }
 
     #[test]

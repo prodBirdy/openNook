@@ -2012,7 +2012,6 @@ pub struct IslandGlass {
     pub w: f64,
     pub h: f64,
     pub radius: f64,
-    pub wing: f64,
     /// Optional stained-glass tint (`NSGlassEffectView.tintColor`). `None`
     /// leaves the system default.
     pub tint: Option<(f32, f32, f32)>,
@@ -2025,7 +2024,6 @@ impl IslandGlass {
         (self.w - other.w).abs() < 0.5
             && (self.h - other.h).abs() < 0.5
             && (self.y - other.y).abs() < 0.5
-            && (self.wing - other.wing).abs() < 0.5
             && (self.radius - other.radius).abs() < 0.5
     }
 }
@@ -2048,18 +2046,6 @@ fn border_needs_update(old: Option<GlassBorder>, new: Option<GlassBorder>) -> bo
 /// Convert a GPUI top-left rect into AppKit view coordinates (origin bottom-left).
 pub fn cocoa_rect_from_gpui(x: f64, y: f64, w: f64, h: f64, view_h: f64) -> (f64, f64, f64, f64) {
     (x, view_h - y - h, w, h)
-}
-
-/// Glass underlay height. Attached to the top edge: island plus corner radius
-/// so the top rounding is clipped at the screen and the visible top stays
-/// flat. Detached: the island's own height, so all four corners show.
-#[allow(dead_code)]
-pub fn glass_underlay_height(island_h: f64, radius: f64, attached: bool) -> f64 {
-    if attached {
-        island_h + radius.max(0.0)
-    } else {
-        island_h
-    }
 }
 
 fn glass_extra(spec: IslandGlass) -> f64 {

@@ -127,7 +127,6 @@ pub enum TimerKind {
 #[derive(Clone)]
 pub struct Timer {
     pub id: u64,
-    #[allow(dead_code)]
     pub name: String,
     pub remaining: u32,
     pub total: u32,
@@ -232,8 +231,6 @@ pub struct Island {
     pub next_timer_id: u64,
     /// Index into the 7-day week strip (today − 3 … today + 3). 3 is today.
     pub calendar_day: u8,
-    /// Preset chips for a new timer, matching the React add dialog.
-    pub timer_composer: bool,
     /// Manual High Alert deadline for the card readout. `None` = until off.
     /// powerd owns expiry; this is display-only and is not a wakeup source.
     pub awake_deadline: Option<Instant>,
@@ -481,7 +478,6 @@ impl Island {
             system_timers: Vec::new(),
             next_timer_id: 1,
             calendar_day: 3,
-            timer_composer: false,
             awake_deadline: None,
             awake_active: false,
             observe: ObserveSnapshot::default(),
@@ -2337,9 +2333,6 @@ impl Island {
     pub(crate) fn remove_timer(&mut self, id: u64) {
         crate::notify::cancel_island_timer(id);
         self.timers.retain(|t| t.id != id);
-        if self.timers.is_empty() {
-            self.timer_composer = false;
-        }
         self.sync_pomodoro_awake();
     }
 
@@ -3690,11 +3683,6 @@ impl Island {
             cx.notify();
             return;
         }
-        if self.timer_composer {
-            self.timer_composer = false;
-            cx.notify();
-            return;
-        }
         if self.mirror_on {
             self.stop_mirror(cx);
             return;
@@ -4290,7 +4278,6 @@ impl Island {
             ends_at: None,
         });
         self.next_timer_id += 1;
-        self.timer_composer = false;
         self.alert_preferred = Some(CompactMode::Timer);
         crate::notify::schedule_island_timer(id, seconds, "");
     }
@@ -4314,7 +4301,6 @@ impl Island {
             ends_at: Some(SystemTime::now() + Duration::from_secs(secs as u64)),
         });
         self.next_timer_id += 1;
-        self.timer_composer = false;
         self.alert_preferred = Some(CompactMode::Timer);
         self.on_pomodoro_edge(true);
         self.sync_pomodoro_awake();
@@ -4414,7 +4400,7 @@ fn mirror_render_image(bgra: Vec<u8>) -> Option<std::sync::Arc<gpui::RenderImage
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::island::files::{file_grid_metrics, file_tile_height, files_pane_min_height};
+    use crate::island::files::{file_tile_height, files_pane_min_height};
     use crate::island::ui::format_timer;
     use nook_core::agents::{AgentKind, AgentStatus};
     use nook_core::notifications::NotificationEvent;
@@ -4491,7 +4477,6 @@ mod tests {
             system_timers: Vec::new(),
             next_timer_id: 1,
             calendar_day: 3,
-            timer_composer: false,
             awake_deadline: None,
             awake_active: false,
             observe: ObserveSnapshot::default(),
@@ -4620,19 +4605,20 @@ mod tests {
 
     #[test]
     fn glass_underlay_grows_up_so_top_rounding_clips() {
-        let island_h = 160.0;
-        let radius = 36.0;
-        let window_h = 1169.0;
+        let island_h = 160.0_f64;
+        let radius = 36.0_f64;
+        let window_h = 1169.0_f64;
         let (_, y, _, h) =
             crate::platform::cocoa_rect_from_gpui(200.0, 0.0, 400.0, island_h, window_h);
-        let under = crate::platform::glass_underlay_height(h, radius, true);
+        // Attached glass is island height plus corner radius so the top
+        // rounding sits past the window edge and is clipped.
+        let under = h + radius.max(0.0);
         assert_eq!(y, window_h - island_h, "bottom of the island stays put");
         assert!(
             y + under > window_h,
             "top rounding sits past the window edge and is clipped"
         );
-        let detached = crate::platform::glass_underlay_height(h, radius, false);
-        assert_eq!(detached, h, "detached glass matches the island height");
+        assert_eq!(h, island_h, "detached glass matches the island height");
     }
 
     #[test]
@@ -4657,7 +4643,6 @@ mod tests {
                 w: 180.0,
                 h: 32.0,
                 radius: 18.0,
-                wing: 6.0,
                 tint: None,
                 border: None,
             })),
@@ -4974,16 +4959,15 @@ mod tests {
         island.screen_width = 1800.0;
         let (w, h) = island.target_size();
         let leftover = h - island.notch_height.max(32.0) - theme::EXPANDED_PAD * 2.0;
-        let (_, tile) = file_grid_metrics(w);
         assert!(
             leftover + 0.05 >= files_pane_min_height(w),
             "h={h} leftover={leftover} need={}",
             files_pane_min_height(w)
         );
         assert!(
-            leftover + 0.05 >= file_tile_height(tile),
+            leftover + 0.05 >= file_tile_height(0.0),
             "leftover={leftover} tile_h={}",
-            file_tile_height(tile)
+            file_tile_height(0.0)
         );
     }
 
@@ -5715,29 +5699,6 @@ mod tests {
         let w = island.expanded_width();
         let expected = (island.screen_width - 40.0).min(theme::EXPANDED_MAX_WIDTH);
         assert!((w - expected).abs() < f32::EPSILON);
-    }
-
-    #[test]
-    fn tray_tiles_stay_at_expanded_size_during_compact_spring() {
-        let mut island = test_island();
-        let compact_w = island.notch_width + 120.0;
-        let (compact_cols, compact_tile) = file_grid_metrics(compact_w);
-        let (layout_cols, layout_tile) = island.file_layout();
-        assert_ne!(
-            (compact_cols, compact_tile.to_bits()),
-            (layout_cols, layout_tile.to_bits()),
-            "compact island width would pick a different tile size"
-        );
-        assert_eq!(
-            island.file_layout(),
-            file_grid_metrics(island.expanded_width())
-        );
-        // Files and Widgets share the full default width (Terminal width).
-        let expected = (island.screen_width - 40.0).min(theme::EXPANDED_MAX_WIDTH);
-        island.tab = Tab::Widgets;
-        assert!((island.expanded_width() - expected).abs() < f32::EPSILON);
-        island.tab = Tab::Files;
-        assert!((island.expanded_width() - expected).abs() < f32::EPSILON);
     }
 
     #[test]

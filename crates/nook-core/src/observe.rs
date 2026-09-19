@@ -864,7 +864,7 @@ pub fn format_sample(value: f64) -> String {
 fn client() -> Result<Client, String> {
     Client::builder()
         .timeout(REQUEST_TIMEOUT)
-        .user_agent("openNook-gpui/observe")
+        .user_agent("openNook/observe")
         .build()
         .map_err(|e| e.to_string())
 }
