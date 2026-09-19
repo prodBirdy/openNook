@@ -60,6 +60,10 @@ Hover or click the notch to expand. Press Esc to collapse, ⌘, to open Settings
 
 macOS provides the notch overlay, MediaRemote, EventKit, Camera, Liquid Glass, AirDrop, and AppKit file drag-out. Linux has no camera-housing notch, MediaRemote, Liquid Glass, Camera Mirror, AirDrop, AppKit drag-out, or EventKit; global hover polling is stubbed. Linux settings and the file tray remain available, and the client needs a Vulkan driver.
 
+## Visuals / Media
+
+GitHub social / OG preview: [`docs/opennook-og-1280x640.png`](docs/opennook-og-1280x640.png)
+
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the build, test, crate layout, and design rules.
