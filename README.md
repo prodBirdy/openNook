@@ -1,6 +1,10 @@
-# openNook
+# openNook — Dynamic Island / notch client for macOS and Linux
 
-openNook is a native macOS and Linux Dynamic Island client, GPU-rendered with [GPUI](https://www.gpui.rs), that surfaces Now Playing, calendar, reminders, timers, weather, battery, a file tray, and live coding-agent status in the notch.
+openNook is a native Dynamic Island overlay for the macOS notch and Linux desktops. Written in Rust and GPU-rendered with [GPUI](https://www.gpui.rs), it surfaces Now Playing, calendar, reminders, timers, weather, battery, a file tray, and live coding-agent status.
+
+![Linux compact view](docs/linux-03-compact.png)
+![Linux expanded view](docs/linux-03-expanded.png)
+![Linux Settings](docs/linux-03-settings.png)
 
 ## What it is
 
@@ -23,7 +27,11 @@ openNook is a small desktop overlay. It stays out of the Dock on macOS, expands 
 
 Experimental widgets are available behind a Settings toggle.
 
-## Install and build
+## Install
+
+Published builds are on [GitHub Releases](https://github.com/prodBirdy/openNook/releases). Current tags: [v0.3.0](https://github.com/prodBirdy/openNook/releases/tag/v0.3.0) (macOS) and [v0.3.0-linux](https://github.com/prodBirdy/openNook/releases/tag/v0.3.0-linux).
+
+## Build from source
 
 Build and run the macOS client with the included Metal wrapper:
 
@@ -51,12 +59,6 @@ Hover or click the notch to expand. Press Esc to collapse, ⌘, to open Settings
 ## Platform notes
 
 macOS provides the notch overlay, MediaRemote, EventKit, Camera, Liquid Glass, AirDrop, and AppKit file drag-out. Linux has no camera-housing notch, MediaRemote, Liquid Glass, Camera Mirror, AirDrop, AppKit drag-out, or EventKit; global hover polling is stubbed. Linux settings and the file tray remain available, and the client needs a Vulkan driver.
-
-## Screenshots
-
-![Linux compact view](docs/linux-03-compact.png)
-![Linux expanded view](docs/linux-03-expanded.png)
-![Linux Settings](docs/linux-03-settings.png)
 
 ## Contributing
 
