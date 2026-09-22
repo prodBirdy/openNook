@@ -1,69 +1,118 @@
-# openNook — Dynamic Island / notch client for macOS and Linux
+# openNook
 
-openNook is a native Dynamic Island overlay for the macOS notch and Linux desktops. Written in Rust and GPU-rendered with [GPUI](https://www.gpui.rs), it surfaces Now Playing, calendar, reminders, timers, weather, battery, a file tray, and live coding-agent status.
+**A Dynamic Island that actually lives on the desktop.** A native macOS and
+Linux overlay, GPU-rendered with [GPUI](https://www.gpui.rs), that hangs from
+the notch (or the top of the screen) and surfaces Now Playing, calendar,
+reminders, timers, weather, battery, a file tray, and live coding-agent status
+without taking a Dock slot.
+
+[![MIT licence](https://img.shields.io/badge/licence-MIT-blue)](LICENSE)
+[![Latest release](https://img.shields.io/github/v/release/prodBirdy/openNook)](https://github.com/prodBirdy/openNook/releases)
+[![Rust](https://img.shields.io/badge/built%20with-Rust%20%2B%20GPUI-orange)](Cargo.toml)
+
+It stays out of the way until you glance at it. Hover or click the housing and
+it expands; Esc collapses it. Same Rust client on both platforms — macOS gets
+the camera-housing wrap, MediaRemote, EventKit, Liquid Glass and AirDrop;
+Linux uses desktop-friendly fallbacks and a Vulkan path.
+
+```
+$ ./scripts/with-metal.sh cargo run -p nook
+
+nook
+  compact  →  camera housing + 1px wrap
+  expand   →  hover / click
+  settings →  ⌘,
+  quit     →  ⌘Q
+```
+
+| widget | what it shows | notes |
+| --- | --- | --- |
+| Agents | live coding-agent status | busy vs idle from the session, not CPU noise |
+| Media | Now Playing, controls, album art | MediaRemote on macOS |
+| Calendar | upcoming events | EventKit; prompted only when enabled |
+| Reminders | due items | same |
+| Timers | countdown | |
+| Weather | current conditions | location optional; city entry works instead |
+| Battery | charge | |
+| Files | tray for open / move | AirDrop and LocalSend on macOS |
+| Notes | scratch notes | |
+| Speed | network speed test | |
+| Mirror | camera preview | macOS only |
+| Terminal | real login shell | opt-in, off by default |
+
+Experimental widgets sit behind a Settings toggle.
 
 ![Linux compact view](docs/linux-03-compact.png)
 ![Linux expanded view](docs/linux-03-expanded.png)
 ![Linux Settings](docs/linux-03-settings.png)
 
-## What it is
-
-openNook is a small desktop overlay. It stays out of the Dock on macOS, expands from the notch, and keeps useful information one glance away. Linux uses the same GPUI client with desktop-friendly fallbacks.
-
-## Features
-
-- Agents: live coding-agent status
-- Media: Now Playing controls and album art
-- Calendar and Reminders
-- Timers
-- Weather
-- Battery
-- Files: tray for opening and moving files
-- Notes
-- Speed test
-- Mirror camera preview on macOS
-- Terminal: an opt-in real login shell, off by default
-- Tray sharing through AirDrop and LocalSend
-
-Experimental widgets are available behind a Settings toggle.
-
 ## Install
 
-Published builds are on [GitHub Releases](https://github.com/prodBirdy/openNook/releases). Current tags: [v0.3.0](https://github.com/prodBirdy/openNook/releases/tag/v0.3.0) (macOS) and [v0.3.0-linux](https://github.com/prodBirdy/openNook/releases/tag/v0.3.0-linux).
+Published builds are on [GitHub Releases](https://github.com/prodBirdy/openNook/releases).
 
-## Build from source
+or clone and build. macOS needs the Metal wrapper so Calendar, Reminders,
+Camera, Location and Automation prompts work as an app bundle:
 
-Build and run the macOS client with the included Metal wrapper:
-
-```bash
+```
 ./scripts/with-metal.sh cargo run -p nook
 ```
 
-For Calendar, Reminders, Camera, Location, and Automation prompts, build the app bundle:
-
-```bash
+```
 ./scripts/with-metal.sh ./scripts/bundle.sh
 open target/OpenNook.app
 ```
 
-Linux uses the same `nook` crate after installing the system packages listed by `scripts/linux-deps.sh`.
+Linux uses the same `nook` crate after the packages in `scripts/linux-deps.sh`.
+It needs a Vulkan driver.
 
-## Permissions
-
-Calendar and Reminders access is requested only when those widgets are enabled. Camera access is requested when you enable Mirror. Location access is requested when Weather uses your location; manual city entry is available instead. Automation is requested when media control needs a fallback. Microphone and Speech Recognition are requested when you enable the experimental Voice recorder. Accessibility is requested for media-key and HUD interception. Full Disk Access is requested by the experimental Messages and Notifications widgets. Local Network access is requested when LocalSend is enabled.
+```
+./scripts/with-metal.sh cargo run -p nook     # macOS
+cargo run -p nook                             # Linux, after linux-deps.sh
+```
 
 ## Keyboard
 
-Hover or click the notch to expand. Press Esc to collapse, ⌘, to open Settings, and ⌘Q to quit.
+Hover or click the notch to expand.
+
+```
+Esc     collapse
+⌘,      Settings
+⌘Q      quit
+```
+
+## Permissions
+
+Nothing is requested until the matching widget is on.
+
+| permission | when |
+| --- | --- |
+| Calendar / Reminders | those widgets enabled |
+| Camera | Mirror enabled |
+| Location | Weather uses your location |
+| Automation | media-control fallback |
+| Microphone / Speech Recognition | experimental Voice recorder |
+| Accessibility | media-key and HUD interception |
+| Full Disk Access | experimental Messages / Notifications |
+| Local Network | LocalSend enabled |
 
 ## Platform notes
 
-macOS provides the notch overlay, MediaRemote, EventKit, Camera, Liquid Glass, AirDrop, and AppKit file drag-out. Linux has no camera-housing notch, MediaRemote, Liquid Glass, Camera Mirror, AirDrop, AppKit drag-out, or EventKit; global hover polling is stubbed. Linux settings and the file tray remain available, and the client needs a Vulkan driver.
+| capability | macOS | Linux |
+| --- | --- | --- |
+| camera-housing notch wrap | yes | no; top-center compact |
+| MediaRemote | yes | no |
+| EventKit | yes | no |
+| Liquid Glass | yes | no |
+| Camera Mirror | yes | no |
+| AirDrop / AppKit drag-out | yes | no; LocalSend / tray still work |
+| Settings + file tray | yes | yes |
+| GPU | Metal | Vulkan |
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for the build, test, crate layout, and design rules.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the build, test, crate layout, and
+design rules.
 
 ## License
 
-openNook is released under the MIT License. See [LICENSE](LICENSE).
+MIT. See [LICENSE](LICENSE).
