@@ -17,7 +17,7 @@ use std::rc::Rc;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::{Duration, Instant};
 
-/// Default settings window. Width matches `openNook — Settings` (820).
+/// Default settings window. Width matches the Settings artboard (820).
 pub(super) const SETTINGS_SIZE: (f32, f32) = (820.0, 720.0);
 pub(super) const SETTINGS_MIN: (f32, f32) = (720.0, 520.0);
 
@@ -32,7 +32,7 @@ const SETTINGS_CANVAS: Rgba = Rgba {
 const SIDEBAR_W: f32 = 212.0;
 /// Room for traffic lights on a transparent titlebar (macOS).
 const TITLEBAR_INSET: f32 = 52.0;
-/// Export title bar is 38pt. Linux has no traffic lights — use that.
+/// Settings artboard title bar is 38pt. Linux has no traffic lights — use that.
 const TITLEBAR_INSET_LINUX: f32 = 38.0;
 const GROUP_PAD: f32 = 12.0;
 const ROW_H: f32 = 36.0;
