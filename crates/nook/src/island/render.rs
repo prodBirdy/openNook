@@ -1,8 +1,9 @@
 //! Overlay window paint: chrome, motion-blur stack, compact vs expanded dispatch.
 
-use super::chrome::{hitbox_debug, island_chrome, COMPACT_WING, GLOW_PAD};
+use super::chrome::{hitbox_debug, island_chrome, notch_wing, COMPACT_WING};
 use super::files::drop_veil;
 use super::{CompactMode, Island};
+use crate::motion;
 use crate::platform;
 use crate::theme;
 use gpui::{
@@ -57,7 +58,8 @@ impl gpui::Render for Island {
         let notch_w = self.notch_width.max(1.0);
         let dropping = self.file_drag && (self.hovered || self.expanded);
         // HIG › Materials: Liquid Glass must yield to Reduce Transparency.
-        // Native glass sits behind Metal; a transparent fill lets it show.
+        // Compact stays black. The material fades in as the sheet opens; the
+        // slider sets how far the black cap reaches once it is open.
         let want_glass = platform::island_glass_setting_on() && !self.suppressed;
         let mut wing = COMPACT_WING;
 
@@ -84,38 +86,17 @@ impl gpui::Render for Island {
             let c = theme::rgba_from_u32(rgb, 1.0);
             (c.r, c.g, c.b)
         });
-        let face = crate::widgets::face_agent(&self.agents);
-        let brand_border = face.map(|agent| {
-            crate::dotmatrix::led_color_on(
-                agent.kind,
-                theme::island_fill(self.settings.island_color),
-            )
-        });
-        let border_fade = self.agent_border.value.clamp(0.0, 1.0);
-        let chrome_border = if border_fade > 0.02 {
-            self.agent_border_color.or(brand_border)
-        } else {
-            None
-        };
-        let pulse = if border_fade > 0.02 {
-            if self.size_morphing() {
-                // Steady ring during expand/collapse only (not compact hover).
-                0.72
-            } else if expanded || mode == CompactMode::Agents {
-                0.70 + 0.30 * ((self.pixel_t * 2.2).sin() * 0.5 + 0.5)
-            } else {
-                0.72
-            }
-        } else {
-            0.0
-        };
-        let border_glow = pulse * border_fade;
-        let chrome_soft = !self.size_morphing();
-        let glass_border = chrome_border.map(|c| platform::GlassBorder {
-            color: (c.r, c.g, c.b),
-            alpha: border_fade,
-            glow: border_glow.clamp(0.0, 1.0),
-        });
+        let glass_ceiling = theme::compact_glass_ceiling(self.notch_height);
+        let glass_amount = self.settings.glass_gradient();
+        // Height opens the sheet. The slow swipe opens the veil across the
+        // whole stretch, over material that is already present.
+        let from_height = theme::glass_veil_reveal(chrome_h, glass_ceiling);
+        let from_pull = theme::glass_pull_reveal(self.expand_pull, motion::EXPAND_PULL_MAX);
+        let glass_open = from_height.max(from_pull);
+        let glass_material = from_height.max(theme::glass_pull_material(
+            self.expand_pull,
+            motion::EXPAND_PULL_MAX,
+        ));
         let native_glass = if want_glass {
             let ok = platform::sync_island_glass(Some(platform::IslandGlass {
                 x: chrome_left as f64,
@@ -125,7 +106,7 @@ impl gpui::Render for Island {
                 radius: radius as f64,
                 wing: wing as f64,
                 tint,
-                border: glass_border,
+                opacity: glass_material as f64,
             }));
             // If this tick failed to talk to AppKit, keep the live underlay
             // rather than painting the 82% black fallback over it.
@@ -134,20 +115,37 @@ impl gpui::Render for Island {
             platform::sync_island_glass(None)
         };
         let island_bg = if native_glass {
-            rgba(0x00000000)
+            theme::island_glass_veil(chrome_h, glass_open, glass_amount)
         } else if want_glass {
-            theme::island_fill_glass(self.settings.island_color)
+            theme::island_glass_fallback_veil(
+                self.settings.island_color,
+                chrome_h,
+                glass_open,
+                glass_amount,
+            )
         } else {
-            theme::island_fill(self.settings.island_color)
+            theme::island_fill(self.settings.island_color).into()
         };
-        let glow_pad = if native_glass {
-            0.0
-        } else if border_glow > 0.02 {
-            GLOW_PAD
+        // Glass keeps NSGlassEffectView a plain rect (wing 0), so the notch
+        // fillets are painted beside it in the colour of the veil's top edge:
+        // black on the compact cap, then whatever the veil holds at the top
+        // as the sheet opens (the mockup keeps them on the expanded sheet).
+        let glass_wings = if want_glass && attached {
+            let (_, floor) = theme::glass_veil_curve(
+                chrome_h,
+                glass_amount,
+                platform::increase_contrast(),
+            );
+            let (top_a, _) = theme::glass_veil_alphas(glass_open, glass_amount, floor);
+            let cap = if native_glass {
+                theme::ISLAND
+            } else {
+                theme::island_fill(self.settings.island_color)
+            };
+            Some(theme::with_alpha(cap, top_a * cap.a))
         } else {
-            0.0
+            None
         };
-        let glow_top = if attached { 0.0 } else { glow_pad };
         let debug_hitbox = hitbox_debug();
         let content_radius = if expanded {
             theme::EXPANDED_RADIUS
@@ -207,37 +205,48 @@ impl gpui::Render for Island {
                 style: gpui::FontStyle::Normal,
             });
         let root = self.accept_file_drop(root, cx);
-        root.when(!self.suppressed, |root| {
+        root.when_some(glass_wings, |root, color| {
             root.child(
                 div()
                     .absolute()
-                    .top(px(body_top - glow_top))
-                    .left(px(chrome_left - glow_pad))
-                    .w(px(chrome_w + glow_pad * 2.0))
-                    .h(px(chrome_h + glow_pad + glow_top))
+                    .top(px(body_top))
+                    .left(px(chrome_left - COMPACT_WING))
+                    .child(notch_wing(true, COMPACT_WING, color.into())),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .top(px(body_top))
+                    .left(px(chrome_left + chrome_w))
+                    .child(notch_wing(false, COMPACT_WING, color.into())),
+            )
+        })
+        .when(!self.suppressed, |root| {
+            root.child(
+                div()
+                    .absolute()
+                    .top(px(body_top))
+                    .left(px(chrome_left))
+                    .w(px(chrome_w))
+                    .h(px(chrome_h))
                     .child(div().absolute().inset_0().child(island_chrome(
                         // Native glass draws no wings — NSGlassEffectView is a
-                        // plain rounded rect spanning the full chrome width — so
-                        // trace the accent glow along that glass edge instead
-                        // of the winged silhouette the painted fills use.
+                        // plain rounded rect spanning the full chrome width.
                         if native_glass { chrome_w } else { tw.max(1.0) },
                         th.max(1.0),
                         if native_glass { 0.0 } else { wing },
                         island_bg,
-                        if native_glass { None } else { chrome_border },
-                        if native_glass { 0.0 } else { border_glow },
                         attached,
                         content_radius,
-                        chrome_soft,
-                        native_glass,
+                        want_glass.then(theme::island_glass_rim),
                     )))
                     .child(
                         self.accept_file_drop(
                             div()
                                 .id("island")
                                 .absolute()
-                                .top(px(glow_top))
-                                .left(px(glow_pad))
+                                .top(px(0.))
+                                .left(px(0.))
                                 .w(px(chrome_w))
                                 .h(px(chrome_h))
                                 .overflow_hidden()
@@ -279,7 +288,26 @@ impl gpui::Render for Island {
                                         .rounded_br(px(content_radius))
                                 })
                                 .when(!attached, |d| d.rounded(px(content_radius)))
-                                .child(self.content_stack(expanded, mode, hovered, notch_w, cx))
+                                .child(if expanded {
+                                    // Body band under the pinned top bar. Clipping
+                                    // here keeps the blur taps and the tab slide
+                                    // from ghosting over the pills.
+                                    let bar_h = self.expanded_topbar_height();
+                                    div()
+                                        .absolute()
+                                        .top(px(bar_h))
+                                        .left_0()
+                                        .w_full()
+                                        .h(px((th.max(1.0) - bar_h).max(0.0)))
+                                        .overflow_hidden()
+                                        .child(
+                                            self.content_stack(expanded, mode, hovered, notch_w, cx),
+                                        )
+                                        .into_any_element()
+                                } else {
+                                    self.content_stack(expanded, mode, hovered, notch_w, cx)
+                                })
+                                .when(expanded, |d| d.child(self.pinned_topbar(notch_w, cx)))
                                 .when(dropping && !expanded, |d| d.child(drop_veil()))
                                 .when(
                                     !expanded
@@ -440,6 +468,26 @@ impl Island {
             .into_any_element()
     }
 
+    /// The expanded tab bar, drawn once above the animating body so tab
+    /// switches leave it perfectly still: no crossfade, no slide, no blur
+    /// taps. Only an expand reveal or a customize swap moves it with the body.
+    fn pinned_topbar(&mut self, notch_w: f32, cx: &mut Context<Self>) -> AnyElement {
+        let (alpha, dy) = if self.topbar_follows_reveal {
+            (self.content_fade.value.clamp(0.0, 1.0), self.content_y.value)
+        } else {
+            (1.0, 0.0)
+        };
+        div()
+            .id("island-topbar")
+            .absolute()
+            .top(px(dy))
+            .left_0()
+            .w_full()
+            .opacity(alpha)
+            .child(self.render_topbar(notch_w, cx))
+            .into_any_element()
+    }
+
     fn content(
         &mut self,
         expanded: bool,
@@ -449,16 +497,10 @@ impl Island {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         if expanded {
-            self.render_expanded(notch_w, cx).into_any_element()
+            self.render_expanded(cx).into_any_element()
         } else {
-            self.render_compact(
-                mode,
-                hovered,
-                notch_w,
-                platform::island_glass_attached(),
-                cx,
-            )
-            .into_any_element()
+            self.render_compact(mode, hovered, notch_w, cx)
+                .into_any_element()
         }
     }
 

@@ -5,6 +5,8 @@ use serde::{Deserialize, Serialize};
 pub enum HapticPattern {
     #[default]
     Medium,
+    /// One alignment tick. Used as a detent while a gesture is still traveling.
+    Alignment,
     Success,
 }
 
@@ -27,7 +29,7 @@ pub fn trigger(config: Option<HapticConfig>) {
                     .name("nook-haptic".into())
                     .spawn(move || fire(config));
             }
-            HapticPattern::Medium => fire(config),
+            HapticPattern::Medium | HapticPattern::Alignment => fire(config),
         }
     }
 }
@@ -44,6 +46,11 @@ fn fire(config: HapticConfig) {
             HapticPattern::Medium => {
                 let _: () =
                     msg_send![manager, performFeedbackPattern: 0_i64, performanceTime: 1_i64];
+            }
+            // NSHapticFeedbackPatternAlignment — the trackpad "notch" click.
+            HapticPattern::Alignment => {
+                let _: () =
+                    msg_send![manager, performFeedbackPattern: 1_i64, performanceTime: 1_i64];
             }
             HapticPattern::Success => {
                 let _: () =

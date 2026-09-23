@@ -431,7 +431,7 @@ fn editor_font() -> Font {
         family: "SF Pro".into(),
         features: FontFeatures(Arc::new(Vec::new())),
         fallbacks: None,
-        weight: FontWeight::MEDIUM,
+        weight: FontWeight::NORMAL,
         style: FontStyle::Normal,
     }
 }
@@ -460,7 +460,7 @@ fn paint_field(
         text.clone()
     };
     let color = if text.is_empty() {
-        theme::TEXT_MUTED
+        theme::tertiary_label()
     } else {
         theme::TEXT
     };

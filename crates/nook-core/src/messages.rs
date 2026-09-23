@@ -645,7 +645,7 @@ fn gen_tx() -> &'static watch::Sender<u64> {
 pub fn request_refresh() {
     let tx = gen_tx();
     let next = tx.borrow().saturating_add(1);
-    let _ = tx.send(next);
+    let _ = tx.send_replace(next);
 }
 
 pub fn subscribe() -> watch::Receiver<u64> {
@@ -731,7 +731,7 @@ fn debounce_loop(rx: std::sync::mpsc::Receiver<()>, tx: watch::Sender<u64>) {
             }
         }
         let next = tx.borrow().saturating_add(1);
-        let _ = tx.send(next);
+        let _ = tx.send_replace(next);
     }
 }
 

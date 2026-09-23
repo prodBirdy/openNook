@@ -3,7 +3,7 @@
 //! Keys and IME commits go to the child's stdin. The URL scheme / CLI /
 //! Services paths never call into `nook_core::shell`.
 
-use crate::island::ui::{label, nook_icon_btn, nook_pane};
+use crate::island::ui::{label, nook_pane};
 use crate::island::Island;
 use crate::platform;
 use crate::theme;
@@ -23,8 +23,11 @@ use std::time::{Duration, Instant};
 
 const DEFAULT_FONT_SIZE: f32 = 11.0;
 /// Fallback metrics until the first paint measures the real font.
+/// Mockup PTY rows are 11px / 14px.
 const DEFAULT_LINE_HEIGHT: f32 = 14.0;
 const DEFAULT_CHAR_WIDTH: f32 = 6.6;
+/// Mockup caret is `#FFFFFF8C`, one cell wide.
+const CURSOR_ALPHA: f32 = 0x8C as f32 / 255.0;
 /// Fonts tried in order when `terminal_font` is empty or missing.
 const FONT_STACK: [&str; 5] = [
     "SF Mono",
@@ -37,11 +40,23 @@ const DEFAULT_COLS: u16 = 80;
 const DEFAULT_ROWS: u16 = 18;
 /// Restart / exit chip row, only painted after the shell ends.
 const TERMINAL_HEADER_H: f32 = 20.0;
+const START_ICON: f32 = 16.0;
+const START_GAP: f32 = 10.0;
+const START_BTN_RADIUS: f32 = 20.0;
+const START_BTN_PAD_X: f32 = 16.0;
+const START_BTN_PAD_Y: f32 = 8.0;
+const EXIT_BTN: f32 = 28.0;
+const EXIT_BTN_RADIUS: f32 = 14.0;
+const EXIT_PLAY: f32 = 16.0;
+const EXIT_CHIP_H: f32 = 20.0;
+const EXIT_CHIP_RADIUS: f32 = 10.0;
+const EXIT_CHIP_PAD_X: f32 = 8.0;
+const EXIT_HEADER_GAP: f32 = 8.0;
 
-/// Height of the Term pane itself (default 18×14 PTY grid), not including
-/// the expanded island's outer bottom pad.
+/// Height of the Term pane itself. Matches the mockup Nook row (128)
+/// minus the expanded bottom pad that `terminal_card` applies.
 pub(crate) fn terminal_pane_min_height() -> f32 {
-    DEFAULT_ROWS as f32 * DEFAULT_LINE_HEIGHT
+    theme::NOOK_BODY - theme::EXPANDED_PAD
 }
 
 pub(crate) enum TerminalEvent {
@@ -628,13 +643,11 @@ fn paint_terminal(
             origin: caret_origin,
             size: size(px(char_w.max(1.0)), px(line_h)),
         };
+        let mut c: Hsla = theme::LABEL.into();
+        c.a = CURSOR_ALPHA;
         if focused {
-            // Translucent block so the glyph underneath stays readable.
-            let mut c: Hsla = theme::LABEL.into();
-            c.a = 0.55;
             window.paint_quad(gpui::fill(caret, c));
         } else {
-            // Unfocused: hollow block, like most terminals.
             window.paint_quad(gpui::outline(caret, theme::LABEL, gpui::BorderStyle::Solid));
         }
         if focused && !marked.is_empty() {
@@ -669,11 +682,22 @@ fn installed_families(window: &Window) -> &'static [String] {
     FAMILIES.get_or_init(|| window.text_system().all_font_names())
 }
 
+/// Snap the PTY 16-color blues/greens onto the mockup prompt
+/// (`#0A84FF` path, `#30D158` ❯). Truecolor spans pass through.
+fn map_ansi_fg(c: [u8; 3]) -> [u8; 3] {
+    match c {
+        [0x57, 0xc7, 0xff] | [0x7f, 0xd7, 0xff] => [0x0a, 0x84, 0xff],
+        [0x5a, 0xf7, 0x8e] | [0x7d, 0xff, 0xa6] => [0x30, 0xd1, 0x58],
+        other => other,
+    }
+}
+
 fn rgb3(c: [u8; 3]) -> Hsla {
+    let c = map_ansi_fg(c);
     gpui::rgb(((c[0] as u32) << 16) | ((c[1] as u32) << 8) | c[2] as u32).into()
 }
 
-/// Advance width of one cell and a line height with ~1.3 leading, both from
+/// Advance width of one cell and the mockup 11/14 line height, both from
 /// the actual shaped font so `cols`/`rows` line up with what is drawn.
 fn measure_cell(font: &Font, font_size: f32, window: &mut Window) -> (f32, f32) {
     let run = TextRun {
@@ -690,7 +714,7 @@ fn measure_cell(font: &Font, font_size: f32, window: &mut Window) -> (f32, f32) 
             .shape_line(SharedString::from("M"), px(font_size), &[run], None);
     let w: f32 = line.width.into();
     let char_w = if w > 1.0 { w } else { DEFAULT_CHAR_WIDTH };
-    let line_h = (font_size * 1.3).round();
+    let line_h = (font_size * DEFAULT_LINE_HEIGHT / DEFAULT_FONT_SIZE).round();
     (char_w, line_h)
 }
 
@@ -789,23 +813,30 @@ pub(crate) fn terminal_card(island: &mut Island, cx: &mut Context<Island>) -> im
             .pb(px(theme::EXPANDED_PAD))
             .child(
                 div()
+                    .id("term-start-empty")
                     .flex_1()
                     .w_full()
+                    .h_full()
                     .flex()
                     .flex_col()
                     .items_center()
                     .justify_center()
-                    .gap(px(10.))
-                    .child(crate::icons::lucide_color("terminal", 16.0, theme::LABEL))
+                    .gap(px(START_GAP))
+                    .child(crate::icons::lucide_color(
+                        "terminal",
+                        START_ICON,
+                        theme::LABEL,
+                    ))
                     .child(
                         div()
                             .id("term-start")
-                            .px(px(16.))
-                            .py(px(8.))
+                            .flex_shrink_0()
+                            .px(px(START_BTN_PAD_X))
+                            .py(px(START_BTN_PAD_Y))
                             .flex()
                             .items_center()
                             .justify_center()
-                            .rounded(px(theme::ROW_RADIUS))
+                            .rounded(px(START_BTN_RADIUS))
                             .bg(theme::FILL)
                             .hover(|s| s.bg(theme::FILL_SECONDARY))
                             .active(|s| s.opacity(0.85))
@@ -823,30 +854,46 @@ pub(crate) fn terminal_card(island: &mut Island, cx: &mut Context<Island>) -> im
             .into_any_element();
     }
     nook_pane("nook-terminal")
+        .relative()
         .w_full()
         .px(px(theme::EXPANDED_PAD))
         .pb(px(theme::EXPANDED_PAD))
+        .child(view)
         .when(!running, |d| {
             d.child(
                 div()
-                    .h(px(TERMINAL_HEADER_H))
+                    .absolute()
+                    .top(px(0.))
+                    .right(px(0.))
+                    .h(px(EXIT_BTN.max(TERMINAL_HEADER_H)))
                     .flex()
                     .items_center()
                     .justify_end()
-                    .gap(px(8.))
-                    .flex_shrink_0()
-                    .child(nook_icon_btn(
-                        "play",
-                        "term-run",
-                        cx,
-                        |this, _, window, cx| {
-                            this.restart_terminal(window, cx);
-                        },
-                    ))
+                    .gap(px(EXIT_HEADER_GAP))
+                    .child(
+                        div()
+                            .id("term-run")
+                            .size(px(EXIT_BTN))
+                            .rounded(px(EXIT_BTN_RADIUS))
+                            .bg(theme::FILL)
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .hover(|s| s.bg(theme::FILL_SECONDARY))
+                            .active(|s| s.opacity(0.85))
+                            .cursor(CursorStyle::PointingHand)
+                            .child(crate::icons::lucide_color("play", EXIT_PLAY, theme::LABEL))
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|this, _: &MouseDownEvent, window, cx| {
+                                    cx.stop_propagation();
+                                    this.restart_terminal(window, cx);
+                                }),
+                            ),
+                    )
                     .when_some(chip, |d, chip| d.child(chip)),
             )
         })
-        .child(view)
         .into_any_element()
 }
 
@@ -858,9 +905,9 @@ fn exit_chip(island: &Island) -> Option<impl IntoElement> {
     let ok = code == 0;
     Some(
         div()
-            .px(px(8.))
-            .h(px(20.))
-            .rounded_full()
+            .px(px(EXIT_CHIP_PAD_X))
+            .h(px(EXIT_CHIP_H))
+            .rounded(px(EXIT_CHIP_RADIUS))
             .bg(if ok {
                 gpui::Rgba {
                     a: 0.2,
@@ -887,4 +934,46 @@ fn exit_chip(island: &Island) -> Option<impl IntoElement> {
                     .child(format!("exit {code}")),
             ),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn start_empty_matches_mockup() {
+        assert_eq!(START_ICON, 16.0);
+        assert_eq!(START_GAP, 10.0);
+        assert_eq!(START_BTN_RADIUS, 20.0);
+        assert_eq!(START_BTN_PAD_X, 16.0);
+        assert_eq!(START_BTN_PAD_Y, 8.0);
+        assert_eq!(DEFAULT_FONT_SIZE, 11.0);
+        assert_eq!(DEFAULT_LINE_HEIGHT, 14.0);
+        assert_eq!(
+            terminal_pane_min_height(),
+            theme::NOOK_BODY - theme::EXPANDED_PAD
+        );
+        assert!((CURSOR_ALPHA - 0x8C as f32 / 255.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn exited_header_matches_mockup() {
+        assert_eq!(EXIT_BTN, 28.0);
+        assert_eq!(EXIT_BTN_RADIUS, 14.0);
+        assert_eq!(EXIT_PLAY, 16.0);
+        assert_eq!(EXIT_CHIP_H, 20.0);
+        assert_eq!(EXIT_CHIP_RADIUS, 10.0);
+        assert_eq!(EXIT_CHIP_PAD_X, 8.0);
+        assert_eq!(EXIT_HEADER_GAP, 8.0);
+        assert_eq!(TERMINAL_HEADER_H, 20.0);
+    }
+
+    #[test]
+    fn prompt_palette_matches_mockup() {
+        assert_eq!(map_ansi_fg([0x57, 0xc7, 0xff]), [0x0a, 0x84, 0xff]);
+        assert_eq!(map_ansi_fg([0x7f, 0xd7, 0xff]), [0x0a, 0x84, 0xff]);
+        assert_eq!(map_ansi_fg([0x5a, 0xf7, 0x8e]), [0x30, 0xd1, 0x58]);
+        assert_eq!(map_ansi_fg([0x7d, 0xff, 0xa6]), [0x30, 0xd1, 0x58]);
+        assert_eq!(map_ansi_fg([0xf1, 0xf1, 0xf0]), [0xf1, 0xf1, 0xf0]);
+    }
 }

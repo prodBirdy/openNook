@@ -157,7 +157,7 @@ fn refresh_and_publish() {
     guard.primed = true;
     drop(guard);
     if changed {
-        let _ = channel().send(next);
+        let _ = channel().send_replace(next);
     }
 }
 

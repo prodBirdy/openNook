@@ -5,7 +5,9 @@
 
 pub fn request_authorization() {
     #[cfg(target_os = "macos")]
-    macos::request_authorization();
+    if macos::available() {
+        macos::request_authorization();
+    }
 }
 
 pub fn schedule_island_timer(id: u64, remaining: u32, title: &str) {
@@ -13,16 +15,20 @@ pub fn schedule_island_timer(id: u64, remaining: u32, title: &str) {
         cancel_island_timer(id);
         return;
     }
-    request_authorization();
     #[cfg(target_os = "macos")]
-    macos::schedule(id, remaining, title);
+    if macos::available() {
+        request_authorization();
+        macos::schedule(id, remaining, title);
+    }
     #[cfg(not(target_os = "macos"))]
     let _ = title;
 }
 
 pub fn cancel_island_timer(id: u64) {
     #[cfg(target_os = "macos")]
-    macos::cancel(id);
+    if macos::available() {
+        macos::cancel(id);
+    }
 }
 
 pub fn identifier(id: u64) -> String {
@@ -42,6 +48,29 @@ mod macos {
     use std::sync::atomic::{AtomicBool, Ordering};
 
     static ASKED: AtomicBool = AtomicBool::new(false);
+    static LOGGED_SKIP: AtomicBool = AtomicBool::new(false);
+
+    /// `UNUserNotificationCenter` throws `NSInternalInconsistencyException`
+    /// (`bundleProxyForCurrentProcess is nil`) from inside `dispatch_once`
+    /// when this process is not an app bundle. `@try` cannot catch that, so
+    /// `cargo run` must not touch the class at all.
+    pub fn available() -> bool {
+        let ok = unsafe {
+            use objc2::runtime::AnyObject;
+            use objc2::{class, msg_send};
+            let bundle: *mut AnyObject = msg_send![class!(NSBundle), mainBundle];
+            if bundle.is_null() {
+                false
+            } else {
+                let ident: *mut AnyObject = msg_send![bundle, bundleIdentifier];
+                !ident.is_null()
+            }
+        };
+        if !ok && !LOGGED_SKIP.swap(true, Ordering::Relaxed) {
+            log::info!("timer notifications skipped: process has no bundle identifier");
+        }
+        ok
+    }
 
     pub fn request_authorization() {
         if ASKED.swap(true, Ordering::SeqCst) {
@@ -108,5 +137,14 @@ mod tests {
     fn identifier_is_stable_per_timer() {
         assert_eq!(identifier(3), "nook.island.timer.3");
         assert_ne!(identifier(1), identifier(2));
+    }
+
+    /// `cargo test` / `cargo run` are not app bundles. Scheduling must return
+    /// instead of aborting on the UserNotifications exception.
+    #[test]
+    fn schedule_does_not_abort_without_a_bundle() {
+        schedule_island_timer(7, 30, "regression");
+        cancel_island_timer(7);
+        schedule_island_timer(7, 0, "clears");
     }
 }

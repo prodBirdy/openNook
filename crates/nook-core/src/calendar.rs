@@ -5,6 +5,9 @@ pub struct CalendarEvent {
     pub id: String,
     pub title: String,
     pub start_date: f64, // Timestamp
+    /// EventKit `endDate`, Unix seconds. Missing in older serialized events.
+    #[serde(default)]
+    pub end: Option<f64>,
     pub location: Option<String>,
     pub is_all_day: bool,
 }
@@ -257,9 +260,13 @@ mod macos {
                 title_ns.to_string()
             };
 
-            // startDate() returns Retained<NSDate>
+            // startDate() / endDate() return Retained<NSDate>
             let start_ts: f64 = {
                 let date = unsafe { event.startDate() };
+                date.timeIntervalSince1970()
+            };
+            let end_ts: f64 = {
+                let date = unsafe { event.endDate() };
                 date.timeIntervalSince1970()
             };
 
@@ -282,6 +289,7 @@ mod macos {
                 id,
                 title,
                 start_date: start_ts,
+                end: Some(end_ts),
                 location,
                 is_all_day,
             });
@@ -885,4 +893,17 @@ pub async fn open_calendar_event(_id: String, date: f64) -> Result<(), String> {
         let _ = date;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::CalendarEvent;
+
+    #[test]
+    fn calendar_event_end_defaults_when_missing() {
+        let json = r#"{"id":"1","title":"Design sync","start_date":0,"location":null,"is_all_day":false}"#;
+        let event: CalendarEvent = serde_json::from_str(json).expect("legacy event");
+        assert_eq!(event.end, None);
+        assert_eq!(event.title, "Design sync");
+    }
 }

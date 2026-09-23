@@ -122,6 +122,31 @@ pub fn hit_test_near(mouse_x: f64, mouse_y: f64) -> bool {
         && mouse_y <= b.y + b.height.max(MIN_GRAB_HEIGHT) + NEAR
 }
 
+/// How far outside the painted island (left, right, below) an inbound Finder
+/// drag already opens the tray.
+const DROP_APPROACH: f64 = 80.0;
+
+/// Whether an inbound file drag is close enough to open the tray drop zone.
+///
+/// The compact pill is only ~32pt tall and sits against the top screen edge.
+/// Requiring the cursor to land inside it means shoving the drag into the
+/// edge, which on macOS 26 triggers the Mission Control Spaces bar instead.
+/// So a drag arms from [`DROP_APPROACH`] to the sides and below the island —
+/// never above (`y0` stays), and never the whole top strip like
+/// [`hit_test_drag_capture`]: dragging along the menu bar far from the island
+/// must not open the tray. Always false without an active drag.
+pub fn hit_test_drop_approach(mouse_x: f64, mouse_y: f64) -> bool {
+    if !drag_active() {
+        return false;
+    }
+    let (x0, x1, y0, y1) = hit_region(0.0);
+    contains(
+        (x0 - DROP_APPROACH, x1 + DROP_APPROACH, y0, y1 + DROP_APPROACH),
+        mouse_x,
+        mouse_y,
+    )
+}
+
 fn rect((x0, x1, y0, y1): (f64, f64, f64, f64)) -> UiBounds {
     UiBounds {
         x: x0,
@@ -476,6 +501,30 @@ mod tests {
             "the drag capture strip must not count as hover"
         );
         assert!(hit_test_drag_capture(far_x, 20.0));
+    }
+
+    #[test]
+    fn finder_drag_arms_the_tray_before_the_top_edge() {
+        let _guard = lock();
+        update_ui_bounds(790.0, 0.0, 220.0, 38.0);
+        super::DRAG_ACTIVE.store(true, Ordering::Relaxed);
+        assert!(
+            hit_test_drop_approach(900.0, 38.0 + 60.0),
+            "60pt below the island is close enough to open the tray"
+        );
+        assert!(
+            !hit_test_drop_approach(900.0 + 400.0, 38.0 + 60.0),
+            "60pt below but far to the side is not"
+        );
+        assert!(
+            !hit_test_drop_approach(10.0, 10.0),
+            "the menu bar away from the island is not an approach"
+        );
+        super::DRAG_ACTIVE.store(false, Ordering::Relaxed);
+        assert!(
+            !hit_test_drop_approach(900.0, 38.0 + 60.0),
+            "no drag, no approach"
+        );
     }
 
     #[test]

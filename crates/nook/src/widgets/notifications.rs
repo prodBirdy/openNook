@@ -25,12 +25,12 @@ pub(crate) fn compact_left(latest: Option<&NotificationEvent>) -> AnyElement {
             return icon;
         }
     }
-    lucide_color("bell", theme::COMPACT_FACE, theme::LABEL).into_any_element()
+    lucide_color("bell", 17.0, theme::SECONDARY_LABEL).into_any_element()
 }
 
 pub(crate) fn compact_right(unread: usize, latest: Option<&NotificationEvent>) -> AnyElement {
     if unread > 0 {
-        return label(unread.to_string(), theme::BODY, true).into_any_element();
+        return label(format!("{unread} new"), theme::BODY, true).into_any_element();
     }
     if let Some(event) = latest {
         let text = if event.title.is_empty() {
@@ -101,7 +101,11 @@ pub(crate) fn notifications_card(
             .into_any_element()
     };
 
-    nook_pane("nook-notifications").w_full().child(body)
+    card_shell("nook-notifications").w_full().child(body)
+}
+
+fn card_shell(id: impl Into<gpui::ElementId>) -> gpui::Stateful<gpui::Div> {
+    nook_pane(id).p(px(16.)).gap(px(10.))
 }
 
 fn notification_row(event: &NotificationEvent, cx: &mut Context<Island>) -> impl IntoElement {
@@ -129,12 +133,11 @@ fn notification_row(event: &NotificationEvent, cx: &mut Context<Island>) -> impl
         .w_full()
         .flex()
         .flex_shrink_0()
-        .items_start()
-        .gap(px(10.))
-        .px(px(12.))
-        .py(px(10.))
-        .rounded(px(16.))
-        .bg(theme::FILL_TERTIARY)
+        .items_center()
+        .gap(px(8.))
+        .py(px(0.))
+        .rounded(px(0.))
+        .bg(theme::with_alpha(theme::ISLAND, 0.0))
         .hover(|s| s.bg(theme::FILL))
         .cursor(CursorStyle::PointingHand)
         .on_mouse_down(
@@ -149,19 +152,14 @@ fn notification_row(event: &NotificationEvent, cx: &mut Context<Island>) -> impl
         )
         .child(
             div()
-                .size(px(34.))
+                .size(px(6.))
+                .rounded_full()
                 .flex_shrink_0()
-                .mt(px(4.))
-                .rounded(px(8.))
-                .bg(theme::FILL_TERTIARY)
-                .flex()
-                .items_center()
-                .justify_center()
-                .child(
-                    app_icon(&event.bundle_id, &event.app_name, 24.).unwrap_or_else(|| {
-                        lucide_color("bell", 16.0, theme::LABEL).into_any_element()
-                    }),
-                ),
+                .bg(if event.unread {
+                    theme::accent()
+                } else {
+                    theme::TERTIARY_LABEL
+                }),
         )
         .child(
             div()
@@ -174,8 +172,17 @@ fn notification_row(event: &NotificationEvent, cx: &mut Context<Island>) -> impl
                         .flex()
                         .items_center()
                         .gap(px(8.))
-                        .child(label(title, theme::BODY, true).flex_1().min_w(px(0.)))
-                        .child(label(age, theme::SUBHEADLINE, false).flex_shrink_0()),
+                        .child(
+                            label(title, theme::CALLOUT, false)
+                                .flex_1()
+                                .min_w(px(0.))
+                                .text_color(theme::LABEL),
+                        )
+                        .child(
+                            label(age, theme::FOOTNOTE, false)
+                                .flex_shrink_0()
+                                .text_color(theme::TERTIARY_LABEL),
+                        ),
                 )
                 .when(!event.app_name.is_empty() && !title_from_app, |d| {
                     d.child(label(event.app_name.clone(), theme::SUBHEADLINE, false))
@@ -183,9 +190,9 @@ fn notification_row(event: &NotificationEvent, cx: &mut Context<Island>) -> impl
                 .when(!detail.is_empty(), |d| {
                     d.child(
                         div()
-                            .text_color(theme::TEXT)
-                            .text_size(px(theme::CALLOUT.size))
-                            .line_height(px(theme::CALLOUT.leading))
+                            .text_color(theme::TERTIARY_LABEL)
+                            .text_size(px(theme::FOOTNOTE.size))
+                            .line_height(px(theme::FOOTNOTE.leading))
                             .line_clamp(2)
                             .child(SharedString::from(detail)),
                     )

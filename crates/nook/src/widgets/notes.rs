@@ -1,20 +1,52 @@
 //! Scratchpad notes Nook pane.
 //!
-//! Preview renders the note as markdown (pulldown-cmark mapped to styled
-//! divs); the pencil toggle swaps in [`NotesEditor`] for raw-markdown editing.
-//! Inline styles flow at span granularity, so a paragraph with mixed bold /
-//! italic runs wraps between spans rather than mid-span.
+//! Preview shows compact list rows (Pencil mockup); the pencil toggle swaps
+//! in [`NotesEditor`] for raw-markdown editing. Inline styles flow at span
+//! granularity in the editor path.
 
+use crate::icons::lucide_color;
 use crate::island::ui::{label, nook_empty, nook_icon_btn, nook_pane, scroll_body};
 use crate::island::Island;
 use crate::theme;
 use gpui::{
-    div, prelude::*, px, relative, Context, CursorStyle, FontWeight, MouseButton, MouseDownEvent,
+    div, prelude::*, px, relative, AnyElement, Context, CursorStyle, FontWeight, MouseButton,
+    MouseDownEvent,
 };
 use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 
 const BODY_SIZE: f32 = theme::BODY.size;
 const MONO_FAMILY: &str = "SF Mono";
+
+/// Compact leading: notebook-pen glyph in a 22pt box.
+#[allow(dead_code)]
+pub(crate) fn compact_left() -> AnyElement {
+    div()
+        .size(px(22.))
+        .flex_shrink_0()
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(lucide_color("notebook-pen", 17.0, theme::secondary_label()))
+        .into_any_element()
+}
+
+/// Compact trailing: "N lists" from blank-line / heading sections.
+#[allow(dead_code)]
+pub(crate) fn compact_right(notes: &str) -> AnyElement {
+    let n = note_sections(notes)
+        .len()
+        .max(if notes.trim().is_empty() { 0 } else { 1 });
+    let text = if n == 0 {
+        "Empty".into()
+    } else if n == 1 {
+        "1 list".into()
+    } else {
+        format!("{n} lists")
+    };
+    label(text, theme::BODY, true)
+        .text_color(theme::secondary_label())
+        .into_any_element()
+}
 
 pub(crate) fn notes_card(island: &mut Island, cx: &mut Context<Island>) -> impl IntoElement {
     let editing = island.notes_editing;
@@ -53,26 +85,34 @@ pub(crate) fn notes_card(island: &mut Island, cx: &mut Context<Island>) -> impl 
             (*f.borrow()).filter(|(_, at)| at.elapsed() < std::time::Duration::from_secs(2))
         })
     };
+    // Mockup has no chrome on the list face: the edit toggle only shows on
+    // hover (tapping the list also opens the editor) and stays while editing.
     nook_pane("nook-notes")
+        .group("nook-notes")
         .relative()
         .w_full()
+        .p(px(16.))
+        .gap(px(10.))
         .child(scroll_body("notes-scroll", body))
         .child(
             div()
                 .absolute()
-                .top(px(0.))
-                .right(px(0.))
+                .top(px(8.))
+                .right(px(8.))
                 .size(px(theme::HIT_MIN))
                 .rounded_full()
                 .bg(theme::FILL_TERTIARY)
                 .flex()
                 .items_center()
                 .justify_center()
+                .when(!editing, |d| {
+                    d.opacity(0.0).group_hover("nook-notes", |s| s.opacity(1.0))
+                })
                 .child(toggle),
         )
         .when_some(flash, |d, (ok, _)| {
             d.child(
-                div().absolute().bottom(px(0.)).left(px(0.)).child(
+                div().absolute().bottom(px(8.)).left(px(16.)).child(
                     label(
                         if ok { "Saved" } else { "Couldn't save" },
                         theme::FOOTNOTE,
@@ -89,6 +129,7 @@ pub(crate) fn notes_card(island: &mut Island, cx: &mut Context<Island>) -> impl 
 }
 
 fn preview_body(empty: bool, notes: String, cx: &mut Context<Island>) -> impl IntoElement {
+    let sections = note_sections(&notes);
     div()
         .id("notes-body")
         .flex_1()
@@ -96,6 +137,8 @@ fn preview_body(empty: bool, notes: String, cx: &mut Context<Island>) -> impl In
         .w_full()
         .flex()
         .flex_col()
+        .gap(px(8.))
+        .justify_center()
         .cursor(CursorStyle::PointingHand)
         .on_mouse_down(
             MouseButton::Left,
@@ -107,7 +150,110 @@ fn preview_body(empty: bool, notes: String, cx: &mut Context<Island>) -> impl In
         .when(empty, |d| {
             d.child(nook_empty("notebook", "Tap to add a note"))
         })
-        .when(!empty, |d| d.child(markdown_preview(&notes)))
+        .when(!empty, |d| {
+            let mut col = d;
+            if sections.is_empty() {
+                col = col.child(markdown_preview(&notes));
+            } else {
+                for (title, subtitle) in sections.into_iter().take(3) {
+                    col = col.child(note_row(title, subtitle));
+                }
+            }
+            col
+        })
+}
+
+fn note_row(title: String, subtitle: Option<String>) -> impl IntoElement {
+    div()
+        .w_full()
+        .flex_shrink_0()
+        .flex()
+        .items_center()
+        .gap(px(8.))
+        .child(
+            div()
+                .size(px(6.))
+                .rounded_full()
+                .flex_shrink_0()
+                .bg(theme::tertiary_label()),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w(px(0.))
+                .flex()
+                .flex_col()
+                .gap(px(1.))
+                .overflow_hidden()
+                .child(
+                    label(title, theme::CALLOUT, false)
+                        .text_color(theme::LABEL)
+                        .overflow_hidden()
+                        .text_ellipsis(),
+                )
+                .when_some(subtitle, |d, sub| {
+                    d.child(
+                        label(sub, theme::FOOTNOTE, false)
+                            .text_color(theme::tertiary_label())
+                            .overflow_hidden()
+                            .text_ellipsis(),
+                    )
+                }),
+        )
+}
+
+/// Split scratchpad text into (title, optional subtitle) rows for the list face.
+fn note_sections(src: &str) -> Vec<(String, Option<String>)> {
+    let trimmed = src.trim();
+    if trimmed.is_empty() {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for block in trimmed.split("\n\n") {
+        let block = block.trim();
+        if block.is_empty() {
+            continue;
+        }
+        let mut lines = block.lines().map(str::trim).filter(|l| !l.is_empty());
+        let Some(first) = lines.next() else {
+            continue;
+        };
+        let title = first
+            .trim_start_matches('#')
+            .trim_start_matches(['*', '-', ' '])
+            .trim()
+            .to_string();
+        if title.is_empty() {
+            continue;
+        }
+        let subtitle = lines
+            .next()
+            .map(|l| {
+                l.trim_start_matches(['*', '-', ' '])
+                    .trim()
+                    .chars()
+                    .take(40)
+                    .collect::<String>()
+            })
+            .filter(|s| !s.is_empty());
+        out.push((title, subtitle));
+    }
+    if out.is_empty() {
+        // Single-paragraph note: first line title, rest subtitle.
+        let mut lines = trimmed.lines().map(str::trim).filter(|l| !l.is_empty());
+        if let Some(first) = lines.next() {
+            let title = first
+                .trim_start_matches('#')
+                .trim_start_matches(['*', '-', ' '])
+                .trim()
+                .to_string();
+            let subtitle = lines.next().map(|l| l.chars().take(40).collect::<String>());
+            if !title.is_empty() {
+                out.push((title, subtitle));
+            }
+        }
+    }
+    out
 }
 
 /// One inline run with its active style flags.
@@ -389,5 +535,14 @@ mod tests {
             &mut heading,
         );
         assert_eq!(heading, "Heading");
+    }
+
+    #[test]
+    fn note_sections_split_on_blank_lines() {
+        let rows = note_sections("Ship notes\nradius audit\n\nGroceries\noat, rye");
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].0, "Ship notes");
+        assert_eq!(rows[0].1.as_deref(), Some("radius audit"));
+        assert_eq!(rows[1].0, "Groceries");
     }
 }

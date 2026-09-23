@@ -4,6 +4,11 @@
 //! (30 min). Callers must not poll faster than that — [`fetch`] returns the
 //! cached snapshot when it is still fresh, and network failures back off
 //! exponentially up to the same cap.
+//!
+//! The location is always the Mac's current one (CoreLocation via
+//! [`crate::location`]), re-checked at most every [`LOCATION_REFRESH`]. A fix
+//! only replaces the stored coords when it moved more than
+//! [`LOCATION_MOVE_KM`], so a jittery fix does not refetch the forecast.
 
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -18,6 +23,13 @@ const HOURLY_POINTS: usize = 8;
 const USER_AGENT: &str = "openNook (https://github.com/prodBirdy/openNook)";
 const FORECAST_URL: &str = "https://api.open-meteo.com/v1/forecast";
 const GEOCODE_URL: &str = "https://geocoding-api.open-meteo.com/v1/search";
+
+/// Shortest gap between two CoreLocation requests.
+pub const LOCATION_REFRESH: Duration = Duration::from_secs(15 * 60);
+/// A new fix closer than this to the stored one keeps the stored coords.
+pub const LOCATION_MOVE_KM: f64 = 1.0;
+/// Card / Settings label when the fix has no reverse-geocoded city yet.
+pub const CURRENT_LOCATION: &str = "Current location";
 
 /// CC-BY 4.0 attribution required by Open-Meteo's free tier.
 pub const ATTRIBUTION: &str = "Weather data by Open-Meteo.com";
@@ -50,6 +62,9 @@ impl WeatherUnits {
     }
 }
 
+/// Where the forecast is for. `Manual` only survives as a stored format from
+/// older builds: [`WeatherSettings`] turns it into `System` on load, keeping
+/// its coords until the first real fix replaces them.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "mode", rename_all = "snake_case")]
 pub enum WeatherLocationMode {
@@ -59,7 +74,7 @@ pub enum WeatherLocationMode {
 
 impl Default for WeatherLocationMode {
     fn default() -> Self {
-        Self::Manual {
+        Self::System {
             name: String::new(),
             lat: 0.0,
             lon: 0.0,
@@ -68,6 +83,25 @@ impl Default for WeatherLocationMode {
 }
 
 impl WeatherLocationMode {
+    /// Always the current location; a stored manual city becomes its seed.
+    pub fn into_system(self) -> Self {
+        match self {
+            Self::Manual { name, lat, lon } | Self::System { name, lat, lon } => {
+                Self::System { name, lat, lon }
+            }
+        }
+    }
+
+    /// City for display, or [`CURRENT_LOCATION`] when the fix has no name.
+    pub fn display_name(&self) -> &str {
+        let name = self.name();
+        if name.trim().is_empty() {
+            CURRENT_LOCATION
+        } else {
+            name
+        }
+    }
+
     pub fn is_system(&self) -> bool {
         matches!(self, Self::System { .. })
     }
@@ -96,10 +130,17 @@ pub struct WeatherSettings {
     pub enabled: bool,
     #[serde(default)]
     pub units: WeatherUnits,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "system_location")]
     pub location: WeatherLocationMode,
     #[serde(default = "default_true")]
     pub show_on_compact_face: bool,
+}
+
+fn system_location<'de, D>(deserializer: D) -> Result<WeatherLocationMode, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    WeatherLocationMode::deserialize(deserializer).map(WeatherLocationMode::into_system)
 }
 
 impl Default for WeatherSettings {
@@ -134,6 +175,10 @@ pub struct WeatherSnapshot {
     pub low: Option<f64>,
     pub precip_probability: Option<u8>,
     pub wind_speed: Option<f64>,
+    /// Relative humidity % from Open-Meteo `current.relative_humidity_2m`.
+    pub humidity: Option<u8>,
+    /// UV index (rounded) from `current.uv_index` or daily `uv_index_max`.
+    pub uv_index: Option<u8>,
     pub hourly: Vec<HourlyForecast>,
     pub fetched_at: Instant,
 }
@@ -189,6 +234,8 @@ pub struct ParsedForecast {
     pub low: Option<f64>,
     pub precip_probability: Option<u8>,
     pub wind_speed: Option<f64>,
+    pub humidity: Option<u8>,
+    pub uv_index: Option<u8>,
     pub hourly: Vec<HourlyForecast>,
 }
 
@@ -207,6 +254,10 @@ struct CurrentBlock {
     weather_code: Option<u8>,
     wind_speed_10m: Option<f64>,
     is_day: Option<u8>,
+    #[serde(default)]
+    relative_humidity_2m: Option<f64>,
+    #[serde(default)]
+    uv_index: Option<f64>,
 }
 
 #[derive(Deserialize)]
@@ -214,6 +265,8 @@ struct DailyBlock {
     temperature_2m_max: Option<Vec<Option<f64>>>,
     temperature_2m_min: Option<Vec<Option<f64>>>,
     precipitation_probability_max: Option<Vec<Option<i32>>>,
+    #[serde(default)]
+    uv_index_max: Option<Vec<Option<f64>>>,
 }
 
 #[derive(Deserialize)]
@@ -360,14 +413,22 @@ pub fn parse_forecast(json: &str) -> Result<ParsedForecast, String> {
     let wmo_code = current.weather_code.unwrap_or(0);
     let is_day = current.is_day.unwrap_or(1) != 0;
     let wind_speed = current.wind_speed_10m;
-    let (high, low, precip_probability) = match parsed.daily {
+    let humidity = current
+        .relative_humidity_2m
+        .map(|h| h.round().clamp(0.0, 100.0) as u8);
+    let (high, low, precip_probability, daily_uv) = match parsed.daily {
         Some(daily) => (
             first_opt_f64(daily.temperature_2m_max.as_deref()),
             first_opt_f64(daily.temperature_2m_min.as_deref()),
             first_opt_u8(daily.precipitation_probability_max.as_deref()),
+            first_opt_f64(daily.uv_index_max.as_deref()),
         ),
-        None => (None, None, None),
+        None => (None, None, None, None),
     };
+    let uv_index = current
+        .uv_index
+        .or(daily_uv)
+        .map(|u| u.round().clamp(0.0, 20.0) as u8);
     let hourly = parsed
         .hourly
         .map(|block| take_hourly(&block, current.time.as_deref(), HOURLY_POINTS))
@@ -381,6 +442,8 @@ pub fn parse_forecast(json: &str) -> Result<ParsedForecast, String> {
         low,
         precip_probability,
         wind_speed,
+        humidity,
+        uv_index,
         hourly,
     })
 }
@@ -503,13 +566,143 @@ fn note_failure() {
     }
 }
 
+#[derive(Default)]
+struct LocationState {
+    last_request: Option<Instant>,
+    inflight: bool,
+    /// A real fix landed this run; until then the stored (maybe migrated
+    /// manual) coords are only a seed and the first fix always replaces them.
+    has_fix: bool,
+    error: Option<String>,
+}
+
+fn location_state() -> &'static Mutex<LocationState> {
+    static STATE: OnceLock<Mutex<LocationState>> = OnceLock::new();
+    STATE.get_or_init(|| Mutex::new(LocationState::default()))
+}
+
+/// Pure throttle: a new request is due on first run or after [`LOCATION_REFRESH`].
+pub fn location_request_due(last_request: Option<Instant>, now: Instant) -> bool {
+    last_request.is_none_or(|at| now.duration_since(at) >= LOCATION_REFRESH)
+}
+
+/// Great-circle distance in km (haversine; plenty for a 1 km threshold).
+pub fn distance_km((lat1, lon1): (f64, f64), (lat2, lon2): (f64, f64)) -> f64 {
+    const EARTH_KM: f64 = 6371.0;
+    let (p1, p2) = (lat1.to_radians(), lat2.to_radians());
+    let dp = (lat2 - lat1).to_radians();
+    let dl = (lon2 - lon1).to_radians();
+    let a = (dp / 2.0).sin().powi(2) + p1.cos() * p2.cos() * (dl / 2.0).sin().powi(2);
+    2.0 * EARTH_KM * a.sqrt().min(1.0).asin()
+}
+
+/// Pure: whether `fix` should replace the stored coords. The first fix of a
+/// run always does (the stored value may be a migrated manual city).
+pub fn location_moved(stored: Option<(f64, f64)>, fix: (f64, f64), first_fix: bool) -> bool {
+    match stored {
+        _ if first_fix => true,
+        None => true,
+        Some(stored) => distance_km(stored, fix) > LOCATION_MOVE_KM,
+    }
+}
+
+/// Claim the next CoreLocation request. False while one is in flight or the
+/// last one is younger than [`LOCATION_REFRESH`]; true stamps the attempt, and
+/// the caller must hand the result to [`finish_location_request`].
+pub fn begin_location_request() -> bool {
+    let Ok(mut state) = location_state().lock() else {
+        return false;
+    };
+    let now = Instant::now();
+    if state.inflight || !location_request_due(state.last_request, now) {
+        return false;
+    }
+    state.inflight = true;
+    state.last_request = Some(now);
+    true
+}
+
+/// Record a location result. On a fix that moved (or the first fix), stores
+/// it as the weather location, drops the forecast cache, and returns the
+/// coords so the caller can reverse-geocode them and refetch.
+pub fn finish_location_request(result: Result<(f64, f64), String>) -> Option<(f64, f64)> {
+    let Ok(mut state) = location_state().lock() else {
+        return None;
+    };
+    state.inflight = false;
+    let fix = match result {
+        Ok(fix) => fix,
+        Err(err) => {
+            state.error = Some(err);
+            return None;
+        }
+    };
+    state.error = None;
+    let first_fix = !state.has_fix;
+    state.has_fix = true;
+    drop(state);
+    let stored = crate::settings::get_app_settings().weather.location.coords();
+    if !location_moved(stored, fix, first_fix) {
+        return None;
+    }
+    let (lat, lon) = fix;
+    crate::settings::tweak_app_settings(|s| {
+        // A reverse-geocoded name follows; keep the old one only when we
+        // barely moved (first fix over a nearby migrated city).
+        let keep = stored.is_some_and(|old| distance_km(old, fix) <= LOCATION_MOVE_KM);
+        let name = if keep {
+            s.weather.location.name().to_string()
+        } else {
+            String::new()
+        };
+        s.weather.location = WeatherLocationMode::System { name, lat, lon };
+    });
+    invalidate();
+    Some(fix)
+}
+
+/// Store the reverse-geocoded city for `fix`, if the location has not moved on.
+pub fn set_location_name(fix: (f64, f64), name: String) {
+    let name = name.trim().to_string();
+    if name.is_empty() {
+        return;
+    }
+    crate::settings::tweak_app_settings(|s| {
+        if s.weather.location.coords() == Some(fix) {
+            s.weather.location = WeatherLocationMode::System {
+                name: name.clone(),
+                lat: fix.0,
+                lon: fix.1,
+            };
+        }
+    });
+    if let Ok(mut guard) = cache().lock() {
+        if let Some(snap) = guard.snapshot.as_mut() {
+            if snap.latitude == fix.0 && snap.longitude == fix.1 {
+                snap.location_name = name;
+            }
+        }
+    }
+}
+
+/// Last location failure (denied, no fix, …) for the Settings hint, if the
+/// most recent request failed.
+pub fn location_error() -> Option<String> {
+    location_state().lock().ok().and_then(|s| s.error.clone())
+}
+
+/// Whether a real fix has landed since launch.
+pub fn has_location_fix() -> bool {
+    location_state().lock().is_ok_and(|s| s.has_fix)
+}
+
 /// TTL-gated fetch. Returns the cached snapshot when it is still fresh for
 /// this location and unit system. Concurrent callers share one in-flight GET.
 pub async fn fetch(settings: &WeatherSettings) -> Result<WeatherSnapshot, String> {
     let (lat, lon) = settings
         .location
         .coords()
-        .ok_or_else(|| "Set a city in Settings".to_string())?;
+        .ok_or_else(|| "Waiting for your location".to_string())?;
     if let Some(snap) = fresh_snapshot(settings) {
         return Ok(snap);
     }
@@ -555,8 +748,8 @@ async fn fetch_uncached(
     let client = client()?;
     let url = format!(
         "{FORECAST_URL}?latitude={lat:.4}&longitude={lon:.4}\
-         &current=temperature_2m,apparent_temperature,weather_code,wind_speed_10m,is_day\
-         &daily=temperature_2m_max,temperature_2m_min,weather_code,precipitation_probability_max\
+         &current=temperature_2m,apparent_temperature,weather_code,wind_speed_10m,is_day,relative_humidity_2m,uv_index\
+         &daily=temperature_2m_max,temperature_2m_min,weather_code,precipitation_probability_max,uv_index_max\
          &hourly=temperature_2m,weather_code\
          &forecast_days=5&temperature_unit={}",
         settings.units.query_value()
@@ -573,7 +766,7 @@ async fn fetch_uncached(
         .map_err(|err| format!("weather: {err}"))?;
     let parsed = parse_forecast(&body)?;
     Ok(WeatherSnapshot {
-        location_name: settings.location.name().to_string(),
+        location_name: settings.location.display_name().to_string(),
         latitude: lat,
         longitude: lon,
         units: settings.units,
@@ -585,6 +778,8 @@ async fn fetch_uncached(
         low: parsed.low,
         precip_probability: parsed.precip_probability,
         wind_speed: parsed.wind_speed,
+        humidity: parsed.humidity,
+        uv_index: parsed.uv_index,
         hourly: parsed.hourly,
         fetched_at: Instant::now(),
     })
@@ -663,14 +858,17 @@ mod tests {
             "apparent_temperature": 17.1,
             "weather_code": 2,
             "wind_speed_10m": 8.2,
-            "is_day": 1
+            "is_day": 1,
+            "relative_humidity_2m": 64.0,
+            "uv_index": 3.2
         },
         "daily": {
             "time": ["2026-08-28"],
             "temperature_2m_max": [22.0],
             "temperature_2m_min": [11.5],
             "weather_code": [2],
-            "precipitation_probability_max": [20]
+            "precipitation_probability_max": [20],
+            "uv_index_max": [5.0]
         },
         "hourly": {
             "time": [
@@ -718,11 +916,47 @@ mod tests {
         assert_eq!(parsed.low, Some(11.5));
         assert_eq!(parsed.precip_probability, Some(20));
         assert_eq!(parsed.wind_speed, Some(8.2));
+        assert_eq!(parsed.humidity, Some(64));
+        assert_eq!(parsed.uv_index, Some(3));
         assert_eq!(parsed.hourly.len(), 3);
         assert_eq!(parsed.hourly[0].hour, "14");
         assert!((parsed.hourly[0].temperature - 18.4).abs() < f64::EPSILON);
         assert_eq!(parsed.hourly[0].wmo_code, 2);
         assert_eq!(parsed.hourly[2].hour, "16");
+    }
+
+    #[test]
+    fn parse_forecast_humidity_and_uv_default_when_absent() {
+        let json = r#"{
+            "current": {
+                "time": "2026-08-28T14:00",
+                "temperature_2m": 18.0,
+                "weather_code": 0,
+                "is_day": 1
+            }
+        }"#;
+        let parsed = parse_forecast(json).unwrap();
+        assert_eq!(parsed.humidity, None);
+        assert_eq!(parsed.uv_index, None);
+    }
+
+    #[test]
+    fn parse_forecast_falls_back_to_daily_uv_max() {
+        let json = r#"{
+            "current": {
+                "time": "2026-08-28T14:00",
+                "temperature_2m": 18.0,
+                "weather_code": 0,
+                "is_day": 1,
+                "relative_humidity_2m": 55
+            },
+            "daily": {
+                "uv_index_max": [8.6]
+            }
+        }"#;
+        let parsed = parse_forecast(json).unwrap();
+        assert_eq!(parsed.humidity, Some(55));
+        assert_eq!(parsed.uv_index, Some(9));
     }
 
     #[test]
@@ -772,13 +1006,50 @@ mod tests {
     }
 
     #[test]
-    fn empty_manual_location_has_no_coords() {
+    fn default_location_is_system_without_coords() {
         let settings = WeatherSettings::default();
         assert!(!settings.enabled);
         assert!(settings.show_on_compact_face);
         assert_eq!(settings.units, WeatherUnits::Celsius);
         assert!(settings.location.coords().is_none());
-        assert!(!settings.location.is_system());
+        assert!(settings.location.is_system());
+        assert_eq!(settings.location.display_name(), CURRENT_LOCATION);
+    }
+
+    #[test]
+    fn stored_manual_city_migrates_to_system_keeping_its_coords() {
+        let json = r#"{"enabled":true,"units":"celsius","location":{"mode":"manual","name":"Oslo","lat":59.91,"lon":10.75}}"#;
+        let parsed: WeatherSettings = serde_json::from_str(json).unwrap();
+        assert!(parsed.location.is_system());
+        assert_eq!(parsed.location.coords(), Some((59.91, 10.75)));
+        assert_eq!(parsed.location.display_name(), "Oslo");
+        let missing: WeatherSettings = serde_json::from_str(r#"{"enabled":true}"#).unwrap();
+        assert!(missing.location.is_system());
+    }
+
+    #[test]
+    fn location_requests_are_throttled_to_the_refresh_window() {
+        let now = Instant::now() + LOCATION_REFRESH * 2;
+        assert!(location_request_due(None, now), "first run always asks");
+        assert!(!location_request_due(Some(now - LOCATION_REFRESH / 2), now));
+        assert!(location_request_due(Some(now - LOCATION_REFRESH), now));
+    }
+
+    #[test]
+    fn small_moves_keep_the_stored_location() {
+        let oslo = (59.9139, 10.7522);
+        // ~0.5 km north, ~50 km away.
+        let near = (oslo.0 + 0.0045, oslo.1);
+        let far = (oslo.0 + 0.45, oslo.1);
+        assert!(distance_km(oslo, near) < LOCATION_MOVE_KM);
+        assert!(distance_km(oslo, far) > 40.0);
+        assert!(!location_moved(Some(oslo), near, false));
+        assert!(location_moved(Some(oslo), far, false));
+        assert!(location_moved(None, near, false), "no stored coords takes any fix");
+        assert!(
+            location_moved(Some(oslo), near, true),
+            "the first fix replaces a migrated manual city"
+        );
     }
 
     #[test]
@@ -786,7 +1057,7 @@ mod tests {
         let settings = WeatherSettings {
             enabled: true,
             units: WeatherUnits::Fahrenheit,
-            location: WeatherLocationMode::Manual {
+            location: WeatherLocationMode::System {
                 name: "Oslo".into(),
                 lat: 59.91,
                 lon: 10.75,

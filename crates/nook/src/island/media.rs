@@ -8,9 +8,9 @@ use super::{Island, QUEUE_PANEL_W, QUEUE_ROW_H};
 use crate::icons::lucide_color;
 use crate::theme;
 use gpui::{
-    canvas, div, img, linear_color_stop, linear_gradient, prelude::*, px, relative, rgba,
-    AnyElement, Context, CursorStyle, FontWeight, Image, MouseButton, MouseDownEvent, Rgba,
-    SharedString,
+    canvas, div, img, linear_color_stop, linear_gradient, point, prelude::*, px, relative,
+    AnyElement, BoxShadow, Context, CursorStyle, FontWeight, Image, MouseButton, MouseDownEvent,
+    Rgba, SharedString,
 };
 use nook_core::models::{NowPlayingData, PlaybackQueue, QueueItem};
 use std::sync::{Mutex, OnceLock};
@@ -18,22 +18,34 @@ use std::sync::{Mutex, OnceLock};
 const MAX_ARTWORK_BYTES: usize = 5 * 1024 * 1024;
 const MAX_ARTWORK_DIMENSION: u32 = 4096;
 
-const COMPACT_ART: f32 = 24.0;
-const COMPACT_ART_RADIUS: f32 = 5.0;
+/// Compact album art — mockup 22×22, radius 6, 1px white 12% border.
+const COMPACT_ART: f32 = 22.0;
+const COMPACT_ART_RADIUS: f32 = 6.0;
+const COMPACT_ART_BORDER: Rgba = Rgba {
+    r: 1.0,
+    g: 1.0,
+    b: 1.0,
+    a: 0.12,
+};
 const ART: f32 = MEDIA_ART;
 const ART_RADIUS: f32 = MEDIA_ART_RADIUS;
 const PLAY: f32 = MEDIA_PLAY;
 const SKIP_GAP: f32 = 36.0;
 /// Room for ~15 title glyphs at Title 2, beside the artwork.
 const TITLE_COL: f32 = 120.0;
-const VIS_BAR_W: f32 = 2.5;
+/// Compact waveform: 5 bars × 2pt, gap 2, max height 14 (`#FF7A4D`).
+const VIS_BAR_W: f32 = 2.0;
 const VIS_BAR_GAP: f32 = 2.0;
-const VIS_H: f32 = 12.0;
-const VIS_REST: [f32; 6] = [0.35, 0.60, 0.45, 0.80, 0.55, 0.30];
+const VIS_H: f32 = 14.0;
+const VIS_BARS: usize = 5;
+/// Shortest a playing bar may shrink to.
+const VIS_MIN_H: f32 = 2.0;
+/// Resting heights as fractions of [`VIS_H`] (7 / 12 / 9 / 14 / 8).
+const VIS_REST: [f32; 5] = [0.5, 12.0 / 14.0, 9.0 / 14.0, 1.0, 8.0 / 14.0];
 const VIS_DEFAULT: Rgba = Rgba {
-    r: 0.882,
-    g: 0.882,
-    b: 0.882,
+    r: 1.0,
+    g: 122.0 / 255.0,
+    b: 77.0 / 255.0,
     a: 1.0,
 };
 const ART_PLACEHOLDER: (Rgba, Rgba) = (
@@ -89,7 +101,7 @@ pub(super) fn album_chip(
         .artwork_base64
         .as_deref()
         .and_then(|b64| artwork_element(b64, COMPACT_ART, COMPACT_ART_RADIUS));
-    let overlay_icon = if playing { "pause-fill" } else { "play-fill" };
+    let overlay_icon = if playing { "media-pause" } else { "media-play" };
 
     div()
         .id("album-hit")
@@ -116,8 +128,17 @@ pub(super) fn album_chip(
                 .size(px(COMPACT_ART))
                 .rounded(px(COMPACT_ART_RADIUS))
                 .overflow_hidden()
-                .shadow_sm()
                 .child(art.unwrap_or_else(placeholder_art))
+                // The ring sits above the artwork: a border on this box is
+                // painted before its children, so the image covered it.
+                .child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .rounded(px(COMPACT_ART_RADIUS))
+                        .border_1()
+                        .border_color(COMPACT_ART_BORDER),
+                )
                 .child(
                     div()
                         .absolute()
@@ -128,8 +149,7 @@ pub(super) fn album_chip(
                         .items_center()
                         .justify_center()
                         .opacity(overlay_alpha.clamp(0.0, 1.0))
-                        .when(!playing, |d| d.pl(px(1.)))
-                        .child(lucide_color(overlay_icon, 14.0, theme::LABEL)),
+                        .child(lucide_color(overlay_icon, 12.0, theme::LABEL)),
                 ),
         )
 }
@@ -244,6 +264,8 @@ fn gpui_format(bytes: &[u8]) -> gpui::ImageFormat {
 }
 
 pub(super) fn visualizer(playing: bool, color: Option<Rgba>) -> impl IntoElement {
+    // Gallery mockup locks the waveform to coral; live art tint still wins
+    // when the island has extracted one.
     let color = color.unwrap_or(VIS_DEFAULT);
     let still = reduce_motion() || !playing;
     // Clock-driven bars at ~15 fps via request_animation_frame — only while
@@ -251,31 +273,33 @@ pub(super) fn visualizer(playing: bool, color: Option<Rgba>) -> impl IntoElement
     canvas(
         move |_, _, _| (),
         move |bounds, _, window, _cx| {
-            let levels: [f64; 6] = if still {
+            let levels: [f64; VIS_BARS] = if still {
                 VIS_REST.map(|r| r as f64)
             } else {
                 // Quantize to 15 Hz so bar heights hold between paints.
+                // Core still samples 6 bands; take the first five for the face.
                 let t = (vis_clock() * 15.0).floor() / 15.0;
-                nook_core::audio::visualizer_levels_at(t)
+                let raw = nook_core::audio::visualizer_levels_at(t);
+                [raw[0], raw[1], raw[2], raw[3], raw[4]]
             };
             let bar_w = px(VIS_BAR_W);
             let gap = px(VIS_BAR_GAP);
-            let total_w = VIS_BAR_W * 6.0 + VIS_BAR_GAP * 5.0;
+            let total_w = VIS_BAR_W * VIS_BARS as f32 + VIS_BAR_GAP * (VIS_BARS as f32 - 1.0);
             let mut x =
                 bounds.origin.x + px(((f32::from(bounds.size.width) - total_w) * 0.5).max(0.0));
-            let bottom = bounds.origin.y + bounds.size.height;
-            let mut fill: gpui::Hsla = color.into();
-            if still {
-                fill.a *= 0.55;
-            }
+            // Mockup row is `align-items: center`: bars grow and shrink
+            // symmetrically about the row's middle, not up from the bottom.
+            let mid = bounds.origin.y + bounds.size.height * 0.5;
+            // Paused shows the resting 7/12/9/14/8 at full colour, as drawn.
+            let fill: gpui::Hsla = color.into();
             for (i, level) in levels.iter().enumerate() {
                 let scale = visualizer_scale(*level, !still, i);
                 let h = px(VIS_H * scale);
                 let bar = gpui::Bounds {
-                    origin: gpui::point(x, bottom - h),
+                    origin: gpui::point(x, mid - h * 0.5),
                     size: gpui::size(bar_w, h),
                 };
-                window.paint_quad(gpui::fill(bar, fill).corner_radii(bar_w / 2.0));
+                window.paint_quad(gpui::fill(bar, fill).corner_radii(px(1.0)));
                 x = x + bar_w + gap;
             }
             if !still {
@@ -284,7 +308,9 @@ pub(super) fn visualizer(playing: bool, color: Option<Rgba>) -> impl IntoElement
         },
     )
     .h(px(VIS_H))
-    .w(px(VIS_BAR_W * 6.0 + VIS_BAR_GAP * 5.0 + 4.0))
+    .w(px(
+        VIS_BAR_W * VIS_BARS as f32 + VIS_BAR_GAP * (VIS_BARS as f32 - 1.0)
+    ))
 }
 
 fn vis_clock() -> f64 {
@@ -298,26 +324,47 @@ fn vis_clock() -> f64 {
 fn visualizer_scale(level: f64, playing: bool, index: usize) -> f32 {
     let resting = VIS_REST[index];
     if playing {
-        (level as f32).clamp(resting * 0.5, 1.0)
+        (level as f32).clamp((resting * 0.5).max(VIS_MIN_H / VIS_H), 1.0)
     } else {
         resting
     }
 }
 
+/// Gallery artwork 52×52 (the Now Playing row is 52 tall).
 const NOOK_ART: f32 = 52.0;
-pub(crate) const NOOK_ART_RADIUS: f32 = 12.0;
+/// Mockup artwork radius 13.
+pub(crate) const NOOK_ART_RADIUS: f32 = 13.0;
 const APP_BADGE: f32 = 22.0;
 const APP_BADGE_RADIUS: f32 = 5.0;
 const NOOK_PLAY_HIT: f32 = 40.0;
 const NOOK_SKIP_HIT: f32 = 32.0;
-const NOOK_PLAY_GLYPH: f32 = 30.0;
-const NOOK_SKIP_GLYPH: f32 = 22.0;
+const NOOK_PLAY_GLYPH: f32 = 26.0;
+const NOOK_SKIP_GLYPH: f32 = 19.0;
+/// Expanded track title: mockup 16/20 semibold (between TITLE_3 and TITLE_2).
+const MEDIA_TITLE: crate::theme::Text = crate::theme::Text {
+    size: 16.0,
+    leading: 20.0,
+    weight: FontWeight::NORMAL,
+    emphasized: FontWeight::SEMIBOLD,
+};
 #[allow(dead_code)]
 const NOOK_PROGRESS_H: f32 = 6.0;
+/// Gallery pane pad `8 12`. Vertical is 7 here: the rows (52 + 22 + 40)
+/// need 114 of the 128pt body, which the mockup's 8 overshoots by 2.
+const NOOK_PAD_X: f32 = 12.0;
+const NOOK_PAD_Y: f32 = 7.0;
+/// Artwork ring `#FFFFFF1A` (shadow `0 3 10 #00000066` is inline below).
+const NOOK_ART_RING: Rgba = Rgba {
+    r: 1.0,
+    g: 1.0,
+    b: 1.0,
+    a: 0.10,
+};
 
 /// Expanded Now Playing: artwork + title row, flanked scrubber, filled
-/// transport. With no track loaded the same chrome stays up — empty art,
-/// blank labels, zeroed scrubber — instead of a separate empty state.
+/// transport. With no track loaded the same chrome stays up — "Not
+/// Playing", the last player's name, zeroed scrubber, dimmed controls —
+/// instead of a separate empty state.
 /// Lyrics sit beside the player when enabled.
 pub(crate) fn nook_media_pane(island: &Island, cx: &mut Context<Island>) -> AnyElement {
     set_reduce_motion(island.reduce_motion);
@@ -337,7 +384,7 @@ pub(crate) fn nook_media_pane(island: &Island, cx: &mut Context<Island>) -> AnyE
             .unwrap_or_else(|| "Unknown Artist".into())
             .into()
     } else {
-        SharedString::from("")
+        np.app_name.clone().unwrap_or_default().into()
     };
     let playing = np.is_playing;
     let duration = np.duration.unwrap_or(0.0);
@@ -361,14 +408,12 @@ pub(crate) fn nook_media_pane(island: &Island, cx: &mut Context<Island>) -> AnyE
     };
     let show_picker = island.output_picker_enabled();
     let picker_open = island.output_picker_open && show_picker;
-    let show_queue_btn = island.settings.show_media_queue
+    // The list slot is always drawn (gallery); it only works where the
+    // player exposes a local queue.
+    let queue_enabled = island.settings.show_media_queue
         && nook_core::queue::supports_local_queue(np.app_name.as_deref(), np.bundle_id.as_deref());
-    let picker_icon = island
-        .output_devices
-        .iter()
-        .find(|d| d.is_default)
-        .map(|d| d.icon())
-        .unwrap_or("airplay");
+    // Gallery draws AirPlay here whatever the current route is.
+    let picker_icon = "airplay";
 
     let header = div()
         .w_full()
@@ -384,9 +429,23 @@ pub(crate) fn nook_media_pane(island: &Island, cx: &mut Context<Island>) -> AnyE
                 .flex()
                 .flex_col()
                 .justify_center()
-                .gap(px(1.))
-                .child(slide_label(title, theme::TITLE_2, true).w_full())
-                .child(slide_label(artist, theme::TITLE_3, false).w_full()),
+                .gap(px(2.))
+                .child(if has {
+                    slide_label(title, MEDIA_TITLE, true)
+                        .w_full()
+                        .into_any_element()
+                } else {
+                    div()
+                        .w_full()
+                        .text_size(px(MEDIA_TITLE.size))
+                        .line_height(px(MEDIA_TITLE.leading))
+                        .font_weight(MEDIA_TITLE.emphasized)
+                        .text_color(theme::secondary_label())
+                        .whitespace_nowrap()
+                        .child("Not Playing")
+                        .into_any_element()
+                })
+                .child(slide_label(artist, theme::BODY, false).w_full()),
         );
 
     let body = if picker_open {
@@ -413,12 +472,12 @@ pub(crate) fn nook_media_pane(island: &Island, cx: &mut Context<Island>) -> AnyE
             .min_h(px(0.))
             .justify_between()
             .overflow_hidden()
-            .child(header.flex_shrink_0())
+            .child(header.flex_shrink_0().h(px(NOOK_ART)))
             .child(
                 div()
                     .w_full()
+                    .h(px(22.))
                     .flex_shrink_0()
-                    .opacity(if has { 1.0 } else { theme::DISABLED_OPACITY })
                     .child(nook_progress(
                         island, progress, elapsed, duration, seekable, cx,
                     )),
@@ -426,11 +485,12 @@ pub(crate) fn nook_media_pane(island: &Island, cx: &mut Context<Island>) -> AnyE
             .child(
                 div()
                     .w_full()
+                    .h(px(40.))
                     .flex_shrink_0()
                     .opacity(if has { 1.0 } else { theme::DISABLED_OPACITY })
                     .child(nook_transport(
                         playing,
-                        show_queue_btn,
+                        queue_enabled,
                         queue_open,
                         show_picker,
                         picker_icon,
@@ -445,10 +505,11 @@ pub(crate) fn nook_media_pane(island: &Island, cx: &mut Context<Island>) -> AnyE
         .relative()
         .h_full()
         .min_h(px(theme::NOOK_BODY - 4.0))
+        .px(px(NOOK_PAD_X))
+        .py(px(NOOK_PAD_Y))
         .overflow_hidden()
         .flex()
         .gap(px(12.))
-        .pr(px(4.))
         .child(body)
         .when_some(lyrics, |d, pane| d.child(pane));
     // When the queue is open, the pane is often wider than the nominal cell
@@ -488,12 +549,16 @@ pub(crate) fn nook_media_pane(island: &Island, cx: &mut Context<Island>) -> AnyE
 fn nook_art_frame(art: Option<AnyElement>) -> impl IntoElement {
     div().relative().size(px(NOOK_ART)).flex_shrink_0().child(
         div()
+            .relative()
             .size(px(NOOK_ART))
             .rounded(px(NOOK_ART_RADIUS))
             .overflow_hidden()
-            .shadow_md()
-            .border_1()
-            .border_color(theme::FILL)
+            .shadow(vec![BoxShadow {
+                color: gpui::hsla(0.0, 0.0, 0.0, 0.40),
+                offset: point(px(0.), px(3.)),
+                blur_radius: px(10.),
+                spread_radius: px(0.),
+            }])
             .bg(linear_gradient(
                 135.0,
                 linear_color_stop(ART_PLACEHOLDER.0, 0.0),
@@ -508,6 +573,15 @@ fn nook_art_frame(art: Option<AnyElement>) -> impl IntoElement {
                     .child(lucide_color("music", 20.0, theme::SECONDARY_LABEL))
                     .into_any_element()
             }))
+            // Ring above the artwork — a border on this box paints under it.
+            .child(
+                div()
+                    .absolute()
+                    .inset_0()
+                    .rounded(px(NOOK_ART_RADIUS))
+                    .border_1()
+                    .border_color(NOOK_ART_RING),
+            )
             .child(
                 canvas(
                     |bounds, _, _| {
@@ -527,7 +601,7 @@ fn nook_art_frame(art: Option<AnyElement>) -> impl IntoElement {
 
 fn nook_transport(
     playing: bool,
-    show_queue_btn: bool,
+    queue_enabled: bool,
     queue_open: bool,
     show_picker: bool,
     picker_icon: &'static str,
@@ -546,12 +620,10 @@ fn nook_transport(
                 .flex()
                 .items_center()
                 .justify_start()
-                .when(show_queue_btn, |d| {
-                    d.child(queue_toggle_btn(queue_open, cx))
-                }),
+                .child(queue_toggle_btn(queue_open, queue_enabled, cx)),
         )
         .child(nook_skip(
-            "skip-back-fill",
+            "media-skip-back",
             "nook-skip-back",
             cx,
             |this, _, cx| {
@@ -565,7 +637,7 @@ fn nook_transport(
         .child(nook_play(playing, cx))
         .child(div().flex_1())
         .child(nook_skip(
-            "skip-forward-fill",
+            "media-skip-forward",
             "nook-skip-fwd",
             cx,
             |this, _, cx| {
@@ -588,31 +660,37 @@ fn nook_transport(
         )
 }
 
-fn queue_toggle_btn(open: bool, cx: &mut Context<Island>) -> impl IntoElement {
+/// Gallery list slot: 15pt glyph flush left in a 28pt slot. Always drawn;
+/// without a local queue it is dimmed and inert.
+fn queue_toggle_btn(open: bool, enabled: bool, cx: &mut Context<Island>) -> impl IntoElement {
     div()
         .id("nook-queue-toggle")
         .size(px(theme::HIT_MIN))
-        .rounded(px(theme::CONTROL_RADIUS))
         .flex()
         .items_center()
-        .justify_center()
-        .bg(if open {
-            theme::FILL_SECONDARY
-        } else {
-            rgba(0x00000000)
+        .justify_start()
+        .child(lucide_color(
+            "list",
+            15.0,
+            if open {
+                theme::LABEL
+            } else {
+                theme::tertiary_label()
+            },
+        ))
+        .when(!enabled, |d| d.opacity(theme::DISABLED_OPACITY))
+        .when(enabled, |d| {
+            d.hover(|s| s.opacity(0.85))
+                .active(|s| s.opacity(0.75))
+                .cursor(CursorStyle::PointingHand)
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                        cx.stop_propagation();
+                        this.toggle_queue_panel(cx);
+                    }),
+                )
         })
-        .opacity(if open { 1.0 } else { 0.9 })
-        .hover(|s| s.opacity(1.0).bg(theme::FILL_TERTIARY))
-        .active(|s| s.opacity(0.75))
-        .cursor(CursorStyle::PointingHand)
-        .child(lucide_color("list", 16.0, theme::LABEL))
-        .on_mouse_down(
-            MouseButton::Left,
-            cx.listener(|this, _: &MouseDownEvent, _, cx| {
-                cx.stop_propagation();
-                this.toggle_queue_panel(cx);
-            }),
-        )
 }
 
 fn output_picker_btn(icon: &'static str, open: bool, cx: &mut Context<Island>) -> impl IntoElement {
@@ -621,12 +699,20 @@ fn output_picker_btn(icon: &'static str, open: bool, cx: &mut Context<Island>) -
         .size(px(theme::HIT_MIN))
         .flex()
         .items_center()
-        .justify_center()
-        .opacity(if open { 1.0 } else { 0.9 })
-        .hover(|s| s.opacity(1.0))
+        // Gallery: 16pt glyph flush right in the 28pt slot.
+        .justify_end()
+        .hover(|s| s.opacity(0.85))
         .active(|s| s.opacity(0.75))
         .cursor(CursorStyle::PointingHand)
-        .child(lucide_color(icon, 18.0, theme::LABEL))
+        .child(lucide_color(
+            icon,
+            16.0,
+            if open {
+                theme::LABEL
+            } else {
+                theme::tertiary_label()
+            },
+        ))
         .on_mouse_down(
             MouseButton::Left,
             cx.listener(|this, _: &MouseDownEvent, _, cx| {
@@ -875,6 +961,7 @@ fn nook_progress(
     seekable: bool,
     cx: &mut Context<Island>,
 ) -> impl IntoElement {
+    let dragging = island.scrubber_drag.is_some();
     let progress = island.scrubber_drag.unwrap_or(progress).clamp(0.0, 1.0);
     let bounds = island.scrubber_bounds.clone();
     div()
@@ -882,11 +969,8 @@ fn nook_progress(
         .flex()
         .items_center()
         .gap(px(8.))
-        .opacity(if seekable {
-            1.0
-        } else {
-            theme::DISABLED_OPACITY
-        })
+        // No dimming when unseekable: the gallery track stays #FFFFFF24 and
+        // the stamps read 0:00 / -0:00.
         .cursor(if seekable {
             CursorStyle::PointingHand
         } else {
@@ -907,16 +991,17 @@ fn nook_progress(
             time_label(if duration > 0.0 {
                 format_time(elapsed)
             } else {
-                "–:––".into()
+                "0:00".into()
             })
-            .w(px(36.)),
+            .w(px(30.))
+            .text_color(theme::tertiary_label()),
         )
         .child(
             div()
                 .relative()
                 .flex_1()
                 .min_w(px(24.))
-                .h(px(20.))
+                .h(px(16.))
                 .flex()
                 .items_center()
                 .group("nook-scrub")
@@ -939,24 +1024,41 @@ fn nook_progress(
                 .child(
                     div()
                         .w_full()
-                        .h(px(theme::TRACK_H))
-                        .rounded(px(theme::TRACK_RADIUS))
-                        .bg(theme::FILL_SECONDARY)
-                        .hover(|s| s.h(px(theme::TRACK_H + 2.0)))
+                        .h(px(6.))
+                        .rounded(px(3.))
+                        .bg(theme::with_alpha(theme::LABEL, 0.14))
                         .child(
                             div()
                                 .h_full()
                                 .w(relative(progress))
-                                .rounded(px(theme::TRACK_RADIUS))
+                                .rounded(px(3.))
                                 .bg(theme::LABEL),
                         ),
                 )
-                .when(seekable, |d| d.child(scrubber_thumb(progress))),
+                // Gallery shows a bare bar; the thumb appears on hover or drag.
+                .when(seekable, |d| {
+                    d.child(
+                        div()
+                            .absolute()
+                            .inset_0()
+                            .flex()
+                            .items_center()
+                            .when(!dragging, |d| {
+                                d.opacity(0.0).group_hover("nook-scrub", |s| s.opacity(1.0))
+                            })
+                            .child(scrubber_thumb(progress)),
+                    )
+                }),
         )
         .child(
-            time_label(format_remaining(elapsed, duration))
-                .w(px(48.))
-                .text_right(),
+            time_label(if duration > 0.0 {
+                format_remaining(elapsed, duration)
+            } else {
+                "-0:00".into()
+            })
+            .w(px(34.))
+            .text_right()
+            .text_color(theme::tertiary_label()),
         )
 }
 
@@ -983,8 +1085,7 @@ fn nook_skip(
         .flex()
         .items_center()
         .justify_center()
-        .opacity(0.95)
-        .hover(|s| s.opacity(1.0))
+        .hover(|s| s.opacity(0.85))
         .active(|s| s.opacity(0.75))
         .cursor(CursorStyle::PointingHand)
         .child(lucide_color(icon, NOOK_SKIP_GLYPH, theme::LABEL))
@@ -1004,13 +1105,11 @@ fn nook_play(playing: bool, cx: &mut Context<Island>) -> impl IntoElement {
         .flex()
         .items_center()
         .justify_center()
-        .when(!playing, |d| d.pl(px(2.)))
-        .opacity(0.95)
-        .hover(|s| s.opacity(1.0))
+        .hover(|s| s.opacity(0.85))
         .active(|s| s.opacity(0.75))
         .cursor(CursorStyle::PointingHand)
         .child(lucide_color(
-            if playing { "pause-fill" } else { "play-fill" },
+            if playing { "media-pause" } else { "media-play" },
             NOOK_PLAY_GLYPH,
             theme::LABEL,
         ))
@@ -1327,7 +1426,7 @@ fn transport_row(playing: bool, cx: &mut Context<Island>) -> impl IntoElement {
         .justify_center()
         .gap(px(SKIP_GAP))
         .child(skip_btn(
-            "skip-back-fill",
+            "media-skip-back",
             "ibtn-skip-back",
             cx,
             |this, _, cx| {
@@ -1339,7 +1438,7 @@ fn transport_row(playing: bool, cx: &mut Context<Island>) -> impl IntoElement {
         ))
         .child(play_btn(playing, cx))
         .child(skip_btn(
-            "skip-forward-fill",
+            "media-skip-forward",
             "ibtn-skip-forward",
             cx,
             |this, _, cx| {
@@ -1386,13 +1485,12 @@ fn play_btn(playing: bool, cx: &mut Context<Island>) -> impl IntoElement {
         .flex()
         .items_center()
         .justify_center()
-        .when(!playing, |d| d.pl(px(1.5)))
         .hover(|s| s.bg(theme::LABEL))
         .active(|s| s.opacity(0.95))
         .cursor(CursorStyle::PointingHand)
         .shadow_sm()
         .child(lucide_color(
-            if playing { "pause-fill" } else { "play-fill" },
+            if playing { "media-pause" } else { "media-play" },
             22.0,
             theme::ISLAND,
         ))
@@ -1409,7 +1507,8 @@ fn play_btn(playing: bool, cx: &mut Context<Island>) -> impl IntoElement {
 }
 
 fn time_label(text: String) -> gpui::Div {
-    timer_text(text, theme::CALLOUT).text_color(theme::secondary_label())
+    // Mockup scrubber stamps: 11px tabular, tertiary (#EBEBF54D).
+    timer_text(text, theme::SUBHEADLINE).text_color(theme::tertiary_label())
 }
 
 fn format_time(seconds: f64) -> String {
@@ -1581,129 +1680,10 @@ fn color_dist(a: Rgba, b: Rgba) -> f32 {
     (dr * dr + dg * dg + db * db).sqrt()
 }
 
-#[allow(dead_code)]
-const WASH_INNER: u32 = 80;
-#[allow(dead_code)]
-const WASH_OUTER: u32 = 160;
-#[allow(dead_code)]
-const WASH_BLUR: f32 = 18.0;
-
-#[allow(dead_code)]
-fn blurred_artwork_png(b64: &str) -> Option<Vec<u8>> {
-    use std::hash::{DefaultHasher, Hash, Hasher};
-
-    if b64.len() > MAX_ARTWORK_BYTES.div_ceil(3) * 4 {
-        return None;
-    }
-    let mut hasher = DefaultHasher::new();
-    b64.hash(&mut hasher);
-    let key = hasher.finish();
-    static CACHE: OnceLock<Mutex<(u64, Option<Vec<u8>>)>> = OnceLock::new();
-    let cache = CACHE.get_or_init(|| Mutex::new((0, None)));
-    if let Ok(guard) = cache.lock() {
-        if guard.0 == key {
-            return guard.1.clone();
-        }
-    }
-    let loaded = render_artwork_wash(b64);
-    if let Ok(mut guard) = cache.lock() {
-        *guard = (key, loaded.clone());
-    }
-    loaded
-}
-
-#[allow(dead_code)]
-fn render_artwork_wash(b64: &str) -> Option<Vec<u8>> {
-    let bytes = artwork_bytes(b64)?;
-    let art = image::load_from_memory(&bytes)
-        .ok()?
-        .resize_exact(
-            WASH_INNER,
-            WASH_INNER,
-            image::imageops::FilterType::Triangle,
-        )
-        .to_rgba8();
-    let pad = (WASH_OUTER - WASH_INNER) / 2;
-    let mut canvas = image::RgbaImage::new(WASH_OUTER, WASH_OUTER);
-    for (x, y, px) in art.enumerate_pixels() {
-        canvas.put_pixel(x + pad, y + pad, *px);
-    }
-    let mut wash = image::imageops::blur(&canvas, WASH_BLUR);
-    apply_bloom_vignette(&mut wash);
-    encode_wash_png(&wash)
-}
-
-#[allow(dead_code)]
-fn apply_bloom_vignette(wash: &mut image::RgbaImage) {
-    let cx = (WASH_OUTER as f32 - 1.0) * 0.5;
-    let cy = cx;
-    let max_r = WASH_OUTER as f32 * 0.5;
-    for (x, y, px) in wash.enumerate_pixels_mut() {
-        let [r, g, b, _] = px.0;
-        let (wr, wg, wb) = wash_srgb(r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0);
-        let dx = x as f32 - cx;
-        let dy = y as f32 - cy;
-        let d = (dx * dx + dy * dy).sqrt() / max_r;
-        let alpha = bloom_alpha(d);
-        // Fade RGB to black so the bloom dissolves on island chrome even
-        // when the renderer ignores PNG alpha.
-        px.0 = [
-            (wr * alpha * 255.0).round() as u8,
-            (wg * alpha * 255.0).round() as u8,
-            (wb * alpha * 255.0).round() as u8,
-            255,
-        ];
-    }
-}
-
-#[allow(dead_code)]
-fn encode_wash_png(wash: &image::RgbaImage) -> Option<Vec<u8>> {
-    use std::io::Cursor;
-    let mut png = Cursor::new(Vec::new());
-    wash.write_to(&mut png, image::ImageFormat::Png).ok()?;
-    let png = png.into_inner();
-    if png.is_empty() || png.len() > MAX_ARTWORK_BYTES {
-        None
-    } else {
-        Some(png)
-    }
-}
-
-#[allow(dead_code)]
-fn bloom_alpha(d: f32) -> f32 {
-    if d <= 0.22 {
-        1.0
-    } else if d >= 0.98 {
-        0.0
-    } else {
-        (1.0 - (d - 0.22) / 0.76).clamp(0.0, 1.0).powf(1.45)
-    }
-}
-
-/// Saturate real hues; crush luminance so the bloom sits on black island
-/// chrome instead of lifting grayscale covers into a mid-gray slab.
-#[allow(dead_code)]
-fn wash_srgb(r: f32, g: f32, b: f32) -> (f32, f32, f32) {
-    let gray = 0.2126 * r + 0.7152 * g + 0.0722 * b;
-    let chroma = r.max(g).max(b) - r.min(g).min(b);
-    let sat = if chroma > 0.08 { 1.55 } else { 1.0 };
-    let mut r = (gray + (r - gray) * sat).clamp(0.0, 1.0);
-    let mut g = (gray + (g - gray) * sat).clamp(0.0, 1.0);
-    let mut b = (gray + (b - gray) * sat).clamp(0.0, 1.0);
-    let luma = 0.2126 * r + 0.7152 * g + 0.0722 * b;
-    let target = if chroma > 0.10 {
-        luma.powf(1.2) * 0.62
-    } else {
-        luma.powf(1.8) * 0.28
-    };
-    if luma > 0.001 {
-        let scale = target / luma;
-        r = (r * scale).clamp(0.0, 1.0);
-        g = (g * scale).clamp(0.0, 1.0);
-        b = (b * scale).clamp(0.0, 1.0);
-    }
-    (r, g, b)
-}
+// NOTE (R2 media bleed): the ambient artwork wash / bloom behind the Nook
+// media pane was removed — the mockup is a clean black card with no
+// artwork-colour bleed. `art_palette` below stays: island/mod.rs still
+// reads it for the aura state.
 
 static ART_BOUNDS: OnceLock<Mutex<(u64, f32, f32, f32, f32)>> = OnceLock::new();
 
@@ -1849,90 +1829,6 @@ mod tests {
         assert_eq!(palette.len(), 3);
         assert!(color_dist(palette[0], palette[1]) > 0.1);
         assert!(art_palette(None).is_none());
-    }
-
-    fn luma(r: f32, g: f32, b: f32) -> f32 {
-        0.2126 * r + 0.7152 * g + 0.0722 * b
-    }
-
-    #[test]
-    fn wash_keeps_hue_and_dims_for_white_labels() {
-        let (r, g, b) = wash_srgb(0.15, 0.45, 0.95);
-        assert!(b > r && b > g, "blue wash lost its hue");
-        let washed = luma(r, g, b);
-        assert!(
-            (0.08..0.40).contains(&washed),
-            "wash luma {washed} left the dim band"
-        );
-
-        let (r, g, b) = wash_srgb(1.0, 1.0, 1.0);
-        assert!(luma(r, g, b) < 0.35, "white art must dim");
-
-        let (r, g, b) = wash_srgb(0.02, 0.02, 0.02);
-        assert!(luma(r, g, b) < 0.05, "near-black art must stay near black");
-
-        let (r, g, b) = wash_srgb(0.62, 0.62, 0.62);
-        assert!(
-            luma(r, g, b) < 0.18,
-            "grayscale covers must not become a mid-gray card"
-        );
-    }
-
-    #[test]
-    fn blurred_artwork_is_a_cached_png() {
-        let b64 = encode_two_tone();
-        let png = blurred_artwork_png(&b64).expect("wash");
-        assert!(
-            png.starts_with(&[0x89, b'P', b'N', b'G']),
-            "expected PNG, got {:02x?}",
-            &png[..4.min(png.len())]
-        );
-        assert!(blurred_artwork_png("").is_none());
-        let again = blurred_artwork_png(&b64).expect("cached wash");
-        assert_eq!(png, again);
-    }
-
-    fn encode_bands(top: [u8; 4], bottom: [u8; 4]) -> String {
-        use base64::Engine;
-        use std::io::Cursor;
-        let mut img = image::RgbaImage::new(32, 32);
-        for (_, y, px) in img.enumerate_pixels_mut() {
-            *px = image::Rgba(if y < 16 { top } else { bottom });
-        }
-        let mut encoded = Cursor::new(Vec::new());
-        img.write_to(&mut encoded, image::ImageFormat::Png).unwrap();
-        base64::engine::general_purpose::STANDARD.encode(encoded.into_inner())
-    }
-
-    #[test]
-    fn artwork_wash_keeps_region_hues() {
-        let png = blurred_artwork_png(&encode_bands(
-            [0x4A, 0x8C, 0xC8, 0xff],
-            [0x2A, 0x5A, 0x38, 0xff],
-        ))
-        .expect("banded wash");
-        let wash = image::load_from_memory(&png).unwrap().to_rgba8();
-        assert_eq!(wash.dimensions(), (WASH_OUTER, WASH_OUTER));
-        let sky = wash.get_pixel(80, 52).0;
-        let trees = wash.get_pixel(80, 108).0;
-        assert!(sky[2] > sky[0] && sky[2] > sky[1], "sky band lost blue");
-        assert!(
-            trees[1] > trees[0] && trees[1] > trees[2],
-            "tree band lost green"
-        );
-        let corner = wash.get_pixel(2, 2).0;
-        assert!(
-            corner[0] < 8 && corner[1] < 8 && corner[2] < 8,
-            "bloom corners must fade to black, got {corner:?}"
-        );
-    }
-
-    #[test]
-    fn bloom_alpha_falls_off_before_the_edge() {
-        assert_eq!(bloom_alpha(0.0), 1.0);
-        assert_eq!(bloom_alpha(0.22), 1.0);
-        assert!(bloom_alpha(0.6) > 0.1 && bloom_alpha(0.6) < 0.7);
-        assert_eq!(bloom_alpha(1.0), 0.0);
     }
 
     #[test]

@@ -8,7 +8,8 @@ use crate::icons::lucide_color;
 use crate::theme;
 use crate::widgets::{
     agents_card, battery_card, calendar_card, high_alert_card, meeting_card, messages_card,
-    notes_card, notifications_card, observe_card, obsidian_card, recorder_card, reminders_card,
+    notes_card, notifications_card, observe_big_view, observe_card, obsidian_card, recorder_card,
+    reminders_card,
     speed_card, sysstats_card, terminal_card, timer_card, vpn_card, weather_card,
 };
 use gpui::{
@@ -21,52 +22,71 @@ use nook_core::settings::{AppSettings, WidgetModule};
 /// Below it, panes stay proportional and centered (single-row layout).
 const ROW_STRETCH_MIN_CELLS: u8 = AppSettings::TOTAL_CELLS - 2;
 
+/// Tab bar (mockup: padding 14 20 10 20, gap 6). Vertical centering stays in
+/// the notch band so 14+27+10 does not overflow a ~38pt housing.
+const TAB_BAR_PAD_X: f32 = 20.0;
+const TAB_BAR_GAP: f32 = 6.0;
+/// Selected tab: fill-secondary, radius 12, padding 6 12, 12px glyph.
+const TAB_PAD_X: f32 = 12.0;
+const TAB_PAD_Y: f32 = 6.0;
+const TAB_RADIUS: f32 = 12.0;
+const TAB_ICON: f32 = 12.0;
+const TAB_GAP: f32 = 6.0;
+const SETTINGS_GLYPH: f32 = 15.0;
+/// Gallery Mirror card: pad 16, a 64pt face (fill `#FFFFFF29`, ring
+/// `#FFFFFF38`, 22pt webcam) with the 11/14 status line 8pt below it.
+const MIRROR_PAD: f32 = 16.0;
+const MIRROR_FACE: f32 = 64.0;
+const MIRROR_ICON: f32 = 22.0;
+const MIRROR_GAP: f32 = 8.0;
+
 impl Island {
     /// Effective Nook cell width for the current expanded island width.
     /// Shared by browse and customize so partial rows do not stretch or clip.
     pub(super) fn nook_cell_width(&self) -> f32 {
         let avail = self.expanded_width() - 2.0 * theme::NOOK_INSET;
-        // Allowance for ~6 pane dividers on a wide single row.
+        // Allowance for ~6 pane gaps on a wide single row.
         (avail - 5.0 * theme::NOOK_DIVIDER) / AppSettings::TOTAL_CELLS as f32
     }
 
-    pub(super) fn render_expanded(
-        &mut self,
-        notch_w: f32,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    pub(super) fn render_expanded(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let tab = if self.tab == Tab::Files && !self.settings.show_files {
             Tab::Widgets
         } else {
             self.tab
         };
+        // Body only: the top bar is pinned by render.rs outside the tab
+        // crossfade, so Nook / Tray / Terminal switches never move it.
         div()
-            .flex()
-            .flex_col()
             .size_full()
             .overflow_hidden()
-            .child(self.render_topbar(notch_w, cx))
-            .child(
-                div().flex_1().w_full().overflow_hidden().child(match tab {
-                    Tab::Widgets => self.render_nook(cx).into_any_element(),
-                    Tab::Files => div()
-                        .size_full()
-                        .px(px(theme::EXPANDED_PAD))
-                        .pb(px(theme::EXPANDED_PAD))
-                        .child(self.render_files(cx))
-                        .into_any_element(),
-                    Tab::Terminal => terminal_card(self, cx).into_any_element(),
-                }),
-            )
+            .child(match tab {
+                Tab::Widgets => self.render_nook(cx).into_any_element(),
+                Tab::Files => div()
+                    .size_full()
+                    .px(px(theme::EXPANDED_PAD))
+                    .pb(px(theme::EXPANDED_PAD))
+                    .child(self.render_files(cx))
+                    .into_any_element(),
+                Tab::Terminal => terminal_card(self, cx).into_any_element(),
+            })
             .into_any_element()
     }
 
-    fn render_topbar(&self, notch_w: f32, cx: &mut Context<Self>) -> impl IntoElement {
+    /// Height of the expanded top bar — the same on every tab and in
+    /// customize, so the body below starts at one fixed line.
+    pub(super) fn expanded_topbar_height(&self) -> f32 {
+        self.notch_height.max(theme::NOTCH_MIN_H)
+    }
+
+    /// Tab pills + gear (or the customize bar). Nothing here depends on the
+    /// current tab except which pill carries the fill.
+    pub(super) fn render_topbar(&self, notch_w: f32, cx: &mut Context<Self>) -> AnyElement {
         if self.widget_edit {
             return div()
                 .w_full()
                 .flex_shrink_0()
-                .h(px(self.notch_height.max(theme::NOTCH_MIN_H)))
+                .h(px(self.expanded_topbar_height()))
                 .flex()
                 .items_center()
                 .justify_between()
@@ -108,64 +128,59 @@ impl Island {
         div()
             .w_full()
             .flex_shrink_0()
-            .h(px(self.notch_height.max(theme::NOTCH_MIN_H)))
+            .h(px(self.expanded_topbar_height()))
             .flex()
             .items_center()
-            .justify_between()
-            .px(px(theme::NOOK_INSET))
+            .px(px(TAB_BAR_PAD_X))
+            .gap(px(TAB_BAR_GAP))
             .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _, cx| {
                 this.on_wheel(event, cx);
             }))
             .child(tab_switch(self, cx))
+            .child(div().flex_1().h(px(1.)))
             .child(div().w(px(notch_w)))
+            .child(div().flex_1().h(px(1.)))
             .child(
                 div()
+                    .id("settings-btn")
+                    .size(px(theme::HIT_MIN))
                     .flex()
                     .items_center()
-                    .gap(px(4.))
-                    .child(
-                        div()
-                            .id("customize-widgets-btn")
-                            .size(px(theme::HIT_MIN))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .hover(|s| s.opacity(0.85))
-                            .active(|s| s.opacity(0.7))
-                            .cursor(CursorStyle::PointingHand)
-                            .child(lucide_color("layout-grid", 16.0, theme::secondary_label()))
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(|this, _: &MouseDownEvent, _, cx| {
-                                    cx.stop_propagation();
-                                    this.begin_widget_edit(cx);
-                                }),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .id("settings-btn")
-                            .size(px(theme::HIT_MIN))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .hover(|s| s.opacity(0.85))
-                            .active(|s| s.opacity(0.7))
-                            .cursor(CursorStyle::PointingHand)
-                            .child(lucide_color("settings", 16.0, theme::secondary_label()))
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(|this, _: &MouseDownEvent, _, cx| {
-                                    cx.stop_propagation();
-                                    this.open_settings(cx);
-                                }),
-                            ),
+                    .justify_center()
+                    .hover(|s| s.opacity(0.85))
+                    .active(|s| s.opacity(0.7))
+                    .cursor(CursorStyle::PointingHand)
+                    .child(lucide_color(
+                        "settings",
+                        SETTINGS_GLYPH,
+                        theme::tertiary_label(),
+                    ))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                            cx.stop_propagation();
+                            this.open_settings(cx);
+                        }),
                     ),
             )
             .into_any_element()
     }
 
     fn render_nook(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        if !self.widget_edit && self.observe_expanded {
+            return div()
+                .id("nook-row")
+                .size_full()
+                .px(px(theme::NOOK_INSET))
+                .pb(px(theme::NOOK_INSET))
+                .child(observe_big_view(
+                    &self.observe,
+                    &self.settings,
+                    self.observe_hover.as_ref(),
+                    cx,
+                ))
+                .into_any_element();
+        }
         if !self.widget_edit && self.has_incoming_message() && self.mode() == CompactMode::Messages
         {
             return div()
@@ -407,12 +422,11 @@ impl Island {
                     .flex_shrink_0()
                     .when(editing || row_stretches, |d| d.justify_start())
                     .when(!editing && !row_stretches, |d| d.justify_center())
+                    // Mockup separates panes by whitespace only — no rules.
+                    .when(!editing, |d| d.gap(px(theme::NOOK_DIVIDER)))
                     .when(editing, |d| d.gap(px(12.)));
 
-                for (i, (module, cells, child)) in row_panes.into_iter().enumerate() {
-                    if !editing && i > 0 {
-                        row = row.child(pane_divider());
-                    }
+                for (module, cells, child) in row_panes {
                     let child = if editing {
                         edit_chrome(module, child, cx)
                     } else {
@@ -430,7 +444,10 @@ impl Island {
                         let mut pane = div()
                             .h_full()
                             .min_w(px(0.))
+                            .rounded(px(theme::ROW_RADIUS))
                             .overflow_hidden()
+                            .border_1()
+                            .border_color(theme::FILL_TERTIARY)
                             .flex_basis(px(basis))
                             .child(child);
                         pane.style().flex_grow = Some(cells as f32);
@@ -448,7 +465,10 @@ impl Island {
                                 .w(px(width))
                                 .h_full()
                                 .min_w(px(0.))
+                                .rounded(px(theme::ROW_RADIUS))
                                 .overflow_hidden()
+                                .border_1()
+                                .border_color(theme::FILL_TERTIARY)
                                 .flex_shrink_0()
                                 .child(child),
                         );
@@ -516,29 +536,24 @@ fn cell_pane(width: f32, child: impl IntoElement) -> AnyElement {
         .into_any_element()
 }
 
-fn pane_divider() -> impl IntoElement {
-    div()
-        .w(px(1.))
-        .h_full()
-        .mx(px(theme::CONTENT_INSET))
-        .bg(theme::SEPARATOR)
-        .flex_shrink_0()
-}
-
 fn tab_switch(island: &Island, cx: &mut Context<Island>) -> impl IntoElement {
     let current = island.tab;
-    let mut row = div().flex().items_center().gap(px(4.)).child(labeled_tab(
-        "tab-nook",
-        "map-pin",
-        "Nook",
-        current == Tab::Widgets,
-        cx,
-        Tab::Widgets,
-    ));
+    let mut row = div()
+        .flex()
+        .items_center()
+        .gap(px(TAB_BAR_GAP))
+        .child(labeled_tab(
+            "tab-nook",
+            "map-pin",
+            "Nook",
+            current == Tab::Widgets,
+            cx,
+            Tab::Widgets,
+        ));
     if island.settings.show_files {
         row = row.child(labeled_tab(
             "tab-tray",
-            "files",
+            "copy",
             "Tray",
             current == Tab::Files,
             cx,
@@ -549,7 +564,7 @@ fn tab_switch(island: &Island, cx: &mut Context<Island>) -> impl IntoElement {
         row = row.child(labeled_tab(
             "tab-term",
             "terminal",
-            "Term",
+            "Terminal",
             current == Tab::Terminal,
             cx,
             Tab::Terminal,
@@ -568,13 +583,13 @@ fn labeled_tab(
 ) -> impl IntoElement {
     div()
         .id(id)
-        .h(px(theme::HIT_MIN))
-        .px(px(10.))
+        .px(px(TAB_PAD_X))
+        .py(px(TAB_PAD_Y))
         .flex()
         .items_center()
-        .gap(px(6.))
-        .rounded_full()
-        .when(selected, |d| d.bg(theme::FILL))
+        .gap(px(TAB_GAP))
+        .rounded(px(TAB_RADIUS))
+        .when(selected, |d| d.bg(theme::FILL_SECONDARY))
         .hover(|s| {
             if selected {
                 s.bg(theme::FILL_SECONDARY)
@@ -586,7 +601,7 @@ fn labeled_tab(
         .cursor(CursorStyle::PointingHand)
         .child(lucide_color(
             icon,
-            13.0,
+            TAB_ICON,
             if selected {
                 theme::LABEL
             } else {
@@ -597,7 +612,7 @@ fn labeled_tab(
             div()
                 .text_size(px(theme::CALLOUT.size))
                 .line_height(px(theme::CALLOUT.leading))
-                .font_weight(FontWeight::SEMIBOLD)
+                .font_weight(FontWeight::NORMAL)
                 .text_color(if selected {
                     theme::LABEL
                 } else {
@@ -609,6 +624,7 @@ fn labeled_tab(
             MouseButton::Left,
             cx.listener(move |this, _: &MouseDownEvent, _, cx| {
                 cx.stop_propagation();
+                this.observe_expanded = false;
                 this.tab = tab;
                 this.arm_content_transition();
                 cx.notify();
@@ -621,20 +637,28 @@ fn mirror_pane(island: &Island, cx: &mut Context<Island>) -> impl IntoElement {
     let frame = island.mirror_frame.clone();
     div()
         .id("mirror-pane")
-        .flex_shrink_0()
+        .flex_1()
         .h_full()
+        .p(px(MIRROR_PAD))
         .flex()
+        .flex_col()
         .items_center()
         .justify_center()
-        .px(px(8.))
+        .gap(px(MIRROR_GAP))
         .child(
             div()
                 .id("mirror-btn")
-                .size(px(theme::MIRROR_FACE))
+                .relative()
+                .size(px(MIRROR_FACE))
+                .flex_shrink_0()
                 .rounded_full()
-                .bg(theme::FILL_TERTIARY)
+                .overflow_hidden()
+                .bg(theme::FILL_SECONDARY)
+                .flex()
+                .items_center()
+                .justify_center()
                 .cursor(CursorStyle::PointingHand)
-                .hover(|s| if live { s } else { s.bg(theme::FILL) })
+                .hover(|s| if live { s } else { s.bg(theme::with_alpha(theme::LABEL, 0.22)) })
                 .active(|s| s.opacity(0.9))
                 .on_mouse_down(
                     MouseButton::Left,
@@ -645,21 +669,28 @@ fn mirror_pane(island: &Island, cx: &mut Context<Island>) -> impl IntoElement {
                 )
                 .when(live, |d| d.child(mirror_frame_el(frame)))
                 .when(!live, |d| {
-                    d.flex()
-                        .flex_col()
-                        .items_center()
-                        .justify_center()
-                        .gap(px(8.))
-                        .child(lucide_color("webcam", 28.0, theme::secondary_label()))
-                        .child(
-                            div()
-                                .text_size(px(theme::CALLOUT.size))
-                                .line_height(px(theme::CALLOUT.leading))
-                                .font_weight(FontWeight::MEDIUM)
-                                .text_color(theme::secondary_label())
-                                .child("Mirror"),
-                        )
-                }),
+                    d.child(lucide_color("webcam", MIRROR_ICON, theme::LABEL))
+                })
+                // Ring above the video — a border on this box paints under it.
+                .child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .rounded_full()
+                        .border_1()
+                        .border_color(theme::SEPARATOR),
+                ),
+        )
+        // The capture API exposes no device name or format, so the status
+        // line states what a tap does instead of the gallery's camera spec.
+        .child(
+            div()
+                .text_size(px(theme::SUBHEADLINE.size))
+                .line_height(px(theme::SUBHEADLINE.leading))
+                .font_weight(FontWeight::NORMAL)
+                .text_color(theme::secondary_label())
+                .whitespace_nowrap()
+                .child(if live { "Live" } else { "Tap to start" }),
         )
 }
 
@@ -672,18 +703,45 @@ fn mirror_frame_el(frame: Option<std::sync::Arc<RenderImage>>) -> AnyElement {
             // placeholder on every camera tick, which looks like a reinit.
             img(image)
                 .id("mirror-video")
-                .size(px(theme::MIRROR_FACE))
+                .size(px(MIRROR_FACE))
                 .rounded_full()
                 .object_fit(ObjectFit::Fill)
                 .into_any_element()
         }
         None => div()
-            .size(px(theme::MIRROR_FACE))
+            .size(px(MIRROR_FACE))
             .rounded_full()
             .flex()
             .items_center()
             .justify_center()
-            .child(lucide_color("webcam", 28.0, theme::LABEL))
+            .child(lucide_color("webcam", MIRROR_ICON, theme::LABEL))
             .into_any_element(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn expanded_tabs_match_mockup_chrome() {
+        assert_eq!(TAB_BAR_PAD_X, 20.0);
+        assert_eq!(TAB_BAR_GAP, 6.0);
+        assert_eq!(TAB_PAD_X, 12.0);
+        assert_eq!(TAB_PAD_Y, 6.0);
+        assert_eq!(TAB_RADIUS, 12.0);
+        assert_eq!(TAB_ICON, 12.0);
+        assert_eq!(TAB_GAP, 6.0);
+        assert_eq!(SETTINGS_GLYPH, 15.0);
+    }
+
+    #[test]
+    fn mirror_face_is_the_expanded_circle() {
+        assert_eq!(MIRROR_PAD, 16.0);
+        assert_eq!(MIRROR_FACE, 64.0);
+        assert_eq!(MIRROR_ICON, 22.0);
+        assert_eq!(MIRROR_GAP, 8.0);
+        assert!(MIRROR_FACE < theme::NOOK_BODY);
+        assert!(MIRROR_FACE <= theme::MIRROR_FACE);
     }
 }

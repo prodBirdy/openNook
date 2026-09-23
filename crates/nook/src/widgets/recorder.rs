@@ -1,22 +1,30 @@
 //! Voice-memo Nook pane: dated list and a ringed record/stop control.
 //! Compact face: live waveform, `00:06` clock, ringed stop.
 
+use crate::icons::lucide_color;
 use crate::island::ui::{
     label, nook_empty, nook_pane, open_privacy_pane, scroll_body, text_btn, timer_text,
 };
 use crate::island::{CompactMode, Island};
+use crate::motion;
+use crate::platform;
 use crate::theme;
 use chrono::{Local, TimeZone, Utc};
 use gpui::{
-    div, linear_color_stop, linear_gradient, prelude::*, px, rgba, AnyElement, Context,
-    CursorStyle, FontWeight, MouseButton, MouseDownEvent, SharedString, Window,
+    canvas, div, linear_color_stop, linear_gradient, prelude::*, px, relative, rgba, AnyElement,
+    Context, CursorStyle, FontWeight, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+    ScrollWheelEvent, SharedString,
 };
-use nook_core::recorder::{self, RecordingItem};
-use std::cell::Cell;
+use nook_core::recorder::{self, Playback, RecordingItem};
+use std::cell::{Cell, RefCell};
 use std::time::{Duration, Instant};
 
 thread_local! {
     static PENDING_DELETE: Cell<Option<i64>> = const { Cell::new(None) };
+    static ROW_MENU: Cell<Option<i64>> = const { Cell::new(None) };
+    static SCRUB_DRAG: Cell<Option<f32>> = const { Cell::new(None) };
+    static SCRUB_BOUNDS: RefCell<Option<(f32, f32)>> = const { RefCell::new(None) };
+    static DRAG_ARM: RefCell<Option<(String, f64, f64)>> = const { RefCell::new(None) };
 }
 
 const RING: f32 = 48.0;
@@ -24,11 +32,10 @@ const DOT: f32 = 30.0;
 const STOP: f32 = 16.0;
 const STOP_RADIUS: f32 = 5.0;
 
-const WAVE_BARS: usize = 10;
-const WAVE_DOTS: usize = 6;
-const WAVE_H: f32 = 18.0;
+const WAVE_BARS: usize = 16;
+const WAVE_H: f32 = 26.0;
 const WAVE_BAR_W: f32 = 3.0;
-const WAVE_GAP: f32 = 1.8;
+const WAVE_GAP: f32 = 3.0;
 const WAVE_INTERVAL: Duration = Duration::from_millis(50);
 
 const COMPACT_STOP_RING: f32 = 26.0;
@@ -51,7 +58,30 @@ pub(crate) fn recorder_card(island: &Island, cx: &mut Context<Island>) -> impl I
     let mic_denied = hint
         .as_deref()
         .is_some_and(|h| h.to_lowercase().contains("denied"));
-    let list = if island.recordings.is_empty() && !recording {
+    let list = if recording {
+        div()
+            .flex_1()
+            .min_h(px(0.))
+            .w_full()
+            .flex()
+            .flex_col()
+            .justify_center()
+            .gap(px(10.))
+            .child(rec_waveform(island.recorder_wave.iter().copied()))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(7.))
+                    .child(div().size(px(7.)).rounded_full().bg(theme::DESTRUCTIVE))
+                    .child(label(clock.clone(), theme::CALLOUT, false).text_color(theme::LABEL))
+                    .child(
+                        label("recording", theme::FOOTNOTE, false)
+                            .text_color(theme::TERTIARY_LABEL),
+                    ),
+            )
+            .into_any_element()
+    } else if island.recordings.is_empty() {
         if mic_denied {
             div()
                 .flex_1()
@@ -76,12 +106,9 @@ pub(crate) fn recorder_card(island: &Island, cx: &mut Context<Island>) -> impl I
         if recording {
             rows = rows.child(live_row(&clock, transcript));
         }
+        let playback = recorder::playback_state();
         for item in &island.recordings {
-            rows = rows.child(recording_row(
-                item,
-                island.playing_recording == Some(item.id),
-                cx,
-            ));
+            rows = rows.child(recording_row(item, playback.as_ref(), cx));
         }
         div()
             .relative()
@@ -107,7 +134,7 @@ pub(crate) fn recorder_card(island: &Island, cx: &mut Context<Island>) -> impl I
             .into_any_element()
     };
 
-    nook_pane("nook-recorder")
+    card_shell("nook-recorder")
         .w_full()
         .on_mouse_down(
             MouseButton::Left,
@@ -126,14 +153,8 @@ pub(crate) fn recorder_card(island: &Island, cx: &mut Context<Island>) -> impl I
                 .flex()
                 .flex_col()
                 .items_center()
-                .pt(px(6.))
-                .when(recording, |d| {
-                    d.child(
-                        timer_text(clock.clone(), theme::BODY)
-                            .text_size(px(theme::CALLOUT.size))
-                            .pb(px(6.)),
-                    )
-                })
+                .pt(px(0.))
+                .when(recording, |d| d)
                 .when_some(mic, |d, (text, err)| {
                     d.child(
                         label(text, theme::FOOTNOTE, false)
@@ -156,6 +177,10 @@ pub(crate) fn recorder_card(island: &Island, cx: &mut Context<Island>) -> impl I
                 })
                 .child(record_btn(recording, cx)),
         )
+}
+
+fn card_shell(id: impl Into<gpui::ElementId>) -> gpui::Stateful<gpui::Div> {
+    nook_pane(id).p(px(16.)).gap(px(10.))
 }
 
 fn mic_caption(recording: bool, empty: bool) -> Option<(String, bool)> {
@@ -219,111 +244,410 @@ fn live_row(clock: &str, transcript: &str) -> impl IntoElement {
 
 fn recording_row(
     item: &RecordingItem,
-    playing: bool,
+    playback: Option<&Playback>,
     cx: &mut Context<Island>,
 ) -> impl IntoElement {
     let id = item.id;
+    let path = item.path.clone();
     let (title, date) = memo_stamp(item.created_at);
     let dur = recorder::format_duration_ms(item.duration_ms);
     let pending = PENDING_DELETE.get() == Some(id);
+    let menu = ROW_MENU.get() == Some(id);
+    let active = playback.is_some_and(|p| p.id == id);
+    let playing = playback.is_some_and(|p| p.id == id && p.playing);
+    let drag_path = path.clone();
+
     div()
         .id(SharedString::from(format!("rec-{id}")))
+        .group("rec-row")
         .w_full()
         .flex()
+        .flex_col()
         .flex_shrink_0()
-        .items_center()
-        .gap(px(10.))
         .py(px(8.))
-        .min_h(px(theme::HIT_MIN))
         .border_b_1()
         .border_color(theme::FILL_TERTIARY)
-        .when(playing, |d| d.bg(theme::FILL_TERTIARY))
+        .when(active, |d| d.bg(theme::FILL_TERTIARY))
         .hover(|s| s.bg(theme::FILL_TERTIARY))
-        .active(|s| s.bg(theme::FILL_SECONDARY))
-        .cursor(CursorStyle::PointingHand)
-        .on_mouse_down(
-            MouseButton::Left,
-            cx.listener(move |this, _: &MouseDownEvent, window, cx| {
-                cx.stop_propagation();
-                if PENDING_DELETE.get().is_some() {
-                    PENDING_DELETE.set(None);
-                    cx.notify();
-                }
-                this.toggle_playback(id, window, cx);
-            }),
-        )
         .child(
             div()
-                .flex_1()
-                .min_w(px(0.))
-                .flex()
-                .flex_col()
-                .child(
-                    div()
-                        .text_size(px(theme::TITLE_3.size))
-                        .line_height(px(theme::TITLE_3.leading))
-                        .font_weight(theme::TITLE_3.emphasized)
-                        .text_color(theme::LABEL)
-                        .whitespace_nowrap()
-                        .overflow_hidden()
-                        .text_ellipsis()
-                        .child(SharedString::from(title)),
-                )
-                .child(label(date, theme::SUBHEADLINE, false)),
-        )
-        .child(
-            timer_text(dur, theme::CALLOUT)
-                .text_color(theme::SECONDARY_LABEL)
-                .font_weight(FontWeight::NORMAL)
-                .flex_shrink_0(),
-        )
-        .child(if pending {
-            div()
-                .id(SharedString::from(format!("rec-del-{id}")))
-                .h(px(theme::HIT_MIN))
-                .px_3()
-                .flex_shrink_0()
+                .w_full()
                 .flex()
                 .items_center()
-                .justify_center()
-                .rounded(px(theme::CONTROL_RADIUS))
-                .bg(theme::FILL)
-                .hover(|s| s.bg(theme::FILL_SECONDARY))
-                .active(|s| s.opacity(0.85))
-                .cursor(CursorStyle::PointingHand)
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(move |this, _: &MouseDownEvent, _, cx| {
-                        cx.stop_propagation();
-                        PENDING_DELETE.set(None);
-                        this.delete_recording(id, cx);
-                    }),
-                )
-                .child(label("Delete", theme::CALLOUT, true).text_color(theme::DESTRUCTIVE))
-                .into_any_element()
-        } else {
-            div()
-                .id(SharedString::from(format!("rec-del-{id}")))
-                .size(px(theme::HIT_MIN))
-                .flex_shrink_0()
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded_full()
-                .hover(|s| s.bg(theme::FILL))
-                .active(|s| s.opacity(0.8))
+                .gap(px(8.))
+                .min_h(px(theme::HIT_MIN))
                 .cursor(CursorStyle::PointingHand)
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(move |_, _: &MouseDownEvent, _, cx| {
                         cx.stop_propagation();
-                        PENDING_DELETE.set(Some(id));
-                        cx.notify();
+                        if PENDING_DELETE.get().is_some() {
+                            PENDING_DELETE.set(None);
+                            cx.notify();
+                        }
+                        if ROW_MENU.get().is_some() && ROW_MENU.get() != Some(id) {
+                            ROW_MENU.set(None);
+                            cx.notify();
+                        }
+                        let (x, y) = nook_core::mouse::current_mouse_logical();
+                        DRAG_ARM.with(|a| *a.borrow_mut() = Some((drag_path.clone(), x, y)));
                     }),
                 )
-                .child(crate::icons::lucide_color("x", 12.0, theme::TERTIARY_LABEL))
-                .into_any_element()
+                .on_mouse_move(cx.listener(move |_, event: &MouseMoveEvent, window, _cx| {
+                    if !event.dragging() {
+                        return;
+                    }
+                    DRAG_ARM.with(|a| {
+                        let Some((path, x0, y0)) = a.borrow().clone() else {
+                            return;
+                        };
+                        let (x, y) = nook_core::mouse::current_mouse_logical();
+                        let dx = x - x0;
+                        let dy = y - y0;
+                        if dx * dx + dy * dy < motion::DRAG_SLOP as f64 {
+                            return;
+                        }
+                        *a.borrow_mut() = None;
+                        platform::start_file_drag(&path, Some(window));
+                    });
+                }))
+                .on_mouse_up(
+                    MouseButton::Left,
+                    cx.listener(move |this, _: &MouseUpEvent, _, cx| {
+                        let armed = DRAG_ARM.with(|a| a.borrow_mut().take().is_some());
+                        if armed {
+                            this.toggle_playback(id, cx);
+                        }
+                    }),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(0.))
+                        .flex()
+                        .flex_col()
+                        .child(
+                            div()
+                                .text_size(px(theme::TITLE_3.size))
+                                .line_height(px(theme::TITLE_3.leading))
+                                .font_weight(theme::TITLE_3.emphasized)
+                                .text_color(theme::LABEL)
+                                .whitespace_nowrap()
+                                .overflow_hidden()
+                                .text_ellipsis()
+                                .child(SharedString::from(title)),
+                        )
+                        .child(label(date, theme::SUBHEADLINE, false)),
+                )
+                .child(
+                    timer_text(dur, theme::CALLOUT)
+                        .text_color(theme::SECONDARY_LABEL)
+                        .font_weight(FontWeight::NORMAL)
+                        .flex_shrink_0(),
+                )
+                .child(row_menu_btn(id, menu, cx))
+                .child(delete_btn(id, pending, cx)),
+        )
+        .when(menu, |d| d.child(row_menu_actions(id, path, cx)))
+        .when(active, |d| {
+            d.child(transport_row(id, playback, playing, cx))
         })
+}
+
+fn row_menu_btn(id: i64, open: bool, cx: &mut Context<Island>) -> impl IntoElement {
+    div()
+        .id(SharedString::from(format!("rec-more-{id}")))
+        .size(px(theme::HIT_MIN))
+        .flex_shrink_0()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded_full()
+        .when(!open, |d| {
+            d.opacity(0.0)
+                .group_hover("rec-row", |s| s.opacity(1.0))
+        })
+        .hover(|s| s.bg(theme::FILL))
+        .cursor(CursorStyle::PointingHand)
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |_, _: &MouseDownEvent, _, cx| {
+                cx.stop_propagation();
+                ROW_MENU.set(if ROW_MENU.get() == Some(id) {
+                    None
+                } else {
+                    Some(id)
+                });
+                cx.notify();
+            }),
+        )
+        .child(label("…", theme::BODY, true).text_color(theme::SECONDARY_LABEL))
+}
+
+fn row_menu_actions(
+    id: i64,
+    path: String,
+    cx: &mut Context<Island>,
+) -> impl IntoElement {
+    let reveal = path.clone();
+    div()
+        .w_full()
+        .flex()
+        .gap(px(8.))
+        .pt(px(4.))
+        .child(menu_chip("Open in QuickTime", format!("rec-open-{id}"), cx, move |this, cx| {
+            ROW_MENU.set(None);
+            this.open_recording(&path, cx);
+        }))
+        .child(menu_chip("Show in Finder", format!("rec-reveal-{id}"), cx, move |this, cx| {
+            ROW_MENU.set(None);
+            this.reveal_recording(&reveal, cx);
+        }))
+}
+
+fn menu_chip(
+    caption: &'static str,
+    id: impl Into<SharedString>,
+    cx: &mut Context<Island>,
+    on_click: impl Fn(&mut Island, &mut Context<Island>) + 'static,
+) -> impl IntoElement {
+    div()
+        .id(id.into())
+        .h(px(theme::HIT_MIN))
+        .px(px(10.))
+        .flex()
+        .items_center()
+        .rounded(px(theme::CONTROL_RADIUS))
+        .bg(theme::FILL)
+        .hover(|s| s.bg(theme::FILL_SECONDARY))
+        .cursor(CursorStyle::PointingHand)
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                cx.stop_propagation();
+                on_click(this, cx);
+            }),
+        )
+        .child(label(caption, theme::FOOTNOTE, true).text_color(theme::LABEL))
+}
+
+fn delete_btn(id: i64, pending: bool, cx: &mut Context<Island>) -> impl IntoElement {
+    if pending {
+        div()
+            .id(SharedString::from(format!("rec-del-{id}")))
+            .h(px(theme::HIT_MIN))
+            .px_3()
+            .flex_shrink_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(theme::CONTROL_RADIUS))
+            .bg(theme::FILL)
+            .hover(|s| s.bg(theme::FILL_SECONDARY))
+            .active(|s| s.opacity(0.85))
+            .cursor(CursorStyle::PointingHand)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                    cx.stop_propagation();
+                    PENDING_DELETE.set(None);
+                    this.delete_recording(id, cx);
+                }),
+            )
+            .child(label("Delete", theme::CALLOUT, true).text_color(theme::DESTRUCTIVE))
+            .into_any_element()
+    } else {
+        div()
+            .id(SharedString::from(format!("rec-del-{id}")))
+            .size(px(theme::HIT_MIN))
+            .flex_shrink_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded_full()
+            .hover(|s| s.bg(theme::FILL))
+            .active(|s| s.opacity(0.8))
+            .cursor(CursorStyle::PointingHand)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |_, _: &MouseDownEvent, _, cx| {
+                    cx.stop_propagation();
+                    PENDING_DELETE.set(Some(id));
+                    cx.notify();
+                }),
+            )
+            .child(lucide_color("x", 12.0, theme::TERTIARY_LABEL))
+            .into_any_element()
+    }
+}
+
+fn transport_row(
+    id: i64,
+    playback: Option<&Playback>,
+    playing: bool,
+    cx: &mut Context<Island>,
+) -> impl IntoElement {
+    let pb = playback.filter(|p| p.id == id);
+    let duration = pb.map(|p| p.duration_s).unwrap_or(0.0);
+    let position = pb.map(|p| p.position_s).unwrap_or(0.0);
+    let drag = SCRUB_DRAG.get();
+    let progress = drag.unwrap_or_else(|| {
+        if duration > 0.0 {
+            (position / duration) as f32
+        } else {
+            0.0
+        }
+    })
+    .clamp(0.0, 1.0);
+    let shown_pos = if let Some(ratio) = drag {
+        duration * ratio as f64
+    } else {
+        position
+    };
+    div()
+        .id(SharedString::from(format!("rec-transport-{id}")))
+        .w_full()
+        .flex()
+        .items_center()
+        .gap(px(6.))
+        .pt(px(6.))
+        .child(icon_hit(
+            if playing { "media-pause" } else { "media-play" },
+            format!("rec-play-{id}"),
+            cx,
+            move |this, cx| this.toggle_playback(id, cx),
+        ))
+        .child(
+            timer_text(recorder::format_elapsed_s(shown_pos), theme::SUBHEADLINE)
+                .text_color(theme::SECONDARY_LABEL)
+                .min_w(px(30.))
+                .flex_shrink_0(),
+        )
+        .child(rec_scrubber(id, progress, duration, cx))
+        .child(
+            timer_text(
+                recorder::format_remaining_s(shown_pos, duration),
+                theme::SUBHEADLINE,
+            )
+            .text_color(theme::SECONDARY_LABEL)
+            .min_w(px(36.))
+            .text_right()
+            .flex_shrink_0(),
+        )
+        .child(icon_hit(
+            "rotate-ccw",
+            format!("rec-back-{id}"),
+            cx,
+            move |this, cx| this.skip_recording(id, -15.0, cx),
+        ))
+        .child(icon_hit(
+            "chevron-right",
+            format!("rec-fwd-{id}"),
+            cx,
+            move |this, cx| this.skip_recording(id, 15.0, cx),
+        ))
+}
+
+fn icon_hit(
+    icon: &'static str,
+    id: impl Into<SharedString>,
+    cx: &mut Context<Island>,
+    on_click: impl Fn(&mut Island, &mut Context<Island>) + 'static,
+) -> impl IntoElement {
+    div()
+        .id(id.into())
+        .size(px(theme::HIT_MIN))
+        .flex_shrink_0()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded_full()
+        .hover(|s| s.bg(theme::FILL))
+        .active(|s| s.opacity(0.8))
+        .cursor(CursorStyle::PointingHand)
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                cx.stop_propagation();
+                on_click(this, cx);
+            }),
+        )
+        .child(lucide_color(icon, 14.0, theme::LABEL))
+}
+
+fn rec_scrubber(
+    id: i64,
+    progress: f32,
+    duration: f64,
+    cx: &mut Context<Island>,
+) -> impl IntoElement {
+    let _ = duration;
+    div()
+        .id(SharedString::from(format!("rec-scrub-{id}")))
+        .relative()
+        .flex_1()
+        .min_w(px(24.))
+        .h(px(theme::HIT_MIN))
+        .flex()
+        .items_center()
+        .cursor(CursorStyle::PointingHand)
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                cx.stop_propagation();
+                this.seek_recording_from_x(id, event.position.x.into(), cx);
+            }),
+        )
+        .on_mouse_move(cx.listener(move |this, event: &MouseMoveEvent, _, cx| {
+            if SCRUB_DRAG.get().is_none() {
+                return;
+            }
+            cx.stop_propagation();
+            this.seek_recording_from_x(id, event.position.x.into(), cx);
+        }))
+        .on_mouse_up(
+            MouseButton::Left,
+            cx.listener(|_, _: &MouseUpEvent, _, cx| {
+                SCRUB_DRAG.set(None);
+                cx.notify();
+            }),
+        )
+        .on_scroll_wheel(cx.listener(move |this, event: &ScrollWheelEvent, _, cx| {
+            let delta = event.delta.pixel_delta(px(16.0));
+            let dx: f32 = delta.x.into();
+            if dx.abs() < 0.5 {
+                return;
+            }
+            cx.stop_propagation();
+            this.skip_recording(id, if dx > 0.0 { 2.0 } else { -2.0 }, cx);
+        }))
+        .child(
+            canvas(
+                move |layout, _, _| {
+                    let origin: f32 = layout.origin.x.into();
+                    let width: f32 = layout.size.width.into();
+                    SCRUB_BOUNDS.with(|b| *b.borrow_mut() = Some((origin, width)));
+                    layout
+                },
+                |_bounds, _, _, _| {},
+            )
+            .absolute()
+            .inset_0(),
+        )
+        .child(
+            div()
+                .w_full()
+                .h(px(theme::TRACK_H))
+                .rounded(px(theme::TRACK_RADIUS))
+                .bg(theme::FILL_TERTIARY)
+                .child(
+                    div()
+                        .h_full()
+                        .w(relative(progress))
+                        .rounded(px(theme::TRACK_RADIUS))
+                        .bg(theme::LABEL),
+                ),
+        )
 }
 
 pub(crate) fn compact_left(island: &Island) -> AnyElement {
@@ -338,7 +662,6 @@ pub(crate) fn compact_right(island: &Island, cx: &mut Context<Island>) -> AnyEle
         .gap(px(10.))
         .child(
             timer_text(clock, theme::BODY)
-                .text_color(theme::DESTRUCTIVE)
                 .min_w(px(42.))
                 .text_right(),
         )
@@ -360,27 +683,13 @@ fn rec_waveform(levels: impl IntoIterator<Item = f32>) -> impl IntoElement {
         .flex_shrink_0();
     for (i, rms) in samples.iter().enumerate() {
         let scale = wave_bar_height(*rms);
-        let fade = 1.0 - (i as f32 / WAVE_BARS as f32) * 0.28;
         row = row.child(
             div()
                 .id(SharedString::from(format!("rec-bar-{i}")))
                 .w(px(WAVE_BAR_W))
                 .h(px((WAVE_H * scale).max(2.0)))
-                .rounded_full()
-                .bg(theme::DESTRUCTIVE)
-                .opacity(fade),
-        );
-    }
-    for i in 0..WAVE_DOTS {
-        let t = i as f32 / (WAVE_DOTS.saturating_sub(1).max(1) as f32);
-        let size = (2.6 - t * 0.7).max(1.6);
-        row = row.child(
-            div()
-                .id(SharedString::from(format!("rec-dot-{i}")))
-                .size(px(size))
-                .rounded_full()
-                .bg(theme::SECONDARY_LABEL)
-                .opacity(0.85 - t * 0.45),
+                .rounded(px(1.5))
+                .bg(theme::with_alpha(theme::LABEL, 0.28)),
         );
     }
     row
@@ -396,7 +705,8 @@ pub(crate) fn wave_bar_height(rms: f32) -> f32 {
     }
 }
 
-/// Compact recording clock: `00:06`, then `1:00:06` past an hour.
+/// Compact recording clock, as the mockup shows it: `0:12`, then `1:00:00`
+/// past an hour (matches `nook_core::recorder::format_duration_ms`).
 pub(crate) fn format_recording_clock(seconds: u32) -> String {
     let h = seconds / 3600;
     let m = (seconds % 3600) / 60;
@@ -404,7 +714,7 @@ pub(crate) fn format_recording_clock(seconds: u32) -> String {
     if h > 0 {
         format!("{h}:{m:02}:{s:02}")
     } else {
-        format!("{m:02}:{s:02}")
+        format!("{m}:{s:02}")
     }
 }
 
@@ -565,22 +875,88 @@ impl Island {
         self.recorder_level = 0.0;
     }
 
-    pub(crate) fn toggle_playback(
-        &mut self,
-        id: i64,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    pub(crate) fn toggle_playback(&mut self, id: i64, cx: &mut Context<Self>) {
         if self.playing_recording == Some(id) {
-            recorder::stop_playback();
-            self.playing_recording = None;
+            match recorder::playback_state() {
+                Some(pb) if pb.playing => recorder::pause(),
+                Some(_) => {
+                    if let Err(err) = recorder::resume() {
+                        self.recorder_error = Some(err);
+                    }
+                }
+                None => {
+                    if let Err(err) = recorder::play(id) {
+                        self.recorder_error = Some(err);
+                        self.playing_recording = None;
+                    }
+                }
+            }
         } else if let Err(err) = recorder::play(id) {
             self.recorder_error = Some(err);
             self.playing_recording = None;
         } else {
             self.playing_recording = Some(id);
+            SCRUB_DRAG.set(None);
         }
         cx.notify();
+    }
+
+    pub(crate) fn seek_recording(&mut self, id: i64, position_s: f64, cx: &mut Context<Self>) {
+        if self.playing_recording != Some(id) {
+            if let Err(err) = recorder::play(id) {
+                self.recorder_error = Some(err);
+                cx.notify();
+                return;
+            }
+            self.playing_recording = Some(id);
+        }
+        if let Err(err) = recorder::seek(id, position_s) {
+            self.recorder_error = Some(err);
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn seek_recording_from_x(&mut self, id: i64, x: f32, cx: &mut Context<Self>) {
+        let Some((origin, width)) = SCRUB_BOUNDS.with(|b| *b.borrow()) else {
+            return;
+        };
+        let ratio = crate::island::media::scrubber_ratio(x, origin, width);
+        SCRUB_DRAG.set(Some(ratio));
+        let duration = recorder::playback_state()
+            .filter(|p| p.id == id)
+            .map(|p| p.duration_s)
+            .unwrap_or(0.0);
+        self.seek_recording(id, duration * ratio as f64, cx);
+    }
+
+    pub(crate) fn skip_recording(&mut self, id: i64, delta_s: f64, cx: &mut Context<Self>) {
+        if self.playing_recording != Some(id) {
+            if let Err(err) = recorder::play(id) {
+                self.recorder_error = Some(err);
+                cx.notify();
+                return;
+            }
+            self.playing_recording = Some(id);
+        }
+        let position = recorder::playback_state()
+            .filter(|p| p.id == id)
+            .map(|p| p.position_s)
+            .unwrap_or(0.0);
+        self.seek_recording(id, position + delta_s, cx);
+    }
+
+    pub(crate) fn open_recording(&mut self, path: &str, cx: &mut Context<Self>) {
+        if let Err(err) = recorder::open_externally(path) {
+            self.recorder_error = Some(err);
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn reveal_recording(&mut self, path: &str, cx: &mut Context<Self>) {
+        if let Err(err) = recorder::reveal_in_finder(path) {
+            self.recorder_error = Some(err);
+            cx.notify();
+        }
     }
 
     pub(crate) fn delete_recording(&mut self, id: i64, cx: &mut Context<Self>) {
@@ -622,10 +998,10 @@ mod tests {
     }
 
     #[test]
-    fn recording_clock_is_zero_padded_mm_ss() {
-        assert_eq!(format_recording_clock(0), "00:00");
-        assert_eq!(format_recording_clock(6), "00:06");
-        assert_eq!(format_recording_clock(65), "01:05");
+    fn recording_clock_is_unpadded_m_ss() {
+        assert_eq!(format_recording_clock(0), "0:00");
+        assert_eq!(format_recording_clock(6), "0:06");
+        assert_eq!(format_recording_clock(65), "1:05");
         assert_eq!(format_recording_clock(3600), "1:00:00");
         assert_eq!(format_recording_clock(3661), "1:01:01");
     }

@@ -383,6 +383,11 @@ pub struct AppSettings {
     pub observe: ObserveConfig,
     #[serde(default)]
     pub liquid_glass_mode: bool,
+    /// How far the expanded Liquid Glass sheet stays black before it opens
+    /// into the material. `0` is bare glass, `1` holds black the longest.
+    /// Compact pills ignore this.
+    #[serde(default = "default_glass_gradient")]
+    pub liquid_glass_gradient: f32,
     #[serde(default)]
     pub non_notch_mode: bool,
     /// Horizontal position of the island centre as a fraction of screen width.
@@ -450,6 +455,10 @@ fn default_terminal_font_size() -> f32 {
 }
 
 fn default_island_x() -> f32 {
+    0.5
+}
+
+fn default_glass_gradient() -> f32 {
     0.5
 }
 
@@ -659,6 +668,7 @@ impl Default for AppSettings {
             notification_blocked_apps: Vec::new(),
             observe: ObserveConfig::default(),
             liquid_glass_mode: false,
+            liquid_glass_gradient: default_glass_gradient(),
             non_notch_mode: false,
             island_x: default_island_x(),
             island_y: 0.0,
@@ -682,6 +692,15 @@ impl Default for AppSettings {
 }
 
 impl AppSettings {
+    /// Slider value for the expanded glass fall, clamped to `0..=1`.
+    pub fn glass_gradient(&self) -> f32 {
+        if self.liquid_glass_gradient.is_finite() {
+            self.liquid_glass_gradient.clamp(0.0, 1.0)
+        } else {
+            default_glass_gradient()
+        }
+    }
+
     pub fn ordered_widgets(&self) -> Vec<WidgetModule> {
         self.widget_order
             .iter()
@@ -1345,6 +1364,7 @@ mod tests {
         assert!(!parsed.notification_fda_opt_in);
         assert!(parsed.notification_blocked_apps.is_empty());
         assert!(parsed.liquid_glass_mode);
+        assert!((parsed.liquid_glass_gradient - default_glass_gradient()).abs() < f32::EPSILON);
         assert!(!parsed.non_notch_mode);
         assert!((parsed.island_x - 0.5).abs() < f32::EPSILON);
         assert_eq!(parsed.island_y, 0.0);
@@ -1362,6 +1382,22 @@ mod tests {
         assert_eq!(parsed.used_cells(), 11);
         assert_eq!(parsed.remaining_cells(), 6);
         assert_eq!(parsed.nook_row_count(), 1);
+    }
+
+    #[test]
+    fn glass_gradient_clamps_and_defaults() {
+        let s = AppSettings::default();
+        assert!((s.glass_gradient() - 0.5).abs() < f32::EPSILON);
+        let mut high = s.clone();
+        high.liquid_glass_gradient = 4.0;
+        assert_eq!(high.glass_gradient(), 1.0);
+        high.liquid_glass_gradient = f32::NAN;
+        assert!((high.glass_gradient() - 0.5).abs() < f32::EPSILON);
+        let parsed: AppSettings =
+            serde_json::from_str(r#"{"liquid_glass_gradient":0.25}"#).unwrap();
+        assert!((parsed.glass_gradient() - 0.25).abs() < f32::EPSILON);
+        let missing: AppSettings = serde_json::from_str("{}").unwrap();
+        assert!((missing.glass_gradient() - 0.5).abs() < f32::EPSILON);
     }
 
     #[test]

@@ -147,7 +147,7 @@ pub fn current() -> Vec<SystemTimer> {
 pub fn publish(timers: Vec<SystemTimer>) {
     let tx = channel();
     if *tx.borrow() != timers {
-        let _ = tx.send(timers);
+        let _ = tx.send_replace(timers);
     }
 }
 

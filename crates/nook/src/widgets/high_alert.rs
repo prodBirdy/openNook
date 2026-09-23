@@ -1,7 +1,7 @@
 //! High Alert keep-awake card: toggle + duration chips + remaining readout.
 
 use crate::icons::lucide_color;
-use crate::island::ui::{format_timer, label, nook_display, nook_pane};
+use crate::island::ui::{format_timer, label, nook_pane};
 use crate::island::Island;
 use crate::theme;
 use gpui::{div, prelude::*, px, Context, CursorStyle, MouseButton, MouseDownEvent, SharedString};
@@ -39,16 +39,46 @@ pub(crate) fn high_alert_card(island: &Island, cx: &mut Context<Island>) -> impl
         Some(island.settings.high_alert_default_duration_secs).filter(|s| *s > 0)
     };
 
-    nook_pane("nook-high-alert")
+    card_shell("nook-high-alert")
         .w_full()
         .child(
             div()
+                .flex_1()
+                .min_h(px(0.))
                 .flex()
-                .items_end()
+                .items_center()
                 .justify_between()
                 .gap(px(12.))
-                .flex_shrink_0()
-                .child(nook_display(remaining))
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(8.))
+                        .child(big_label(
+                            if active {
+                                remaining.clone()
+                            } else {
+                                "Off".into()
+                            },
+                            if active {
+                                theme::SYSTEM_ORANGE
+                            } else {
+                                theme::SECONDARY_LABEL
+                            },
+                        ))
+                        .child(
+                            label(
+                                if active {
+                                    "High alert active"
+                                } else {
+                                    "High alert paused"
+                                },
+                                theme::FOOTNOTE,
+                                false,
+                            )
+                            .text_color(theme::TERTIARY_LABEL),
+                        ),
+                )
                 .child(toggle_btn(active, cx)),
         )
         .child(
@@ -58,10 +88,20 @@ pub(crate) fn high_alert_card(island: &Island, cx: &mut Context<Island>) -> impl
                     .map(|(name, secs)| chip(name, *secs, selected == *secs, cx)),
             ),
         )
-        .child(
-            label("Lid-close sleep is not prevented.", theme::FOOTNOTE, false)
-                .text_color(theme::TERTIARY_LABEL),
-        )
+}
+
+fn card_shell(id: impl Into<gpui::ElementId>) -> gpui::Stateful<gpui::Div> {
+    nook_pane(id).p(px(16.)).gap(px(10.))
+}
+
+fn big_label(text: impl Into<gpui::SharedString>, color: gpui::Rgba) -> gpui::Div {
+    div()
+        .text_size(px(26.))
+        .line_height(px(30.))
+        .font_weight(gpui::FontWeight::SEMIBOLD)
+        .text_color(color)
+        .whitespace_nowrap()
+        .child(text.into())
 }
 
 fn toggle_btn(active: bool, cx: &mut Context<Island>) -> impl IntoElement {
@@ -78,7 +118,11 @@ fn toggle_btn(active: bool, cx: &mut Context<Island>) -> impl IntoElement {
         .child(lucide_color(
             "sun",
             16.0,
-            if active { theme::SUCCESS } else { theme::LABEL },
+            if active {
+                theme::SYSTEM_ORANGE
+            } else {
+                theme::LABEL
+            },
         ))
         .on_mouse_down(
             MouseButton::Left,
@@ -111,9 +155,9 @@ fn chip(
 ) -> impl IntoElement {
     div()
         .id(SharedString::from(format!("high-alert-chip-{name}")))
-        .h(px(theme::HIT_MIN))
+        .h(px(24.))
         .px(px(8.))
-        .rounded(px(6.))
+        .rounded(px(8.))
         .flex()
         .items_center()
         .justify_center()
@@ -125,13 +169,11 @@ fn chip(
         .hover(|s| s.bg(theme::FILL_SECONDARY))
         .active(|s| s.opacity(0.85))
         .cursor(CursorStyle::PointingHand)
-        .child(
-            label(name, theme::SUBHEADLINE, true).text_color(if selected {
-                theme::LABEL
-            } else {
-                theme::SECONDARY_LABEL
-            }),
-        )
+        .child(label(name, theme::FOOTNOTE, true).text_color(if selected {
+            theme::LABEL
+        } else {
+            theme::SECONDARY_LABEL
+        }))
         .on_mouse_down(
             MouseButton::Left,
             cx.listener(move |this, _: &MouseDownEvent, _, cx| {

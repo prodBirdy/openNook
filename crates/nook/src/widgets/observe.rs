@@ -1,10 +1,10 @@
 //! Observe Nook pane: warmUP `/admin/metrics` plus Prometheus `/api/v1/query_range`.
 //!
-//! Calendar-style range chips, a featured headline, and one Nightwatch-style
-//! status chart with a hover popover.
+//! The 128pt gallery card is two status rows. Clicking it opens the full-width
+//! Nightwatch chart (range chips, stacked bars, legend).
 
 use crate::icons::lucide_color;
-use crate::island::ui::{label, nook_display, nook_empty, nook_pane, text_btn};
+use crate::island::ui::{label, nook_pane, text_btn};
 use crate::island::Island;
 use crate::theme;
 use gpui::{
@@ -12,13 +12,14 @@ use gpui::{
     MouseButton, MouseDownEvent, MouseMoveEvent, PathBuilder, Pixels, Rgba, SharedString,
 };
 use nook_core::observe::{
-    ObserveChartKind, ObserveRange, ObserveSnapshot, RangeSeries, SamplePoint,
+    ObserveChartKind, ObserveRange, ObserveSnapshot, ObserveSourceKind, RangeSeries, SamplePoint,
 };
 use nook_core::settings::AppSettings;
 use std::cell::RefCell;
 use std::rc::Rc;
 
-const STATUS_CHART_ID: &str = "http-status";
+/// Mockup Nook Row while Observe is expanded (`observe.html` height 240).
+pub(crate) const OBSERVE_EXPANDED_BODY: f32 = 240.0;
 
 #[derive(Clone)]
 struct StatusSeries {
@@ -28,7 +29,6 @@ struct StatusSeries {
 
 #[derive(Clone, Debug, PartialEq)]
 struct StackedSample {
-    t: f32,
     ts: f64,
     values: [f64; 3],
 }
@@ -47,115 +47,414 @@ pub(crate) fn observe_card(
     hover: Option<&ObserveHover>,
     cx: &mut Context<Island>,
 ) -> impl IntoElement {
-    let range = settings.observe.range;
-    let mut chips = div().flex().items_end().gap(px(10.));
-    for option in ObserveRange::all() {
-        let active = option == range;
-        chips = chips.child(range_chip(option, active, cx));
-    }
-
+    let _ = hover;
     let url = settings.observe.prometheus_url.trim();
-    let featured = snap.metrics.first();
-    let raw_headline = featured.map(|m| m.headline()).unwrap_or_else(|| "—".into());
-    let big_headline = (raw_headline.len() <= 8).then(|| raw_headline.clone());
-    let featured_label = featured.map(|m| m.label.clone());
+    let rows = observe_event_rows(snap);
 
-    let mut body = div().flex().flex_col().flex_1().min_h(px(0.));
+    let mut body = div()
+        .flex()
+        .flex_col()
+        .flex_1()
+        .min_h(px(0.))
+        .w_full()
+        .gap(px(8.))
+        .justify_center();
     if url.is_empty() {
-        body = body.child(nook_empty("activity", "No metrics URL"));
-    } else if snap.metrics.is_empty() {
+        body = body.child(
+            label("No metrics URL", theme::CALLOUT, false).text_color(theme::TERTIARY_LABEL),
+        );
+    } else if rows.is_empty() {
         if let Some(err) = &snap.error {
             body = body.child(observe_error_row(err, cx));
         } else {
-            body = body.child(nook_empty("activity", "No samples"));
+            body = body.child(
+                label("No samples", theme::CALLOUT, false).text_color(theme::TERTIARY_LABEL),
+            );
         }
     } else {
-        if let Some(err) = &snap.error {
-            body = body.child(observe_error_row(err, cx));
-        }
-        let statuses = status_series(snap);
-        let has_statuses = !statuses.is_empty();
-        if has_statuses {
-            body = body
-                .child(status_chart(
-                    statuses,
-                    hover.filter(|h| h.query == STATUS_CHART_ID),
-                    cx,
-                ))
-                .child(status_legend(status_totals(snap)));
-        } else if let Some(reading) = featured {
-            let series = reading.series.first().cloned();
-            let multi = reading.series.len() > 1;
-            if reading.chart != ObserveChartKind::Off {
-                if let Some(series) = series.filter(|s| s.points.len() >= 2) {
-                    let color = chart_color(&reading.query);
-                    body = body.child(mini_chart(
-                        reading.query.clone(),
-                        reading.chart,
-                        series,
-                        multi,
-                        color,
-                        hover.filter(|h| h.query == reading.query),
-                        cx,
-                    ));
-                }
-            }
-        }
-        for reading in snap.metrics.iter().skip(1).take(1) {
-            if has_statuses {
-                break;
-            }
-            body = body.child(
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .gap_2()
-                    .pt(px(6.))
-                    .child(label(reading.label.clone(), theme::SUBHEADLINE, false))
-                    .child(label(reading.headline(), theme::CALLOUT, true)),
-            );
+        for (ok, title, sub) in rows {
+            body = body.child(observe_event_row(ok, title, sub));
         }
     }
 
-    nook_pane("nook-observe")
+    card_shell("nook-observe")
         .w_full()
-        .child(
-            div()
-                .flex()
-                .items_end()
-                .gap(px(16.))
-                .flex_shrink_0()
-                .when_some(big_headline, |d, text| d.child(nook_display(text)))
-                .when(featured.is_some() && raw_headline.len() > 8, |d| {
-                    d.child(label(raw_headline.clone(), theme::TITLE_3, true))
-                })
-                .child(chips),
+        .cursor(CursorStyle::PointingHand)
+        .hover(|s| s.bg(theme::FILL_TERTIARY))
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                cx.stop_propagation();
+                this.open_observe_expanded(cx);
+            }),
         )
-        .when_some(featured_label, |d, name| {
-            d.child(label(name, theme::CALLOUT, false))
-        })
         .child(body)
 }
 
+pub(crate) fn observe_big_view(
+    snap: &ObserveSnapshot,
+    settings: &AppSettings,
+    hover: Option<&ObserveHover>,
+    cx: &mut Context<Island>,
+) -> impl IntoElement {
+    // Mockup `observe-big` (nNzAv): numeral + unit + range chips, caption,
+    // 30 stacked status columns, legend. No other chrome; the × only shows
+    // on hover. Empty data keeps the layout with a "—" numeral.
+    let _ = hover;
+    let range = settings.observe.range;
+    let mut chips = div().flex().items_center().gap(px(6.)).flex_shrink_0();
+    for option in ObserveRange::all() {
+        chips = chips.child(range_chip(option, option == range, cx));
+    }
+
+    let statuses = status_series(snap);
+    let featured = snap.metrics.first();
+    let headline = if !statuses.is_empty() {
+        let latest: f64 = statuses
+            .iter()
+            .filter_map(|series| series.points.last())
+            .map(|pt| pt.value.max(0.0))
+            .sum();
+        compact_number(latest)
+    } else {
+        featured
+            .and_then(|m| m.last_value())
+            .map(compact_number)
+            .unwrap_or_else(|| "—".into())
+    };
+    let metric_label = if !statuses.is_empty() {
+        observe_metric_caption(Some("HTTP status"), settings)
+    } else {
+        observe_metric_caption(featured.map(|m| m.label.as_str()), settings)
+    };
+
+    let header = div()
+        .flex()
+        .items_end()
+        .gap(px(16.))
+        .flex_shrink_0()
+        .w_full()
+        .child(observe_headline(headline))
+        .child(observe_unit("req/s"))
+        .child(div().flex_1())
+        .child(chips);
+
+    let buckets = status_buckets(&stacked_samples(&statuses), range, BIG_COLUMNS);
+
+    nook_pane("nook-observe-big")
+        .group("nook-observe-big")
+        .relative()
+        .w_full()
+        .h_full()
+        .bg(theme::ISLAND)
+        .rounded(px(theme::ROW_RADIUS))
+        .border_1()
+        .border_color(theme::FILL_TERTIARY)
+        .p(px(16.))
+        .gap(px(12.))
+        .child(header)
+        .child(
+            label(metric_label, theme::CALLOUT, false)
+                .text_color(theme::secondary_label())
+                .w_full()
+                .flex_shrink_0(),
+        )
+        .child(status_columns(&buckets))
+        .child(status_legend(status_totals(snap), range))
+        .child(observe_close_btn(cx))
+}
+
+/// Columns in the big status chart (mockup: always 30).
+const BIG_COLUMNS: usize = 30;
+const COLUMN_GAP: f32 = 3.0;
+const COLUMN_RADIUS: f32 = 3.0;
+const CLOSE_INSET: f32 = 12.0;
+const CLOSE_GLYPH: f32 = 16.0;
+
+/// Mockup numeral format: one decimal, trailing `.0` dropped (`2.4k`, `84`).
+fn compact_number(value: f64) -> String {
+    if !value.is_finite() {
+        return "—".into();
+    }
+    let abs = value.abs();
+    let (scaled, suffix) = if abs >= 1e9 {
+        (value / 1e9, "G")
+    } else if abs >= 1e6 {
+        (value / 1e6, "M")
+    } else if abs >= 1e3 {
+        (value / 1e3, "k")
+    } else {
+        (value, "")
+    };
+    let text = if suffix.is_empty() && scaled.fract().abs() < 1e-9 {
+        format!("{scaled:.0}")
+    } else {
+        format!("{scaled:.1}")
+    };
+    let text = text.strip_suffix(".0").map(str::to_string).unwrap_or(text);
+    format!("{text}{suffix}")
+}
+
+/// Bucket stacked samples into `count` equal slices of the selected range,
+/// ending at the newest sample. Each bucket is the per-group mean of the
+/// samples that fall in it; empty buckets are `None` (no bar).
+fn status_buckets(
+    samples: &[StackedSample],
+    range: ObserveRange,
+    count: usize,
+) -> Vec<Option<[f64; 3]>> {
+    let mut sums = vec![[0.0f64; 3]; count];
+    let mut hits = vec![0usize; count];
+    if let Some(end) = samples.iter().map(|s| s.ts).reduce(f64::max) {
+        let span = range.seconds().max(1) as f64;
+        let start = end - span;
+        for sample in samples {
+            if sample.ts < start {
+                continue;
+            }
+            let index = (((sample.ts - start) / span) * count as f64) as usize;
+            let index = index.min(count.saturating_sub(1));
+            for (sum, value) in sums[index].iter_mut().zip(sample.values) {
+                *sum += value.max(0.0);
+            }
+            hits[index] += 1;
+        }
+    }
+    sums.into_iter()
+        .zip(hits)
+        .map(|(sum, n)| (n > 0).then(|| sum.map(|v| v / n as f64)))
+        .collect()
+}
+
+/// 30 flex columns, bottom-aligned, 3pt gaps. Each column stacks 1–3xx
+/// (bottom), 4xx, 5xx (top); the column's 3pt radius clips the corners and
+/// the topmost present segment carries the 3 3 0 0 radius.
+fn status_columns(buckets: &[Option<[f64; 3]>]) -> impl IntoElement {
+    let max = buckets
+        .iter()
+        .flatten()
+        .map(|values| values.iter().sum::<f64>())
+        .fold(0.0, f64::max);
+    let mut chart = div()
+        .flex()
+        .items_end()
+        .gap(px(COLUMN_GAP))
+        .w_full()
+        .flex_1()
+        .min_h(px(0.));
+    for bucket in buckets {
+        let total = bucket.map(|v| v.iter().sum::<f64>()).unwrap_or(0.0);
+        let mut column = div().flex_1().min_w(px(0.));
+        if max > 0.0 && total > 0.0 {
+            let values = bucket.unwrap_or_default();
+            let top = values.iter().rposition(|v| *v > 0.0).unwrap_or(0);
+            column = column
+                .h(relative((total / max) as f32))
+                .rounded(px(COLUMN_RADIUS))
+                .overflow_hidden()
+                .flex()
+                .flex_col();
+            // Top-down children: 5xx, 4xx, then 1–3xx at the bottom.
+            for group in (0..3).rev() {
+                let value = values[group];
+                if value <= 0.0 {
+                    continue;
+                }
+                column = column.child(
+                    div()
+                        .w_full()
+                        .flex_shrink_0()
+                        .h(relative((value / total) as f32))
+                        .bg(status_color(group))
+                        .when(group == top, |d| d.rounded_t(px(COLUMN_RADIUS))),
+                );
+            }
+        } else {
+            column = column.h(px(0.));
+        }
+        chart = chart.child(column);
+    }
+    chart
+}
+
+/// Hover-only close, inside the card at 12,12 (mockup has no chrome at rest).
+fn observe_close_btn(cx: &mut Context<Island>) -> impl IntoElement {
+    div()
+        .id("observe-close")
+        .absolute()
+        .top(px(CLOSE_INSET))
+        .right(px(CLOSE_INSET))
+        .size(px(CLOSE_GLYPH))
+        .flex()
+        .items_center()
+        .justify_center()
+        .opacity(0.0)
+        .group_hover("nook-observe-big", |s| s.opacity(1.0))
+        .cursor(CursorStyle::PointingHand)
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                cx.stop_propagation();
+                this.close_observe_expanded(cx);
+            }),
+        )
+        .child(lucide_color("x", CLOSE_GLYPH, theme::tertiary_label()))
+}
+
+fn observe_metric_caption(label: Option<&str>, settings: &AppSettings) -> String {
+    let source = match settings.observe.source {
+        ObserveSourceKind::Warmup => "warmUP /admin/metrics",
+        ObserveSourceKind::Prometheus => "Prometheus",
+        ObserveSourceKind::Grafana => "Grafana",
+        ObserveSourceKind::Alertmanager => "Alertmanager",
+        ObserveSourceKind::FmObserve => "fm-observe",
+    };
+    match label {
+        Some(name) if !name.is_empty() => format!("{name} · {source}"),
+        _ => format!("HTTP status · {source}"),
+    }
+}
+
+fn card_shell(id: impl Into<gpui::ElementId>) -> gpui::Stateful<gpui::Div> {
+    nook_pane(id).p(px(16.)).gap(px(10.))
+}
+
+/// Gallery card: 6px status dot + 12/15 title + 10/13 tertiary subtitle.
+fn observe_event_row(ok: bool, title: String, subtitle: String) -> impl IntoElement {
+    div()
+        .w_full()
+        .flex_shrink_0()
+        .flex()
+        .items_center()
+        .gap(px(8.))
+        .child(
+            div()
+                .size(px(6.))
+                .rounded_full()
+                .flex_shrink_0()
+                .bg(if ok {
+                    theme::SUCCESS
+                } else {
+                    theme::DESTRUCTIVE
+                }),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w(px(0.))
+                .flex()
+                .flex_col()
+                .gap(px(1.))
+                .overflow_hidden()
+                .child(
+                    label(title, theme::CALLOUT, false)
+                        .text_color(theme::LABEL)
+                        .overflow_hidden()
+                        .text_ellipsis(),
+                )
+                .child(
+                    label(subtitle, theme::FOOTNOTE, false)
+                        .text_color(theme::TERTIARY_LABEL)
+                        .overflow_hidden()
+                        .text_ellipsis(),
+                ),
+        )
+}
+
+fn observe_event_rows(snap: &ObserveSnapshot) -> Vec<(bool, String, String)> {
+    let mut rows = Vec::new();
+    for alert in snap.alerts.iter().take(2) {
+        let sub = if alert.summary.is_empty() {
+            alert.severity.clone()
+        } else {
+            alert.summary.clone()
+        };
+        rows.push((false, alert.name.clone(), sub));
+    }
+    if rows.len() < 2 {
+        for reading in &snap.metrics {
+            if rows.len() >= 2 {
+                break;
+            }
+            let ok = reading.error.is_none() && snap.connected;
+            rows.push((ok, reading.label.clone(), metric_subtitle(reading)));
+        }
+    }
+    if rows.is_empty() && snap.connected {
+        rows.push((true, "warmup /metrics".into(), "just now".into()));
+    }
+    rows.truncate(2);
+    rows
+}
+
+fn metric_subtitle(reading: &nook_core::observe::MetricReading) -> String {
+    if let Some(err) = &reading.error {
+        return err.clone();
+    }
+    if let Some(pt) = reading
+        .series
+        .first()
+        .and_then(|s| s.points.last())
+    {
+        return relative_ago(pt.ts);
+    }
+    if let Some(value) = reading.last_value() {
+        return nook_core::observe::format_sample(value);
+    }
+    "just now".into()
+}
+
+fn relative_ago(ts: f64) -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(ts);
+    let secs = (now - ts).max(0.0) as u64;
+    if secs < 15 {
+        "just now".into()
+    } else if secs < 60 {
+        format!("{secs}s ago")
+    } else if secs < 3600 {
+        format!("{}m ago", secs / 60)
+    } else if secs < 86_400 {
+        format!("{}h ago", secs / 3600)
+    } else {
+        format!("{}d ago", secs / 86_400)
+    }
+}
+
+/// Big metric numeral: mockup 34/36 weight 600 with an 11px tertiary unit.
+fn observe_headline(text: String) -> gpui::Div {
+    div()
+        .text_size(px(34.0))
+        .line_height(px(36.0))
+        .font_weight(gpui::FontWeight::SEMIBOLD)
+        .text_color(theme::LABEL)
+        .child(text)
+}
+
+fn observe_unit(text: &str) -> gpui::Div {
+    div()
+        .text_size(px(theme::SUBHEADLINE.size))
+        .line_height(px(26.0))
+        .text_color(theme::tertiary_label())
+        .child(text.to_string())
+}
+
 fn range_chip(option: ObserveRange, active: bool, cx: &mut Context<Island>) -> impl IntoElement {
-    let (unit, num) = range_parts(option);
-    let color = if active {
-        theme::accent()
-    } else {
-        theme::LABEL
-    };
-    let label_color = if active {
-        theme::accent()
-    } else {
-        theme::SECONDARY_LABEL
-    };
     div()
         .id(SharedString::from(format!("range-{}", option.label())))
         .flex()
-        .flex_col()
         .items_center()
-        .gap(px(4.))
+        .justify_center()
+        .px(px(10.))
+        .py(px(4.))
+        .rounded(px(8.))
+        .bg(if active {
+            theme::FILL_SECONDARY
+        } else {
+            theme::with_alpha(theme::ISLAND, 0.0)
+        })
         .cursor(CursorStyle::PointingHand)
         .hover(|s| s.opacity(0.85))
         .on_mouse_down(
@@ -171,17 +470,13 @@ fn range_chip(option: ObserveRange, active: bool, cx: &mut Context<Island>) -> i
                 this.refresh_observe(cx);
             }),
         )
-        .child(label(unit, theme::FOOTNOTE, true).text_color(label_color))
-        .child(label(num, theme::TITLE_3, true).text_color(color))
-}
-
-fn range_parts(option: ObserveRange) -> (&'static str, &'static str) {
-    match option {
-        ObserveRange::FiveMinutes => ("M", "05"),
-        ObserveRange::FifteenMinutes => ("M", "15"),
-        ObserveRange::OneHour => ("H", "01"),
-        ObserveRange::SixHours => ("H", "06"),
-    }
+        .child(
+            label(option.label(), theme::SUBHEADLINE, active).text_color(if active {
+                theme::LABEL
+            } else {
+                theme::TERTIARY_LABEL
+            }),
+        )
 }
 
 fn observe_error_row(err: &str, cx: &mut Context<Island>) -> impl IntoElement {
@@ -205,7 +500,7 @@ fn observe_error_row(err: &str, cx: &mut Context<Island>) -> impl IntoElement {
 fn chart_color(query: &str) -> Rgba {
     match query.trim() {
         "5xx" | "errors" => theme::DESTRUCTIVE,
-        "4xx" => theme::SYSTEM_ORANGE,
+        "4xx" => theme::WARNING,
         "slow" => theme::SUCCESS,
         _ => theme::accent(),
     }
@@ -222,7 +517,7 @@ fn status_group(query: &str) -> Option<usize> {
 
 fn status_color(group: usize) -> Rgba {
     match group {
-        0 => with_alpha(theme::LABEL, 0.36),
+        0 => with_alpha(theme::LABEL, 0x5C as f32 / 255.0),
         1 => chart_color("4xx"),
         _ => chart_color("5xx"),
     }
@@ -254,41 +549,58 @@ fn status_totals(snap: &ObserveSnapshot) -> [f64; 3] {
     totals
 }
 
-fn status_legend(totals: [f64; 3]) -> impl IntoElement {
+fn status_legend(totals: [f64; 3], range: ObserveRange) -> impl IntoElement {
+    // Mockup legend row: 5px dots, 11px tertiary labels, gap 16, with the
+    // window (`last 15m · 30s step`) pinned right.
     let mut legend = div()
         .flex()
         .items_center()
-        .justify_between()
-        .gap_1()
-        .pt(px(3.));
+        .gap(px(16.))
+        .w_full()
+        .flex_shrink_0();
     for (group, name) in ["1–3xx", "4xx", "5xx"].into_iter().enumerate() {
         legend = legend.child(
             div()
                 .flex()
                 .items_center()
-                .gap(px(3.))
+                .gap(px(5.))
                 .child(div().size(px(5.)).rounded_full().bg(status_color(group)))
-                .child(label(
-                    format!(
-                        "{name} {}",
-                        nook_core::observe::format_sample(totals[group])
-                    ),
-                    theme::FOOTNOTE,
-                    false,
-                )),
+                .child(
+                    label(
+                        format!("{name} {}", compact_number(totals[group])),
+                        theme::SUBHEADLINE,
+                        false,
+                    )
+                    .text_color(theme::tertiary_label()),
+                ),
         );
     }
     legend
+        .child(div().flex_1())
+        .child(
+            label(
+                format!("last {} · {} step", range.label(), bucket_step(range)),
+                theme::SUBHEADLINE,
+                false,
+            )
+            .text_color(theme::tertiary_label()),
+        )
+}
+
+/// Width of one chart column: the range split into [`BIG_COLUMNS`] (`30s` at 15m).
+fn bucket_step(range: ObserveRange) -> String {
+    let secs = range.seconds() / BIG_COLUMNS as i64;
+    if secs >= 60 && secs % 60 == 0 {
+        format!("{}m", secs / 60)
+    } else {
+        format!("{secs}s")
+    }
 }
 
 fn stacked_samples(series: &[StatusSeries]) -> Vec<StackedSample> {
     let Some(reference) = series.iter().max_by_key(|series| series.points.len()) else {
         return Vec::new();
     };
-    let (Some(first), Some(last)) = (reference.points.first(), reference.points.last()) else {
-        return Vec::new();
-    };
-    let span = (last.ts - first.ts).max(1e-9);
     reference
         .points
         .iter()
@@ -300,198 +612,11 @@ fn stacked_samples(series: &[StatusSeries]) -> Vec<StackedSample> {
                 }
             }
             StackedSample {
-                t: span_t(first.ts, span, point.ts),
                 ts: point.ts,
                 values,
             }
         })
         .collect()
-}
-
-fn status_chart(
-    series: Vec<StatusSeries>,
-    hover: Option<&ObserveHover>,
-    cx: &mut Context<Island>,
-) -> impl IntoElement {
-    let bounds_cell = Rc::new(RefCell::new(None::<Bounds<Pixels>>));
-    let samples = stacked_samples(&series);
-    let hover_sample = hover.and_then(|hover| {
-        samples.iter().min_by(|a, b| {
-            (a.ts - hover.ts)
-                .abs()
-                .partial_cmp(&(b.ts - hover.ts).abs())
-                .unwrap_or(std::cmp::Ordering::Equal)
-        })
-    });
-    let hover_t = hover_sample.map(|sample| sample.t).unwrap_or(0.0);
-
-    let mut chart = div()
-        .id(STATUS_CHART_ID)
-        .relative()
-        .flex()
-        .w_full()
-        .h(px(48.))
-        .flex_shrink_0()
-        .cursor(CursorStyle::Crosshair)
-        .on_mouse_move({
-            let bounds_cell = bounds_cell.clone();
-            let samples = samples.clone();
-            cx.listener(move |this, event: &MouseMoveEvent, _, cx| {
-                let Some(bounds) = *bounds_cell.borrow() else {
-                    return;
-                };
-                let width: f32 = bounds.size.width.into();
-                if width < 1.0 || samples.is_empty() {
-                    return;
-                }
-                let x: f32 = event.position.x.into();
-                let origin: f32 = bounds.origin.x.into();
-                let index = ((((x - origin) / width).clamp(0.0, 1.0) * (samples.len() - 1) as f32)
-                    .round() as usize)
-                    .min(samples.len() - 1);
-                let sample = &samples[index];
-                let next = ObserveHover {
-                    query: STATUS_CHART_ID.into(),
-                    series: None,
-                    ts: sample.ts,
-                    value: sample.values.iter().sum(),
-                };
-                if this.observe_hover.as_ref() != Some(&next) {
-                    this.observe_hover = Some(next);
-                    cx.notify();
-                }
-            })
-        })
-        .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
-            if !*hovered
-                && this
-                    .observe_hover
-                    .as_ref()
-                    .is_some_and(|hover| hover.query == STATUS_CHART_ID)
-            {
-                this.observe_hover = None;
-                cx.notify();
-            }
-        }))
-        .child(
-            canvas(
-                {
-                    let bounds_cell = bounds_cell.clone();
-                    move |bounds, _, _| {
-                        *bounds_cell.borrow_mut() = Some(bounds);
-                        bounds
-                    }
-                },
-                {
-                    let samples = samples.clone();
-                    let show_hover = hover_sample.is_some();
-                    move |bounds, _, window, _| {
-                        let x0: f32 = bounds.origin.x.into();
-                        let y0: f32 = bounds.origin.y.into();
-                        let w: f32 = bounds.size.width.into();
-                        let h: f32 = bounds.size.height.into();
-                        if w < 8.0 || h < 8.0 || samples.is_empty() {
-                            return;
-                        }
-                        let p = |x: f32, y: f32| point(px(x), px(y));
-                        let max = samples
-                            .iter()
-                            .map(|sample| sample.values.iter().sum::<f64>())
-                            .fold(0.0, f64::max);
-                        if max <= 0.0 {
-                            return;
-                        }
-                        for t in [0.0, 0.5, 1.0] {
-                            let y = y0 + h * t;
-                            let mut line = PathBuilder::stroke(px(1.0));
-                            line.move_to(p(x0, y));
-                            line.line_to(p(x0 + w, y));
-                            if let Ok(path) = line.build() {
-                                window.paint_path(path, with_alpha(theme::LABEL, 0.11));
-                            }
-                        }
-                        let bar_w = (w / samples.len() as f32 * 0.62).clamp(1.5, 8.0);
-                        for sample in &samples {
-                            let x = x0 + sample.t * w;
-                            let left = (x - bar_w * 0.5).clamp(x0, x0 + w - bar_w);
-                            let mut bottom = y0 + h;
-                            let top_group = sample
-                                .values
-                                .iter()
-                                .rposition(|value| *value > 0.0)
-                                .unwrap_or(0);
-                            for (group, value) in sample.values.into_iter().enumerate() {
-                                if value <= 0.0 {
-                                    continue;
-                                }
-                                let top = bottom - (value / max) as f32 * h * 0.94;
-                                let mut bar = PathBuilder::fill();
-                                rounded_top_rect(
-                                    &mut bar,
-                                    &p,
-                                    left,
-                                    top,
-                                    bar_w,
-                                    bottom,
-                                    if group == top_group { 1.5 } else { 0.0 },
-                                );
-                                if let Ok(path) = bar.build() {
-                                    window.paint_path(path, status_color(group));
-                                }
-                                bottom = top;
-                            }
-                        }
-                        if show_hover {
-                            let x = x0 + hover_t.clamp(0.0, 1.0) * w;
-                            let mut rule = PathBuilder::stroke(px(1.0));
-                            rule.move_to(p(x, y0));
-                            rule.line_to(p(x, y0 + h));
-                            if let Ok(path) = rule.build() {
-                                window.paint_path(path, with_alpha(theme::LABEL, 0.45));
-                            }
-                        }
-                    }
-                },
-            )
-            .w_full()
-            .h_full(),
-        );
-
-    if let Some(sample) = hover_sample {
-        let mut pop = div().flex().flex_col().gap(px(1.)).child(label(
-            format_observe_ts(sample.ts),
-            theme::FOOTNOTE,
-            false,
-        ));
-        for (group, name) in ["1–3xx", "4xx", "5xx"].into_iter().enumerate() {
-            pop = pop.child(label(
-                format!(
-                    "{name} {}/min",
-                    nook_core::observe::format_sample(sample.values[group])
-                ),
-                theme::FOOTNOTE,
-                group > 0,
-            ));
-        }
-        chart = chart.child(deferred(
-            div()
-                .absolute()
-                .bottom(px(40.))
-                .when(hover_t > 0.55, |d| d.right(px(2.)))
-                .when(hover_t <= 0.55, |d| {
-                    d.left(relative(hover_t.clamp(0.0, 0.55)))
-                })
-                .rounded(px(theme::CONTROL_RADIUS))
-                .bg(theme::GROUPED_BG)
-                .border_1()
-                .border_color(theme::FILL_SECONDARY)
-                .shadow_sm()
-                .px_2()
-                .py(px(3.))
-                .child(pop),
-        ));
-    }
-    chart
 }
 
 fn with_alpha(color: Rgba, a: f32) -> Rgba {
@@ -600,16 +725,6 @@ fn mini_chart(
                             return;
                         }
                         let p = |x: f32, y: f32| point(px(x), px(y));
-                        let grid = with_alpha(theme::LABEL, 0.11);
-                        for t in [0.0, 0.5, 1.0] {
-                            let y = y0 + h * t;
-                            let mut line = PathBuilder::stroke(px(1.0));
-                            line.move_to(p(x0, y));
-                            line.line_to(p(x0 + w, y));
-                            if let Ok(built) = line.build() {
-                                window.paint_path(built, grid);
-                            }
-                        }
 
                         let from_zero = kind == ObserveChartKind::Bars;
                         let values: Vec<f64> = painted.iter().map(|pt| pt.1).collect();
@@ -926,7 +1041,11 @@ fn scale_series(series: &[f64], from_zero: bool) -> Vec<f32> {
 
 #[cfg(test)]
 mod tests {
-    use super::{monotone_beziers, scale_series, stacked_samples, StatusSeries};
+    use super::{
+        bucket_step, compact_number, monotone_beziers, scale_series, stacked_samples,
+        status_buckets, StackedSample, StatusSeries, BIG_COLUMNS,
+    };
+    use nook_core::observe::ObserveRange;
     use nook_core::observe::SamplePoint;
 
     #[test]
@@ -977,5 +1096,75 @@ mod tests {
             },
         ]);
         assert_eq!(samples[1].values, [22.0, 0.0, 4.0]);
+    }
+
+    #[test]
+    fn compact_number_matches_the_mockup() {
+        assert_eq!(compact_number(2400.0), "2.4k");
+        assert_eq!(compact_number(2000.0), "2k");
+        assert_eq!(compact_number(84.0), "84");
+        assert_eq!(compact_number(12.5), "12.5");
+        assert_eq!(compact_number(f64::NAN), "—");
+    }
+
+    #[test]
+    fn big_chart_always_has_thirty_buckets() {
+        let range = ObserveRange::FifteenMinutes;
+        assert_eq!(bucket_step(range), "30s");
+        assert_eq!(bucket_step(ObserveRange::OneHour), "2m");
+        assert_eq!(status_buckets(&[], range, BIG_COLUMNS).len(), BIG_COLUMNS);
+        assert!(status_buckets(&[], range, BIG_COLUMNS).iter().all(Option::is_none));
+
+        let end = 10_000.0;
+        let sample = |ts: f64, v: [f64; 3]| StackedSample { ts, values: v };
+        let samples = [
+            sample(end - 900.0 - 10.0, [99.0, 0.0, 0.0]), // before the window
+            sample(end - 890.0, [10.0, 0.0, 0.0]),
+            sample(end - 880.0, [20.0, 2.0, 0.0]),
+            sample(end, [5.0, 1.0, 1.0]),
+        ];
+        let buckets = status_buckets(&samples, range, BIG_COLUMNS);
+        assert_eq!(buckets.len(), BIG_COLUMNS);
+        assert_eq!(buckets[0], Some([15.0, 1.0, 0.0]), "mean of the first slice");
+        assert_eq!(buckets[BIG_COLUMNS - 1], Some([5.0, 1.0, 1.0]));
+        assert!(buckets[1..BIG_COLUMNS - 1].iter().all(Option::is_none));
+    }
+
+    #[test]
+    fn gallery_rows_prefer_alerts_then_metrics() {
+        let mut snap = nook_core::observe::ObserveSnapshot::default();
+        snap.connected = true;
+        snap.alerts.push(nook_core::observe::FiringAlert {
+            name: "403 Forbidden".into(),
+            severity: "error".into(),
+            summary: "/admin · 2m ago".into(),
+        });
+        snap.metrics.push(nook_core::observe::MetricReading {
+            label: "warmup /metrics".into(),
+            query: "total_requests".into(),
+            chart: nook_core::observe::ObserveChartKind::Off,
+            values: Vec::new(),
+            series: Vec::new(),
+            error: None,
+            history: Vec::new(),
+            window_total: None,
+        });
+        let rows = super::observe_event_rows(&snap);
+        assert_eq!(rows.len(), 2);
+        assert!(!rows[0].0);
+        assert_eq!(rows[0].1, "403 Forbidden");
+        assert_eq!(rows[0].2, "/admin · 2m ago");
+        assert!(rows[1].0);
+        assert_eq!(rows[1].1, "warmup /metrics");
+    }
+
+    #[test]
+    fn relative_ago_uses_just_now_under_15s() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs_f64();
+        assert_eq!(super::relative_ago(now), "just now");
+        assert_eq!(super::relative_ago(now - 120.0), "2m ago");
     }
 }

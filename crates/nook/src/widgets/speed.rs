@@ -1,12 +1,10 @@
-//! Speed-test Nook pane: tap the ring gauge to run or stop.
+//! Speed-test Nook pane: tap the readout to run or stop.
 
-use crate::icons::lucide_color;
 use crate::island::ui::{label, nook_pane, timer_text};
 use crate::island::Island;
 use crate::theme;
 use gpui::{
-    canvas, div, point, prelude::*, px, Context, CursorStyle, MouseButton, MouseDownEvent,
-    PathBuilder,
+    div, prelude::*, px, Context, CursorStyle, FontWeight, MouseButton, MouseDownEvent,
 };
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -17,11 +15,13 @@ thread_local! {
     static SPEED_ERROR: RefCell<Option<(String, Instant)>> = const { RefCell::new(None) };
 }
 
-const DIAL: f32 = 88.0;
-const STROKE: f32 = 6.0;
-/// Path radius so a 6px stroke sits inside the 88px face.
-const RADIUS: f32 = (DIAL - STROKE) / 2.0;
-const ARC_STEPS: i32 = 64;
+/// Big Mbps numeral — mockup 26/30 semibold.
+const SPEED_NUM: theme::Text = theme::Text {
+    size: 26.0,
+    leading: 30.0,
+    weight: FontWeight::SEMIBOLD,
+    emphasized: FontWeight::SEMIBOLD,
+};
 
 pub(crate) fn speed_card(
     mbps: Option<f64>,
@@ -39,149 +39,54 @@ pub(crate) fn speed_card(
         }
         slot.as_ref().map(|(msg, _)| msg.clone())
     });
-    let idle = !running && mbps.is_none() && error.is_none();
-    nook_pane("nook-speed").w_full().child(
-        div()
-            .flex_1()
-            .min_h(px(0.))
-            .w_full()
-            .flex()
-            .flex_col()
-            .items_center()
-            .justify_center()
-            .gap(px(8.))
-            .child(dial(mbps, progress, running, cx))
-            .when(idle, |d| {
-                d.child(
-                    label("Tap to test", theme::SUBHEADLINE, false)
-                        .text_color(theme::TERTIARY_LABEL),
-                )
-            })
-            .when_some(error, |d, msg| {
-                d.child(label(msg, theme::FOOTNOTE, false).text_color(theme::DESTRUCTIVE))
-            }),
-    )
-}
-
-fn dial(
-    mbps: Option<f64>,
-    progress: f64,
-    running: bool,
-    cx: &mut Context<Island>,
-) -> impl IntoElement {
-    let idle = !running && mbps.is_none();
-    // Time-based samples can end mid-arc on a fast link; a finished result
-    // always owns the full ring.
-    let fill = if running {
-        (progress as f32 / 100.0).clamp(0.0, 1.0)
-    } else if mbps.is_some() {
-        1.0
+    // Pencil: "284" + "Mbps down · 41 up". Core only measures download — up is
+    // a placeholder dash until an upload sample exists.
+    let (value, caption) = if running {
+        let (n, unit) = format_speed(mbps.unwrap_or(0.0));
+        (n, format!("{unit} down · {progress:.0}%"))
+    } else if let Some(v) = mbps {
+        let (n, unit) = format_speed(v);
+        (n, format!("{unit} down · — up"))
     } else {
-        0.0
+        ("—".into(), "Tap to test".into())
     };
 
-    div()
-        .id("speed-run")
-        .relative()
-        .size(px(DIAL))
-        .flex_shrink_0()
-        .flex()
-        .items_center()
-        .justify_center()
-        .cursor(CursorStyle::PointingHand)
-        .hover(|s| s.opacity(0.92))
-        .active(|s| s.opacity(0.8))
-        .on_mouse_down(
-            MouseButton::Left,
-            cx.listener(|this, _: &MouseDownEvent, _, cx| {
-                cx.stop_propagation();
-                if this.speed_running {
-                    this.stop_speed_test(cx);
-                } else {
-                    this.begin_speed_test(cx);
-                }
-            }),
+    nook_pane("nook-speed")
+        .w_full()
+        .p(px(16.))
+        .gap(px(10.))
+        .child(
+            div()
+                .id("speed-run")
+                .flex_1()
+                .min_h(px(0.))
+                .w_full()
+                .flex()
+                .flex_col()
+                .gap(px(8.))
+                .justify_center()
+                .cursor(CursorStyle::PointingHand)
+                .hover(|s| s.opacity(0.92))
+                .active(|s| s.opacity(0.8))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                        cx.stop_propagation();
+                        if this.speed_running {
+                            this.stop_speed_test(cx);
+                        } else {
+                            this.begin_speed_test(cx);
+                        }
+                    }),
+                )
+                .child(timer_text(value, SPEED_NUM))
+                .child(
+                    label(caption, theme::FOOTNOTE, false).text_color(theme::TERTIARY_LABEL),
+                )
+                .when_some(error, |d, msg| {
+                    d.child(label(msg, theme::FOOTNOTE, false).text_color(theme::DESTRUCTIVE))
+                }),
         )
-        .child(speed_ring(fill))
-        .when(idle, |d| {
-            d.child(
-                div()
-                    .absolute()
-                    .inset_0()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .child(lucide_color("play", 18.0, theme::LABEL)),
-            )
-        })
-        .when(!idle, |d| d.child(readout(mbps.unwrap_or(0.0), running)))
-}
-
-/// Control Center–style ring: progress from 12 o'clock, round caps.
-fn speed_ring(progress: f32) -> impl IntoElement {
-    let accent = theme::accent();
-    let track = theme::FILL_SECONDARY;
-    canvas(
-        |bounds, _, _| bounds,
-        move |bounds, _, window, _| {
-            let cx: f32 = bounds.center().x.into();
-            let cy: f32 = bounds.center().y.into();
-            let p = |x: f32, y: f32| point(px(x), px(y));
-
-            let mut arc = |color: gpui::Rgba, start: f32, end: f32| {
-                let span = (end - start).abs();
-                if span < 0.001 {
-                    return;
-                }
-                let steps = ((span / std::f32::consts::TAU) * ARC_STEPS as f32)
-                    .ceil()
-                    .max(2.0) as i32;
-                let mut path = PathBuilder::stroke(px(STROKE));
-                for i in 0..=steps {
-                    let t = i as f32 / steps as f32;
-                    let a = start + (end - start) * t;
-                    let x = cx + RADIUS * a.cos();
-                    let y = cy + RADIUS * a.sin();
-                    if i == 0 {
-                        path.move_to(p(x, y));
-                    } else {
-                        path.line_to(p(x, y));
-                    }
-                }
-                if let Ok(built) = path.build() {
-                    window.paint_path(built, color);
-                }
-            };
-
-            let start = -std::f32::consts::FRAC_PI_2;
-            arc(track, start, start + std::f32::consts::TAU);
-            if progress > 0.001 {
-                arc(accent, start, start + progress * std::f32::consts::TAU);
-            }
-        },
-    )
-    .size(px(DIAL))
-    .flex_shrink_0()
-}
-
-fn readout(mbps: f64, running: bool) -> impl IntoElement {
-    let (value, unit) = format_speed(mbps);
-    div()
-        .absolute()
-        .inset_0()
-        .flex()
-        .flex_col()
-        .items_center()
-        .justify_center()
-        .child(timer_text(value, theme::TITLE_2))
-        .child(label(unit, theme::FOOTNOTE, true).text_color(if running {
-            theme::TERTIARY_LABEL
-        } else {
-            theme::SECONDARY_LABEL
-        }))
-        .when(running, |d| {
-            d.child(label("Testing…", theme::FOOTNOTE, false).text_color(theme::SECONDARY_LABEL))
-        })
 }
 
 fn short_speed_error(err: &str) -> String {
@@ -205,6 +110,9 @@ pub(crate) fn format_speed(val: f64) -> (String, &'static str) {
         (format!("{:.2}", val / 1000.0), "Gbps")
     } else if val > 0.0 && val < 1.0 {
         (format!("{:.0}", val * 1000.0), "Kbps")
+    } else if val >= 100.0 {
+        // Whole Mbps for the big readout (mockup "284").
+        (format!("{val:.0}"), "Mbps")
     } else {
         (format!("{val:.1}"), "Mbps")
     }
@@ -346,6 +254,7 @@ mod tests {
         assert_eq!(format_speed(0.0), ("0.0".into(), "Mbps"));
         assert_eq!(format_speed(0.4), ("400".into(), "Kbps"));
         assert_eq!(format_speed(14.2), ("14.2".into(), "Mbps"));
+        assert_eq!(format_speed(284.0), ("284".into(), "Mbps"));
         assert_eq!(format_speed(1500.0), ("1.50".into(), "Gbps"));
     }
 }

@@ -7,7 +7,8 @@
 use crate::app_data_dir;
 use crate::database::{get_connection, log_sql};
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -21,6 +22,15 @@ pub struct RecordingItem {
     pub created_at: i64,
     pub duration_ms: i64,
     pub transcript: String,
+}
+
+/// Live AVAudioPlayer readout. `playing` is false while paused or at end.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Playback {
+    pub id: i64,
+    pub position_s: f64,
+    pub duration_s: f64,
+    pub playing: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -83,6 +93,37 @@ pub fn format_duration_ms(ms: i64) -> String {
     } else {
         format!("{m}:{s:02}")
     }
+}
+
+pub fn format_elapsed_s(secs: f64) -> String {
+    format_duration_ms((secs.max(0.0) * 1000.0).round() as i64)
+}
+
+pub fn format_remaining_s(elapsed: f64, duration: f64) -> String {
+    format!("-{}", format_elapsed_s(duration - elapsed))
+}
+
+pub fn clamp_position(position_s: f64, duration_s: f64) -> f64 {
+    if !duration_s.is_finite() || duration_s <= 0.0 {
+        return 0.0;
+    }
+    if !position_s.is_finite() {
+        return 0.0;
+    }
+    position_s.clamp(0.0, duration_s)
+}
+
+pub fn clamp_fraction(fraction: f64) -> f64 {
+    if !fraction.is_finite() {
+        0.0
+    } else {
+        fraction.clamp(0.0, 1.0)
+    }
+}
+
+/// True when the player finished the file (paused mid-file is not finished).
+pub fn playback_finished(state: &Playback) -> bool {
+    !state.playing && state.duration_s > 0.0 && state.position_s + 0.05 >= state.duration_s
 }
 
 /// Stitch a finalized 60 s chunk onto the next partial. Overlap (the new
@@ -275,6 +316,93 @@ pub fn stop_playback() {
     macos::stop_playback();
 }
 
+pub fn pause() {
+    #[cfg(target_os = "macos")]
+    macos::pause();
+}
+
+pub fn resume() -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        macos::resume()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Ok(())
+    }
+}
+
+pub fn seek(id: i64, position_s: f64) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        macos::seek(id, position_s)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (id, position_s);
+        Ok(())
+    }
+}
+
+pub fn seek_fraction(id: i64, fraction: f64) -> Result<(), String> {
+    let fraction = clamp_fraction(fraction);
+    match playback_state() {
+        Some(pb) if pb.id == id && pb.duration_s > 0.0 => {
+            seek(id, pb.duration_s * fraction)
+        }
+        Some(pb) if pb.id == id => Ok(()),
+        _ => seek(id, 0.0),
+    }
+}
+
+pub fn playback_state() -> Option<Playback> {
+    let id = PLAYING_ID.load(Ordering::Relaxed);
+    if id == 0 {
+        return None;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        macos::playback_state(id as i64)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Some(Playback {
+            id: id as i64,
+            position_s: 0.0,
+            duration_s: 0.0,
+            playing: true,
+        })
+    }
+}
+
+pub fn open_externally(path: &str) -> Result<(), String> {
+    if !Path::new(path).exists() {
+        return Err("Recording file is gone.".into());
+    }
+    let qt = Command::new("/usr/bin/open")
+        .args(["-a", "QuickTime Player", path])
+        .status();
+    match qt {
+        Ok(status) if status.success() => Ok(()),
+        _ => Command::new("/usr/bin/open")
+            .arg(path)
+            .spawn()
+            .map(|_| ())
+            .map_err(|e| e.to_string()),
+    }
+}
+
+pub fn reveal_in_finder(path: &str) -> Result<(), String> {
+    if !Path::new(path).exists() {
+        return Err("Recording file is gone.".into());
+    }
+    Command::new("/usr/bin/open")
+        .args(["-R", path])
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
 pub fn permission_hint() -> Option<String> {
     #[cfg(target_os = "macos")]
     {
@@ -421,6 +549,54 @@ mod macos {
             }
         }
         PLAYING_ID.store(0, Ordering::Relaxed);
+    }
+
+    pub fn pause() {
+        if let Ok(g) = PLAYER.lock() {
+            if let Some(player) = g.as_ref() {
+                let _: () = unsafe { msg_send![&*player.0, pause] };
+            }
+        }
+    }
+
+    pub fn resume() -> Result<(), String> {
+        let g = PLAYER.lock().map_err(|e| e.to_string())?;
+        let Some(player) = g.as_ref() else {
+            return Err("Nothing is playing.".into());
+        };
+        let ok: bool = unsafe { msg_send![&*player.0, play] };
+        if !ok {
+            return Err("Could not resume the recording.".into());
+        }
+        Ok(())
+    }
+
+    pub fn seek(id: i64, position_s: f64) -> Result<(), String> {
+        if PLAYING_ID.load(Ordering::Relaxed) != id as u64 {
+            return Err("That recording is not active.".into());
+        }
+        let g = PLAYER.lock().map_err(|e| e.to_string())?;
+        let Some(player) = g.as_ref() else {
+            return Err("Nothing is playing.".into());
+        };
+        let duration: f64 = unsafe { msg_send![&*player.0, duration] };
+        let t = clamp_position(position_s, duration);
+        let _: () = unsafe { msg_send![&*player.0, setCurrentTime: t] };
+        Ok(())
+    }
+
+    pub fn playback_state(id: i64) -> Option<Playback> {
+        let g = PLAYER.lock().ok()?;
+        let player = g.as_ref()?;
+        let position_s: f64 = unsafe { msg_send![&*player.0, currentTime] };
+        let duration_s: f64 = unsafe { msg_send![&*player.0, duration] };
+        let playing: bool = unsafe { msg_send![&*player.0, isPlaying] };
+        Some(Playback {
+            id,
+            position_s,
+            duration_s,
+            playing,
+        })
     }
 
     pub fn permission_hint() -> Option<String> {
@@ -762,6 +938,52 @@ mod tests {
         assert_eq!(format_duration_ms(65_000), "1:05");
         assert_eq!(format_duration_ms(3_600_000), "1:00:00");
         assert_eq!(format_duration_ms(3_661_000), "1:01:01");
+    }
+
+    #[test]
+    fn remaining_clock_is_signed_and_clamped() {
+        assert_eq!(format_remaining_s(12.0, 60.0), "-0:48");
+        assert_eq!(format_remaining_s(0.0, 12.0), "-0:12");
+        assert_eq!(format_remaining_s(60.0, 60.0), "-0:00");
+        assert_eq!(format_remaining_s(80.0, 60.0), "-0:00");
+        assert_eq!(format_elapsed_s(12.4), "0:12");
+    }
+
+    #[test]
+    fn seek_helpers_clamp_fraction_and_position() {
+        assert_eq!(clamp_fraction(-0.2), 0.0);
+        assert_eq!(clamp_fraction(0.25), 0.25);
+        assert_eq!(clamp_fraction(1.4), 1.0);
+        assert_eq!(clamp_fraction(f64::NAN), 0.0);
+        assert_eq!(clamp_position(-3.0, 60.0), 0.0);
+        assert_eq!(clamp_position(12.0, 60.0), 12.0);
+        assert_eq!(clamp_position(90.0, 60.0), 60.0);
+        assert_eq!(clamp_position(12.0, 0.0), 0.0);
+    }
+
+    #[test]
+    fn playback_finished_ignores_a_mid_file_pause() {
+        let mid = Playback {
+            id: 1,
+            position_s: 12.0,
+            duration_s: 60.0,
+            playing: false,
+        };
+        assert!(!playback_finished(&mid));
+        let end = Playback {
+            id: 1,
+            position_s: 60.0,
+            duration_s: 60.0,
+            playing: false,
+        };
+        assert!(playback_finished(&end));
+        let live = Playback {
+            id: 1,
+            position_s: 59.9,
+            duration_s: 60.0,
+            playing: true,
+        };
+        assert!(!playback_finished(&live));
     }
 
     #[test]

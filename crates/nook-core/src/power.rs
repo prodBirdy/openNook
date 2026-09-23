@@ -335,7 +335,7 @@ mod macos {
         set_time_remaining_subscription(
             snap.should_watch_time_remaining(DETAIL_WATCH.load(Ordering::Relaxed)),
         );
-        let _ = super::channel().send(snap);
+        let _ = super::channel().send_replace(snap);
     }
 
     fn install_lpm_observer() {
@@ -427,7 +427,13 @@ mod macos {
                 snap.is_charging = cf_dict_bool(desc, c"Is Charging").unwrap_or(false);
                 let state = cf_dict_string(desc, c"Power Source State");
                 snap.on_ac = state.as_deref() == Some("AC Power");
-                if let Some(minutes) = cf_dict_i32(desc, c"Time to Empty").filter(|m| *m > 0) {
+                if snap.is_charging {
+                    if let Some(minutes) = cf_dict_i32(desc, c"Time to Full").filter(|m| *m > 0) {
+                        snap.time_to_empty_min = Some(minutes as u32);
+                    }
+                } else if let Some(minutes) =
+                    cf_dict_i32(desc, c"Time to Empty").filter(|m| *m > 0)
+                {
                     snap.time_to_empty_min = Some(minutes as u32);
                 }
                 break;
@@ -786,7 +792,24 @@ mod tests {
     }
 
     #[test]
-    fn watch_channel_starts_as_desktop() {
+    fn watch_channel_stores_without_receivers() {
+        // tokio watch::Sender::send drops the value when no receivers remain;
+        // send_replace always stores. Startup publish_now() races ahead of the
+        // island subscribe() — without this, current() stays the desktop default.
+        let snap = PowerSnapshot {
+            percent: Some(99),
+            is_charging: false,
+            on_ac: false,
+            time_to_empty_min: Some(120),
+            warning_level: BatteryWarning::None,
+            low_power_mode: false,
+            has_battery: true,
+        };
+        let _ = channel().send_replace(snap);
+        let got = current();
+        assert!(got.has_battery);
+        assert_eq!(got.percent, Some(99));
+        let _ = channel().send_replace(PowerSnapshot::default());
         assert_eq!(current(), PowerSnapshot::default());
         let rx = subscribe();
         assert_eq!(*rx.borrow(), PowerSnapshot::default());

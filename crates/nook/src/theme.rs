@@ -1,4 +1,4 @@
-use gpui::{hsla, rgb, FontWeight, Hsla, Rgba};
+use gpui::{linear_color_stop, linear_gradient, Background, FontWeight, Rgba};
 
 /// Opaque island fill. Live Activities compact/expanded presentations use a
 /// black background; we keep that role without cloning Apple chrome.
@@ -40,6 +40,195 @@ pub fn island_fill_glass(color: Option<u32>) -> Rgba {
         Some(rgb) => rgba_from_u32(rgb, 0.82),
         None => ISLAND_GLASS,
     }
+}
+
+/// Black band, in points, at slider midpoint (`0.5`). That is the approved fall.
+const GLASS_VEIL_BAND_AT_DEFAULT: f32 = 48.0;
+const GLASS_GRADIENT_MID: f32 = 0.5;
+/// The bottom edge always keeps some material, even with the slider at full.
+const GLASS_VEIL_HOLD_CAP: f32 = 0.82;
+/// Black alpha at the bottom edge when Increase Contrast is on.
+const GLASS_VEIL_CONTRAST_FLOOR: f32 = 0.72;
+/// Points past the compact pill over which the veil fades in.
+const GLASS_VEIL_REVEAL_SPAN: f32 = 96.0;
+
+/// Tallest compact pill, including the hover chin. The fall stays off at or
+/// below this height.
+pub fn compact_glass_ceiling(notch_h: f32) -> f32 {
+    let notch = if notch_h.is_finite() {
+        notch_h.max(NOTCH_MIN_H)
+    } else {
+        NOTCH_MIN_H
+    };
+    notch + COMPACT_HOVER_CHIN + COMPACT_HEIGHT_OVERFLOW
+}
+
+/// How far a full resisted stretch opens the veil. `1` finishes the fall
+/// while the pill is still resisting, so the scroll itself is the transition.
+pub const GLASS_PULL_REVEAL: f32 = 1.0;
+
+/// Fraction of the stretch at which the system material is fully present.
+/// The veil keeps opening after this, over a material that is already there.
+const GLASS_PULL_MATERIAL_AT: f32 = 0.35;
+
+fn pull_t(pull: f32, pull_max: f32) -> f32 {
+    if !pull.is_finite() || !pull_max.is_finite() || pull <= 0.0 || pull_max <= 0.0 {
+        return 0.0;
+    }
+    (pull / pull_max).clamp(0.0, 1.0)
+}
+
+/// Opacity of the system material during a down-swipe. It arrives early so
+/// the opening veil has glass behind it instead of a faded scrim.
+pub fn glass_pull_material(pull: f32, pull_max: f32) -> f32 {
+    (pull_t(pull, pull_max) / GLASS_PULL_MATERIAL_AT).clamp(0.0, 1.0)
+}
+
+/// Veil open amount for the slow down-swipe. Eased so the glass is obvious
+/// well before the commit, and complete at a full stretch.
+pub fn glass_pull_reveal(pull: f32, pull_max: f32) -> f32 {
+    let t = pull_t(pull, pull_max);
+    let eased = 1.0 - (1.0 - t) * (1.0 - t);
+    eased * GLASS_PULL_REVEAL
+}
+
+/// `0` on a compact pill, `1` once the sheet has opened past it.
+pub fn glass_veil_reveal(height: f32, ceiling: f32) -> f32 {
+    if !height.is_finite() || !ceiling.is_finite() {
+        return 0.0;
+    }
+    ((height - ceiling) / GLASS_VEIL_REVEAL_SPAN).clamp(0.0, 1.0)
+}
+
+/// `(hold, floor)` for the black veil.
+///
+/// `amount` is the settings slider (`0` bare glass, `0.5` the 48pt band,
+/// `1` the longest black cap). `hold` is the fraction of `height` that stays
+/// opaque black. `floor` is the black alpha at the bottom edge.
+pub fn glass_veil_curve(height: f32, amount: f32, increase_contrast: bool) -> (f32, f32) {
+    let amount = if amount.is_finite() {
+        amount.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let floor = if increase_contrast {
+        GLASS_VEIL_CONTRAST_FLOOR
+    } else {
+        0.0
+    };
+    if amount <= f32::EPSILON || !height.is_finite() || height <= 1.0 {
+        return (0.0, floor);
+    }
+    let band = GLASS_VEIL_BAND_AT_DEFAULT * (amount / GLASS_GRADIENT_MID);
+    let hold = (band / height).clamp(0.0, GLASS_VEIL_HOLD_CAP);
+    (hold, floor)
+}
+
+fn black_fall(hold: f32, start: Rgba, end: Rgba) -> Background {
+    // 180°: first stop is the top edge, second stop is the bottom edge.
+    linear_gradient(
+        180.0,
+        linear_color_stop(start, hold),
+        linear_color_stop(end, 1.0),
+    )
+}
+
+/// Black alphas `(top, bottom)` painted over the material.
+///
+/// Compact (`open` 0) is solid black. As the sheet opens, the bottom clears
+/// so the material comes in. Slider `amount` 0 clears the whole sheet.
+pub fn glass_veil_alphas(open: f32, amount: f32, floor: f32) -> (f32, f32) {
+    let open = if open.is_finite() {
+        open.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let amount = if amount.is_finite() {
+        amount.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let floor = if floor.is_finite() {
+        floor.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let end = floor + (1.0 - floor) * (1.0 - open);
+    if amount <= f32::EPSILON {
+        (end, end)
+    } else {
+        (1.0, end)
+    }
+}
+
+/// Veil painted over live Liquid Glass. `open` is 0 on a compact pill and 1
+/// on a fully open sheet. Solid black at 0; black through the top band, then
+/// the system material, as it opens.
+pub fn island_glass_veil(height: f32, open: f32, amount: f32) -> Background {
+    let open = if open.is_finite() {
+        open.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let (hold, floor) = glass_veil_curve(height, amount, crate::platform::increase_contrast());
+    let (start_a, end_a) = glass_veil_alphas(open, amount, floor);
+    if (start_a - end_a).abs() < 0.004 {
+        return with_alpha(ISLAND, start_a).into();
+    }
+    black_fall(hold, with_alpha(ISLAND, start_a), with_alpha(ISLAND, end_a))
+}
+
+/// Same fall where no system material view is behind the fill. Compact stays
+/// the opaque island color so the open end never punches a hole.
+pub fn island_glass_fallback_veil(
+    color: Option<u32>,
+    height: f32,
+    open: f32,
+    amount: f32,
+) -> Background {
+    let solid = island_fill(color);
+    let glass = island_fill_glass(color);
+    let open = if open.is_finite() {
+        open.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let (hold, floor) = glass_veil_curve(height, amount, crate::platform::increase_contrast());
+    let (start_a, end_a) = glass_veil_alphas(open, amount, floor);
+    let paint = |alpha: f32| {
+        let t = (1.0 - alpha).clamp(0.0, 1.0);
+        Rgba {
+            r: solid.r + (glass.r - solid.r) * t,
+            g: solid.g + (glass.g - solid.g) * t,
+            b: solid.b + (glass.b - solid.b) * t,
+            a: solid.a + (glass.a - solid.a) * t,
+        }
+    };
+    if (start_a - end_a).abs() < 0.004 {
+        return paint(start_a).into();
+    }
+    black_fall(hold, paint(start_a), paint(end_a))
+}
+
+/// Peak alpha of the Liquid Glass edge highlight at the bottom rim.
+pub const GLASS_RIM_ALPHA: f32 = 0.38;
+/// Fraction of the island height the rim stays dark before it fades in.
+pub const GLASS_RIM_HOLD: f32 = 0.35;
+
+/// Hairline edge highlight stroked around the Liquid Glass island: dark along
+/// the notch edge, catching light toward the rounded bottom (mockup eYApc /
+/// w31KY).
+pub fn island_glass_rim() -> Background {
+    let peak = if crate::platform::increase_contrast() {
+        (GLASS_RIM_ALPHA * 1.5).min(1.0)
+    } else {
+        GLASS_RIM_ALPHA
+    };
+    linear_gradient(
+        180.0,
+        linear_color_stop(with_alpha(LABEL, 0.0), GLASS_RIM_HOLD),
+        linear_color_stop(with_alpha(LABEL, peak), 1.0),
+    )
 }
 
 /// Semantic dark-overlay roles (HIG Color: label / fill / separator).
@@ -200,14 +389,6 @@ pub const WINDOW_BG: Rgba = Rgba {
     b: 0.118,
     a: 1.0,
 };
-/// Settings window fill. Slightly transparent so macOS `Blurred` chrome reads
-/// as dark glass; opaque enough that Linux (no vibrancy) stays legible.
-pub const SETTINGS_GLASS: Rgba = Rgba {
-    r: 0.110,
-    g: 0.110,
-    b: 0.118,
-    a: 0.86,
-};
 pub const GROUPED_BG: Rgba = Rgba {
     r: 0.173,
     g: 0.173,
@@ -232,10 +413,6 @@ pub const COMPACT_HEIGHT_OVERFLOW: f32 = 1.0;
 /// rounded rect, not a capsule — half-height rounding ate the 1px wrap.
 pub const COMPACT_RADIUS: f32 = 14.0;
 pub const EXPANDED_RADIUS: f32 = 36.0;
-/// Extra space on each side of the hardware notch in Liquid Glass mode so
-/// compact content (album art, visualizer) does not sit against the camera.
-/// Painted mode hides the notch inside the pill and must stay at 0.
-pub const GLASS_NOTCH_GAP: f32 = 14.0;
 /// React `WidgetWrapper`: `rounded-[28px]`.
 pub const WIDGET_RADIUS: f32 = 28.0;
 pub const INNER_RADIUS: f32 = 10.0;
@@ -245,11 +422,12 @@ pub const CONTENT_INSET: f32 = 12.0;
 pub const EXPANDED_PAD: f32 = 20.0;
 /// Nook tab body: one row under the notch, matching the capsule layout.
 pub const NOOK_BODY: f32 = 128.0;
-pub const NOOK_INSET: f32 = 16.0;
+/// Mockup Nook row padding `0 20 20 20` — lines panes up with the tab bar.
+pub const NOOK_INSET: f32 = 20.0;
 /// Nominal minimum cell; the grid uses `Island::nook_cell_width()`.
 pub const NOOK_CELL: f32 = 56.0;
-/// Pane divider contribution: 1px rule + 12px margin each side.
-pub const NOOK_DIVIDER: f32 = 25.0;
+/// Gap between Nook panes (mockup row `gap: 20`, no divider rule).
+pub const NOOK_DIVIDER: f32 = 20.0;
 /// Vertical gap between Nook rows: 1 px rule + CONTENT_INSET margin each side.
 pub const NOOK_ROW_GAP: f32 = 25.0;
 /// Expanded island width; the Nook row holds `TOTAL_CELLS` cells at `nook_cell_width()`.
@@ -347,25 +525,13 @@ pub const TRACK_H: f32 = 4.0;
 pub const TRACK_RADIUS: f32 = 2.0;
 /// Inset from the compact capsule edge to the leading/trailing glyph.
 /// Past the 14pt corner so a 20pt face does not sit on the curve.
+#[cfg(test)]
 pub const COMPACT_INSET: f32 = 8.0;
 /// Expanded Nook Mirror circle. Fills `NOOK_BODY` minus the pane inset.
+#[cfg(test)]
 pub const MIRROR_FACE: f32 = 112.0;
 
 /// HIG › Accessibility › Buttons gives macOS a 28×28 pt recommended hit target
 /// (20×20 pt minimum). Interactive rows and controls hold this floor even when
 /// their visible artwork is smaller.
 pub const HIT_MIN: f32 = 28.0;
-
-pub fn parse_hex(hex: &str) -> Hsla {
-    let hex = hex.trim_start_matches('#');
-    if hex.len() >= 6 {
-        if let (Ok(r), Ok(g), Ok(b)) = (
-            u8::from_str_radix(&hex[0..2], 16),
-            u8::from_str_radix(&hex[2..4], 16),
-            u8::from_str_radix(&hex[4..6], 16),
-        ) {
-            return rgb(((r as u32) << 16) | ((g as u32) << 8) | b as u32).into();
-        }
-    }
-    hsla(0.58, 1.0, 0.52, 1.0)
-}

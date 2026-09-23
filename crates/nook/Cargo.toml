@@ -40,3 +40,5 @@ objc2-user-notifications = { version = "0.3", features = [
 ] }
 block2 = "0.6"
 global-hotkey = "0.7"
+# Weather card backdrop: the Pencil scene shader, rendered offscreen.
+objc2-metal = "0.3"

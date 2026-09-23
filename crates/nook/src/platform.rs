@@ -1371,31 +1371,6 @@ unsafe impl objc2::Encode for CGImageRef {
         objc2::Encoding::Pointer(&objc2::Encoding::Struct("CGImage", &[]));
 }
 
-/// `CGColorRef` encodes as `^{CGColor=}`; a raw `*const c_void` is `^v`
-/// and panics objc2's encoding check.
-#[cfg(target_os = "macos")]
-#[derive(Clone, Copy)]
-#[repr(transparent)]
-struct CGColorRef(*const std::ffi::c_void);
-
-#[cfg(target_os = "macos")]
-unsafe impl objc2::Encode for CGColorRef {
-    const ENCODING: objc2::Encoding =
-        objc2::Encoding::Pointer(&objc2::Encoding::Struct("CGColor", &[]));
-}
-
-/// `CGPathRef` encodes as `^{CGPath=}`; same `^v` trap as `CGColorRef`.
-#[cfg(target_os = "macos")]
-#[derive(Clone, Copy)]
-#[repr(transparent)]
-struct CGPathRef(*const std::ffi::c_void);
-
-#[cfg(target_os = "macos")]
-unsafe impl objc2::Encode for CGPathRef {
-    const ENCODING: objc2::Encoding =
-        objc2::Encoding::Pointer(&objc2::Encoding::Struct("CGPath", &[]));
-}
-
 #[cfg(target_os = "macos")]
 #[repr(transparent)]
 struct NSRectPtr(*mut nook_core::notch::CGRect);
@@ -1996,14 +1971,6 @@ pub fn install_weather_observers() {
     }
 }
 
-/// Brand ring drawn *under* native glass so the material refracts it.
-#[derive(Clone, Copy, Debug)]
-pub struct GlassBorder {
-    pub color: (f32, f32, f32),
-    pub alpha: f32,
-    pub glow: f32,
-}
-
 /// GPUI-space island rect (origin top-left) for the native glass underlay.
 #[derive(Clone, Copy, Debug)]
 pub struct IslandGlass {
@@ -2016,8 +1983,8 @@ pub struct IslandGlass {
     /// Optional stained-glass tint (`NSGlassEffectView.tintColor`). `None`
     /// leaves the system default.
     pub tint: Option<(f32, f32, f32)>,
-    /// Agent brand stroke + halo. `None` hides the ring view.
-    pub border: Option<GlassBorder>,
+    /// Material strength. `0` is the black compact pill; `1` is fully open.
+    pub opacity: f64,
 }
 
 impl IslandGlass {
@@ -2027,21 +1994,6 @@ impl IslandGlass {
             && (self.y - other.y).abs() < 0.5
             && (self.wing - other.wing).abs() < 0.5
             && (self.radius - other.radius).abs() < 0.5
-    }
-}
-
-#[cfg(target_os = "macos")]
-fn border_needs_update(old: Option<GlassBorder>, new: Option<GlassBorder>) -> bool {
-    match (old, new) {
-        (None, None) => false,
-        (None, Some(_)) | (Some(_), None) => true,
-        (Some(a), Some(b)) => {
-            (a.color.0 - b.color.0).abs() > 0.01
-                || (a.color.1 - b.color.1).abs() > 0.01
-                || (a.color.2 - b.color.2).abs() > 0.01
-                || (a.alpha - b.alpha).abs() > 0.01
-                || (a.glow - b.glow).abs() > 0.01
-        }
     }
 }
 
@@ -2072,8 +2024,9 @@ fn glass_extra(spec: IslandGlass) -> f64 {
 
 /// Place, update, or hide the island's native glass underlay.
 ///
-/// Returns `true` when a system material view is showing, so GPUI must paint
-/// the island fill fully transparent. macOS 26+ uses `NSGlassEffectView`
+/// Returns `true` when a system material view is attached, so GPUI paints the
+/// black veil instead of a flat fill. `IslandGlass::opacity` fades that view
+/// in as the sheet opens. macOS 26+ uses `NSGlassEffectView`
 /// (regular style — the island is text-heavy). Older systems fall back to
 /// `NSVisualEffectView` HUD material.
 ///
@@ -2117,7 +2070,6 @@ pub fn island_glass_attached() -> bool {
 #[cfg(target_os = "macos")]
 struct GlassCap {
     view: *mut objc2::runtime::AnyObject,
-    ring: *mut objc2::runtime::AnyObject,
     last: Option<IslandGlass>,
 }
 
@@ -2130,7 +2082,6 @@ fn glass_cap() -> &'static std::sync::Mutex<GlassCap> {
     GLASS.get_or_init(|| {
         std::sync::Mutex::new(GlassCap {
             view: std::ptr::null_mut(),
-            ring: std::ptr::null_mut(),
             last: None,
         })
     })
@@ -2159,21 +2110,13 @@ fn hide_island_glass() {
     let mut cap = glass_cap().lock().unwrap_or_else(|e| e.into_inner());
     cap.last = None;
     let view = cap.view;
-    let ring = cap.ring;
     cap.view = std::ptr::null_mut();
-    cap.ring = std::ptr::null_mut();
-    if view.is_null() && ring.is_null() {
+    if view.is_null() {
         return;
     }
     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
-        if !ring.is_null() {
-            let _: () = msg_send![ring, removeFromSuperview];
-            let _: () = msg_send![ring, release];
-        }
-        if !view.is_null() {
-            let _: () = msg_send![view, removeFromSuperview];
-            let _: () = msg_send![view, release];
-        }
+        let _: () = msg_send![view, removeFromSuperview];
+        let _: () = msg_send![view, release];
     }));
 }
 
@@ -2211,20 +2154,11 @@ unsafe fn apply_island_glass(spec: IslandGlass) -> bool {
             None => return false,
         };
         attach_glass_behind_content(ns_win, content, cap.view);
-        if cap.ring.is_null() {
-            cap.ring = create_ring_view(rect).unwrap_or(std::ptr::null_mut());
-        }
-        if !cap.ring.is_null() {
-            attach_ring_below_glass(cap.view, cap.ring);
-        }
     } else {
         let hosted: *mut AnyObject = msg_send![cap.view, window];
         if hosted != ns_win {
             attach_glass_behind_content(ns_win, content, cap.view);
             pin_dark_appearance(cap.view);
-            if !cap.ring.is_null() {
-                attach_ring_below_glass(cap.view, cap.ring);
-            }
         }
         let current: CGRect = msg_send![cap.view, frame];
         let moved = (current.origin.x - rect.origin.x).abs() > 0.4
@@ -2244,15 +2178,14 @@ unsafe fn apply_island_glass(spec: IslandGlass) -> bool {
         if reshape || retint {
             apply_glass_tint(cap.view, spec.tint);
         }
-        if cap.ring.is_null() {
-            cap.ring = create_ring_view(rect).unwrap_or(std::ptr::null_mut());
-            if !cap.ring.is_null() {
-                attach_ring_below_glass(cap.view, cap.ring);
-            }
-        }
     }
-    if !cap.ring.is_null() {
-        sync_ring_view(cap.ring, rect, spec, cap.last);
+    let opacity = spec.opacity.clamp(0.0, 1.0);
+    let opacity_changed = cap
+        .last
+        .map(|old| (old.opacity - opacity).abs() > 0.01)
+        .unwrap_or(true);
+    if opacity_changed {
+        let _: () = msg_send![cap.view, setAlphaValue: opacity];
     }
     cap.last = Some(spec);
     let hidden: bool = msg_send![cap.view, isHidden];
@@ -2447,277 +2380,6 @@ unsafe fn attach_glass_behind_content(
         positioned: -1_i64,
         relativeTo: relative
     ];
-}
-
-#[cfg(target_os = "macos")]
-const RING_LINE: f64 = 2.5;
-#[cfg(target_os = "macos")]
-const RING_SHADOW: f64 = 12.0;
-
-#[cfg(target_os = "macos")]
-unsafe extern "C" {
-    fn CGPathCreateWithRoundedRect(
-        rect: CGRect,
-        corner_width: f64,
-        corner_height: f64,
-        transform: *const std::ffi::c_void,
-    ) -> CGPathRef;
-    fn CGPathRelease(path: CGPathRef);
-}
-
-#[cfg(target_os = "macos")]
-unsafe fn create_ring_view(rect: CGRect) -> Option<*mut objc2::runtime::AnyObject> {
-    use objc2::runtime::{AnyClass, AnyObject, Bool};
-    use objc2::*;
-
-    let shape_cls = AnyClass::get(c"CAShapeLayer")?;
-    let view: *mut AnyObject = msg_send![class!(NSView), alloc];
-    let view: *mut AnyObject = msg_send![view, initWithFrame: rect];
-    if view.is_null() {
-        return None;
-    }
-    let layer: *mut AnyObject = msg_send![shape_cls, layer];
-    if layer.is_null() {
-        let _: () = msg_send![view, release];
-        return None;
-    }
-    // Layer must be set before wantsLayer so NSView does not mint a CALayer.
-    let _: () = msg_send![view, setLayer: layer];
-    let _: () = msg_send![view, setWantsLayer: Bool::from(true)];
-    let _: () = msg_send![view, setHidden: Bool::from(true)];
-    let _: () = msg_send![view, setClipsToBounds: Bool::from(false)];
-    let id_sel = sel!(setIdentifier:);
-    let can_id: Bool = msg_send![view, respondsToSelector: id_sel];
-    if can_id.as_bool() {
-        let id = ns_string("nook-island-glass-ring");
-        if !id.is_null() {
-            let _: () = msg_send![view, setIdentifier: id];
-        }
-    }
-    let join = ns_string("round");
-    if !join.is_null() {
-        let _: () = msg_send![layer, setLineJoin: join];
-    }
-    let _: () = msg_send![layer, setLineWidth: RING_LINE];
-    let fill: *mut AnyObject = msg_send![class!(NSColor), clearColor];
-    if !fill.is_null() {
-        let cg: CGColorRef = msg_send![fill, CGColor];
-        let _: () = msg_send![layer, setFillColor: cg];
-    }
-    Some(view)
-}
-
-#[cfg(target_os = "macos")]
-unsafe fn attach_ring_below_glass(
-    glass: *mut objc2::runtime::AnyObject,
-    ring: *mut objc2::runtime::AnyObject,
-) {
-    use objc2::runtime::AnyObject;
-    use objc2::*;
-
-    let parent: *mut AnyObject = msg_send![glass, superview];
-    if parent.is_null() {
-        return;
-    }
-    // NSWindowBelow = -1: ring sits under the glass so the material refracts it.
-    let _: () = msg_send![
-        parent,
-        addSubview: ring,
-        positioned: -1_i64,
-        relativeTo: glass
-    ];
-}
-
-#[cfg(target_os = "macos")]
-fn ring_is_visible(border: Option<GlassBorder>) -> bool {
-    border.is_some_and(|b| b.glow >= 0.02)
-}
-
-#[cfg(target_os = "macos")]
-unsafe fn sync_ring_view(
-    ring: *mut objc2::runtime::AnyObject,
-    rect: CGRect,
-    spec: IslandGlass,
-    last: Option<IslandGlass>,
-) {
-    use objc2::runtime::Bool;
-    use objc2::*;
-
-    let current: CGRect = msg_send![ring, frame];
-    let origin_moved = (current.origin.x - rect.origin.x).abs() > 0.4
-        || (current.origin.y - rect.origin.y).abs() > 0.4;
-    let size_moved = (current.size.width - rect.size.width).abs() > 0.4
-        || (current.size.height - rect.size.height).abs() > 0.4;
-    let radius_changed = last
-        .map(|old| (old.radius - spec.radius).abs() > 0.5)
-        .unwrap_or(true);
-    let restyle = last
-        .map(|old| border_needs_update(old.border, spec.border))
-        .unwrap_or(true);
-    let want_hidden = !ring_is_visible(spec.border);
-    let was_hidden: Bool = msg_send![ring, isHidden];
-
-    if !origin_moved
-        && !size_moved
-        && !radius_changed
-        && !restyle
-        && was_hidden.as_bool() == want_hidden
-    {
-        return;
-    }
-
-    let Some(txn) = objc2::runtime::AnyClass::get(c"CATransaction") else {
-        apply_ring_updates(
-            ring,
-            rect,
-            spec,
-            origin_moved || size_moved,
-            size_moved || radius_changed,
-            restyle,
-            was_hidden.as_bool() != want_hidden,
-            want_hidden,
-        );
-        return;
-    };
-    let _: () = msg_send![txn, begin];
-    let _: () = msg_send![txn, setDisableActions: Bool::from(true)];
-    apply_ring_updates(
-        ring,
-        rect,
-        spec,
-        origin_moved || size_moved,
-        size_moved || radius_changed,
-        restyle,
-        was_hidden.as_bool() != want_hidden,
-        want_hidden,
-    );
-    let _: () = msg_send![txn, commit];
-}
-
-#[cfg(target_os = "macos")]
-unsafe fn apply_ring_updates(
-    ring: *mut objc2::runtime::AnyObject,
-    rect: CGRect,
-    spec: IslandGlass,
-    move_frame: bool,
-    rewrite_path: bool,
-    restyle: bool,
-    toggle_hidden: bool,
-    want_hidden: bool,
-) {
-    use objc2::runtime::{AnyObject, Bool};
-    use objc2::*;
-
-    if move_frame {
-        let _: () = msg_send![ring, setFrame: rect];
-    }
-    if rewrite_path {
-        set_ring_path(ring, rect.size, spec.radius);
-    }
-    if restyle {
-        set_ring_style(ring, spec.border);
-    }
-    if toggle_hidden {
-        let _: () = msg_send![ring, setHidden: Bool::from(want_hidden)];
-    }
-    if move_frame || rewrite_path {
-        let window: *mut AnyObject = msg_send![ring, window];
-        if !window.is_null() {
-            let layer: *mut AnyObject = msg_send![ring, layer];
-            if !layer.is_null() {
-                let scale: f64 = msg_send![window, backingScaleFactor];
-                if scale > 0.0 {
-                    let _: () = msg_send![layer, setContentsScale: scale];
-                }
-            }
-        }
-    }
-}
-
-#[cfg(target_os = "macos")]
-unsafe fn set_ring_path(ring: *mut objc2::runtime::AnyObject, size: CGSize, radius: f64) {
-    use objc2::runtime::AnyObject;
-    use objc2::*;
-
-    let layer: *mut AnyObject = msg_send![ring, layer];
-    if layer.is_null() {
-        return;
-    }
-    let inset = RING_LINE * 0.5;
-    let path_rect = CGRect {
-        origin: CGPoint { x: inset, y: inset },
-        size: CGSize {
-            width: (size.width - RING_LINE).max(0.0),
-            height: (size.height - RING_LINE).max(0.0),
-        },
-    };
-    if path_rect.size.width < 1.0 || path_rect.size.height < 1.0 {
-        return;
-    }
-    let max_r = path_rect.size.width.min(path_rect.size.height) * 0.5;
-    let corner = (radius - inset).clamp(0.0, max_r);
-    let path = CGPathCreateWithRoundedRect(path_rect, corner, corner, std::ptr::null());
-    if path.0.is_null() {
-        return;
-    }
-    let _: () = msg_send![layer, setPath: path];
-    CGPathRelease(path);
-}
-
-#[cfg(target_os = "macos")]
-unsafe fn set_ring_style(ring: *mut objc2::runtime::AnyObject, border: Option<GlassBorder>) {
-    use objc2::runtime::AnyObject;
-    use objc2::*;
-
-    let layer: *mut AnyObject = msg_send![ring, layer];
-    if layer.is_null() {
-        return;
-    }
-    let Some(border) = border else {
-        let clear: *mut AnyObject = msg_send![class!(NSColor), clearColor];
-        if !clear.is_null() {
-            let cg: CGColorRef = msg_send![clear, CGColor];
-            let _: () = msg_send![layer, setStrokeColor: cg];
-            let _: () = msg_send![layer, setShadowColor: cg];
-        }
-        let _: () = msg_send![layer, setShadowOpacity: 0.0_f32];
-        return;
-    };
-    let stroke: *mut AnyObject = msg_send![
-        class!(NSColor),
-        colorWithSRGBRed: border.color.0 as f64,
-        green: border.color.1 as f64,
-        blue: border.color.2 as f64,
-        alpha: border.alpha as f64
-    ];
-    if !stroke.is_null() {
-        let cg: CGColorRef = msg_send![stroke, CGColor];
-        let _: () = msg_send![layer, setStrokeColor: cg];
-    }
-    let fill: *mut AnyObject = msg_send![class!(NSColor), clearColor];
-    if !fill.is_null() {
-        let cg: CGColorRef = msg_send![fill, CGColor];
-        let _: () = msg_send![layer, setFillColor: cg];
-    }
-    let _: () = msg_send![layer, setLineWidth: RING_LINE];
-    let shadow: *mut AnyObject = msg_send![
-        class!(NSColor),
-        colorWithSRGBRed: border.color.0 as f64,
-        green: border.color.1 as f64,
-        blue: border.color.2 as f64,
-        alpha: 1.0_f64
-    ];
-    if !shadow.is_null() {
-        let cg: CGColorRef = msg_send![shadow, CGColor];
-        let _: () = msg_send![layer, setShadowColor: cg];
-    }
-    let _: () = msg_send![layer, setShadowOpacity: (border.glow * 0.9)];
-    let _: () = msg_send![layer, setShadowRadius: RING_SHADOW];
-    let offset = CGSize {
-        width: 0.0,
-        height: 0.0,
-    };
-    let _: () = msg_send![layer, setShadowOffset: offset];
 }
 
 #[cfg(target_os = "macos")]

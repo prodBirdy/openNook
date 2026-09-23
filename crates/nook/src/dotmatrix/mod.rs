@@ -16,7 +16,7 @@ mod material;
 
 use engine::{bloom_level, Ctx, N};
 
-pub use brand::{element as brand_element, led_color_on};
+pub use brand::element as brand_element;
 use gpui::{canvas, fill, point, prelude::*, px, Bounds, IntoElement, Pixels, Rgba, Window};
 /// Global LED grid — change [`LED`].resolution to retune every face.
 #[allow(unused_imports)]

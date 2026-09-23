@@ -1,14 +1,52 @@
-//! Week strip + empty/event state for the Nook calendar pane.
+//! Date head + event list for the Nook calendar pane (Pencil mockup).
 
+use crate::icons::lucide_color;
 use crate::island::ui::{
-    label, nook_accent_bar, nook_display, nook_empty, nook_row, open_privacy_pane, scroll_body,
-    slide_label, text_btn, timer_text,
+    label, nook_empty, open_privacy_pane, scroll_body, text_btn, timer_text,
 };
 use crate::island::Island;
 use crate::theme;
-use chrono::{Datelike, Local, TimeZone, Weekday};
-use gpui::{div, prelude::*, px, Context, MouseButton, MouseDownEvent, SharedString};
+use chrono::{Datelike, Local, TimeZone};
+use gpui::{
+    div, prelude::*, px, AnyElement, Context, CursorStyle, MouseButton, MouseDownEvent,
+    SharedString,
+};
 use nook_core::calendar::CalendarEvent;
+
+/// Mockup event bars: systemBlue / systemOrange (dark), fixed — not the user accent.
+const BAR_BLUE: u32 = 0x0A84FF;
+const BAR_ORANGE: u32 = 0xFF9F0A;
+
+/// Compact leading: red calendar glyph in a 22pt box.
+#[allow(dead_code)]
+pub(crate) fn compact_left() -> AnyElement {
+    div()
+        .size(px(22.))
+        .flex_shrink_0()
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(lucide_color("calendar", 17.0, theme::DESTRUCTIVE))
+        .into_any_element()
+}
+
+/// Compact trailing: next upcoming event start time (BODY semibold).
+#[allow(dead_code)]
+pub(crate) fn compact_right(events: &[CalendarEvent]) -> AnyElement {
+    let now = Local::now().timestamp() as f64;
+    let text = events
+        .iter()
+        .filter(|e| !e.is_all_day && e.start_date >= now)
+        .min_by(|a, b| {
+            a.start_date
+                .partial_cmp(&b.start_date)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .map(|e| format_event_time(e.start_date))
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "—".into());
+    timer_text(text, theme::BODY).into_any_element()
+}
 
 pub(crate) fn calendar_card(
     events: &[CalendarEvent],
@@ -18,21 +56,9 @@ pub(crate) fn calendar_card(
     let today = Local::now().date_naive();
     let selected = selected_day.min(6);
     let selected_date = today + chrono::Duration::days(selected as i64 - 3);
-    let month = selected_date.format("%b").to_string();
     let is_today = selected == 3;
-
-    let mut week = div().flex().items_end().gap(px(10.));
-    for index in 0..7u8 {
-        let date = today + chrono::Duration::days(index as i64 - 3);
-        week = week.child(day_col(
-            index,
-            date.day(),
-            weekday_label(date, index == selected),
-            index == selected,
-            is_weekend(date.weekday()),
-            cx,
-        ));
-    }
+    let weekday = selected_date.format("%A").to_string().to_uppercase();
+    let day_num = selected_date.day().to_string();
 
     let filtered: Vec<_> = events
         .iter()
@@ -59,11 +85,13 @@ pub(crate) fn calendar_card(
             }))
             .into_any_element()
     } else if filtered.is_empty() {
-        nook_empty("calendar", empty_copy).into_any_element()
+        label(empty_copy, theme::CALLOUT, false)
+            .text_color(theme::TERTIARY_LABEL)
+            .into_any_element()
     } else {
-        let mut col = div().flex().flex_col().flex_shrink_0().gap_2().pt(px(8.));
-        for event in filtered {
-            col = col.child(event_row(event, cx));
+        let mut col = div().flex().flex_col().w_full().flex_shrink_0().gap(px(8.));
+        for (i, event) in filtered.into_iter().enumerate() {
+            col = col.child(event_row(event, i, cx));
         }
         scroll_body("cal-events", col).into_any_element()
     };
@@ -75,30 +103,91 @@ pub(crate) fn calendar_card(
         .min_h(px(0.))
         .flex()
         .flex_col()
+        .gap(px(10.))
+        .p(px(16.))
         .overflow_hidden()
+        .child(
+            div()
+                .flex_1()
+                .min_h(px(0.))
+                .flex()
+                .flex_col()
+                .gap(px(8.))
+                .justify_center()
+                .child(date_head(&weekday, &day_num, selected, cx))
+                .child(body),
+        )
+}
+
+fn date_head(
+    weekday: &str,
+    day_num: &str,
+    selected: u8,
+    cx: &mut Context<Island>,
+) -> impl IntoElement {
+    div()
+        .w_full()
+        .flex()
+        .items_center()
+        .justify_between()
+        .flex_shrink_0()
+        .child(
+            div()
+                .flex()
+                .items_end()
+                .gap(px(7.))
+                .child(
+                    label(weekday.to_string(), theme::FOOTNOTE, true)
+                        .text_color(theme::DESTRUCTIVE)
+                        .line_height(px(12.)),
+                )
+                .child(
+                    div()
+                        .text_size(px(theme::TITLE_2.size))
+                        .line_height(px(20.))
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .text_color(theme::LABEL)
+                        .child(day_num.to_string()),
+                ),
+        )
         .child(
             div()
                 .flex()
                 .items_center()
-                .gap(px(16.))
-                .flex_shrink_0()
-                .child(nook_display(month))
-                .child(week),
+                .gap(px(6.))
+                .child(day_chevron("cal-prev", "chevron-left", selected, -1, cx))
+                .child(day_chevron("cal-next", "chevron-right", selected, 1, cx)),
         )
-        .child(body)
 }
 
-fn weekday_label(date: chrono::NaiveDate, selected: bool) -> String {
-    let short = date.format("%a").to_string().to_uppercase();
-    if selected {
-        short.chars().take(3).collect()
-    } else {
-        short.chars().next().unwrap_or('?').to_string()
-    }
-}
-
-fn is_weekend(day: Weekday) -> bool {
-    matches!(day, Weekday::Sat | Weekday::Sun)
+fn day_chevron(
+    id: &'static str,
+    icon: &'static str,
+    selected: u8,
+    delta: i8,
+    cx: &mut Context<Island>,
+) -> impl IntoElement {
+    let next = (selected as i8 + delta).clamp(0, 6) as u8;
+    div()
+        .id(id)
+        .size(px(20.))
+        .rounded(px(10.))
+        .bg(theme::FILL_TERTIARY)
+        .flex()
+        .items_center()
+        .justify_center()
+        .cursor(CursorStyle::PointingHand)
+        .hover(|s| s.opacity(0.85))
+        .active(|s| s.opacity(0.75))
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                cx.stop_propagation();
+                this.calendar_day = next;
+                cx.notify();
+            }),
+        )
+        .child(lucide_color(icon, 12.0, theme::secondary_label()))
 }
 
 fn same_day(ts: f64, day: chrono::NaiveDate) -> bool {
@@ -108,61 +197,21 @@ fn same_day(ts: f64, day: chrono::NaiveDate) -> bool {
         .is_some_and(|dt| dt.date_naive() == day)
 }
 
-fn day_col(
-    index: u8,
-    day: u32,
-    weekday: String,
-    selected: bool,
-    weekend: bool,
-    cx: &mut Context<Island>,
-) -> impl IntoElement {
-    let number_color = if weekend {
-        theme::SECONDARY_LABEL
-    } else {
-        theme::LABEL
-    };
-    let label_color = theme::SECONDARY_LABEL;
-    div()
-        .id(SharedString::from(format!("cal-day-{index}")))
-        .flex()
-        .flex_col()
-        .items_center()
-        .justify_center()
-        .gap(px(4.))
-        .min_h(px(theme::HIT_MIN))
-        .cursor(gpui::CursorStyle::PointingHand)
-        .hover(|s| s.opacity(0.85))
-        .active(|s| s.opacity(0.75))
-        .on_mouse_down(
-            MouseButton::Left,
-            cx.listener(move |this, _: &MouseDownEvent, _, cx| {
-                cx.stop_propagation();
-                this.calendar_day = index;
-                cx.notify();
-            }),
-        )
-        .child(label(weekday, theme::FOOTNOTE, true).text_color(label_color))
-        .child(
-            div()
-                .id(SharedString::from(format!("day-pill-{index}")))
-                .px(px(6.))
-                .py(px(2.))
-                .rounded_full()
-                .active(|s| s.bg(theme::FILL))
-                .when(selected, |d| d.bg(theme::FILL_SECONDARY))
-                .child(label(format!("{day:02}"), theme::TITLE_3, true).text_color(number_color)),
-        )
-}
-
-fn event_row(event: &CalendarEvent, cx: &mut Context<Island>) -> impl IntoElement {
+fn event_row(event: &CalendarEvent, index: usize, cx: &mut Context<Island>) -> impl IntoElement {
     let id = event.id.clone();
     let date = event.start_date;
-    let time = if event.is_all_day {
-        "All day".to_string()
-    } else {
-        format_event_time(event.start_date)
-    };
-    nook_row(SharedString::from(format!("cal-ev-{id}")))
+    let bar = theme::rgba_from_u32(if index % 2 == 0 { BAR_BLUE } else { BAR_ORANGE }, 1.0);
+    let time = format_event_range(event);
+    div()
+        .id(SharedString::from(format!("cal-ev-{id}")))
+        .w_full()
+        .flex()
+        .items_center()
+        .gap(px(9.))
+        .flex_shrink_0()
+        .cursor(CursorStyle::PointingHand)
+        .hover(|s| s.opacity(0.9))
+        .active(|s| s.opacity(0.8))
         .on_mouse_down(
             MouseButton::Left,
             cx.listener(move |_, _: &MouseDownEvent, _, cx| {
@@ -175,36 +224,27 @@ fn event_row(event: &CalendarEvent, cx: &mut Context<Island>) -> impl IntoElemen
         )
         .child(
             div()
-                .w(px(48.))
+                .w(px(3.))
+                .h(px(29.))
+                .rounded(px(1.5))
                 .flex_shrink_0()
-                .flex()
-                .justify_end()
-                .pr_2()
-                .child(if event.is_all_day {
-                    label(time, theme::FOOTNOTE, true)
-                        .text_color(theme::SECONDARY_LABEL)
-                        .into_any_element()
-                } else {
-                    timer_text(time, theme::BODY).into_any_element()
-                }),
+                .bg(bar),
         )
-        .child(nook_accent_bar(theme::accent()))
         .child(
             div()
                 .flex_1()
                 .min_w(px(0.))
                 .flex()
                 .flex_col()
-                .justify_center()
+                .gap(px(1.))
                 .overflow_hidden()
-                .child(slide_label(event.title.clone(), theme::TITLE_3, true).w_full())
-                .when_some(event.location.clone(), |d, loc| {
-                    d.child(
-                        label(loc, theme::SUBHEADLINE, false)
-                            .text_color(theme::SECONDARY_LABEL)
-                            .mt(px(1.)),
-                    )
-                }),
+                .child(
+                    label(event.title.clone(), theme::CALLOUT, false)
+                        .text_color(theme::LABEL)
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .w_full(),
+                )
+                .child(label(time, theme::FOOTNOTE, false).text_color(theme::secondary_label())),
         )
 }
 
@@ -213,5 +253,63 @@ fn format_event_time(ts: f64) -> String {
         dt.format("%H:%M").to_string()
     } else {
         String::new()
+    }
+}
+
+/// Expanded row: `10:30 – 11:00` (en dash, spaces). All-day stays `All day`.
+fn format_event_range(event: &CalendarEvent) -> String {
+    if event.is_all_day {
+        return "All day".to_string();
+    }
+    let start = format_event_time(event.start_date);
+    if start.is_empty() {
+        return String::new();
+    }
+    let Some(end_ts) = event.end else {
+        return start;
+    };
+    let end = format_event_time(end_ts);
+    if end.is_empty() {
+        start
+    } else {
+        format!("{start} – {end}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn event(start: f64, end: Option<f64>, all_day: bool) -> CalendarEvent {
+        CalendarEvent {
+            id: "e".into(),
+            title: "Design sync".into(),
+            start_date: start,
+            end,
+            location: None,
+            is_all_day: all_day,
+        }
+    }
+
+    #[test]
+    fn event_time_formats_hh_mm() {
+        // 2024-01-15 10:30 local — just assert non-empty for a known epoch.
+        let s = format_event_time(1_705_311_000.0);
+        assert!(!s.is_empty());
+        assert!(s.contains(':'));
+    }
+
+    #[test]
+    fn event_range_uses_en_dash_and_spaces() {
+        let start = 1_705_311_000.0;
+        let end = start + 30.0 * 60.0;
+        let s = format_event_range(&event(start, Some(end), false));
+        assert!(s.contains(" – "), "expected en dash with spaces, got {s:?}");
+        let parts: Vec<_> = s.split(" – ").collect();
+        assert_eq!(parts.len(), 2);
+        assert!(parts[0].contains(':'));
+        assert!(parts[1].contains(':'));
+        assert_eq!(format_event_range(&event(start, None, false)), format_event_time(start));
+        assert_eq!(format_event_range(&event(start, Some(end), true)), "All day");
     }
 }

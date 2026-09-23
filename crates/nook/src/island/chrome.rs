@@ -1,10 +1,8 @@
 //! Island silhouette: flat top, concave wings, rounded bottom.
 
-use gpui::{canvas, point, prelude::*, px, PathBuilder, Rgba};
+use gpui::{canvas, point, prelude::*, px, Background, PathBuilder};
 
 pub(super) const COMPACT_WING: f32 = 14.0;
-/// Extra canvas around the silhouette so the brand glow is not clipped.
-pub(super) const GLOW_PAD: f32 = 14.0;
 
 /// Whether to outline the mouse hit regions. Off unless `NOOK_DEBUG_HITBOX=1`.
 pub(super) fn hitbox_debug() -> bool {
@@ -15,174 +13,137 @@ pub(super) fn hitbox_debug() -> bool {
     })
 }
 
-/// One filled silhouette.
+/// One filled silhouette, plus an optional hairline rim.
 ///
 /// Notch-attached: flat top, concave wings, rounded bottom — GPUI's
 /// per-corner radius was turning that into a capsule. Detached (moved off the
 /// top edge): a rounded rect so the top corners are visible.
+///
+/// `rim` strokes the same outline half a point inside the edge — the Liquid
+/// Glass edge highlight. Its paint is a top-to-bottom fade, so the flat top
+/// against the screen edge stays dark and only the lower rim catches light.
 pub(super) fn island_chrome(
     body_w: f32,
     body_h: f32,
     wing: f32,
-    color: gpui::Rgba,
-    border_color: Option<gpui::Rgba>,
-    glow: f32,
+    color: Background,
     attached: bool,
     radius: f32,
-    // Soft multi-band radiation. Off while the size spring is moving so the
-    // morph is not redrawing six stroked paths every frame.
-    soft_glow: bool,
-    // Native glass already rims the curve; a 1px core on that edge doubles it.
-    glass_rim: bool,
+    rim: Option<Background>,
 ) -> impl IntoElement {
-    let glow = glow.clamp(0.0, 1.0);
-    let pad = if border_color.is_some() && glow > 0.02 {
-        GLOW_PAD
-    } else {
-        0.0
-    };
-    let top_pad = if attached { 0.0 } else { pad };
     canvas(
         |bounds, _, _| bounds,
         move |bounds, _, window, _| {
             let ox: f32 = bounds.origin.x.into();
             let oy: f32 = bounds.origin.y.into();
-            let ox = ox + pad;
-            let oy = oy + top_pad;
             let g = if attached { wing } else { 0.0 };
-            let w = body_w;
-            let h = body_h;
-            let r = radius.min(h * 0.5).min(w * 0.5);
             let k = 0.552_284_8;
             let p = |x: f32, y: f32| point(px(ox + x), px(oy + y));
             let cubic = |path: &mut PathBuilder, to: (f32, f32), c1: (f32, f32), c2: (f32, f32)| {
                 path.cubic_bezier_to(p(to.0, to.1), p(c1.0, c1.1), p(c2.0, c2.1));
             };
 
-            let append_silhouette = |path: &mut PathBuilder| {
+            // `inset` pulls the sides and bottom (and a detached top) in, so a
+            // centred stroke lands inside the fill rather than on the desktop.
+            let append_silhouette = |path: &mut PathBuilder, inset: f32| {
+                let x0 = g + inset;
+                let w = (body_w - 2.0 * inset).max(0.0);
+                let h = (body_h - inset).max(0.0);
+                let r = (radius - inset).max(0.0).min(h * 0.5).min(w * 0.5);
+                let rk = k * r;
                 if attached {
-                    path.move_to(p(0.0, 0.0));
-                    path.line_to(p(g + w + g, 0.0));
+                    let top = 0.0;
+                    path.move_to(p(0.0, top));
+                    path.line_to(p(x0 + w + g, top));
                     if g > 0.5 {
                         let kk = k * g;
-                        cubic(path, (g + w, g), (g + w + g - kk, 0.0), (g + w, g - kk));
+                        cubic(path, (x0 + w, g), (x0 + w + g - kk, top), (x0 + w, g - kk));
                     }
-                    path.line_to(p(g + w, h - r));
-                    let rk = k * r;
-                    cubic(
-                        path,
-                        (g + w - r, h),
-                        (g + w, h - r + rk),
-                        (g + w - r + rk, h),
-                    );
-                    path.line_to(p(g + r, h));
-                    cubic(path, (g, h - r), (g + r - rk, h), (g, h - r + rk));
-                    path.line_to(p(g, g.max(0.0)));
+                    path.line_to(p(x0 + w, h - r));
+                    cubic(path, (x0 + w - r, h), (x0 + w, h - r + rk), (x0 + w - r + rk, h));
+                    path.line_to(p(x0 + r, h));
+                    cubic(path, (x0, h - r), (x0 + r - rk, h), (x0, h - r + rk));
+                    path.line_to(p(x0, g.max(0.0)));
                     if g > 0.5 {
                         let kk = k * g;
-                        cubic(path, (0.0, 0.0), (g, g - kk), (kk, 0.0));
+                        cubic(path, (x0 - g, top), (x0, g - kk), (x0 - g + kk, top));
                     }
                 } else {
+                    let y0 = inset;
+                    let h = h - inset;
+                    let r = r.min(h * 0.5);
                     let rk = k * r;
-                    path.move_to(p(r, 0.0));
-                    path.line_to(p(w - r, 0.0));
-                    cubic(path, (w, r), (w - r + rk, 0.0), (w, r - rk));
-                    path.line_to(p(w, h - r));
-                    cubic(path, (w - r, h), (w, h - r + rk), (w - r + rk, h));
-                    path.line_to(p(r, h));
-                    cubic(path, (0.0, h - r), (r - rk, h), (0.0, h - r + rk));
-                    path.line_to(p(0.0, r));
-                    cubic(path, (r, 0.0), (0.0, r - rk), (r - rk, 0.0));
+                    path.move_to(p(x0 + r, y0));
+                    path.line_to(p(x0 + w - r, y0));
+                    cubic(path, (x0 + w, y0 + r), (x0 + w - r + rk, y0), (x0 + w, y0 + r - rk));
+                    path.line_to(p(x0 + w, y0 + h - r));
+                    cubic(
+                        path,
+                        (x0 + w - r, y0 + h),
+                        (x0 + w, y0 + h - r + rk),
+                        (x0 + w - r + rk, y0 + h),
+                    );
+                    path.line_to(p(x0 + r, y0 + h));
+                    cubic(path, (x0, y0 + h - r), (x0 + r - rk, y0 + h), (x0, y0 + h - r + rk));
+                    path.line_to(p(x0, y0 + r));
+                    cubic(path, (x0 + r, y0), (x0, y0 + r - rk), (x0 + r - rk, y0));
                 }
                 path.close();
             };
 
-            if !glass_rim {
-                let mut fill = PathBuilder::fill();
-                append_silhouette(&mut fill);
-                match fill.build() {
-                    Ok(built) => window.paint_path(built, color),
-                    Err(err) => log::warn!("island path: {err}"),
-                }
+            // Always fill. On native glass `color` is a black veil; where it
+            // clears, the system material behind Metal is the other end.
+            let mut fill = PathBuilder::fill();
+            append_silhouette(&mut fill, 0.0);
+            match fill.build() {
+                Ok(built) => window.paint_path(built, color),
+                Err(err) => log::warn!("island path: {err}"),
             }
-
-            if let Some(border_color) = border_color {
-                let stroke_edge = |path: &mut PathBuilder| {
-                    if attached {
-                        // The screen edge is the attached island's top edge, so leave
-                        // that edge open instead of drawing an accent line across it.
-                        path.move_to(p(g + w + g, 0.0));
-                        if g > 0.5 {
-                            let kk = k * g;
-                            cubic(path, (g + w, g), (g + w + g - kk, 0.0), (g + w, g - kk));
-                        }
-                        path.line_to(p(g + w, h - r));
-                        let rk = k * r;
-                        cubic(
-                            path,
-                            (g + w - r, h),
-                            (g + w, h - r + rk),
-                            (g + w - r + rk, h),
-                        );
-                        path.line_to(p(g + r, h));
-                        cubic(path, (g, h - r), (g + r - rk, h), (g, h - r + rk));
-                        path.line_to(p(g, g.max(0.0)));
-                        if g > 0.5 {
-                            let kk = k * g;
-                            cubic(path, (0.0, 0.0), (g, g - kk), (kk, 0.0));
-                        }
-                    } else {
-                        append_silhouette(path);
-                    }
-                };
-                // Soft radiation, wide to tight, then a crisp 1px core.
-                // On native glass skip the core — NSGlassEffectView already
-                // sheens that curve, and a second 1px line is a doubled border
-                // (loudest on the compact agent face, where the glow pulses).
-                let bands: &[(f32, f32)] = if soft_glow && glow > 0.02 {
-                    if glass_rim {
-                        &[(16.0, 0.05), (11.0, 0.08), (7.0, 0.12), (4.0, 0.20)]
-                    } else {
-                        &[
-                            (16.0, 0.05),
-                            (11.0, 0.08),
-                            (7.0, 0.12),
-                            (4.0, 0.20),
-                            (2.2, 0.38),
-                            (1.15, 0.92),
-                        ]
-                    }
-                } else if glass_rim {
-                    &[(4.0, 0.35)]
-                } else {
-                    &[(1.15, 1.0)]
-                };
-                for &(width, a) in bands {
-                    let mut border = PathBuilder::stroke(px(width));
-                    stroke_edge(&mut border);
-                    match border.build() {
-                        Ok(built) => window.paint_path(
-                            built,
-                            with_alpha(
-                                border_color,
-                                a * if soft_glow && glow > 0.02 { glow } else { 1.0 },
-                            ),
-                        ),
-                        Err(err) => log::warn!("island border path: {err}"),
-                    }
+            if let Some(rim) = rim {
+                let mut stroke = PathBuilder::stroke(px(RIM_WIDTH));
+                append_silhouette(&mut stroke, RIM_WIDTH * 0.5);
+                match stroke.build() {
+                    Ok(built) => window.paint_path(built, rim),
+                    Err(err) => log::warn!("island rim: {err}"),
                 }
             }
         },
     )
-    .w(px(body_w
-        + if attached { wing * 2.0 } else { 0.0 }
-        + pad * 2.0))
-    .h(px(body_h + pad + top_pad))
+    .w(px(body_w + if attached { wing * 2.0 } else { 0.0 }))
+    .h(px(body_h))
 }
 
-fn with_alpha(color: Rgba, a: f32) -> Rgba {
-    Rgba {
-        a: (color.a * a).clamp(0.0, 1.0),
-        ..color
-    }
+/// Liquid Glass edge highlight width.
+const RIM_WIDTH: f32 = 1.0;
+
+/// One concave fillet beside the notch, drawn on its own (Liquid Glass keeps
+/// the glass view a plain rect, so the wings it would have carried are
+/// painted here). `left` is the wing west of the pill: filled along the top
+/// and its right edge, `M0 0 l14 0 0 14 c0-7.73-6.27-14-14-14z`; the east
+/// wing mirrors it. Purely visual — no hitbox, so click-through is unchanged.
+pub(super) fn notch_wing(left: bool, size: f32, color: Background) -> impl IntoElement {
+    canvas(
+        |bounds, _, _| bounds,
+        move |bounds, _, window, _| {
+            let ox: f32 = bounds.origin.x.into();
+            let oy: f32 = bounds.origin.y.into();
+            let p = |x: f32, y: f32| point(px(ox + x), px(oy + y));
+            let kk = 0.552_284_8 * size;
+            let mut path = PathBuilder::fill();
+            path.move_to(p(0.0, 0.0));
+            path.line_to(p(size, 0.0));
+            if left {
+                path.line_to(p(size, size));
+                path.cubic_bezier_to(p(0.0, 0.0), p(size, size - kk), p(kk, 0.0));
+            } else {
+                path.cubic_bezier_to(p(0.0, size), p(size - kk, 0.0), p(0.0, size - kk));
+            }
+            path.close();
+            match path.build() {
+                Ok(built) => window.paint_path(built, color),
+                Err(err) => log::warn!("island wing: {err}"),
+            }
+        },
+    )
+    .size(px(size))
 }

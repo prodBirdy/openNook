@@ -5,6 +5,7 @@ mod motion;
 mod notify;
 mod platform;
 mod theme;
+mod weather_shader;
 mod widgets;
 
 use gpui::{actions, App, Application, KeyBinding};

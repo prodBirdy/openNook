@@ -1,32 +1,28 @@
 //! Incoming iMessage / WhatsApp lockup with a quick reply.
 //!
-//! The pane is a communication-style Live Activity: it only appears when a
-//! message arrives, shows the sender and snippet, and lets you reply without
-//! opening the host app.
+//! Expanded face matches the Pencil list mockup (dot + sender + snippet).
+//! When a peek is active, the reply row stays so send/dismiss still work.
 
 use crate::icons::lucide_color;
-use crate::island::ui::{label, nook_empty, nook_icon_btn, nook_pane, open_privacy_pane, text_btn};
+use crate::island::ui::{label, nook_empty, nook_pane, open_privacy_pane, text_btn};
 use crate::island::Island;
 use crate::theme;
 use gpui::{
     canvas, div, prelude::*, px, Context, CursorStyle, FocusHandle, FontWeight, KeyDownEvent,
     MouseButton, MouseDownEvent, SharedString,
 };
-use nook_core::messages::{FdaStatus, IncomingPeek, MessageService};
-use nook_core::notifications::relative_age;
+use nook_core::messages::{Conversation, FdaStatus, IncomingPeek, MessageService};
 use std::cell::RefCell;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 thread_local! {
     static SEND_FAILED: RefCell<bool> = const { RefCell::new(false) };
 }
 
-const AVATAR: f32 = 36.0;
+const ROW_H: f32 = 29.0;
 const REPLY_H: f32 = 28.0;
 const SEND: f32 = theme::HIT_MIN;
 const CARET_W: f32 = 1.5;
 const CARET_H: f32 = 14.0;
-const BADGE: f32 = 14.0;
 
 pub(crate) fn messages_card(island: &mut Island, cx: &mut Context<Island>) -> impl IntoElement {
     if island.message_focus.is_none() {
@@ -37,7 +33,7 @@ pub(crate) fn messages_card(island: &mut Island, cx: &mut Context<Island>) -> im
     let focus = island.message_focus.clone();
 
     match snap.fda {
-        FdaStatus::Denied => nook_pane("nook-messages")
+        FdaStatus::Denied => card_shell("nook-messages")
             .w_full()
             .child(
                 div()
@@ -68,84 +64,154 @@ pub(crate) fn messages_card(island: &mut Island, cx: &mut Context<Island>) -> im
                     })),
             )
             .into_any_element(),
-        FdaStatus::Unavailable => nook_pane("nook-messages")
+        FdaStatus::Unavailable => card_shell("nook-messages")
             .w_full()
             .child(nook_empty(
                 "message-circle",
                 "No Messages database on this Mac",
             ))
             .into_any_element(),
-        FdaStatus::Granted => match snap.incoming.clone() {
-            Some(peek) => incoming_card(peek, &draft, focus, cx).into_any_element(),
-            None => nook_pane("nook-messages")
-                .w_full()
-                .child(nook_empty("message-circle", "No new messages"))
-                .into_any_element(),
-        },
+        FdaStatus::Granted => {
+            let incoming = snap.incoming.clone();
+            let conversations = snap.conversations.clone();
+            if conversations.is_empty() && incoming.is_none() {
+                return card_shell("nook-messages")
+                    .w_full()
+                    .child(nook_empty("message-circle", "No new messages"))
+                    .into_any_element();
+            }
+            list_card(conversations, incoming, &draft, focus, cx).into_any_element()
+        }
     }
 }
 
-fn incoming_card(
-    peek: IncomingPeek,
+fn list_card(
+    conversations: Vec<Conversation>,
+    incoming: Option<IncomingPeek>,
     draft: &str,
     focus: Option<FocusHandle>,
     cx: &mut Context<Island>,
 ) -> impl IntoElement {
-    let age = peek_age(peek.last_date);
-    let snippet = if peek.snippet.is_empty() {
-        SharedString::from("Attachment")
-    } else {
-        SharedString::from(peek.snippet.clone())
-    };
-    let send_tint = service_tint(peek.service);
+    let send_failed = SEND_FAILED.with(|f| *f.borrow());
     let empty = draft.is_empty();
     let shown = if empty { "Reply" } else { draft };
-    let send_failed = SEND_FAILED.with(|f| *f.borrow());
+    let send_tint = incoming
+        .as_ref()
+        .map(|p| service_tint(p.service))
+        .unwrap_or_else(theme::accent);
 
-    nook_pane("nook-messages")
+    let mut body = div()
+        .flex_1()
+        .min_h(px(0.))
         .w_full()
-        .justify_between()
+        .flex()
+        .flex_col()
+        .gap(px(8.))
+        .justify_center();
+
+    if let Some(peek) = incoming.as_ref() {
+        let snippet = if peek.snippet.is_empty() {
+            "Attachment".into()
+        } else {
+            peek.snippet.clone()
+        };
+        body = body.child(msg_row(
+            SharedString::from(format!("msg-peek-{}", peek.conversation_id)),
+            peek.sender.clone(),
+            snippet,
+            true,
+            None,
+            cx,
+        ));
+    } else {
+        for conv in conversations.iter().take(2) {
+            let snippet = if conv.snippet.is_empty() {
+                "Attachment".into()
+            } else {
+                conv.snippet.clone()
+            };
+            body = body.child(msg_row(
+                SharedString::from(format!("msg-{}", conv.id)),
+                conv.title.clone(),
+                snippet,
+                conv.unread,
+                Some((conv.id.clone(), conv.last_rowid)),
+                cx,
+            ));
+        }
+    }
+
+    card_shell("nook-messages").w_full().child(body).when(
+        incoming.is_some(),
+        |d| d.child(reply_row(shown, empty, focus, send_tint, send_failed, cx)),
+    )
+}
+
+fn msg_row(
+    id: SharedString,
+    title: String,
+    snippet: String,
+    unread: bool,
+    mark_seen: Option<(String, i64)>,
+    cx: &mut Context<Island>,
+) -> impl IntoElement {
+    div()
+        .id(id)
+        .w_full()
+        .h(px(ROW_H))
+        .flex_shrink_0()
+        .flex()
+        .items_center()
+        .gap(px(8.))
+        .when_some(mark_seen, |d, (conv_id, rowid)| {
+            d.cursor(CursorStyle::PointingHand)
+                .hover(|s| s.bg(theme::FILL))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |_, _: &MouseDownEvent, _, cx| {
+                        cx.stop_propagation();
+                        nook_core::messages::mark_conversation_seen(&conv_id, rowid);
+                        nook_core::messages::request_refresh();
+                        cx.notify();
+                    }),
+                )
+        })
         .child(
             div()
-                .w_full()
+                .size(px(6.))
+                .rounded_full()
+                .flex_shrink_0()
+                .bg(if unread {
+                    theme::accent()
+                } else {
+                    theme::TERTIARY_LABEL
+                }),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w(px(0.))
                 .flex()
-                .items_start()
-                .gap(px(10.))
-                .child(avatar(&peek.sender, peek.service, AVATAR, true))
+                .flex_col()
+                .gap(px(1.))
+                .overflow_hidden()
                 .child(
-                    div()
-                        .flex_1()
-                        .min_w(px(0.))
-                        .flex()
-                        .flex_col()
-                        .gap(px(2.))
-                        .child(
-                            div()
-                                .flex()
-                                .items_baseline()
-                                .gap(px(8.))
-                                .child(
-                                    label(peek.sender.clone(), theme::BODY, true)
-                                        .flex_1()
-                                        .min_w(px(0.)),
-                                )
-                                .child(label(age, theme::SUBHEADLINE, false).flex_shrink_0())
-                                .child(nook_icon_btn("x", "msg-dismiss", cx, |this, _, _, cx| {
-                                    dismiss_incoming(this, cx);
-                                })),
-                        )
-                        .child(
-                            div()
-                                .text_color(theme::LABEL)
-                                .text_size(px(theme::CALLOUT.size))
-                                .line_height(px(theme::CALLOUT.leading))
-                                .font_weight(FontWeight::MEDIUM)
-                                .line_clamp(2)
-                                .child(snippet),
-                        ),
+                    label(title, theme::CALLOUT, false)
+                        .text_color(theme::LABEL)
+                        .overflow_hidden()
+                        .text_ellipsis(),
+                )
+                .child(
+                    label(snippet, theme::FOOTNOTE, false)
+                        .text_color(theme::TERTIARY_LABEL)
+                        .overflow_hidden()
+                        .text_ellipsis(),
                 ),
         )
-        .child(reply_row(shown, empty, focus, send_tint, send_failed, cx))
+}
+
+fn card_shell(id: impl Into<gpui::ElementId>) -> gpui::Stateful<gpui::Div> {
+    nook_pane(id).p(px(16.)).gap(px(10.))
 }
 
 fn reply_row(
@@ -159,7 +225,6 @@ fn reply_row(
     let mut row = div()
         .id("msg-reply")
         .w_full()
-        .pt(px(8.))
         .flex()
         .flex_shrink_0()
         .items_center()
@@ -196,6 +261,8 @@ fn reply_row(
                             this.message_draft.clear();
                             SEND_FAILED.with(|f| *f.borrow_mut() = false);
                             cx.notify();
+                        } else if this.messages.incoming.is_some() {
+                            dismiss_incoming(this, cx);
                         } else {
                             window.blur();
                         }
@@ -287,90 +354,12 @@ fn send_btn(empty: bool, tint: gpui::Rgba, cx: &mut Context<Island>) -> impl Int
         .child(lucide_color("send", 13.0, theme::LABEL))
 }
 
-fn avatar(name: &str, service: MessageService, size: f32, badge: bool) -> impl IntoElement {
-    let initials = sender_initials(name);
-    let face = div()
-        .size(px(size))
-        .rounded_full()
-        .bg(theme::FILL_SECONDARY)
-        .border_1()
-        .border_color(theme::FILL)
-        .flex()
-        .items_center()
-        .justify_center()
-        .child(
-            div()
-                .text_size(px((size * 0.38).max(10.0)))
-                .line_height(px((size * 0.42).max(12.0)))
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(theme::LABEL)
-                .child(SharedString::from(initials)),
-        );
-
-    if !badge {
-        return face.into_any_element();
-    }
-
-    div()
-        .relative()
-        .size(px(size))
-        .flex_shrink_0()
-        .child(face)
-        .child(
-            div()
-                .absolute()
-                .bottom(px(0.))
-                .right(px(0.))
-                .size(px(BADGE))
-                .rounded_full()
-                .bg(service_tint(service))
-                .border_2()
-                .border_color(theme::ISLAND)
-                .flex()
-                .items_center()
-                .justify_center()
-                .child(lucide_color("message-circle", 8.0, theme::LABEL)),
-        )
-        .into_any_element()
-}
-
 fn service_tint(service: MessageService) -> gpui::Rgba {
     match service {
         MessageService::IMessage => theme::accent(),
         MessageService::WhatsApp => theme::SUCCESS,
         MessageService::Sms => theme::SYSTEM_ORANGE,
     }
-}
-
-fn sender_initials(name: &str) -> String {
-    let letters: String = name
-        .split_whitespace()
-        .filter_map(|part| part.chars().find(|c| c.is_alphabetic()))
-        .take(2)
-        .map(|c| c.to_uppercase().next().unwrap_or(c))
-        .collect();
-    if !letters.is_empty() {
-        return letters;
-    }
-    let digits: String = name.chars().filter(|c| c.is_ascii_digit()).collect();
-    if digits.len() >= 2 {
-        return digits[digits.len() - 2..].to_string();
-    }
-    name.chars()
-        .next()
-        .map(|c| c.to_string())
-        .unwrap_or_else(|| "·".into())
-}
-
-fn peek_age(last_date: f64) -> String {
-    if last_date < 1_000_000.0 {
-        return "now".into();
-    }
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
-    relative_age(last_date as i64, now)
 }
 
 fn send_incoming(island: &mut Island, cx: &mut Context<Island>) {
@@ -478,30 +467,20 @@ fn apply_draft_key(draft: &mut String, event: &KeyDownEvent, cx: &Context<Island
     }
 }
 
-pub(crate) fn compact_left(peek: &IncomingPeek) -> impl IntoElement {
-    avatar(&peek.sender, peek.service, theme::COMPACT_FACE, false)
+pub(crate) fn compact_left(_peek: &IncomingPeek) -> impl IntoElement {
+    div()
+        .size(px(22.))
+        .flex_shrink_0()
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(lucide_color(
+            "message-circle",
+            17.0,
+            theme::secondary_label(),
+        ))
 }
 
 pub(crate) fn compact_right(peek: &IncomingPeek) -> impl IntoElement {
     crate::island::ui::slide_label(peek.sender.clone(), theme::BODY, true)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::sender_initials;
-
-    #[test]
-    fn initials_from_given_name() {
-        assert_eq!(sender_initials("Carmen"), "C");
-    }
-
-    #[test]
-    fn initials_from_two_words() {
-        assert_eq!(sender_initials("Ada Lovelace"), "AL");
-    }
-
-    #[test]
-    fn initials_from_phone_digits() {
-        assert_eq!(sender_initials("+49 170 123456"), "56");
-    }
 }

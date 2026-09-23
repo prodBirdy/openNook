@@ -5,9 +5,10 @@ use crate::icons::lucide_color;
 use crate::theme;
 use crate::CloseWindow;
 use gpui::{
-    canvas, div, prelude::*, px, AnyElement, Bounds, Context, CursorStyle, ElementId, FocusHandle,
-    FontWeight, KeyDownEvent, MouseButton, MouseMoveEvent, MouseUpEvent, Pixels, Rgba,
-    ScrollHandle, ScrollWheelEvent, SharedString, Window,
+    canvas, div, linear_color_stop, linear_gradient, prelude::*, px, relative, AnyElement, Bounds,
+    Context, CursorStyle, ElementId, FocusHandle, FontWeight, KeyDownEvent, MouseButton,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Rgba, ScrollHandle, ScrollWheelEvent,
+    SharedString, Window,
 };
 use nook_core::high_alert::HighAlertKind;
 use nook_core::settings::{AppSettings, IslandSwatch, WidgetModule, ISLAND_SWATCHES};
@@ -18,22 +19,46 @@ use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::{Duration, Instant};
 
 /// Default settings window. Sidebar + grouped pane.
-pub(super) const SETTINGS_SIZE: (f32, f32) = (780.0, 560.0);
+pub(super) const SETTINGS_SIZE: (f32, f32) = (820.0, 560.0);
 pub(super) const SETTINGS_MIN: (f32, f32) = (680.0, 480.0);
 
-// TODO(theme): move to theme.rs
-const SETTINGS_CANVAS: Rgba = Rgba {
-    r: 27.0 / 255.0,
-    g: 27.0 / 255.0,
-    b: 31.0 / 255.0,
-    a: 1.0,
-};
-
-const SIDEBAR_W: f32 = 180.0;
+const SIDEBAR_W: f32 = 212.0;
+const SIDEBAR_PAD: f32 = 10.0;
+const SEARCH_H: f32 = 24.0;
+const SEARCH_RADIUS: f32 = 6.0;
+const CATEGORY_H: f32 = 30.0;
+const CATEGORY_BADGE: f32 = 17.0;
+const CATEGORY_BADGE_RADIUS: f32 = 4.5;
+const CATEGORY_ICON: f32 = 11.0;
+const CATEGORY_GAP: f32 = 9.0;
+const WIDGET_ROW_H: f32 = 46.0;
+const WIDGET_BADGE: f32 = 22.0;
+const WIDGET_BADGE_RADIUS: f32 = 6.16;
+const WIDGET_BADGE_ICON: f32 = 13.0;
+const WIDGET_GRIP: f32 = 13.0;
+const REMOVE_H: f32 = 22.0;
+const REMOVE_RADIUS: f32 = 6.0;
+const PANE_TITLE: f32 = 22.0;
+const PANE_TITLE_LEADING: f32 = 26.0;
 /// Room for traffic lights on a transparent titlebar.
 const TITLEBAR_INSET: f32 = 52.0;
 const GROUP_PAD: f32 = 12.0;
 const ROW_H: f32 = 36.0;
+const GRADIENT_TRACK_W: f32 = 140.0;
+const GRADIENT_KNOB: f32 = 18.0;
+/// Separator inset under a widget row: past grip + badge (In the Island) or badge only.
+const ISLAND_LIST_INDENT: f32 = 67.0;
+const MORE_LIST_INDENT: f32 = 44.0;
+/// Icon-tile colours are fixed like System Settings, not the user accent.
+const TILE_BLUE: u32 = 0x0A84FF;
+const TILE_ORANGE: u32 = 0xFF9F0A;
+/// `#FFFFFF0F` rim on grouped lists.
+const LIST_BORDER: Rgba = Rgba {
+    r: 1.0,
+    g: 1.0,
+    b: 1.0,
+    a: 0.06,
+};
 
 /// Last surface the user had open. Survives closing the window.
 static LAST_CATEGORY: AtomicU8 = AtomicU8::new(SettingsCategory::Widgets as u8);
@@ -64,12 +89,22 @@ fn hairline() -> Rgba {
 enum SettingsCategory {
     General = 0,
     Widgets = 1,
+    Appearance = 2,
+    Shortcuts = 3,
+    Privacy = 4,
+    Updates = 5,
+    About = 6,
 }
 
 impl SettingsCategory {
     fn from_u8(v: u8) -> Self {
         match v {
             1 => Self::Widgets,
+            2 => Self::Appearance,
+            3 => Self::Shortcuts,
+            4 => Self::Privacy,
+            5 => Self::Updates,
+            6 => Self::About,
             _ => Self::General,
         }
     }
@@ -77,21 +112,49 @@ impl SettingsCategory {
     fn title(self) -> &'static str {
         match self {
             Self::General => "General",
+            Self::Appearance => "Appearance",
             Self::Widgets => "Widgets",
+            Self::Shortcuts => "Shortcuts",
+            Self::Privacy => "Privacy",
+            Self::Updates => "Updates",
+            Self::About => "About",
         }
     }
 
     fn icon(self) -> &'static str {
         match self {
             Self::General => "settings",
+            Self::Appearance => "sun-moon",
             Self::Widgets => "layout-grid",
+            Self::Shortcuts => "keyboard",
+            Self::Privacy => "lock",
+            Self::Updates => "arrow-down-to-line",
+            Self::About => "info",
         }
+    }
+
+    fn badge(self) -> Rgba {
+        match self {
+            Self::General | Self::About => theme::rgba_from_u32(0x8E8E93, 1.0),
+            Self::Appearance => theme::rgba_from_u32(0x5E5CE6, 1.0),
+            Self::Widgets => theme::rgba_from_u32(TILE_BLUE, 1.0),
+            Self::Shortcuts => theme::rgba_from_u32(TILE_ORANGE, 1.0),
+            Self::Privacy => theme::SUCCESS,
+            Self::Updates => theme::rgba_from_u32(0x64D2FF, 1.0),
+        }
+    }
+
+    fn matches_query(self, query: &str) -> bool {
+        let q = query.trim().to_ascii_lowercase();
+        q.is_empty() || self.title().to_ascii_lowercase().contains(&q)
     }
 }
 
 trait WidgetModuleExt {
     fn name(self) -> &'static str;
     fn icon(self) -> &'static str;
+    /// Short static description shown under the name in the widget lists.
+    fn tagline(self) -> &'static str;
     #[allow(dead_code)]
     fn subtitle(self, settings: &AppSettings) -> SharedString;
     fn enabled(self, settings: &AppSettings) -> bool;
@@ -104,21 +167,25 @@ struct WidgetDrag(WidgetModule);
 impl gpui::Render for WidgetDrag {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         div()
-            .w(px(220.))
-            .h(px(ROW_H))
-            .px(px(10.))
+            .w(px(280.))
+            .h(px(WIDGET_ROW_H))
+            .px(px(12.))
             .rounded(px(8.))
             .bg(theme::GROUPED_BG)
             .shadow_md()
             .flex()
             .items_center()
-            .gap(px(8.))
-            .child(lucide_color("grip-vertical", 14.0, theme::TERTIARY_LABEL))
-            .child(lucide_color(self.0.icon(), 14.0, theme::LABEL))
+            .gap(px(10.))
+            .child(lucide_color(
+                "grip-vertical",
+                WIDGET_GRIP,
+                theme::TERTIARY_LABEL,
+            ))
+            .child(widget_badge(self.0))
             .child(
                 div()
                     .text_size(px(theme::BODY.size))
-                    .font_weight(FontWeight::MEDIUM)
+                    .font_weight(FontWeight::NORMAL)
                     .text_color(theme::LABEL)
                     .child(self.0.name()),
             )
@@ -135,7 +202,7 @@ impl WidgetModuleExt for WidgetModule {
             Self::Observe => "Observe",
             Self::Timers => "Timers",
             Self::Reminders => "Reminders",
-            Self::Speed => "Speed Test",
+            Self::Speed => "Speed",
             Self::Agents => "Agents",
             Self::Mirror => "Mirror",
             Self::Battery => "Battery",
@@ -143,11 +210,11 @@ impl WidgetModuleExt for WidgetModule {
             Self::Obsidian => "Obsidian",
             Self::Weather => "Weather",
             Self::Vpn => "VPN",
-            Self::HighAlert => "High Alert",
+            Self::HighAlert => "Alert",
             Self::SysStats => "Stats",
             Self::Recorder => "Voice",
             Self::Meeting => "Meetings",
-            Self::Notifications => "Notifications",
+            Self::Notifications => "Notify",
         }
     }
 
@@ -155,28 +222,52 @@ impl WidgetModuleExt for WidgetModule {
         match self {
             Self::Calendar => "calendar",
             Self::Music => "music",
-            Self::Files => "files",
-            Self::Notes => "notebook",
-            Self::Observe => "activity",
-            Self::Timers => "clock",
-            Self::Reminders => "list-checks",
+            Self::Files => "folder",
+            Self::Notes => "notebook-pen",
+            Self::Observe => "eye",
+            Self::Timers => "timer",
+            Self::Reminders => "bell",
             Self::Speed => "gauge",
             Self::Agents => "bot",
             Self::Mirror => "webcam",
-            Self::Battery => "battery",
-            Self::Messages => "message-circle",
-            Self::Obsidian => "book",
+            Self::Battery => "battery-medium",
+            Self::Messages => "message-square",
+            Self::Obsidian => "gem",
             Self::Weather => "cloud-sun",
             Self::Vpn => "shield",
-            Self::HighAlert => "sun",
-            Self::SysStats => "activity",
+            Self::HighAlert => "triangle-alert",
+            Self::SysStats => "chart-column",
             Self::Recorder => "mic",
             Self::Meeting => "video",
-            Self::Notifications => "bell",
+            Self::Notifications => "bell-ring",
         }
     }
 
-    #[allow(dead_code)]
+    fn tagline(self) -> &'static str {
+        match self {
+            Self::Calendar => "Next event",
+            Self::Music => "Now playing",
+            Self::Files => "Recent downloads",
+            Self::Notes => "Quick capture",
+            Self::Observe => "Screen watcher",
+            Self::Timers => "Active timers",
+            Self::Reminders => "Due today",
+            Self::Speed => "Network speed",
+            Self::Agents => "Running tasks",
+            Self::Mirror => "Camera preview",
+            Self::Battery => "Charge level",
+            Self::Messages => "Unread threads",
+            Self::Obsidian => "Daily note",
+            Self::Weather => "Current conditions",
+            Self::Vpn => "Tunnel status",
+            Self::HighAlert => "System alerts",
+            Self::SysStats => "CPU and memory",
+            Self::Recorder => "Dictation",
+            Self::Meeting => "Next call",
+            Self::Notifications => "Notification relay",
+        }
+    }
+
     fn subtitle(self, settings: &AppSettings) -> SharedString {
         match self {
             Self::Calendar => "7 days".into(),
@@ -356,24 +447,22 @@ pub(super) struct SettingsView {
     token_revealed: bool,
     query_draft: String,
     heading_draft: String,
-    city_draft: String,
-    geo_results: Vec<nook_core::weather::GeoPlace>,
-    geo_error: Option<String>,
-    geo_loading: bool,
-    location_status: Option<String>,
-    location_busy: bool,
     shell_draft: String,
     catalog: Vec<String>,
     catalog_error: Option<String>,
     catalog_loading: bool,
     placement_drag: bool,
     placement_bounds: Rc<RefCell<Option<Bounds<Pixels>>>>,
+    gradient_drag: bool,
+    gradient_track: Rc<RefCell<Option<(f32, f32)>>>,
     shortcut_catalog: Vec<String>,
     shortcuts_loading: bool,
     pending_destructive: Option<SharedString>,
     login_error: Option<String>,
     /// 2 s "No room for that size" caption under the Size control.
     size_budget_hint_at: Option<Instant>,
+    search_draft: String,
+    search_focus: FocusHandle,
 }
 
 impl SettingsView {
@@ -418,24 +507,35 @@ impl SettingsView {
                 .obsidian_capture_heading
                 .clone()
                 .unwrap_or_default(),
-            city_draft: settings.weather.location.name().to_string(),
-            geo_results: Vec::new(),
-            geo_error: None,
-            geo_loading: false,
-            location_status: None,
-            location_busy: false,
             shell_draft: settings.terminal_shell.clone(),
             catalog: Vec::new(),
             catalog_error: None,
             catalog_loading: false,
             placement_drag: false,
             placement_bounds: Rc::new(RefCell::new(None)),
+            gradient_drag: false,
+            gradient_track: Rc::new(RefCell::new(None)),
             shortcut_catalog: Vec::new(),
             shortcuts_loading: false,
             pending_destructive: None,
             login_error: None,
             size_budget_hint_at: None,
+            search_draft: String::new(),
+            search_focus: cx.focus_handle(),
         }
+    }
+
+    fn apply_gradient(&mut self, x: f32, cx: &mut Context<Self>) {
+        let Some((origin, width)) = *self.gradient_track.borrow() else {
+            return;
+        };
+        let value = gradient_ratio(x, origin, width);
+        let current = nook_core::settings::get_app_settings().glass_gradient();
+        if (current - value).abs() < 0.001 {
+            return;
+        }
+        nook_core::settings::tweak_app_settings(|s| s.liquid_glass_gradient = value);
+        cx.notify();
     }
 
     fn apply_placement(&mut self, x: f32, y: f32, cx: &mut Context<Self>) {
@@ -561,96 +661,6 @@ impl SettingsView {
         .detach();
     }
 
-    fn search_city(&mut self, cx: &mut Context<Self>) {
-        let query = self.city_draft.trim().to_string();
-        if query.is_empty() || self.geo_loading {
-            return;
-        }
-        self.geo_loading = true;
-        self.geo_error = None;
-        cx.notify();
-        cx.spawn(async move |this, cx| {
-            let result = cx
-                .background_executor()
-                .spawn(async move {
-                    nook_core::runtime().block_on(nook_core::weather::search_places(&query, 5))
-                })
-                .await;
-            this.update(cx, |this, cx| {
-                this.geo_loading = false;
-                match result {
-                    Ok(places) => {
-                        this.geo_results = places;
-                        this.geo_error = if this.geo_results.is_empty() {
-                            Some("No matching cities.".into())
-                        } else {
-                            None
-                        };
-                    }
-                    Err(err) => this.geo_error = Some(err),
-                }
-                cx.notify();
-            })
-            .ok();
-        })
-        .detach();
-    }
-
-    fn pick_place(&mut self, place: nook_core::weather::GeoPlace, cx: &mut Context<Self>) {
-        let name = place.display_name();
-        nook_core::settings::tweak_app_settings(|s| {
-            s.weather.location = nook_core::weather::WeatherLocationMode::Manual {
-                name: name.clone(),
-                lat: place.latitude,
-                lon: place.longitude,
-            };
-        });
-        nook_core::weather::invalidate();
-        self.city_draft = name;
-        self.geo_results.clear();
-        self.location_status = None;
-        cx.notify();
-    }
-
-    fn use_system_location(&mut self, cx: &mut Context<Self>) {
-        if self.location_busy {
-            return;
-        }
-        self.location_busy = true;
-        self.location_status = Some("Locating…".into());
-        cx.notify();
-        let rx = nook_core::location::begin_request();
-        cx.spawn(async move |this, cx| {
-            let result = cx
-                .background_executor()
-                .spawn(async move {
-                    rx.await
-                        .unwrap_or_else(|_| Err("Location request ended.".into()))
-                })
-                .await;
-            this.update(cx, |this, cx| {
-                this.location_busy = false;
-                match result {
-                    Ok((lat, lon)) => {
-                        nook_core::settings::tweak_app_settings(|s| {
-                            s.weather.location = nook_core::weather::WeatherLocationMode::System {
-                                name: "Current location".into(),
-                                lat,
-                                lon,
-                            };
-                        });
-                        nook_core::weather::invalidate();
-                        this.city_draft = "Current location".into();
-                        this.location_status = None;
-                    }
-                    Err(err) => this.location_status = Some(err),
-                }
-                cx.notify();
-            })
-            .ok();
-        })
-        .detach();
-    }
     fn fetch_shortcuts(&mut self, cx: &mut Context<Self>) {
         if self.shortcuts_loading {
             return;
@@ -701,11 +711,7 @@ impl gpui::Render for SettingsView {
             }))
             .size_full()
             .flex()
-            .bg(if crate::platform::reduce_transparency() {
-                theme::WINDOW_BG
-            } else {
-                theme::SETTINGS_GLASS
-            })
+            .bg(theme::WINDOW_BG)
             .on_action(cx.listener(|_, _: &CloseWindow, window, _| window.remove_window()))
             .on_mouse_down(
                 MouseButton::Left,
@@ -715,20 +721,27 @@ impl gpui::Render for SettingsView {
                 }),
             )
             .text_color(theme::LABEL)
-            .when(self.placement_drag, |d| {
+            .when(self.placement_drag || self.gradient_drag, |d| {
                 d.on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
-                    this.apply_placement(event.position.x.into(), event.position.y.into(), cx);
+                    let x = event.position.x.into();
+                    let y = event.position.y.into();
+                    if this.gradient_drag {
+                        this.apply_gradient(x, cx);
+                    } else {
+                        this.apply_placement(x, y, cx);
+                    }
                 }))
                 .on_mouse_up(
                     MouseButton::Left,
                     cx.listener(|this, _: &MouseUpEvent, _, cx| {
                         this.placement_drag = false;
+                        this.gradient_drag = false;
                         cx.notify();
                     }),
                 )
             })
-            .child(self.sidebar(cx))
-            .child(div().w(px(1.)).h_full().bg(hairline()))
+            .child(self.sidebar(window, cx))
+            .child(div().w(px(1.)).h_full().bg(theme::HAIRLINE))
             .child(match self.category {
                 SettingsCategory::Widgets => self
                     .render_widgets(
@@ -742,6 +755,15 @@ impl gpui::Render for SettingsView {
                         cx,
                     )
                     .into_any_element(),
+                SettingsCategory::Appearance => {
+                    self.render_appearance(&settings, cx).into_any_element()
+                }
+                SettingsCategory::Shortcuts => {
+                    self.render_shortcuts(&settings, cx).into_any_element()
+                }
+                SettingsCategory::Privacy => self.render_privacy(cx).into_any_element(),
+                SettingsCategory::Updates => self.render_updates(cx).into_any_element(),
+                SettingsCategory::About => self.render_about(cx).into_any_element(),
                 SettingsCategory::General => self
                     .render_general(&settings, window, alias_focused, pin_focused, cx)
                     .into_any_element(),
@@ -750,7 +772,10 @@ impl gpui::Render for SettingsView {
 }
 
 impl SettingsView {
-    fn sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn sidebar(&self, window: &gpui::Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let search_focused = self.search_focus.is_focused(window);
+        let query = self.search_draft.clone();
+        let show = |cat: SettingsCategory| cat.matches_query(&query);
         div()
             .id("settings-sidebar")
             .w(px(SIDEBAR_W))
@@ -760,30 +785,138 @@ impl SettingsView {
             .flex_col()
             .bg(theme::SETTINGS_WELL)
             .pt(px(TITLEBAR_INSET))
-            .px(px(10.))
+            .px(px(SIDEBAR_PAD))
             .pb(px(16.))
-            .gap(px(2.))
-            .child(self.sidebar_item(SettingsCategory::General, cx))
-            .child(self.sidebar_item(SettingsCategory::Widgets, cx))
+            .gap(px(1.))
+            .child(self.sidebar_search(search_focused, cx))
+            .child(div().h(px(10.)).w_full())
+            .when(show(SettingsCategory::General), |d| {
+                d.child(self.sidebar_item(SettingsCategory::General, cx))
+            })
+            .when(show(SettingsCategory::Appearance), |d| {
+                d.child(self.sidebar_item(SettingsCategory::Appearance, cx))
+            })
+            .when(show(SettingsCategory::Widgets), |d| {
+                d.child(self.sidebar_item(SettingsCategory::Widgets, cx))
+            })
+            .when(show(SettingsCategory::Shortcuts), |d| {
+                d.child(self.sidebar_item(SettingsCategory::Shortcuts, cx))
+            })
+            .child(div().h(px(16.)).w_full())
+            .child(
+                div().px(px(7.)).pb(px(5.)).child(
+                    div()
+                        .text_size(px(theme::SUBHEADLINE.size))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(theme::secondary_label())
+                        .child("Advanced"),
+                ),
+            )
+            .when(show(SettingsCategory::Privacy), |d| {
+                d.child(self.sidebar_item(SettingsCategory::Privacy, cx))
+            })
+            .when(show(SettingsCategory::Updates), |d| {
+                d.child(self.sidebar_item(SettingsCategory::Updates, cx))
+            })
+            .when(show(SettingsCategory::About), |d| {
+                d.child(self.sidebar_item(SettingsCategory::About, cx))
+            })
+            .child(div().flex_1())
+            .child(
+                div().px(px(7.)).pb(px(4.)).child(
+                    div()
+                        .text_size(px(theme::SUBHEADLINE.size))
+                        .text_color(theme::secondary_label())
+                        .child(format!("openNook {}", env!("CARGO_PKG_VERSION"))),
+                ),
+            )
+    }
+
+    fn sidebar_search(&self, focused: bool, cx: &mut Context<Self>) -> impl IntoElement {
+        let focus = self.search_focus.clone();
+        let placeholder = self.search_draft.is_empty();
+        let value = if placeholder {
+            "Search"
+        } else {
+            self.search_draft.as_str()
+        };
+        div()
+            .id("settings-search")
+            .track_focus(&focus)
+            .w_full()
+            .h(px(SEARCH_H))
+            .px(px(7.))
+            .rounded(px(SEARCH_RADIUS))
+            .bg(theme::FILL_TERTIARY)
+            .border_1()
+            .border_color(if focused {
+                theme::accent()
+            } else {
+                theme::FILL_TERTIARY
+            })
+            .flex()
+            .items_center()
+            .gap(px(5.))
+            .cursor(CursorStyle::IBeam)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _, window, cx| {
+                    this.pending_destructive = None;
+                    cx.stop_propagation();
+                    window.focus(&this.search_focus);
+                    cx.notify();
+                }),
+            )
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+                if Self::apply_key(&mut this.search_draft, event, cx) {
+                    cx.notify();
+                }
+            }))
+            .child(lucide_color("search", 12.0, theme::tertiary_label()))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(0.))
+                    .overflow_hidden()
+                    .text_ellipsis()
+                    .whitespace_nowrap()
+                    .text_size(px(theme::CALLOUT.size))
+                    .text_color(if placeholder {
+                        theme::secondary_label()
+                    } else {
+                        theme::LABEL
+                    })
+                    .child(SharedString::from(value.to_string())),
+            )
+            .when(focused, |d| {
+                d.child(
+                    div()
+                        .w(px(1.))
+                        .h(px(12.))
+                        .flex_shrink_0()
+                        .bg(theme::accent()),
+                )
+            })
     }
 
     fn sidebar_item(&self, category: SettingsCategory, cx: &mut Context<Self>) -> impl IntoElement {
         let selected = self.category == category;
-        let icon_color = if selected {
-            theme::accent()
-        } else {
-            theme::SECONDARY_LABEL
-        };
         div()
             .id(SharedString::from(format!("sidebar-{}", category.title())))
-            .h(px(28.))
-            .px(px(8.))
-            .rounded(px(theme::CONTROL_RADIUS))
+            .h(px(CATEGORY_H))
+            .px(px(7.))
+            .rounded(px(SEARCH_RADIUS))
             .flex()
             .items_center()
-            .gap(px(8.))
-            .when(selected, |d| d.bg(theme::FILL_SECONDARY))
-            .hover(|s| if selected { s } else { s.bg(theme::FILL) })
+            .gap(px(CATEGORY_GAP))
+            .when(selected, |d| d.bg(theme::FILL))
+            .hover(|s| {
+                if selected {
+                    s
+                } else {
+                    s.bg(theme::FILL_TERTIARY)
+                }
+            })
             .tab_index(0)
             .focus(|s| s.border_1().border_color(theme::accent()))
             .active(|s| s.opacity(0.85))
@@ -792,28 +925,40 @@ impl SettingsView {
                 this.pending_destructive = None;
                 this.category = category;
                 this.persist_nav();
+                if category == SettingsCategory::Shortcuts {
+                    this.fetch_shortcuts(cx);
+                }
                 cx.notify();
             }))
-            .child(lucide_color(category.icon(), 15.0, icon_color))
+            .child(
+                div()
+                    .size(px(CATEGORY_BADGE))
+                    .rounded(px(CATEGORY_BADGE_RADIUS))
+                    .bg(category.badge())
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(lucide_color(category.icon(), CATEGORY_ICON, theme::LABEL)),
+            )
             .child(
                 div()
                     .text_size(px(theme::BODY.size))
                     .line_height(px(theme::BODY.leading))
-                    .font_weight(if selected {
-                        FontWeight::SEMIBOLD
-                    } else {
-                        FontWeight::NORMAL
-                    })
+                    .font_weight(FontWeight::NORMAL)
                     .text_color(if selected {
                         theme::LABEL
                     } else {
-                        theme::SECONDARY_LABEL
+                        theme::secondary_label()
                     })
                     .child(category.title()),
             )
     }
 
-    fn pane(title: &'static str, body: impl IntoElement) -> impl IntoElement {
+    fn pane(
+        title: &'static str,
+        subtitle: Option<&'static str>,
+        body: impl IntoElement,
+    ) -> impl IntoElement {
         let body_id: ElementId = SharedString::from(format!("pane-body-{title}")).into();
         let scroll = pane_scroll(&body_id);
         let mut scroller = div()
@@ -821,13 +966,11 @@ impl SettingsView {
             .track_scroll(&scroll)
             .flex_1()
             .min_h(px(0.))
-            .px(px(20.))
-            .pb(px(24.))
             .overflow_x_hidden()
             .overflow_y_scroll()
             .flex()
             .flex_col()
-            .gap(px(16.))
+            .gap(px(20.))
             .on_scroll_wheel({
                 let scroll = scroll.clone();
                 move |event: &ScrollWheelEvent, window: &mut Window, cx: &mut gpui::App| {
@@ -847,17 +990,33 @@ impl SettingsView {
             .h_full()
             .flex()
             .flex_col()
-            .pt(px(TITLEBAR_INSET))
+            .pt(px(TITLEBAR_INSET.max(22.0)))
+            .px(px(24.))
+            .pb(px(24.))
             .child(
                 div()
-                    .px(px(20.))
-                    .pb(px(12.))
+                    .flex()
+                    .flex_col()
+                    .gap(px(5.))
                     .flex_shrink_0()
-                    .text_size(px(theme::TITLE_2.size))
-                    .line_height(px(theme::TITLE_2.leading))
-                    .font_weight(theme::TITLE_2.emphasized)
-                    .text_color(theme::LABEL)
-                    .child(title),
+                    .pb(px(20.))
+                    .child(
+                        div()
+                            .text_size(px(PANE_TITLE))
+                            .line_height(px(PANE_TITLE_LEADING))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(theme::LABEL)
+                            .child(title),
+                    )
+                    .when_some(subtitle, |d, text| {
+                        d.child(
+                            div()
+                                .text_size(px(theme::CALLOUT.size))
+                                .line_height(px(17.))
+                                .text_color(theme::secondary_label())
+                                .child(text),
+                        )
+                    }),
             )
             .child(scroller)
     }
@@ -887,22 +1046,12 @@ impl SettingsView {
     ) -> impl IntoElement {
         Self::pane(
             "General",
+            Some("Launch, position, and how the island behaves."),
             div()
                 .id("general-pane")
                 .flex()
                 .flex_col()
                 .gap(px(16.))
-                .child(section(
-                    "Appearance",
-                    settings_group(vec![
-                        toggle_row("Liquid Glass island", settings.liquid_glass_mode, cx, |s| {
-                            s.liquid_glass_mode = !s.liquid_glass_mode
-                        })
-                        .into_any_element(),
-                        self.color_row(settings, cx).into_any_element(),
-                    ]),
-                    Some("A custom color replaces the default black island."),
-                ))
                 .child(section(
                     "Position",
                     settings_group(vec![
@@ -955,34 +1104,6 @@ impl SettingsView {
                         }).into_any_element(),
                     ]),
                     Some("Hover the island to expand. Click the gear on the expanded island to open Settings. Press ⌘Q to quit. First-Run Tips appear again on the next launch."),
-                ))
-                .child(section(
-                    "openNook",
-                    settings_group(vec![
-                        // action_row appends "-btn" → push_button id "quit-btn"
-                        // (matches the destructive-confirm list).
-                        action_row(
-                            "quit",
-                            "Quit",
-                            self.destructive_caption("quit-btn", "Quit"),
-                            cx,
-                            |_, _, cx| {
-                                nook_core::high_alert::release_all();
-                                cx.quit();
-                            },
-                        )
-                        .into_any_element(),
-                        settings_row("version")
-                            .child(label("Version", theme::BODY, true))
-                            .child(label(env!("CARGO_PKG_VERSION"), theme::BODY, false))
-                            .into_any_element(),
-                        action_row("github", "View on GitHub", "Open", cx, |_, _, _| {
-                            let _ = std::process::Command::new("/usr/bin/open")
-                                .arg("https://github.com/prodBirdy/openNook")
-                                .spawn();
-                        }).into_any_element(),
-                    ]),
-                    None::<&str>,
                 ))
                 .child(section(
                     "HUD",
@@ -1106,17 +1227,174 @@ impl SettingsView {
                     alias_focused,
                     pin_focused,
                     cx,
-                ))
-                .child(section("Reset", settings_group(vec![action_row(
-                    "reset-all", "All Settings", self.destructive_caption("reset-all-btn", "Reset to Defaults…"), cx, |this, _, cx| {
-                        nook_core::settings::update_app_settings(AppSettings::default());
-                        nook_core::osd::apply(false);
-                        nook_core::weather::invalidate();
-                        *this = SettingsView::new(cx);
-                        this.category = SettingsCategory::General;
-                        cx.notify();
-                    },
-                ).into_any_element()]), Some("Returns every setting on every page to its default."))),
+                )),
+        )
+    }
+
+    fn render_appearance(
+        &self,
+        settings: &AppSettings,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        Self::pane(
+            "Appearance",
+            Some("Island color, Liquid Glass, and the expand gradient."),
+            div()
+                .id("appearance-pane")
+                .flex()
+                .flex_col()
+                .gap(px(16.))
+                .child(section(
+                    "Island",
+                    settings_group(vec![
+                        toggle_row("Liquid Glass island", settings.liquid_glass_mode, cx, |s| {
+                            s.liquid_glass_mode = !s.liquid_glass_mode
+                        })
+                        .into_any_element(),
+                        self.gradient_row(settings, cx).into_any_element(),
+                        self.color_row(settings, cx).into_any_element(),
+                    ]),
+                    Some("A custom color replaces the default black island. Compact stays black; the glass gradient fades in when the island expands."),
+                )),
+        )
+    }
+
+    fn render_shortcuts(
+        &mut self,
+        settings: &AppSettings,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let mut rows = vec![
+            action_row(
+                "clock-shortcuts",
+                "Clock Shortcuts",
+                "Install Shortcuts",
+                cx,
+                |_, _, _| {
+                    if let Err(err) = nook_core::shortcuts::import_bundled_shortcuts() {
+                        log::info!("clock shortcuts: {err}");
+                    }
+                },
+            )
+            .into_any_element(),
+            action_row(
+                "lpm-shortcut",
+                "Low Power Mode",
+                "Install Shortcut",
+                cx,
+                |_, _, _| {
+                    if let Err(err) = nook_core::power::install_lpm_shortcut() {
+                        log::warn!("install LPM shortcut: {err}");
+                    }
+                },
+            )
+            .into_any_element(),
+            toggle_row("Apple Clock Timers", settings.sync_clock_timers, cx, |s| {
+                s.sync_clock_timers = !s.sync_clock_timers
+            })
+            .into_any_element(),
+        ];
+        rows.extend(pomodoro_rows(settings, &self.shortcut_catalog, cx));
+        Self::pane(
+            "Shortcuts",
+            Some("Clock, Low Power Mode, and Focus shortcuts the island can run."),
+            div()
+                .id("shortcuts-pane")
+                .flex()
+                .flex_col()
+                .gap(px(16.))
+                .child(section(
+                    "Installed",
+                    settings_group(rows),
+                    Some("Import the bundled Nook Clock shortcuts once to pause, resume, or cancel timers from the island."),
+                )),
+        )
+    }
+
+    fn render_privacy(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        Self::pane(
+            "Privacy",
+            Some("Permissions the island needs on this Mac."),
+            div()
+                .id("privacy-pane")
+                .flex()
+                .flex_col()
+                .gap(px(16.))
+                .child(section(
+                    "Permissions",
+                    settings_group(notification_permission_rows(cx)),
+                    Some("Captures other apps' banners via Accessibility. Optional usernoted backfill needs a manual Full Disk Access grant."),
+                )),
+        )
+    }
+
+    fn render_updates(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        Self::pane(
+            "Updates",
+            Some("Restore every setting to its default."),
+            div()
+                .id("updates-pane")
+                .flex()
+                .flex_col()
+                .gap(px(16.))
+                .child(section(
+                    "Reset",
+                    settings_group(vec![action_row(
+                        "reset-all",
+                        "All Settings",
+                        self.destructive_caption("reset-all-btn", "Reset to Defaults…"),
+                        cx,
+                        |this, _, cx| {
+                            nook_core::settings::update_app_settings(AppSettings::default());
+                            nook_core::osd::apply(false);
+                            nook_core::weather::invalidate();
+                            *this = SettingsView::new(cx);
+                            this.category = SettingsCategory::Updates;
+                            cx.notify();
+                        },
+                    )
+                    .into_any_element()]),
+                    Some("Returns every setting on every page to its default."),
+                )),
+        )
+    }
+
+    fn render_about(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        Self::pane(
+            "About",
+            Some("Version and links."),
+            div()
+                .id("about-pane")
+                .flex()
+                .flex_col()
+                .gap(px(16.))
+                .child(section(
+                    "openNook",
+                    settings_group(vec![
+                        action_row(
+                            "quit",
+                            "Quit",
+                            self.destructive_caption("quit-btn", "Quit"),
+                            cx,
+                            |_, _, cx| {
+                                nook_core::high_alert::release_all();
+                                cx.quit();
+                            },
+                        )
+                        .into_any_element(),
+                        settings_row("version")
+                            .child(label("Version", theme::BODY, true))
+                            .child(label(env!("CARGO_PKG_VERSION"), theme::BODY, false))
+                            .into_any_element(),
+                        action_row("github", "View on GitHub", "Open", cx, |_, _, _| {
+                            let _ = std::process::Command::new("/usr/bin/open")
+                                .arg("https://github.com/prodBirdy/openNook")
+                                .spawn();
+                        })
+                        .into_any_element(),
+                    ]),
+                    None::<&str>,
+                )),
         )
     }
 
@@ -1199,6 +1477,135 @@ impl SettingsView {
             .child(swatches)
     }
 
+    fn gradient_row(&self, settings: &AppSettings, cx: &mut Context<Self>) -> impl IntoElement {
+        let enabled = settings.liquid_glass_mode;
+        let value = settings.glass_gradient();
+        let pct = format!("{}%", (value * 100.0).round() as i32);
+        settings_row("glass-gradient")
+            .opacity(if enabled {
+                1.0
+            } else {
+                theme::DISABLED_OPACITY
+            })
+            .when(enabled, |row| {
+                row.tab_index(0)
+                    .focus(|style| style.border_1().border_color(theme::accent()))
+                    .on_key_down(cx.listener(|_, event: &KeyDownEvent, _, cx| {
+                        let step = match event.keystroke.key.as_str() {
+                            "left" => -0.05,
+                            "right" => 0.05,
+                            _ => return,
+                        };
+                        cx.stop_propagation();
+                        nook_core::settings::tweak_app_settings(|s| {
+                            s.liquid_glass_gradient = (s.glass_gradient() + step).clamp(0.0, 1.0);
+                        });
+                        cx.notify();
+                    }))
+            })
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(1.))
+                    .child(label("Glass gradient", theme::BODY, true))
+                    .child(label("Fades in on expand", theme::SUBHEADLINE, false)),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .child(self.gradient_slider(value, enabled, cx))
+                    .child(
+                        div()
+                            .w(px(40.))
+                            .flex_shrink_0()
+                            .flex()
+                            .justify_end()
+                            .child(label(pct, theme::BODY, true)),
+                    ),
+            )
+    }
+
+    fn gradient_slider(
+        &self,
+        value: f32,
+        enabled: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let value = value.clamp(0.0, 1.0);
+        let knob_left = value * (GRADIENT_TRACK_W - GRADIENT_KNOB);
+        let fill = (knob_left + GRADIENT_KNOB * 0.5) / GRADIENT_TRACK_W;
+        let track = self.gradient_track.clone();
+        let dragging = self.gradient_drag;
+        div()
+            .id("glass-gradient-slider")
+            .relative()
+            .flex_shrink_0()
+            .w(px(GRADIENT_TRACK_W))
+            .h(px(theme::HIT_MIN))
+            .cursor(if !enabled {
+                CursorStyle::Arrow
+            } else if dragging {
+                CursorStyle::ClosedHand
+            } else {
+                CursorStyle::PointingHand
+            })
+            .when(enabled, |d| {
+                d.on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, event: &MouseDownEvent, _, cx| {
+                        cx.stop_propagation();
+                        this.pending_destructive = None;
+                        this.gradient_drag = true;
+                        this.apply_gradient(event.position.x.into(), cx);
+                        cx.notify();
+                    }),
+                )
+            })
+            .child(
+                div()
+                    .absolute()
+                    .top(px((theme::HIT_MIN - theme::TRACK_H) * 0.5))
+                    .left_0()
+                    .right_0()
+                    .h(px(theme::TRACK_H))
+                    .rounded(px(theme::TRACK_RADIUS))
+                    .bg(theme::FILL_SECONDARY)
+                    .overflow_hidden()
+                    .child(div().h_full().w(relative(fill)).bg(if enabled {
+                        theme::accent()
+                    } else {
+                        theme::FILL
+                    })),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .top(px((theme::HIT_MIN - GRADIENT_KNOB) * 0.5))
+                    .left(px(knob_left))
+                    .size(px(GRADIENT_KNOB))
+                    .rounded_full()
+                    .bg(theme::LABEL)
+                    .border_1()
+                    .border_color(theme::with_alpha(theme::ISLAND, 0.22)),
+            )
+            .child(
+                canvas(
+                    move |bounds, _, _| {
+                        let origin: f32 = bounds.origin.x.into();
+                        let width: f32 = bounds.size.width.into();
+                        *track.borrow_mut() = Some((origin, width));
+                        bounds
+                    },
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .inset_0(),
+            )
+    }
+
     fn placement_canvas(&self, settings: &AppSettings, cx: &mut Context<Self>) -> impl IntoElement {
         const PILL_W: f32 = 52.0;
         const PILL_H: f32 = 14.0;
@@ -1228,7 +1635,7 @@ impl SettingsView {
             } else {
                 CursorStyle::OpenHand
             })
-            .child(div().absolute().inset_0().bg(SETTINGS_CANVAS))
+            .child(div().absolute().inset_0().bg(theme::WINDOW_BG))
             .child(
                 canvas(
                     move |bounds, _, _| {
@@ -1313,92 +1720,121 @@ impl SettingsView {
         let mut on_nook = Vec::new();
         let mut available = Vec::new();
         let mut blocked_available = false;
+        let query = self.search_draft.trim().to_ascii_lowercase();
         for module in settings.ordered_widgets() {
             if !module.is_available() || !settings.widget_visible(module) {
                 continue;
             }
+            if !query.is_empty() && !module.name().to_ascii_lowercase().contains(&query) {
+                continue;
+            }
             if module.enabled(settings) {
-                on_nook.push(self.widget_row(module, settings, cx).into_any_element());
+                on_nook.push(
+                    self.widget_row(module, settings, true, cx)
+                        .into_any_element(),
+                );
             } else {
                 if module.occupies_nook_cells() && !settings.can_enable(module) {
                     blocked_available = true;
                 }
-                available.push(self.widget_row(module, settings, cx).into_any_element());
+                available.push(
+                    self.widget_row(module, settings, false, cx)
+                        .into_any_element(),
+                );
             }
         }
         let used = settings.used_cells();
-        let capacity = format!("{used} of {} cells in use.", AppSettings::TOTAL_CELLS);
+        let total = AppSettings::TOTAL_CELLS;
+        let available_n = available.len();
         let available_footer = blocked_available
             .then(|| "No room left. Turn off or shrink a widget to make room.".to_string());
 
         let show_module = settings.widget_visible(self.module);
+        let preview = self.island_preview(settings, cx);
 
         Self::pane(
             "Widgets",
+            Some("Pick the widgets that live in the island and drag them into the order you want."),
             div()
                 .id("custom-widgets")
                 .flex()
                 .flex_col()
-                .gap(px(16.))
-                .child(section(
-                    "Nook",
-                    settings_group(vec![action_row(
-                        "customize-on-nook",
-                        "Customize Layout",
-                        "Edit on Island",
-                        cx,
-                        |_, _, _| {
-                            nook_core::automation::push_action(
-                                nook_core::automation::ExternalAction::EditWidgets,
-                            );
-                        },
-                    )
-                    .into_any_element()]),
-                    Some(capacity),
-                ))
-                .child(section(
-                    "On the Island",
-                    settings_group(if on_nook.is_empty() {
+                .child(preview)
+                .child(div().h(px(24.)).flex_shrink_0())
+                .child(widget_list_block(
+                    "In the Island",
+                    format!("{used} of {total}"),
+                    ISLAND_LIST_INDENT,
+                    if on_nook.is_empty() {
                         vec![empty_hint("No widgets on the island yet.").into_any_element()]
                     } else {
                         on_nook
-                    }),
-                    Some("Drag to reorder. Size and options below."),
+                    },
                 ))
-                .child(section(
-                    "Available",
-                    settings_group(if available.is_empty() {
+                .child(div().h(px(22.)).flex_shrink_0())
+                .child(widget_list_block(
+                    "More Widgets",
+                    format!("{available_n} available"),
+                    MORE_LIST_INDENT,
+                    if available.is_empty() {
                         vec![empty_hint("Every widget is already on the island.").into_any_element()]
                     } else {
                         available
-                    }),
-                    available_footer,
+                    },
                 ))
-                .when(show_module, |d| {
-                    d.child(self.module_section(
-                        settings,
-                        url_focused,
-                        token_focused,
-                        query_focused,
-                        heading_focused,
-                        city_focused,
-                        ignore_focused,
-                        cx,
-                    ))
+                .when_some(available_footer, |d, text| {
+                    d.child(div().px(px(4.)).pt(px(6.)).child(caption_text(text)))
                 })
-                .child(section(
-                    "Experimental",
-                    settings_group(vec![toggle_row(
-                        "Show Experimental Widgets",
-                        settings.experimental_widgets,
-                        cx,
-                        |s| s.experimental_widgets = !s.experimental_widgets,
-                    )
-                    .into_any_element()]),
-                    Some(
-                        "Reveals in-progress widgets (Observe, Obsidian, VPN, Meetings, Messages, and more). They are unfinished and off by default.",
-                    ),
-                )),
+                .child(
+                    div()
+                        .pt(px(22.))
+                        .flex()
+                        .flex_col()
+                        .gap(px(22.))
+                        .when(show_module, |d| {
+                            d.child(self.module_section(
+                                settings,
+                                url_focused,
+                                token_focused,
+                                query_focused,
+                                heading_focused,
+                                city_focused,
+                                ignore_focused,
+                                cx,
+                            ))
+                        })
+                        .child(section(
+                            "Layout",
+                            settings_group(vec![action_row(
+                                "customize-on-nook",
+                                "Customize Layout",
+                                "Edit on Island",
+                                cx,
+                                |_, _, _| {
+                                    nook_core::automation::push_action(
+                                        nook_core::automation::ExternalAction::EditWidgets,
+                                    );
+                                },
+                            )
+                            .into_any_element()]),
+                            Some("Drag widgets on the island, or reorder them in the lists above."),
+                        ))
+                        .child(section(
+                            "Experimental",
+                            settings_group(vec![toggle_row(
+                                "Show Experimental Widgets",
+                                settings.experimental_widgets,
+                                cx,
+                                |s| s.experimental_widgets = !s.experimental_widgets,
+                            )
+                            .into_any_element()]),
+                            Some(
+                                "Reveals in-progress widgets (Observe, Obsidian, VPN, Meetings, Messages, and more). They are unfinished and off by default.",
+                            ),
+                        )),
+                )
+                .child(div().h(px(20.)).flex_shrink_0())
+                .child(self.widgets_reset_footer(cx)),
         )
     }
 
@@ -1406,29 +1842,26 @@ impl SettingsView {
         &self,
         module: WidgetModule,
         settings: &AppSettings,
+        on_island: bool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let selected = self.module == module;
         let on = module.enabled(settings);
-        let caption = if module.occupies_nook_cells() {
-            format!("{} · {}", settings.size_for(module).label(), {
-                let cells = settings.cells_for(module);
-                if cells == 1 {
-                    "1 cell".to_string()
-                } else {
-                    format!("{cells} cells")
-                }
-            })
+        let caption = widget_caption(module, settings);
+        let action_label = if on_island { "Remove" } else { "Add" };
+        let action_icon = if on_island { "minus" } else { "plus" };
+        let action_color = if on_island {
+            theme::secondary_label()
         } else {
-            "Tray tab".to_string()
+            theme::accent()
         };
         div()
             .id(SharedString::from(format!("mod-{}", module.name())))
             .px(px(GROUP_PAD))
-            .min_h(px(ROW_H + 4.0))
+            .h(px(WIDGET_ROW_H))
             .flex()
             .items_center()
-            .gap(px(8.))
+            .gap(px(10.))
             .when(selected, |d| d.bg(theme::FILL))
             .hover(|s| {
                 if selected {
@@ -1470,8 +1903,14 @@ impl SettingsView {
                 cx.notify();
             }))
             .on_drag(WidgetDrag(module), |drag, _, _, cx| cx.new(|_| *drag))
-            .child(lucide_color("grip-vertical", 14.0, theme::TERTIARY_LABEL))
-            .child(lucide_color(module.icon(), 15.0, theme::LABEL))
+            .when(on_island, |d| {
+                d.child(lucide_color(
+                    "grip-vertical",
+                    WIDGET_GRIP,
+                    theme::TERTIARY_LABEL,
+                ))
+            })
+            .child(widget_badge(module))
             .child(
                 div()
                     .flex_1()
@@ -1479,10 +1918,176 @@ impl SettingsView {
                     .flex()
                     .flex_col()
                     .gap(px(1.))
-                    .child(label(module.name(), theme::BODY, true))
-                    .child(label(caption, theme::SUBHEADLINE, false)),
+                    .child(label(module.name(), theme::BODY, false).text_color(theme::LABEL))
+                    .child(
+                        label(caption, theme::FOOTNOTE, false).text_color(theme::secondary_label()),
+                    ),
             )
-            .child(module_toggle(on, module, settings, cx))
+            .child(
+                div()
+                    .id(SharedString::from(format!("mod-act-{}", module.name())))
+                    .h(px(REMOVE_H))
+                    .px(px(9.))
+                    .rounded(px(REMOVE_RADIUS))
+                    .bg(theme::FILL)
+                    .flex()
+                    .items_center()
+                    .gap(px(4.))
+                    .cursor(CursorStyle::PointingHand)
+                    .hover(|s| s.bg(theme::FILL_SECONDARY))
+                    .on_click(cx.listener(move |_, _, _, cx| {
+                        cx.stop_propagation();
+                        let s = nook_core::settings::get_app_settings();
+                        let can = on || s.can_enable(module);
+                        if !can && !on {
+                            return;
+                        }
+                        let mut s = s;
+                        let was_enabled = s.show_notifications;
+                        module.set_enabled(&mut s);
+                        let request_notifications = module == WidgetModule::Notifications
+                            && !was_enabled
+                            && s.show_notifications;
+                        nook_core::settings::update_app_settings(s);
+                        if request_notifications {
+                            nook_core::notifications::ax_trusted(true);
+                        }
+                        cx.notify();
+                    }))
+                    .child(lucide_color(action_icon, 11.0, action_color))
+                    .child(
+                        div()
+                            .text_size(px(theme::SUBHEADLINE.size))
+                            .text_color(action_color)
+                            .child(action_label),
+                    ),
+            )
+    }
+
+    fn island_preview(&self, settings: &AppSettings, cx: &mut Context<Self>) -> impl IntoElement {
+        let used = settings.used_cells();
+        let total = AppSettings::TOTAL_CELLS;
+        let mut cells = div()
+            .id("island-preview")
+            .flex()
+            .flex_1()
+            .gap(px(4.))
+            .justify_center()
+            .rounded(px(theme::ROW_RADIUS))
+            .bg(theme::ISLAND)
+            .shadow_lg()
+            .p(px(14.));
+        let enabled: Vec<WidgetModule> = settings
+            .ordered_widgets()
+            .into_iter()
+            .filter(|m| {
+                m.enabled(settings) && settings.widget_visible(*m) && m.occupies_nook_cells()
+            })
+            .collect();
+        if enabled.is_empty() {
+            cells = cells.child(div().flex_1().flex().items_center().justify_center().child(
+                label("No widgets on the island yet.", theme::FOOTNOTE, false),
+            ));
+        } else {
+            for module in enabled {
+                let selected = self.module == module;
+                cells = cells.child(
+                    div()
+                        .id(SharedString::from(format!("preview-{}", module.name())))
+                        .flex_1()
+                        .flex()
+                        .flex_col()
+                        .items_center()
+                        .justify_center()
+                        .gap(px(7.))
+                        .px(px(4.))
+                        .py(px(6.))
+                        .rounded(px(theme::CONTROL_RADIUS))
+                        .when(selected, |d| d.bg(theme::FILL))
+                        .cursor(CursorStyle::PointingHand)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.module = module;
+                            this.persist_nav();
+                            cx.notify();
+                        }))
+                        .child(lucide_color(module.icon(), 17.0, theme::LABEL))
+                        .child(
+                            div()
+                                .text_size(px(theme::FOOTNOTE.size))
+                                .line_height(px(theme::FOOTNOTE.leading))
+                                .text_color(theme::secondary_label())
+                                .child(module.name()),
+                        ),
+                );
+            }
+        }
+        div()
+            .flex()
+            .flex_col()
+            .w_full()
+            .child(group_header(
+                "Island Preview",
+                format!("{used} of {total} slots used"),
+            ))
+            .child(
+                div()
+                    .w_full()
+                    .rounded(px(theme::INNER_RADIUS))
+                    .border_1()
+                    .border_color(theme::FILL_TERTIARY)
+                    .p(px(18.))
+                    .bg(linear_gradient(
+                        90.0,
+                        linear_color_stop(theme::rgba_from_u32(0x2A2A30, 1.0), 0.0),
+                        linear_color_stop(theme::rgba_from_u32(0x141417, 1.0), 1.0),
+                    ))
+                    .flex()
+                    .justify_center()
+                    .child(cells),
+            )
+            .child(div().pt(px(8.)).child(label(
+                "The island updates live as you make changes.",
+                theme::SUBHEADLINE,
+                false,
+            )))
+    }
+
+    fn widgets_reset_footer(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        div().px(px(2.)).flex().child(
+            div()
+                .id("widgets-reset")
+                .h(px(26.))
+                .px(px(11.))
+                .rounded(px(6.))
+                .bg(theme::FILL)
+                .border_1()
+                .border_color(theme::FILL_TERTIARY)
+                .flex()
+                .items_center()
+                .gap(px(4.))
+                .cursor(CursorStyle::PointingHand)
+                .hover(|s| s.bg(theme::FILL_SECONDARY))
+                .on_click(cx.listener(|this, _, _, cx| {
+                    cx.stop_propagation();
+                    if !confirm_destructive(&mut this.pending_destructive, "reset-all-btn".into()) {
+                        cx.notify();
+                        return;
+                    }
+                    nook_core::settings::update_app_settings(AppSettings::default());
+                    nook_core::osd::apply(false);
+                    nook_core::weather::invalidate();
+                    *this = SettingsView::new(cx);
+                    this.category = SettingsCategory::Widgets;
+                    cx.notify();
+                }))
+                .child(lucide_color("rotate-ccw", 12.0, theme::secondary_label()))
+                .child(
+                    div()
+                        .text_size(px(theme::CALLOUT.size))
+                        .text_color(theme::LABEL)
+                        .child(self.destructive_caption("reset-all-btn", "Reset to Defaults")),
+                ),
+        )
     }
 
     fn size_picker(&self, settings: &AppSettings, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1568,6 +2173,12 @@ impl SettingsView {
         let name = self.module.name();
         let enabled = self.module.enabled(settings);
         let mut rows = Vec::new();
+        rows.push(
+            settings_row("mod-enabled")
+                .child(label("On the Island", theme::BODY, true))
+                .child(module_toggle(enabled, self.module, settings, cx))
+                .into_any_element(),
+        );
         match self.module {
             WidgetModule::Music => {
                 rows.push(
@@ -1960,10 +2571,10 @@ impl SettingsView {
     fn render_weather_settings(
         &self,
         settings: &AppSettings,
-        city_focused: bool,
+        _city_focused: bool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        use nook_core::weather::{WeatherLocationMode, WeatherUnits};
+        use nook_core::weather::WeatherUnits;
 
         let units = settings.weather.units;
         let mut unit_row = segmented_group();
@@ -1978,97 +2589,52 @@ impl SettingsView {
             }));
         }
 
-        let city_text = if self.city_draft.is_empty() {
-            "City name"
+        // Weather always follows the Mac's location (nook-core refreshes it at
+        // most every 15 min); this section only reports where and whether.
+        let location = &settings.weather.location;
+        let error = nook_core::weather::location_error();
+        let located = location.coords().is_some();
+        let place = if located {
+            format!("{} (current)", location.display_name())
         } else {
-            self.city_draft.as_str()
+            "Locating…".to_string()
+        };
+        let permission = if error.is_some() {
+            "Unavailable"
+        } else if nook_core::weather::has_location_fix() {
+            "Allowed"
+        } else {
+            "Waiting for a fix"
         };
         let mut location_rows = vec![
-            field_row(
-                "weather-city",
-                "City",
-                city_text,
-                self.city_draft.is_empty(),
-                city_focused,
-                &self.city_focus,
-                cx,
-                |this, event, cx| {
-                    if event.keystroke.key == "enter" {
-                        this.search_city(cx);
-                    } else if SettingsView::apply_key(&mut this.city_draft, event, cx) {
-                        cx.notify();
-                    }
-                },
-            )
-            .into_any_element(),
-            settings_row("weather-city-actions")
-                .child(div().flex_1())
-                .child(
-                    div()
-                        .flex()
-                        .gap(px(6.))
-                        .child(push_button(
-                            "weather-search",
-                            if self.geo_loading {
-                                "Searching…"
-                            } else {
-                                "Search"
-                            },
-                            cx,
-                            |this, _, cx| this.search_city(cx),
-                        ))
-                        .child(push_button(
-                            "weather-system",
-                            if self.location_busy {
-                                "Locating…"
-                            } else {
-                                "Use Current Location"
-                            },
-                            cx,
-                            |this, _, cx| this.use_system_location(cx),
-                        )),
-                )
+            settings_row("weather-location")
+                .child(label("Location", theme::BODY, true))
+                .child(label(place, theme::BODY, false))
+                .into_any_element(),
+            settings_row("weather-permission")
+                .child(label("Location Services", theme::BODY, true))
+                .child(label(permission, theme::BODY, false))
                 .into_any_element(),
         ];
-        if let Some(status) = &self.location_status {
+        if let Some(err) = error {
             location_rows.push(
-                settings_row("weather-loc-status")
-                    .child(label(status.clone(), theme::BODY, false))
-                    .into_any_element(),
-            );
-        }
-        if let Some(err) = &self.geo_error {
-            location_rows.push(
-                settings_row("weather-geo-err")
-                    .child(label(err.clone(), theme::BODY, false))
-                    .into_any_element(),
-            );
-        }
-        for (i, place) in self.geo_results.iter().enumerate() {
-            let caption = place.display_name();
-            let picked = place.clone();
-            location_rows.push(
-                settings_row(SharedString::from(format!("weather-hit-{i}")))
-                    .child(label(caption, theme::BODY, true))
+                settings_row("weather-location-hint")
+                    .child(
+                        label(err, theme::FOOTNOTE, false)
+                            .flex_1()
+                            .min_w(px(0.))
+                            .text_color(theme::secondary_label()),
+                    )
                     .child(push_button(
-                        SharedString::from(format!("weather-pick-{i}")),
-                        "Use",
+                        "weather-location-settings",
+                        "Open Location Settings",
                         cx,
-                        move |this, _, cx| this.pick_place(picked.clone(), cx),
+                        |_, _, _| super::ui::open_privacy_pane("Privacy_LocationServices"),
                     ))
                     .into_any_element(),
             );
         }
-
-        let location_note = match &settings.weather.location {
-            WeatherLocationMode::System { .. } => {
-                "Using a one-shot system fix (city-level). The Location Services grant is keyed to this build's signature and resets after an ad-hoc re-sign."
-            }
-            WeatherLocationMode::Manual { name, .. } if !name.is_empty() => {
-                "Manual city. System location is opt-in and optional."
-            }
-            _ => "Enter a city (no permission prompt). System location is opt-in and resets on re-sign.",
-        };
+        let location_note = "Uses your Mac's approximate location (city-level), checked at most every 15 minutes. The Location Services grant is keyed to this build's signature and resets after an ad-hoc re-sign.";
 
         div()
             .flex()
@@ -2764,21 +3330,20 @@ fn section(
     div()
         .flex()
         .flex_col()
-        .gap(px(6.))
         .child(section_header(header))
         .child(group)
         .when_some(footer, |d, text| {
-            d.child(div().px(px(4.)).child(caption_text(text)))
+            d.child(div().px(px(2.)).pt(px(8.)).child(caption_text(text)))
         })
 }
 
 fn section_header(text: impl Into<SharedString>) -> impl IntoElement {
     div()
-        .px(px(4.))
-        .text_size(px(theme::BODY.size))
-        .line_height(px(theme::BODY.leading))
-        .font_weight(FontWeight::NORMAL)
-        .text_color(theme::SECONDARY_LABEL)
+        .px(px(2.))
+        .pb(px(8.))
+        .text_size(px(theme::SUBHEADLINE.size))
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_color(theme::secondary_label())
         .child(text.into())
 }
 
@@ -2983,11 +3548,106 @@ fn chip_row(
         .child(group)
 }
 
+fn widget_badge_color(module: WidgetModule) -> Rgba {
+    let rgb = match module {
+        WidgetModule::Music | WidgetModule::SysStats => 0xFF375F,
+        WidgetModule::Calendar | WidgetModule::Reminders | WidgetModule::Recorder => 0xFF453A,
+        WidgetModule::Speed | WidgetModule::Battery | WidgetModule::Messages => 0x30D158,
+        WidgetModule::Mirror | WidgetModule::Observe => 0x64D2FF,
+        WidgetModule::Agents | WidgetModule::Meeting => 0xBF5AF2,
+        WidgetModule::Timers | WidgetModule::HighAlert | WidgetModule::Notifications => TILE_ORANGE,
+        WidgetModule::Notes => 0xFFD60A,
+        WidgetModule::Weather | WidgetModule::Vpn => TILE_BLUE,
+        WidgetModule::Files => 0x5E5CE6,
+        WidgetModule::Obsidian => 0x7C5CFF,
+    };
+    theme::rgba_from_u32(rgb, 1.0)
+}
+
+fn widget_badge(module: WidgetModule) -> impl IntoElement {
+    div()
+        .size(px(WIDGET_BADGE))
+        .rounded(px(WIDGET_BADGE_RADIUS))
+        .bg(widget_badge_color(module))
+        .flex()
+        .items_center()
+        .justify_center()
+        .flex_shrink_0()
+        .child(lucide_color(module.icon(), WIDGET_BADGE_ICON, theme::LABEL))
+}
+
+fn widget_caption(module: WidgetModule, settings: &AppSettings) -> SharedString {
+    let trailing = if module.is_experimental() {
+        "Experimental".to_string()
+    } else if !module.occupies_nook_cells() {
+        "Tray tab".to_string()
+    } else {
+        match settings.cells_for(module) {
+            1 => "1 slot".to_string(),
+            cells => format!("{cells} slots"),
+        }
+    };
+    format!("{} · {trailing}", module.tagline()).into()
+}
+
+fn widget_list_block(
+    title: &'static str,
+    trailing: String,
+    indent: f32,
+    rows: Vec<AnyElement>,
+) -> impl IntoElement {
+    let mut group = div()
+        .flex()
+        .flex_col()
+        .rounded(px(theme::INNER_RADIUS))
+        .border_1()
+        .border_color(LIST_BORDER)
+        .bg(theme::GROUPED_BG)
+        .overflow_hidden();
+    for (i, row) in rows.into_iter().enumerate() {
+        if i > 0 {
+            group = group.child(div().h(px(1.)).ml(px(indent)).bg(hairline()));
+        }
+        group = group.child(row);
+    }
+    div()
+        .flex()
+        .flex_col()
+        .w_full()
+        .child(group_header(title, trailing))
+        .child(group)
+}
+
+/// Small semibold group title with a trailing count, as above each widget list.
+fn group_header(title: impl Into<SharedString>, trailing: impl Into<SharedString>) -> impl IntoElement {
+    div()
+        .flex()
+        .items_center()
+        .px(px(2.))
+        .pb(px(8.))
+        .child(
+            div()
+                .text_size(px(theme::SUBHEADLINE.size))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(theme::secondary_label())
+                .child(title.into()),
+        )
+        .child(div().flex_1())
+        .child(
+            div()
+                .text_size(px(theme::SUBHEADLINE.size))
+                .text_color(theme::secondary_label())
+                .child(trailing.into()),
+        )
+}
+
 fn settings_group(rows: Vec<AnyElement>) -> impl IntoElement {
     let mut group = div()
         .flex()
         .flex_col()
         .rounded(px(theme::INNER_RADIUS))
+        .border_1()
+        .border_color(LIST_BORDER)
         .bg(theme::GROUPED_BG)
         .overflow_hidden();
     for (i, row) in rows.into_iter().enumerate() {
@@ -3412,9 +4072,28 @@ fn field_row(
         )
 }
 
+/// Map a click on the gradient track to `0..=1`, using the knob's travel
+/// so the centre of the knob is the value.
+fn gradient_ratio(x: f32, origin: f32, width: f32) -> f32 {
+    let travel = (width - GRADIENT_KNOB).max(1.0);
+    ((x - origin - GRADIENT_KNOB * 0.5) / travel).clamp(0.0, 1.0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gradient_track_ratio_follows_the_knob() {
+        let width = GRADIENT_TRACK_W;
+        let half = GRADIENT_KNOB * 0.5;
+        assert_eq!(gradient_ratio(half, 0.0, width), 0.0);
+        let mid = half + (width - GRADIENT_KNOB) * 0.5;
+        assert!((gradient_ratio(mid, 0.0, width) - 0.5).abs() < 1e-4);
+        assert_eq!(gradient_ratio(-20.0, 0.0, width), 0.0);
+        assert_eq!(gradient_ratio(width + 40.0, 0.0, width), 1.0);
+        assert!((gradient_ratio(half + 10.0, 10.0, width)).abs() < 1e-4);
+    }
 
     #[test]
     fn destructive_confirmation_requires_the_same_row_twice() {
@@ -3437,12 +4116,15 @@ mod tests {
     #[test]
     fn settings_window_is_landscape() {
         let (w, h) = SETTINGS_SIZE;
-        assert_eq!((w, h), (780.0, 560.0));
+        assert_eq!((w, h), (820.0, 560.0));
         assert!(w > h, "default size stays landscape");
         let (min_w, min_h) = SETTINGS_MIN;
         assert!(min_w > min_h, "min size stays landscape");
         assert!(min_w >= 680.0 && min_h >= 480.0);
         assert!(w > SIDEBAR_W + 400.0, "pane has room beside the sidebar");
+        assert_eq!(SIDEBAR_W, 212.0);
+        assert_eq!(SEARCH_H, 24.0);
+        assert!((SIDEBAR_W - SIDEBAR_PAD * 2.0 - 192.0).abs() < 0.05);
     }
 
     #[test]
@@ -3452,7 +4134,7 @@ mod tests {
             WidgetModule::Weather.subtitle(&settings).as_ref(),
             "Open-Meteo"
         );
-        settings.weather.location = nook_core::weather::WeatherLocationMode::Manual {
+        settings.weather.location = nook_core::weather::WeatherLocationMode::System {
             name: "Oslo".into(),
             lat: 59.91,
             lon: 10.75,
@@ -3554,7 +4236,7 @@ mod tests {
                 "Observe",
                 "Timers",
                 "Reminders",
-                "Speed Test",
+                "Speed",
                 "Agents",
                 "Mirror",
                 "Battery",
@@ -3562,11 +4244,11 @@ mod tests {
                 "Obsidian",
                 "Weather",
                 "VPN",
-                "High Alert",
+                "Alert",
                 "Stats",
                 "Voice",
                 "Meetings",
-                "Notifications",
+                "Notify",
             ]
         );
         assert!(!names
@@ -3575,15 +4257,32 @@ mod tests {
     }
 
     #[test]
+    fn widgets_chrome_matches_mockup() {
+        assert_eq!(WIDGET_ROW_H, 46.0);
+        assert_eq!(WIDGET_BADGE, 22.0);
+        assert_eq!(WIDGET_GRIP, 13.0);
+        assert_eq!(CATEGORY_H, 30.0);
+        assert_eq!(PANE_TITLE, 22.0);
+        assert_eq!(SettingsCategory::Widgets.title(), "Widgets");
+        assert_eq!(SettingsCategory::Appearance.icon(), "sun-moon");
+        let settings = AppSettings::default();
+        let caption = widget_caption(WidgetModule::Calendar, &settings);
+        assert!(caption.starts_with("Next event · "), "{caption}");
+        assert!(caption.contains("slot"), "{caption}");
+        let experimental = widget_caption(WidgetModule::Vpn, &settings);
+        assert!(experimental.ends_with("· Experimental"), "{experimental}");
+    }
+
+    #[test]
     fn nav_enums_round_trip() {
-        assert_eq!(SettingsCategory::from_u8(1), SettingsCategory::Widgets);
-        for retired in [2, 3, 4, 255] {
-            assert_eq!(
-                SettingsCategory::from_u8(retired),
-                SettingsCategory::General
-            );
-        }
         assert_eq!(SettingsCategory::from_u8(0), SettingsCategory::General);
+        assert_eq!(SettingsCategory::from_u8(1), SettingsCategory::Widgets);
+        assert_eq!(SettingsCategory::from_u8(2), SettingsCategory::Appearance);
+        assert_eq!(SettingsCategory::from_u8(3), SettingsCategory::Shortcuts);
+        assert_eq!(SettingsCategory::from_u8(4), SettingsCategory::Privacy);
+        assert_eq!(SettingsCategory::from_u8(5), SettingsCategory::Updates);
+        assert_eq!(SettingsCategory::from_u8(6), SettingsCategory::About);
+        assert_eq!(SettingsCategory::from_u8(255), SettingsCategory::General);
         assert_eq!(SettingsCategory::from_u8(99), SettingsCategory::General);
         assert_eq!(WidgetModule::from_u8(0), WidgetModule::Calendar);
         assert_eq!(WidgetModule::from_u8(99), WidgetModule::Calendar);

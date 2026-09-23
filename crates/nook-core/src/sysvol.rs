@@ -120,7 +120,7 @@ pub(crate) fn publish(kind: HudKind, value: f32) {
         return;
     }
     let seq = SEQ.fetch_add(1, Ordering::Relaxed) + 1;
-    let _ = tx.send(HudEvent { kind, value, seq });
+    let _ = tx.send_replace(HudEvent { kind, value, seq });
 }
 
 /// Install CoreAudio listeners. Safe to call more than once.

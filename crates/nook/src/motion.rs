@@ -28,8 +28,57 @@ pub const OUTPUT_HUD_TTL: Duration = Duration::from_millis(1500);
 /// Meeting mute glyph flash.
 pub const MUTE_FLASH: Duration = Duration::from_millis(450);
 
-/// Two-finger swipe must accumulate this many points before acting.
+/// Two-finger swipe must accumulate this many points before a horizontal
+/// mode/tab change or an expanded collapse.
 pub const SWIPE_THRESHOLD: f32 = 20.0;
+
+/// Down-swipe distance that lets the compact pill go. Shorter travel only
+/// stretches it.
+pub const EXPAND_PULL_COMMIT: f32 = 72.0;
+
+/// Most the compact pill grows in height while a down-swipe is still resisting.
+pub const EXPAND_PULL_MAX: f32 = 18.0;
+
+/// Extra width at the same moment. Wider than the height stretch so the pill
+/// opens outward during the slow swipe.
+pub const EXPAND_PULL_WIDTH: f32 = 64.0;
+
+/// Extra width for the current height stretch. `height_pull` is
+/// [`expand_pull_height`].
+pub fn expand_pull_width(height_pull: f32) -> f32 {
+    if !height_pull.is_finite() || height_pull <= 0.0 || EXPAND_PULL_MAX <= 0.0 {
+        return 0.0;
+    }
+    (height_pull / EXPAND_PULL_MAX).clamp(0.0, 1.0) * EXPAND_PULL_WIDTH
+}
+
+/// How many progress detents a down-swipe has passed, before it commits.
+/// `0` at the start, `1` after one third, `2` after two thirds.
+pub fn expand_pull_notch(progress: f32) -> u8 {
+    let progress = if progress.is_finite() {
+        progress.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    if progress >= 2.0 / 3.0 {
+        2
+    } else if progress >= 1.0 / 3.0 {
+        1
+    } else {
+        0
+    }
+}
+
+/// Extra compact height for a downward swipe that has not committed yet.
+/// The island moves less than the fingers, then stops growing at the cap.
+pub fn expand_pull_height(scroll: f32) -> f32 {
+    if !scroll.is_finite() || scroll <= 0.0 {
+        return 0.0;
+    }
+    let t = (scroll / EXPAND_PULL_COMMIT).clamp(0.0, 1.0);
+    let eased = 1.0 - (1.0 - t) * (1.0 - t);
+    eased * EXPAND_PULL_MAX
+}
 
 /// Quiet gap that re-arms a locked swipe gesture.
 pub const SWIPE_IDLE: Duration = Duration::from_millis(280);
@@ -180,6 +229,34 @@ mod tests {
             spring.stiffness
         );
         assert!((spring.damping - 12.57).abs() < 0.05, "{}", spring.damping);
+    }
+
+    #[test]
+    fn expand_pull_grows_less_than_the_swipe() {
+        assert_eq!(expand_pull_height(0.0), 0.0);
+        assert_eq!(expand_pull_height(-12.0), 0.0);
+        let early = expand_pull_height(8.0);
+        let mid = expand_pull_height(EXPAND_PULL_COMMIT * 0.5);
+        assert!(early > 0.0 && early < mid);
+        assert!(
+            mid < EXPAND_PULL_COMMIT * 0.5,
+            "half a swipe stays a small stretch, got {mid}"
+        );
+        assert!((expand_pull_height(EXPAND_PULL_COMMIT) - EXPAND_PULL_MAX).abs() < 1e-3);
+        assert_eq!(
+            expand_pull_height(EXPAND_PULL_COMMIT * 3.0),
+            EXPAND_PULL_MAX
+        );
+        assert_eq!(expand_pull_width(0.0), 0.0);
+        let wide = expand_pull_width(mid);
+        assert!(wide > 0.0 && wide < EXPAND_PULL_WIDTH);
+        assert!((expand_pull_width(EXPAND_PULL_MAX) - EXPAND_PULL_WIDTH).abs() < 1e-3);
+        assert_eq!(expand_pull_notch(0.0), 0);
+        assert_eq!(expand_pull_notch(0.2), 0);
+        assert_eq!(expand_pull_notch(1.0 / 3.0), 1);
+        assert_eq!(expand_pull_notch(0.5), 1);
+        assert_eq!(expand_pull_notch(2.0 / 3.0), 2);
+        assert_eq!(expand_pull_notch(1.0), 2);
     }
 
     #[test]

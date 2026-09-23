@@ -479,7 +479,7 @@ fn gen_tx() -> &'static watch::Sender<u64> {
 fn bump() {
     let tx = gen_tx();
     let next = tx.borrow().saturating_add(1);
-    let _ = tx.send(next);
+    let _ = tx.send_replace(next);
 }
 
 fn now_unix() -> i64 {

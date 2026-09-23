@@ -3,10 +3,10 @@
 //! Sampling is spawned only while the expanded card is on screen and stops
 //! on collapse — zero idle syscalls.
 
-use crate::island::ui::{label, nook_empty, nook_pane};
+use crate::island::ui::{nook_empty, nook_pane};
 use crate::island::{Island, Tab};
 use crate::theme;
-use gpui::{div, prelude::*, px, relative, Context, FontWeight};
+use gpui::{div, prelude::*, px, relative, Context, FontWeight, SharedString};
 use nook_core::sysstats;
 use std::time::Duration;
 
@@ -22,7 +22,7 @@ pub(crate) fn sysstats_card(island: &mut Island, cx: &mut Context<Island>) -> im
         .flex_1()
         .min_h(px(0.))
         .justify_center()
-        .gap(px(6.));
+        .gap(px(9.));
     let mut any = false;
     if cfg.show_cpu {
         any = true;
@@ -31,10 +31,7 @@ pub(crate) fn sysstats_card(island: &mut Island, cx: &mut Context<Island>) -> im
             .map(sysstats::format_pct)
             .unwrap_or_else(|| "—".into());
         let t = snap.cpu_pct.unwrap_or(0.0) / 100.0;
-        rows = rows.child(stat_row("CPU", value, t));
-        if !snap.per_core.is_empty() {
-            rows = rows.child(core_strip(&snap.per_core));
-        }
+        rows = rows.child(stat_row("CPU", value, t, theme::LABEL));
     }
     if cfg.show_mem {
         any = true;
@@ -48,7 +45,7 @@ pub(crate) fn sysstats_card(island: &mut Island, cx: &mut Context<Island>) -> im
             )
         };
         let t = ratio(snap.mem_used, snap.mem_total);
-        rows = rows.child(stat_row("MEM", value, t));
+        rows = rows.child(stat_row("MEM", value, t, theme::LABEL));
     }
     if cfg.show_net {
         any = true;
@@ -56,120 +53,71 @@ pub(crate) fn sysstats_card(island: &mut Island, cx: &mut Context<Island>) -> im
             .net_down_bps
             .map(sysstats::format_bps)
             .unwrap_or_else(|| "—".into());
-        let up = snap
-            .net_up_bps
-            .map(sysstats::format_bps)
-            .unwrap_or_else(|| "—".into());
-        rows = rows.child(
-            div()
-                .w_full()
-                .flex()
-                .items_center()
-                .gap(px(8.))
-                .child(stat_label("NET"))
-                .child(
-                    div()
-                        .flex_1()
-                        .flex()
-                        .items_center()
-                        .justify_end()
-                        .gap(px(10.))
-                        .child(net_side("↓", down))
-                        .child(net_side("↑", up)),
-                ),
-        );
-    }
-    if cfg.show_disk {
-        any = true;
-        let value = if snap.disk_total == 0 {
-            "—".into()
-        } else {
-            format!(
-                "{} / {}",
-                sysstats::format_bytes(snap.disk_used),
-                sysstats::format_bytes(snap.disk_total)
-            )
-        };
-        let t = ratio(snap.disk_used, snap.disk_total);
-        rows = rows.child(stat_row("DISK", value, t));
+        let t = snap
+            .net_down_bps
+            .map(|v| (v / 50_000_000.0) as f32)
+            .unwrap_or(0.0);
+        rows = rows.child(stat_row("NET", down, t, theme::accent()));
     }
 
-    nook_pane("nook-sysstats").w_full().child(if any {
+    card_shell("nook-sysstats").w_full().child(if any {
         rows.into_any_element()
     } else {
         nook_empty("gauge", "Enable a readout in Settings").into_any_element()
     })
 }
 
+fn card_shell(id: impl Into<gpui::ElementId>) -> gpui::Stateful<gpui::Div> {
+    nook_pane(id).p(px(16.)).gap(px(10.))
+}
+
 fn stat_label(name: &'static str) -> impl IntoElement {
     div()
-        .w(px(32.))
+        .w(px(26.))
         .flex_shrink_0()
-        .text_size(px(theme::FOOTNOTE.size))
-        .line_height(px(theme::FOOTNOTE.leading))
-        .font_weight(FontWeight::SEMIBOLD)
+        .text_size(px(9.))
+        .line_height(px(12.))
+        .font_weight(FontWeight::NORMAL)
         .text_color(theme::TERTIARY_LABEL)
         .child(name)
 }
 
-fn stat_row(name: &'static str, value: String, t: f32) -> impl IntoElement {
+fn stat_row(name: &'static str, value: String, t: f32, color: gpui::Rgba) -> impl IntoElement {
     div()
         .w_full()
         .flex()
-        .flex_col()
-        .gap(px(3.))
+        .items_center()
+        .gap(px(8.))
+        .child(stat_label(name))
+        .child(gauge(t, color))
         .child(
             div()
-                .w_full()
-                .flex()
-                .items_baseline()
-                .justify_between()
-                .gap(px(8.))
-                .child(stat_label(name))
-                .child(label(value, theme::CALLOUT, true)),
+                .w(px(62.))
+                .flex_shrink_0()
+                .text_size(px(9.))
+                .line_height(px(12.))
+                .font_weight(FontWeight::NORMAL)
+                .text_color(theme::SECONDARY_LABEL)
+                .text_right()
+                .whitespace_nowrap()
+                .child(SharedString::from(value)),
         )
-        .child(gauge(t))
 }
 
-fn gauge(t: f32) -> impl IntoElement {
+fn gauge(t: f32, color: gpui::Rgba) -> impl IntoElement {
     div()
         .w_full()
         .h(px(theme::TRACK_H))
         .rounded(px(theme::TRACK_RADIUS))
         .overflow_hidden()
-        .bg(theme::FILL_SECONDARY)
+        .bg(theme::FILL)
         .child(
             div()
                 .h_full()
                 .w(relative(t.clamp(0.0, 1.0)))
                 .rounded(px(theme::TRACK_RADIUS))
-                .bg(theme::accent()),
+                .bg(color),
         )
-}
-
-fn core_strip(cores: &[f32]) -> impl IntoElement {
-    let mut row = div().w_full().flex().items_end().gap(px(2.)).h(px(10.));
-    for (i, pct) in cores.iter().enumerate() {
-        let t = (*pct / 100.0).clamp(0.08, 1.0);
-        row = row.child(
-            div()
-                .id(("sys-core", i))
-                .flex_1()
-                .h(relative(t))
-                .rounded(px(1.))
-                .bg(theme::FILL_SECONDARY),
-        );
-    }
-    row
-}
-
-fn net_side(arrow: &'static str, value: String) -> impl IntoElement {
-    div()
-        .flex()
-        .items_baseline()
-        .gap(px(4.))
-        .child(label(arrow, theme::SUBHEADLINE, false))
-        .child(label(value, theme::CALLOUT, true))
 }
 
 fn ratio(used: u64, total: u64) -> f32 {

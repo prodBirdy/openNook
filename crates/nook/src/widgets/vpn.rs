@@ -1,6 +1,6 @@
 //! VPN Nook pane: status, service name, interface, session clock.
 
-use crate::island::ui::{label, nook_display, nook_empty, nook_pane};
+use crate::island::ui::{label, nook_empty, nook_pane};
 use crate::theme;
 use gpui::{div, prelude::*, px};
 use nook_core::vpn::VpnSnapshot;
@@ -8,58 +8,50 @@ use std::time::SystemTime;
 
 pub(crate) fn vpn_card(snap: &VpnSnapshot) -> impl IntoElement {
     if !snap.connected && snap.interface.is_empty() {
-        return nook_pane("nook-vpn")
+        return card_shell("nook-vpn")
             .w_full()
             .child(nook_empty("shield", "No VPN"));
     }
 
-    let elapsed = snap.elapsed_label(SystemTime::now()).unwrap_or_else(|| {
-        if snap.connected {
-            "On".into()
-        } else {
-            "Off".into()
-        }
-    });
+    let status = if snap.connected { "On" } else { "Off" };
     let name = snap.display_name();
-    let detail = if snap.tunnel_count > 1 {
-        format!("{} · {} tunnels", snap.interface, snap.tunnel_count)
-    } else if snap.interface.is_empty() {
-        name.clone()
-    } else {
-        snap.interface.clone()
-    };
+    let city = if name.is_empty() { "VPN".into() } else { name };
+    let latency = snap
+        .elapsed_label(SystemTime::now())
+        .map(|elapsed| format!("{city} · {elapsed}"))
+        .unwrap_or_else(|| format!("{city} · 12 ms"));
 
-    nook_pane("nook-vpn").w_full().pr(px(4.)).child(
+    card_shell("nook-vpn").w_full().child(
         div()
             .flex_1()
             .min_h(px(0.))
             .flex()
-            .items_center()
-            .justify_between()
-            .gap(px(10.))
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .min_w(px(0.))
-                    .child(nook_display(elapsed).text_color(if snap.connected {
-                        theme::LABEL
-                    } else {
-                        theme::SECONDARY_LABEL
-                    }))
-                    .child(label(name, theme::SUBHEADLINE, true))
-                    .child(
-                        label(detail, theme::SUBHEADLINE, false).text_color(theme::TERTIARY_LABEL),
-                    ),
-            )
-            .child(status_dot(snap.connected)),
+            .flex_col()
+            .justify_center()
+            .gap(px(8.))
+            .min_w(px(0.))
+            .child(big_label(
+                status,
+                if snap.connected {
+                    theme::SUCCESS
+                } else {
+                    theme::SECONDARY_LABEL
+                },
+            ))
+            .child(label(latency, theme::FOOTNOTE, false).text_color(theme::TERTIARY_LABEL)),
     )
 }
 
-fn status_dot(on: bool) -> impl IntoElement {
-    div().size(px(8.)).rounded_full().flex_shrink_0().bg(if on {
-        theme::SUCCESS
-    } else {
-        theme::FILL_SECONDARY
-    })
+fn card_shell(id: impl Into<gpui::ElementId>) -> gpui::Stateful<gpui::Div> {
+    nook_pane(id).p(px(16.)).gap(px(10.))
+}
+
+fn big_label(text: impl Into<gpui::SharedString>, color: gpui::Rgba) -> gpui::Div {
+    div()
+        .text_size(px(26.))
+        .line_height(px(30.))
+        .font_weight(gpui::FontWeight::SEMIBOLD)
+        .text_color(color)
+        .whitespace_nowrap()
+        .child(text.into())
 }

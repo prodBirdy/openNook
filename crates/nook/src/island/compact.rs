@@ -1,6 +1,5 @@
 //! Compact Live Activity: left | notch gap | right, plus mode dots.
 
-use super::chrome::COMPACT_WING;
 use super::media::{album_chip, visualizer};
 use super::ui::{label, timer_text};
 use super::{CompactMode, Island};
@@ -15,13 +14,89 @@ use nook_core::sysvol::HudKind;
 use std::cell::RefCell;
 use std::rc::Rc;
 
+/// Mockup compact faces: a 22pt leading slot holding a 17pt glyph.
+const LEADING_SLOT: f32 = 22.0;
+const LEADING_GLYPH: f32 = 17.0;
+/// Mirror compact: 8pt live dot trailing.
+const MIRROR_LIVE_DOT: f32 = 8.0;
+/// Battery compact glyph: 25×13 shell, 1pt 36% ring, 2pt inner pad, 1.5pt nub.
+const BATTERY_SHELL_W: f32 = 25.0;
+const BATTERY_SHELL_H: f32 = 13.0;
+const BATTERY_SHELL_RADIUS: f32 = 4.3;
+const BATTERY_LEVEL_RADIUS: f32 = 2.5;
+const BATTERY_PAD: f32 = 2.0;
+const BATTERY_NUB_W: f32 = 1.5;
+const BATTERY_NUB_H: f32 = 4.5;
+const BATTERY_RING_ALPHA: f32 = 0.36;
+const BATTERY_LEVEL_RUN: f32 = 21.0;
+/// Mockup High Alert orange `#FF9F0A` (systemOrange dark).
+const ALERT_ORANGE: gpui::Rgba = gpui::Rgba {
+    r: 1.0,
+    g: 0.624,
+    b: 0.039,
+    a: 1.0,
+};
+
+/// Leading glyph centred in the mockup's 22pt slot.
+fn leading_icon(name: &'static str, color: gpui::Rgba) -> AnyElement {
+    div()
+        .size(px(LEADING_SLOT))
+        .flex_shrink_0()
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(lucide_color(name, LEADING_GLYPH, color))
+        .into_any_element()
+}
+
+/// Drawn battery (shell + level + nub) — the mockup face, not a line icon.
+fn battery_glyph(percent: Option<u8>, tint: gpui::Rgba) -> AnyElement {
+    let ring = theme::with_alpha(theme::LABEL, BATTERY_RING_ALPHA);
+    // Gallery sizes the level off a 21pt run (82% → 17pt) though ring + pad
+    // leave 19pt inside the shell; clamp so a full battery still fits.
+    let inner = BATTERY_SHELL_W - 2.0 * (BATTERY_PAD + 1.0);
+    let level = percent.map(|p| p.min(100) as f32 / 100.0).unwrap_or(1.0);
+    let level_w = (BATTERY_LEVEL_RUN * level).min(inner);
+    div()
+        .h(px(LEADING_SLOT))
+        .flex_shrink_0()
+        .flex()
+        .items_center()
+        .gap(px(BATTERY_NUB_W))
+        .child(
+            div()
+                .w(px(BATTERY_SHELL_W))
+                .h(px(BATTERY_SHELL_H))
+                .p(px(BATTERY_PAD))
+                .rounded(px(BATTERY_SHELL_RADIUS))
+                .border_1()
+                .border_color(ring)
+                .flex()
+                .items_center()
+                .child(
+                    div()
+                        .h_full()
+                        .w(px(level_w.max(BATTERY_LEVEL_RADIUS)))
+                        .rounded(px(BATTERY_LEVEL_RADIUS))
+                        .bg(tint),
+                ),
+        )
+        .child(
+            div()
+                .w(px(BATTERY_NUB_W))
+                .h(px(BATTERY_NUB_H))
+                .rounded(px(1.0))
+                .bg(ring),
+        )
+        .into_any_element()
+}
+
 impl Island {
     pub(super) fn render_compact(
         &self,
         mode: CompactMode,
         hovered: bool,
         notch_w: f32,
-        glass: bool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         // Leading/trailing sit in the camera band, not the extra chin the
@@ -35,9 +110,9 @@ impl Island {
                 .items_center()
                 .w_full()
                 .h(px(notch_h))
-                .px(px(
-                    theme::COMPACT_INSET + if glass { COMPACT_WING } else { 0. }
-                ))
+                // Mockup compact: padding 0 9 (theme::COMPACT_INSET is still 8 for
+                // chrome math elsewhere).
+                .px(px(9.0))
                 .child(
                     div()
                         .flex_1()
@@ -52,13 +127,13 @@ impl Island {
                             d.child(div().ml(px(4.)).flex_shrink_0().child(lucide_color(
                                 "sun",
                                 theme::COMPACT_BADGE,
-                                theme::SUCCESS,
+                                ALERT_ORANGE,
                             )))
                         }),
                 )
                 .child(
                     div()
-                        .w(px(notch_w + 2.0 * self.glass_notch_gap()))
+                        .w(px(notch_w))
                         .flex_shrink_0()
                         .h_full(),
                 )
@@ -79,8 +154,7 @@ impl Island {
     fn compact_left(&self, mode: CompactMode, cx: &mut Context<Self>) -> AnyElement {
         if self.hud_active() {
             let kind = self.hud.unwrap().kind;
-            return lucide_color(hud_icon(kind), theme::COMPACT_FACE, hud_tint(kind))
-                .into_any_element();
+            return leading_icon(hud_icon(kind), hud_tint(kind));
         }
         if let Some(name) = self.output_hud_label() {
             return label(name.to_string(), theme::BODY, true).into_any_element();
@@ -95,35 +169,30 @@ impl Island {
             .into_any_element(),
             CompactMode::Agents => widgets::agents_compact_left(
                 &self.agents,
+                self.agent_rotation,
                 self.pixel_t,
                 theme::island_fill(self.settings.island_color),
                 self.size_morphing(),
             ),
             CompactMode::Files => super::files::compact_left(&self.files),
             CompactMode::Timer => widgets::timer_compact_left(self, cx),
-            CompactMode::Observe => {
-                lucide_color("triangle-alert", theme::COMPACT_FACE, theme::WARNING)
-                    .into_any_element()
-            }
+            // Mockup V7Snx: radar in systemRed.
+            CompactMode::Observe => leading_icon("radar", theme::DESTRUCTIVE),
             CompactMode::Battery => {
-                let color = widgets::battery_tint(self.power);
-                lucide_color(self.power.compact_icon(), theme::COMPACT_FACE, color)
-                    .into_any_element()
+                battery_glyph(self.power.percent, widgets::battery_tint(self.power))
             }
-            CompactMode::Vpn => lucide_color(
+            CompactMode::Vpn => leading_icon(
                 if self.vpn.connected {
                     "shield-check"
                 } else {
                     "shield-off"
                 },
-                theme::COMPACT_FACE,
                 if self.vpn.connected {
                     theme::SUCCESS
                 } else {
                     theme::tertiary_label()
                 },
-            )
-            .into_any_element(),
+            ),
             CompactMode::Recording => widgets::recorder_compact_left(self),
             CompactMode::Meeting => widgets::meeting_compact_left(&self.meeting),
             CompactMode::Notifications => {
@@ -137,12 +206,12 @@ impl Island {
                 .map(widgets::messages_compact_left)
                 .map(|el| el.into_any_element())
                 .unwrap_or_else(|| div().into_any_element()),
-            CompactMode::Share => {
-                lucide_color("share", theme::COMPACT_FACE, theme::ACCENT).into_any_element()
-            }
+            CompactMode::Share => leading_icon("share", theme::ACCENT),
             CompactMode::Idle => {
-                if self.high_alert_active() {
-                    lucide_color("sun", theme::COMPACT_FACE, theme::SUCCESS).into_any_element()
+                if self.mirror_on {
+                    leading_icon("webcam", theme::LABEL)
+                } else if self.high_alert_active() {
+                    leading_icon("sun", ALERT_ORANGE)
                 } else {
                     widgets::compact_weather(self)
                 }
@@ -163,7 +232,8 @@ impl Island {
             CompactMode::Media => {
                 visualizer(self.now_playing.is_playing, self.visualizer_color).into_any_element()
             }
-            CompactMode::Agents => widgets::agents_compact_right(&self.agents),
+            // Pencil iZPif / jRPai: session title + slide dots while the face rotates.
+            CompactMode::Agents => widgets::agents_compact_right(&self.agents, self.agent_rotation),
             CompactMode::Files => {
                 label(self.files.len().to_string(), theme::BODY, true).into_any_element()
             }
@@ -182,15 +252,34 @@ impl Island {
                     [one] => one.name.clone(),
                     _ => self.observe.firing_count().to_string(),
                 };
-                label(text, theme::BODY, true).into_any_element()
+                label(text, theme::BODY, true)
+                    .text_color(theme::DESTRUCTIVE)
+                    .into_any_element()
             }
+            // Mockup: the percent stays white; the level fill carries the tint.
             CompactMode::Battery => label(
                 nook_core::power::format_percent(self.power.percent),
                 theme::BODY,
                 true,
             )
-            .text_color(widgets::battery_tint(self.power))
             .into_any_element(),
+            // Mirror compact (mockup): webcam leading, green live dot trailing.
+            CompactMode::Idle if self.mirror_on => div()
+                .size(px(MIRROR_LIVE_DOT))
+                .rounded_full()
+                .bg(theme::SUCCESS)
+                .into_any_element(),
+            // High Alert compact (mockup): orange sun leading, orange value
+            // trailing — here the keep-awake time left, or "On" when open-ended.
+            CompactMode::Idle if self.high_alert_active() => {
+                let text = self
+                    .high_alert_remaining_secs()
+                    .map(super::ui::format_timer_compact)
+                    .unwrap_or_else(|| "On".into());
+                timer_text(text, theme::BODY)
+                    .text_color(ALERT_ORANGE)
+                    .into_any_element()
+            }
             CompactMode::Idle => div().into_any_element(),
             CompactMode::Messages => self
                 .messages
@@ -209,6 +298,11 @@ impl Island {
                 timer_text(text, theme::BODY)
                     .min_w(px(40.))
                     .text_right()
+                    .text_color(if self.vpn.connected {
+                        theme::SUCCESS
+                    } else {
+                        theme::tertiary_label()
+                    })
                     .into_any_element()
             }
             CompactMode::Recording => widgets::recorder_compact_right(self, cx),

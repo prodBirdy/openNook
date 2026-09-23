@@ -23,7 +23,6 @@ mod weather;
 
 pub(crate) use agents::{
     agents_card, compact_left as agents_compact_left, compact_right as agents_compact_right,
-    face_agent,
 };
 pub(crate) use battery::{battery_card, tint as battery_tint};
 pub(crate) use calendar::calendar_card;
@@ -40,7 +39,9 @@ pub(crate) use notifications::{
     compact_left as notifications_compact_left, compact_right as notifications_compact_right,
     notifications_card,
 };
-pub(crate) use observe::{observe_card, ObserveHover};
+pub(crate) use observe::{
+    observe_big_view, observe_card, ObserveHover, OBSERVE_EXPANDED_BODY,
+};
 pub(crate) use obsidian::obsidian_card;
 pub(crate) use quick_add::{QuickAdd, QuickAddEvent};
 pub(crate) use recorder::{

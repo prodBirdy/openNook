@@ -1,16 +1,19 @@
 //! Obsidian vault Nook pane: daily-note capture, recent notes, deep links.
+//!
+//! Expanded face is the Pencil list mockup (vault summary + daily/recent rows).
+//! Capture / daily / refresh stay as corner controls so plumbing still works.
 
-use super::notes::markdown_preview;
-use crate::island::ui::{
-    label, nook_empty, nook_header, nook_icon_btn, nook_pane, nook_row, scroll_body,
-};
+use crate::island::ui::{label, nook_empty, nook_icon_btn, nook_pane};
 use crate::island::Island;
 use crate::theme;
 use gpui::{
     div, prelude::*, px, Context, CursorStyle, KeyDownEvent, MouseButton, MouseDownEvent,
     SharedString,
 };
-use nook_core::obsidian::NoteEntry;
+use nook_core::obsidian::{CivilDate, NoteEntry};
+use std::time::SystemTime;
+
+const ROW_H: f32 = 29.0;
 
 pub(crate) fn obsidian_card(island: &mut Island, cx: &mut Context<Island>) -> impl IntoElement {
     island.flush_obsidian_dirty(cx);
@@ -18,18 +21,88 @@ pub(crate) fn obsidian_card(island: &mut Island, cx: &mut Context<Island>) -> im
     let capturing = island.obsidian_typing;
     let capture = island.obsidian_capture.clone();
     let flash = island.obsidian_flash.clone();
-    let selected = island.obsidian_selected.clone();
-    let body = island.obsidian_body.clone();
     let vault = island.settings.obsidian_vault.clone();
     let notes = island.obsidian_notes.clone();
 
-    let mut pane = nook_pane("nook-obsidian").relative().w_full();
-    pane = pane.child(nook_header(
-        "Obsidian",
+    let mut pane = card_shell("nook-obsidian").relative().w_full();
+
+    let Some(vault_path) = vault else {
+        return pane.child(nook_empty(
+            "book",
+            "Choose a vault in Settings. openNook reads and writes Markdown in that folder.",
+        ));
+    };
+
+    let vault_label = nook_core::obsidian::vault_name(&vault_path);
+    let today_n = notes_modified_today(&notes);
+    let today = CivilDate::today();
+    let stamp = format!("{:04}-{:02}-{:02}", today.year, today.month, today.day);
+
+    let mut body = div()
+        .flex_1()
+        .min_h(px(0.))
+        .w_full()
+        .flex()
+        .flex_col()
+        .gap(px(8.))
+        .justify_center();
+
+    let today_sub = if today_n == 1 {
+        "1 note today".into()
+    } else {
+        format!("{today_n} notes today")
+    };
+    body = body.child(obs_row(
+        SharedString::from("obs-vault"),
+        vault_label,
+        today_sub,
+        false,
+        cx,
+        None,
+    ));
+
+    if let Some(daily) = notes.iter().find(|n| {
+        n.rel_path.contains(&stamp) || n.title.contains(&stamp) || n.title.eq_ignore_ascii_case("daily")
+    }) {
+        let rel = daily.rel_path.clone();
+        body = body.child(obs_row(
+            SharedString::from(format!("obs-{}", daily.rel_path)),
+            format!("Daily · {stamp}"),
+            edited_ago(daily.mtime),
+            true,
+            cx,
+            Some(rel),
+        ));
+    } else if let Some(note) = notes.first() {
+        let rel = note.rel_path.clone();
+        body = body.child(obs_row(
+            SharedString::from(format!("obs-{}", note.rel_path)),
+            note.title.clone(),
+            edited_ago(note.mtime),
+            true,
+            cx,
+            Some(rel),
+        ));
+    } else {
+        body = body.child(nook_empty("book", "No markdown notes"));
+    }
+
+    pane = pane.child(body).child(
         div()
+            .absolute()
+            .top(px(8.))
+            .right(px(8.))
             .flex()
             .items_center()
             .gap(px(4.))
+            .child(nook_icon_btn(
+                "plus",
+                "obs-capture-btn",
+                cx,
+                |this, _, window, cx| {
+                    this.focus_obsidian_capture(window, cx);
+                },
+            ))
             .child(nook_icon_btn(
                 "calendar",
                 "obs-daily",
@@ -47,26 +120,90 @@ pub(crate) fn obsidian_card(island: &mut Island, cx: &mut Context<Island>) -> im
                     this.flush_obsidian_dirty(cx);
                 },
             )),
-    ));
+    );
 
-    if vault.is_none() {
-        return pane.child(nook_empty(
-            "book",
-            "Choose a vault in Settings. openNook reads and writes Markdown in that folder.",
-        ));
+    if capturing || !capture.is_empty() || flash.is_some() {
+        pane = pane.child(
+            div()
+                .absolute()
+                .left(px(16.))
+                .right(px(16.))
+                .bottom(px(8.))
+                .child(capture_field(
+                    &capture,
+                    capturing,
+                    flash.as_deref(),
+                    &focus,
+                    cx,
+                )),
+        );
     }
 
-    pane.child(capture_field(
-        &capture,
-        capturing,
-        flash.as_deref(),
-        &focus,
-        cx,
-    ))
-    .child(scroll_body(
-        "obsidian-scroll",
-        note_list(&notes, selected.as_deref(), body.as_deref(), cx),
-    ))
+    pane
+}
+
+fn card_shell(id: impl Into<gpui::ElementId>) -> gpui::Stateful<gpui::Div> {
+    nook_pane(id).p(px(16.)).gap(px(10.))
+}
+
+fn obs_row(
+    id: SharedString,
+    title: String,
+    subtitle: String,
+    openable: bool,
+    cx: &mut Context<Island>,
+    rel: Option<String>,
+) -> impl IntoElement {
+    div()
+        .id(id)
+        .w_full()
+        .h(px(ROW_H))
+        .flex_shrink_0()
+        .flex()
+        .items_center()
+        .gap(px(8.))
+        .overflow_hidden()
+        .when(openable, |d| {
+            d.cursor(CursorStyle::PointingHand)
+                .hover(|s| s.bg(theme::FILL))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                        cx.stop_propagation();
+                        if let Some(rel) = rel.as_ref() {
+                            this.open_obsidian_note(rel, cx);
+                        }
+                    }),
+                )
+        })
+        .child(
+            div()
+                .size(px(6.))
+                .rounded_full()
+                .flex_shrink_0()
+                .bg(theme::TERTIARY_LABEL),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w(px(0.))
+                .flex()
+                .flex_col()
+                .gap(px(1.))
+                .overflow_hidden()
+                .child(
+                    label(title, theme::CALLOUT, false)
+                        .text_color(theme::LABEL)
+                        .overflow_hidden()
+                        .text_ellipsis(),
+                )
+                .child(
+                    label(subtitle, theme::FOOTNOTE, false)
+                        .text_color(theme::TERTIARY_LABEL)
+                        .overflow_hidden()
+                        .text_ellipsis(),
+                ),
+        )
 }
 
 fn capture_field(
@@ -90,8 +227,7 @@ fn capture_field(
         .flex_shrink_0()
         .h(px(theme::HIT_MIN))
         .px(px(8.))
-        .mb(px(6.))
-        .rounded(px(6.))
+        .rounded(px(8.))
         .bg(theme::FILL_TERTIARY)
         .when(focused, |d| d.border_1().border_color(theme::accent()))
         .flex()
@@ -124,95 +260,36 @@ fn capture_field(
         )
 }
 
-fn note_list(
-    notes: &[NoteEntry],
-    selected: Option<&str>,
-    body: Option<&str>,
-    cx: &mut Context<Island>,
-) -> impl IntoElement {
-    if notes.is_empty() {
-        return nook_empty("book", "No markdown notes").into_any_element();
-    }
-    let mut list = div().flex().flex_col().w_full().flex_shrink_0();
-    let extra = notes.len().saturating_sub(8);
-    for note in notes.iter().take(8) {
-        let rel = note.rel_path.clone();
-        let title = note.title.clone();
-        let folder = note
-            .rel_path
-            .rsplit_once('/')
-            .map(|(dir, _)| dir.to_string())
-            .unwrap_or_default();
-        let is_sel = selected == Some(note.rel_path.as_str());
-        list = list.child(
-            nook_row(SharedString::from(format!("obs-{}", note.rel_path)))
-                .gap(px(8.))
-                .when(is_sel, |d| d.bg(theme::FILL_TERTIARY))
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener({
-                        let rel = rel.clone();
-                        move |this, _: &MouseDownEvent, _, cx| {
-                            cx.stop_propagation();
-                            this.select_obsidian_note(rel.clone(), cx);
-                        }
-                    }),
-                )
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w(px(0.))
-                        .flex()
-                        .flex_col()
-                        .child(
-                            label(title, theme::CALLOUT, true)
-                                .overflow_hidden()
-                                .text_ellipsis()
-                                .whitespace_nowrap(),
-                        )
-                        .when(!folder.is_empty(), |d| {
-                            d.child(
-                                label(folder, theme::FOOTNOTE, false)
-                                    .text_color(theme::TERTIARY_LABEL)
-                                    .overflow_hidden()
-                                    .text_ellipsis()
-                                    .whitespace_nowrap(),
-                            )
-                        }),
-                )
-                .child(nook_icon_btn(
-                    "files",
-                    SharedString::from(format!("obs-open-{}", note.rel_path)),
-                    cx,
-                    {
-                        let rel = rel.clone();
-                        move |this, _, _, cx| {
-                            this.open_obsidian_note(&rel, cx);
-                        }
-                    },
-                )),
-        );
-        if is_sel {
-            if let Some(body) = body {
-                list = list.child(
-                    div()
-                        .w_full()
-                        .max_h(px(72.))
-                        .overflow_hidden()
-                        .pt(px(4.))
-                        .child(markdown_preview(body)),
-                );
-            }
+fn notes_modified_today(notes: &[NoteEntry]) -> usize {
+    notes.iter().filter(|n| mtime_is_today(n.mtime)).count()
+}
+
+fn mtime_is_today(mtime: SystemTime) -> bool {
+    let Ok(elapsed) = SystemTime::now().duration_since(mtime) else {
+        return false;
+    };
+    elapsed.as_secs() < 86_400
+}
+
+fn edited_ago(mtime: SystemTime) -> String {
+    let secs = SystemTime::now()
+        .duration_since(mtime)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    if secs < 60 {
+        "edited just now".into()
+    } else if secs < 3600 {
+        format!("edited {}m ago", secs / 60)
+    } else if secs < 86_400 {
+        format!("edited {}h ago", secs / 3600)
+    } else {
+        let days = secs / 86_400;
+        if days == 1 {
+            "edited 1d ago".into()
+        } else {
+            format!("edited {days}d ago")
         }
     }
-    if extra > 0 {
-        list = list.child(
-            label(format!("+{extra} more"), theme::FOOTNOTE, false)
-                .text_color(theme::tertiary_label())
-                .pt(px(4.)),
-        );
-    }
-    list.into_any_element()
 }
 
 #[cfg(test)]

@@ -4,9 +4,8 @@ use super::Island;
 use crate::icons::lucide_color;
 use crate::theme;
 use gpui::{
-    div, prelude::*, px, AnyElement, App, Context, CursorStyle, Div, ElementId, Font, FontFeatures,
-    FontStyle, MouseButton, MouseDownEvent, ScrollHandle, ScrollWheelEvent, SharedString, Stateful,
-    Window,
+    div, prelude::*, px, App, Context, CursorStyle, Div, ElementId, Font, FontFeatures, FontStyle,
+    MouseButton, MouseDownEvent, ScrollHandle, ScrollWheelEvent, SharedString, Stateful, Window,
 };
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -184,14 +183,6 @@ pub(crate) fn nook_empty(icon: &'static str, message: impl Into<SharedString>) -
     nook_empty_column(icon, message)
 }
 
-pub(crate) fn nook_empty_with(
-    icon: &'static str,
-    message: impl Into<SharedString>,
-    action: AnyElement,
-) -> impl IntoElement {
-    nook_empty_column(icon, message).child(action)
-}
-
 fn nook_empty_column(icon: &'static str, message: impl Into<SharedString>) -> Div {
     div()
         .flex_1()
@@ -211,62 +202,10 @@ fn nook_empty_column(icon: &'static str, message: impl Into<SharedString>) -> Di
         )
 }
 
-/// Calendar month numeral: 32/36 bold primary label.
-pub(crate) fn nook_display(text: impl Into<SharedString>) -> Div {
-    div()
-        .text_size(px(theme::DISPLAY.size))
-        .line_height(px(theme::DISPLAY.leading))
-        .font_weight(theme::DISPLAY.emphasized)
-        .text_color(theme::LABEL)
-        .child(text.into())
-}
-
-/// Title row: body label on the left, trailing control on the right.
-pub(crate) fn nook_header(
-    title: impl Into<SharedString>,
-    trailing: impl IntoElement,
-) -> impl IntoElement {
-    div()
-        .flex()
-        .items_center()
-        .justify_between()
-        .flex_shrink_0()
-        .pb(px(4.))
-        .child(label(title, theme::BODY, true))
-        .child(trailing)
-}
-
 /// Open a Privacy & Security pane in System Settings via `/usr/bin/open`.
 pub(crate) fn open_privacy_pane(anchor: &'static str) {
     let url = format!("x-apple.systempreferences:com.apple.preference.security?{anchor}");
     let _ = std::process::Command::new("/usr/bin/open").arg(url).spawn();
-}
-
-/// Calendar event row: hairline, vertical padding, no card fill.
-pub(crate) fn nook_row(id: impl Into<ElementId>) -> Stateful<Div> {
-    div()
-        .id(id)
-        .flex()
-        .items_center()
-        .py_2()
-        .min_h(px(theme::HIT_MIN))
-        .flex_shrink_0()
-        .border_b_1()
-        .border_color(theme::HAIRLINE)
-        .cursor(CursorStyle::PointingHand)
-        .hover(|s| s.bg(theme::FILL_TERTIARY))
-        .active(|s| s.bg(theme::FILL_SECONDARY))
-}
-
-/// 3×32pt accent rail used beside Calendar event titles.
-pub(crate) fn nook_accent_bar(color: gpui::Rgba) -> Div {
-    div()
-        .w(px(3.))
-        .h(px(32.))
-        .rounded(px(2.))
-        .mr_3()
-        .flex_shrink_0()
-        .bg(color)
 }
 
 /// Now Playing skip/play glyph: 22pt face, opacity press, no fill.
