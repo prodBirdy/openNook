@@ -32,7 +32,7 @@ impl Island {
 
     pub(super) fn render_expanded(
         &mut self,
-        notch_w: f32,
+        _notch_w: f32,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let tab = if self.tab == Tab::Files && !self.settings.show_files {
@@ -45,32 +45,25 @@ impl Island {
             .flex_col()
             .size_full()
             .overflow_hidden()
-            .child(self.render_topbar(notch_w, cx))
-            .child(
-                div().flex_1().w_full().overflow_hidden().child(match tab {
-                    Tab::Widgets => self.render_nook(cx).into_any_element(),
-                    Tab::Files => div()
-                        .size_full()
-                        .px(px(theme::EXPANDED_PAD))
-                        .pb(px(theme::EXPANDED_PAD))
-                        .child(self.render_files(cx))
-                        .into_any_element(),
-                    Tab::Terminal => terminal_card(self, cx).into_any_element(),
-                }),
-            )
+            .child(self.render_topbar(cx))
+            .child(div().flex_1().w_full().overflow_hidden().child(match tab {
+                Tab::Widgets => self.render_nook(cx).into_any_element(),
+                Tab::Files => self.render_files(cx).into_any_element(),
+                Tab::Terminal => terminal_card(self, cx).into_any_element(),
+            }))
             .into_any_element()
     }
 
-    fn render_topbar(&self, notch_w: f32, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_topbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         if self.widget_edit {
             return div()
                 .w_full()
                 .flex_shrink_0()
-                .h(px(self.notch_height.max(theme::NOTCH_MIN_H)))
+                .h(px(theme::EXPANDED_TAB_H))
                 .flex()
                 .items_center()
                 .justify_between()
-                .px(px(theme::NOOK_INSET))
+                .px(px(theme::EXPANDED_TAB_PAD_X))
                 .child(
                     div()
                         .text_size(px(theme::SUBHEADLINE.size))
@@ -79,7 +72,7 @@ impl Island {
                         .text_color(theme::secondary_label())
                         .child("Customize"),
                 )
-                .child(div().w(px(notch_w)))
+                .child(div().flex_1())
                 .child(
                     div()
                         .flex()
@@ -108,16 +101,18 @@ impl Island {
         div()
             .w_full()
             .flex_shrink_0()
-            .h(px(self.notch_height.max(theme::NOTCH_MIN_H)))
+            .h(px(theme::EXPANDED_TAB_H))
+            .pt(px(theme::EXPANDED_TAB_PAD_TOP))
+            .px(px(theme::EXPANDED_TAB_PAD_X))
+            .pb(px(theme::EXPANDED_TAB_PAD_BOTTOM))
             .flex()
             .items_center()
-            .justify_between()
-            .px(px(theme::NOOK_INSET))
+            .gap(px(theme::TAB_GAP))
             .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _, cx| {
                 this.on_wheel(event, cx);
             }))
             .child(tab_switch(self, cx))
-            .child(div().w(px(notch_w)))
+            .child(div().flex_1())
             .child(
                 div()
                     .flex()
@@ -357,9 +352,6 @@ impl Island {
             .w_full()
             .flex_1()
             .min_h(px(0.))
-            .px(px(theme::NOOK_INSET))
-            .pt(px(0.))
-            .pb(px(theme::NOOK_INSET))
             .when(!editing, |d| d.overflow_hidden())
             .when(!editing, |d| {
                 d.on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _, cx| {
@@ -404,15 +396,15 @@ impl Island {
                     .flex_row()
                     .w_full()
                     .h(px(theme::NOOK_BODY))
+                    .px(px(theme::NOOK_INSET))
+                    .pb(px(theme::NOOK_INSET))
                     .flex_shrink_0()
                     .when(editing || row_stretches, |d| d.justify_start())
                     .when(!editing && !row_stretches, |d| d.justify_center())
-                    .when(editing, |d| d.gap(px(12.)));
+                    .when(editing, |d| d.gap(px(12.)))
+                    .when(!editing, |d| d.gap(px(theme::NOOK_DIVIDER)));
 
-                for (i, (module, cells, child)) in row_panes.into_iter().enumerate() {
-                    if !editing && i > 0 {
-                        row = row.child(pane_divider());
-                    }
+                for (_i, (module, cells, child)) in row_panes.into_iter().enumerate() {
                     let child = if editing {
                         edit_chrome(module, child, cx)
                     } else {
@@ -516,25 +508,20 @@ fn cell_pane(width: f32, child: impl IntoElement) -> AnyElement {
         .into_any_element()
 }
 
-fn pane_divider() -> impl IntoElement {
-    div()
-        .w(px(1.))
-        .h_full()
-        .mx(px(theme::CONTENT_INSET))
-        .bg(theme::SEPARATOR)
-        .flex_shrink_0()
-}
-
 fn tab_switch(island: &Island, cx: &mut Context<Island>) -> impl IntoElement {
     let current = island.tab;
-    let mut row = div().flex().items_center().gap(px(4.)).child(labeled_tab(
-        "tab-nook",
-        "map-pin",
-        "Nook",
-        current == Tab::Widgets,
-        cx,
-        Tab::Widgets,
-    ));
+    let mut row = div()
+        .flex()
+        .items_center()
+        .gap(px(theme::TAB_GAP))
+        .child(labeled_tab(
+            "tab-nook",
+            "map-pin",
+            "Nook",
+            current == Tab::Widgets,
+            cx,
+            Tab::Widgets,
+        ));
     if island.settings.show_files {
         row = row.child(labeled_tab(
             "tab-tray",
@@ -549,7 +536,7 @@ fn tab_switch(island: &Island, cx: &mut Context<Island>) -> impl IntoElement {
         row = row.child(labeled_tab(
             "tab-term",
             "terminal",
-            "Term",
+            "Terminal",
             current == Tab::Terminal,
             cx,
             Tab::Terminal,
@@ -568,13 +555,13 @@ fn labeled_tab(
 ) -> impl IntoElement {
     div()
         .id(id)
-        .h(px(theme::HIT_MIN))
-        .px(px(10.))
+        .px(px(theme::TAB_PAD_X))
+        .py(px(theme::TAB_PAD_Y))
         .flex()
         .items_center()
-        .gap(px(6.))
-        .rounded_full()
-        .when(selected, |d| d.bg(theme::FILL))
+        .gap(px(theme::TAB_GAP))
+        .rounded(px(theme::TAB_RADIUS))
+        .when(selected, |d| d.bg(theme::TAB_ACTIVE))
         .hover(|s| {
             if selected {
                 s.bg(theme::FILL_SECONDARY)
@@ -597,7 +584,7 @@ fn labeled_tab(
             div()
                 .text_size(px(theme::CALLOUT.size))
                 .line_height(px(theme::CALLOUT.leading))
-                .font_weight(FontWeight::SEMIBOLD)
+                .font_weight(FontWeight::NORMAL)
                 .text_color(if selected {
                     theme::LABEL
                 } else {
@@ -632,7 +619,9 @@ fn mirror_pane(island: &Island, cx: &mut Context<Island>) -> impl IntoElement {
                 .id("mirror-btn")
                 .size(px(theme::MIRROR_FACE))
                 .rounded_full()
-                .bg(theme::FILL_TERTIARY)
+                .bg(theme::FILL)
+                .border_1()
+                .border_color(theme::SEPARATOR)
                 .cursor(CursorStyle::PointingHand)
                 .hover(|s| if live { s } else { s.bg(theme::FILL) })
                 .active(|s| s.opacity(0.9))

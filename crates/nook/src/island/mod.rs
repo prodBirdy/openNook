@@ -3200,28 +3200,31 @@ impl Island {
             let body = if self.tab == Tab::Terminal {
                 // Outer pad lives on the pane so the PTY grid is not sized
                 // through a parent that then clips it. Default 18×14 cells.
+                // Terminal states are out of scope for the 0923 chrome pass;
+                // keep the PTY-sized height.
                 theme::EXPANDED_PAD + crate::widgets::terminal_pane_min_height()
             } else if self.tab == Tab::Files {
-                // Tall enough for one full dropzone tile (flush preview + caption)
-                // plus Clear All, so a single file is not clipped behind a scroll.
                 let extra = if self.share.shows_picker() { 88.0 } else { 0.0 };
-                theme::EXPANDED_PAD * 2.0 + files::files_pane_min_height(w) + extra
+                theme::NOOK_BODY + extra
             } else {
                 let (rows, _) = self.nook_row_count_for_render();
-                let rows = rows as f32;
-                let mut body = theme::NOOK_INSET
-                    + rows * theme::NOOK_BODY
-                    + (rows - 1.0) * theme::NOOK_ROW_GAP;
+                let rows = rows.max(1) as f32;
+                let mut body = rows * theme::NOOK_BODY + (rows - 1.0) * theme::NOOK_ROW_GAP;
                 if self.widget_edit {
                     body += theme::WIDGET_EDIT_PICKER_H + theme::NOOK_INSET;
                 }
                 body
             };
-            let h = (self.notch_height.max(theme::NOTCH_MIN_H) + body)
-                .min(self.screen_height - theme::SCREEN_MARGIN);
+            let tab_h = if self.tab == Tab::Terminal {
+                self.notch_height.max(theme::NOTCH_MIN_H)
+            } else {
+                theme::EXPANDED_TAB_H
+            };
+            let h = (tab_h + body).min(self.screen_height - theme::SCREEN_MARGIN);
             return (w, h);
         }
         let glass_gap = 2.0 * self.glass_notch_gap();
+        let live_w = theme::COMPACT_LIVE_W.max(base_w);
         if self.mode() == CompactMode::Recording {
             let extra = if self.hovered {
                 crate::widgets::RECORDER_COMPACT_HOVER_EXTRA
@@ -3237,13 +3240,13 @@ impl Island {
         }
         if self.hovered {
             return (
-                base_w + theme::COMPACT_HOVER_EXTRA + glass_gap,
+                live_w + (theme::COMPACT_HOVER_EXTRA - theme::COMPACT_LIVE_EXTRA) + glass_gap,
                 base_h + theme::COMPACT_HOVER_CHIN,
             );
         }
         if self.hud_active() {
             return (
-                base_w + theme::COMPACT_HUD_EXTRA + glass_gap,
+                live_w.max(base_w + theme::COMPACT_HUD_EXTRA) + glass_gap,
                 base_h + theme::COMPACT_HEIGHT_OVERFLOW,
             );
         }
@@ -3256,10 +3259,7 @@ impl Island {
             // Glass gap is for live-activity flanks, not the idle housing wrap.
             return (self.notch_width + theme::IDLE_NOTCH_OVERFLOW, h);
         }
-        (
-            base_w + theme::COMPACT_LIVE_EXTRA + glass_gap,
-            base_h + theme::COMPACT_HEIGHT_OVERFLOW,
-        )
+        (live_w + glass_gap, base_h + theme::COMPACT_HEIGHT_OVERFLOW)
     }
 
     pub(super) fn expanded_width(&self) -> f32 {
@@ -3400,20 +3400,23 @@ impl Island {
     /// stretched stale frame).
     pub(super) fn expanded_bottom(&self) -> f32 {
         let files_w = (self.screen_width - theme::SCREEN_MARGIN).min(theme::EXPANDED_MAX_WIDTH);
-        let mut widgets_body = theme::NOOK_INSET + theme::NOOK_BODY;
+        let mut widgets_body = theme::NOOK_BODY;
         if self.widget_edit {
             widgets_body += theme::WIDGET_EDIT_PICKER_H + theme::NOOK_INSET;
         }
         let mut body = widgets_body;
         if self.settings.show_files {
             let extra = if self.share.shows_picker() { 88.0 } else { 0.0 };
-            body =
-                body.max(theme::EXPANDED_PAD * 2.0 + files::files_pane_min_height(files_w) + extra);
+            body = body.max(theme::NOOK_BODY + extra);
         }
+        let tab_h = theme::EXPANDED_TAB_H;
+        let mut h = tab_h + body;
         if self.settings.terminal_enabled {
-            body = body.max(theme::EXPANDED_PAD + crate::widgets::terminal_pane_min_height());
+            let term = self.notch_height.max(theme::NOTCH_MIN_H)
+                + theme::EXPANDED_PAD
+                + crate::widgets::terminal_pane_min_height();
+            h = h.max(term);
         }
-        let h = self.notch_height.max(theme::NOTCH_MIN_H) + body;
         let w = self.expanded_width().max(files_w);
         let (_, top) = self.settings.island_origin(
             self.screen_width,
@@ -4958,7 +4961,7 @@ mod tests {
         island.notch_height = 38.0;
         island.screen_width = 1800.0;
         let (w, h) = island.target_size();
-        let leftover = h - island.notch_height.max(32.0) - theme::EXPANDED_PAD * 2.0;
+        let leftover = h - theme::EXPANDED_TAB_H;
         assert!(
             leftover + 0.05 >= files_pane_min_height(w),
             "h={h} leftover={leftover} need={}",
@@ -5166,12 +5169,18 @@ mod tests {
         let compact = island.target_size();
         assert_eq!(
             compact,
-            (185.0 + 72.0, 38.0 + theme::COMPACT_HEIGHT_OVERFLOW)
+            (theme::COMPACT_LIVE_W, 38.0 + theme::COMPACT_HEIGHT_OVERFLOW)
         );
 
         island.hovered = true;
         let hovered = island.target_size();
-        assert_eq!(hovered, (185.0 + 88.0, 38.0 + 11.0));
+        assert_eq!(
+            hovered,
+            (
+                theme::COMPACT_LIVE_W + (theme::COMPACT_HOVER_EXTRA - theme::COMPACT_LIVE_EXTRA),
+                38.0 + 11.0
+            )
+        );
         assert!(hovered.0 > compact.0 && hovered.1 > compact.1);
     }
 
@@ -5283,9 +5292,12 @@ mod tests {
         island.now_playing.title = Some("Track".into());
         island.now_playing.is_playing = true;
         island.settings.show_media = true;
-        assert_eq!(island.target_size().0, 180.0 + 72.0);
+        assert_eq!(island.target_size().0, theme::COMPACT_LIVE_W);
         island.hovered = true;
-        assert_eq!(island.target_size().0, 180.0 + 88.0);
+        assert_eq!(
+            island.target_size().0,
+            theme::COMPACT_LIVE_W + (theme::COMPACT_HOVER_EXTRA - theme::COMPACT_LIVE_EXTRA)
+        );
         island.hovered = false;
 
         island.hud = Some(HudState {
@@ -5294,7 +5306,10 @@ mod tests {
             shown_at: Instant::now(),
             gen: 1,
         });
-        assert_eq!(island.target_size().0, 180.0 + 120.0);
+        assert_eq!(
+            island.target_size().0,
+            theme::COMPACT_LIVE_W.max(180.0 + theme::COMPACT_HUD_EXTRA)
+        );
         island.hud = None;
 
         island.settings.experimental_widgets = true;

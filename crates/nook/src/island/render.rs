@@ -7,9 +7,9 @@ use crate::platform;
 use crate::theme;
 use gpui::{
     div, point, prelude::*, px, rgba, AnyElement, App, Bounds, Context, CursorStyle, ExternalPaths,
-    FontFallbacks, FontWeight, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, ScrollWheelEvent, Window, WindowBackgroundAppearance, WindowBounds,
-    WindowDecorations, WindowKind, WindowOptions,
+    FontWeight, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+    ScrollWheelEvent, Window, WindowBackgroundAppearance, WindowBounds, WindowDecorations,
+    WindowKind, WindowOptions,
 };
 use nook_core::notch;
 use std::any::Any;
@@ -194,17 +194,7 @@ impl gpui::Render for Island {
                     }
                 }),
             )
-            .font(gpui::Font {
-                family: "SF Pro".into(),
-                features: gpui::FontFeatures::default(),
-                fallbacks: Some(FontFallbacks::from_fonts(vec![
-                    "SF Compact".into(),
-                    "SF Symbols".into(),
-                    ".AppleSystemUIFont".into(),
-                ])),
-                weight: FontWeight::NORMAL,
-                style: gpui::FontStyle::Normal,
-            });
+            .font(theme::ui_font(FontWeight::NORMAL));
         let root = self.accept_file_drop(root, cx);
         root.when(!self.suppressed, |root| {
             root.child(

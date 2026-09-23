@@ -26,11 +26,12 @@ const DEFAULT_FONT_SIZE: f32 = 11.0;
 const DEFAULT_LINE_HEIGHT: f32 = 14.0;
 const DEFAULT_CHAR_WIDTH: f32 = 6.6;
 /// Fonts tried in order when `terminal_font` is empty or missing.
-const FONT_STACK: [&str; 5] = [
+const FONT_STACK: [&str; 6] = [
+    "Roboto Mono",
+    "JetBrains Mono",
     "SF Mono",
     "Menlo",
     "Monaco",
-    "Courier New",
     "DejaVu Sans Mono",
 ];
 const DEFAULT_COLS: u16 = 80;

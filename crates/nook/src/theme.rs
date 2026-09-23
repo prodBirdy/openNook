@@ -1,4 +1,38 @@
-use gpui::{hsla, rgb, FontWeight, Hsla, Rgba};
+use gpui::{hsla, rgb, Font, FontFallbacks, FontFeatures, FontStyle, FontWeight, Hsla, Rgba};
+
+/// Export UI face (`export.html`: `font-[Inter,system-ui,sans-serif]`).
+pub const UI_FONT: &str = "Inter";
+/// Export mono face (`Roboto Mono`) — timers, terminal fallback.
+pub const MONO_FONT: &str = "Roboto Mono";
+
+pub fn ui_font(weight: FontWeight) -> Font {
+    Font {
+        family: UI_FONT.into(),
+        features: FontFeatures::default(),
+        fallbacks: Some(FontFallbacks::from_fonts(vec![
+            "system-ui".into(),
+            "SF Pro".into(),
+            ".AppleSystemUIFont".into(),
+        ])),
+        weight,
+        style: FontStyle::Normal,
+    }
+}
+
+pub fn mono_font(weight: FontWeight) -> Font {
+    Font {
+        family: MONO_FONT.into(),
+        features: FontFeatures::default(),
+        fallbacks: Some(FontFallbacks::from_fonts(vec![
+            "JetBrains Mono".into(),
+            "SF Mono".into(),
+            "Menlo".into(),
+            "DejaVu Sans Mono".into(),
+        ])),
+        weight,
+        style: FontStyle::Normal,
+    }
+}
 
 /// Opaque island fill. Live Activities compact/expanded presentations use a
 /// black background; we keep that role without cloning Apple chrome.
@@ -228,6 +262,48 @@ pub const EXPANDED_RADIUS: f32 = 36.0;
 /// compact content (album art, visualizer) does not sit against the camera.
 /// Painted mode hides the notch inside the pill and must stay at 0.
 pub const GLASS_NOTCH_GAP: f32 = 14.0;
+/// Compact Live Activity width from the 0923 export (`w-[318px]`).
+pub const COMPACT_LIVE_W: f32 = 318.0;
+/// Expanded tab row: `p-[14px_20px_10px_20px]` + 36px tab = 60.
+/// `188 − 128` against the export island (`h-[188px]` / `h-[128px]` row).
+pub const EXPANDED_TAB_H: f32 = 60.0;
+pub const EXPANDED_TAB_PAD_X: f32 = 20.0;
+pub const EXPANDED_TAB_PAD_TOP: f32 = 14.0;
+pub const EXPANDED_TAB_PAD_BOTTOM: f32 = 10.0;
+/// Selected Nook/Tray/Terminal chip (`bg-[#FFFFFF29]`).
+pub const TAB_ACTIVE: Rgba = Rgba {
+    r: 1.0,
+    g: 1.0,
+    b: 1.0,
+    a: 0.16,
+};
+pub const TAB_RADIUS: f32 = 12.0;
+pub const TAB_PAD_X: f32 = 12.0;
+pub const TAB_PAD_Y: f32 = 6.0;
+pub const TAB_GAP: f32 = 6.0;
+/// Compact album chip (`w-[22px]`, `rounded-[6px]`, `#FFFFFF1F` hairline).
+pub const COMPACT_ART_BORDER: Rgba = Rgba {
+    r: 1.0,
+    g: 1.0,
+    b: 1.0,
+    a: 0.12,
+};
+/// Resting compact waveform (`#FF7A4D`).
+pub const COMPACT_WAVE: Rgba = Rgba {
+    r: 1.0,
+    g: 0.478,
+    b: 0.302,
+    a: 1.0,
+};
+/// Tray / drop accent (`#0A84FF`).
+pub const DROP_ACCENT: Rgba = ACCENT;
+pub const DROP_FILL: Rgba = Rgba {
+    r: 0.039,
+    g: 0.518,
+    b: 1.0,
+    a: 0.10,
+};
+pub const DROP_RADIUS: f32 = 14.0;
 #[allow(dead_code)]
 pub const WIDGET_RADIUS: f32 = 28.0;
 pub const INNER_RADIUS: f32 = 10.0;
@@ -235,17 +311,18 @@ pub const CONTROL_RADIUS: f32 = 8.0;
 pub const CONTENT_INSET: f32 = 12.0;
 /// React expanded pane `p-5` (files tab still uses this).
 pub const EXPANDED_PAD: f32 = 20.0;
-/// Nook tab body: one row under the notch, matching the capsule layout.
+/// Nook / Tray body row from the export (`h-[128px]`, pad lives inside).
 pub const NOOK_BODY: f32 = 128.0;
-pub const NOOK_INSET: f32 = 16.0;
+/// Expanded body inset (`p-[0px_20px_20px_20px]`).
+pub const NOOK_INSET: f32 = 20.0;
 /// Nominal minimum cell; the grid uses `Island::nook_cell_width()`.
 pub const NOOK_CELL: f32 = 56.0;
-/// Pane divider contribution: 1px rule + 12px margin each side.
-pub const NOOK_DIVIDER: f32 = 25.0;
+/// Export Nook row gap (`gap-[20px]`).
+pub const NOOK_DIVIDER: f32 = 20.0;
 /// Vertical gap between Nook rows: 1 px rule + CONTENT_INSET margin each side.
 pub const NOOK_ROW_GAP: f32 = 25.0;
-/// Expanded island width; the Nook row holds `TOTAL_CELLS` cells at `nook_cell_width()`.
-pub const EXPANDED_MAX_WIDTH: f32 = 1120.0;
+/// Expanded island width from the 0923 export (`w-[780px]`).
+pub const EXPANDED_MAX_WIDTH: f32 = 780.0;
 /// Bottom widget picker strip while editing the Nook row (icons + labels + actions).
 pub const WIDGET_EDIT_PICKER_H: f32 = 78.0;
 pub const NOTCH_MIN_H: f32 = 32.0;
@@ -322,7 +399,8 @@ pub const DISPLAY: Text = Text {
 };
 
 /// Compact Live Activity face — lucide glyphs, HUD marks, avatars, file thumbs.
-pub const COMPACT_FACE: f32 = 20.0;
+/// Export album art is 22×22.
+pub const COMPACT_FACE: f32 = 22.0;
 /// Small inline badge next to a compact face (e.g. High Alert sun).
 pub const COMPACT_BADGE: f32 = 12.0;
 /// Small inline glyph next to text.
@@ -330,11 +408,10 @@ pub const COMPACT_BADGE: f32 = 12.0;
 pub const GLYPH_SM: f32 = 16.0;
 pub const TRACK_H: f32 = 4.0;
 pub const TRACK_RADIUS: f32 = 2.0;
-/// Inset from the compact capsule edge to the leading/trailing glyph.
-/// Past the 14pt corner so a 20pt face does not sit on the curve.
-pub const COMPACT_INSET: f32 = 8.0;
-/// Expanded Nook Mirror circle. Fills `NOOK_BODY` minus the pane inset.
-pub const MIRROR_FACE: f32 = 112.0;
+/// Inset from the compact capsule edge (`p-[0px_9px]`).
+pub const COMPACT_INSET: f32 = 9.0;
+/// Expanded Nook Mirror circle (`w-[100px]`).
+pub const MIRROR_FACE: f32 = 100.0;
 
 /// HIG › Accessibility › Buttons gives macOS a 28×28 pt recommended hit target
 /// (20×20 pt minimum). Interactive rows and controls hold this floor even when
@@ -353,4 +430,27 @@ pub fn parse_hex(hex: &str) -> Hsla {
         }
     }
     hsla(0.58, 1.0, 0.52, 1.0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mock_0923_chrome_tokens() {
+        assert_eq!(COMPACT_LIVE_W, 318.0);
+        assert_eq!(COMPACT_RADIUS, 14.0);
+        assert_eq!(COMPACT_INSET, 9.0);
+        assert_eq!(COMPACT_FACE, 22.0);
+        assert_eq!(EXPANDED_MAX_WIDTH, 780.0);
+        assert_eq!(EXPANDED_RADIUS, 36.0);
+        assert_eq!(EXPANDED_TAB_H, 60.0);
+        assert_eq!(NOOK_BODY, 128.0);
+        assert_eq!(EXPANDED_TAB_H + NOOK_BODY, 188.0);
+        assert_eq!(NOOK_INSET, 20.0);
+        assert_eq!(TAB_RADIUS, 12.0);
+        assert_eq!(MIRROR_FACE, 100.0);
+        assert_eq!(UI_FONT, "Inter");
+        assert_eq!(MONO_FONT, "Roboto Mono");
+    }
 }

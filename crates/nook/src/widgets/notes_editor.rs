@@ -664,7 +664,7 @@ impl EntityInputHandler for NotesEditor {
 
 fn editor_font() -> Font {
     Font {
-        family: "SF Pro".into(),
+        family: crate::theme::UI_FONT.into(),
         features: FontFeatures(Arc::new(Vec::new())),
         fallbacks: None,
         weight: FontWeight::NORMAL,

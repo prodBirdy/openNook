@@ -4,9 +4,8 @@ use super::Island;
 use crate::icons::lucide_color;
 use crate::theme;
 use gpui::{
-    div, prelude::*, px, AnyElement, App, Context, CursorStyle, Div, ElementId, Font, FontFeatures,
-    FontStyle, MouseButton, MouseDownEvent, ScrollHandle, ScrollWheelEvent, SharedString, Stateful,
-    Window,
+    div, prelude::*, px, AnyElement, App, Context, CursorStyle, Div, ElementId, FontFeatures,
+    MouseButton, MouseDownEvent, ScrollHandle, ScrollWheelEvent, SharedString, Stateful, Window,
 };
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -74,12 +73,10 @@ fn tabular_features() -> FontFeatures {
 /// values that update in place).
 pub(crate) fn timer_text(text: impl Into<SharedString>, style: theme::Text) -> Div {
     div()
-        .font(Font {
-            family: "SF Pro".into(),
-            features: tabular_features(),
-            fallbacks: None,
-            weight: style.emphasized,
-            style: FontStyle::Normal,
+        .font({
+            let mut font = theme::mono_font(style.emphasized);
+            font.features = tabular_features();
+            font
         })
         .text_color(theme::TEXT)
         .text_size(px(style.size))

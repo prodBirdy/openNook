@@ -15,18 +15,14 @@ use std::sync::{Mutex, OnceLock};
 const MAX_ARTWORK_BYTES: usize = 5 * 1024 * 1024;
 const MAX_ARTWORK_DIMENSION: u32 = 4096;
 
-const COMPACT_ART: f32 = 24.0;
-const COMPACT_ART_RADIUS: f32 = 5.0;
-const VIS_BAR_W: f32 = 2.5;
+const COMPACT_ART: f32 = 22.0;
+const COMPACT_ART_RADIUS: f32 = 6.0;
+const VIS_BAR_W: f32 = 2.0;
 const VIS_BAR_GAP: f32 = 2.0;
-const VIS_H: f32 = 12.0;
-const VIS_REST: [f32; 6] = [0.35, 0.60, 0.45, 0.80, 0.55, 0.30];
-const VIS_DEFAULT: Rgba = Rgba {
-    r: 0.882,
-    g: 0.882,
-    b: 0.882,
-    a: 1.0,
-};
+const VIS_H: f32 = 14.0;
+/// Export rest bars: 7 / 12 / 9 / 14 / 8 over 14px.
+const VIS_REST: [f32; 5] = [0.50, 0.857, 0.643, 1.0, 0.571];
+const VIS_DEFAULT: Rgba = theme::COMPACT_WAVE;
 const ART_PLACEHOLDER: (Rgba, Rgba) = (
     Rgba {
         r: 0.165,
@@ -107,7 +103,8 @@ pub(super) fn album_chip(
                 .size(px(COMPACT_ART))
                 .rounded(px(COMPACT_ART_RADIUS))
                 .overflow_hidden()
-                .shadow_sm()
+                .border_1()
+                .border_color(theme::COMPACT_ART_BORDER)
                 .child(art.unwrap_or_else(placeholder_art))
                 .child(
                     div()
@@ -242,23 +239,21 @@ pub(super) fn visualizer(playing: bool, color: Option<Rgba>) -> impl IntoElement
     canvas(
         move |_, _, _| (),
         move |bounds, _, window, _cx| {
-            let levels: [f64; 6] = if still {
+            let levels: [f64; 5] = if still {
                 VIS_REST.map(|r| r as f64)
             } else {
                 // Quantize to 15 Hz so bar heights hold between paints.
                 let t = (vis_clock() * 15.0).floor() / 15.0;
-                nook_core::audio::visualizer_levels_at(t)
+                let six = nook_core::audio::visualizer_levels_at(t);
+                [six[0], six[1], six[2], six[3], six[4]]
             };
             let bar_w = px(VIS_BAR_W);
             let gap = px(VIS_BAR_GAP);
-            let total_w = VIS_BAR_W * 6.0 + VIS_BAR_GAP * 5.0;
+            let total_w = VIS_BAR_W * 5.0 + VIS_BAR_GAP * 4.0;
             let mut x =
                 bounds.origin.x + px(((f32::from(bounds.size.width) - total_w) * 0.5).max(0.0));
             let bottom = bounds.origin.y + bounds.size.height;
-            let mut fill: gpui::Hsla = color.into();
-            if still {
-                fill.a *= 0.55;
-            }
+            let fill: gpui::Hsla = color.into();
             for (i, level) in levels.iter().enumerate() {
                 let scale = visualizer_scale(*level, !still, i);
                 let h = px(VIS_H * scale);
@@ -275,7 +270,7 @@ pub(super) fn visualizer(playing: bool, color: Option<Rgba>) -> impl IntoElement
         },
     )
     .h(px(VIS_H))
-    .w(px(VIS_BAR_W * 6.0 + VIS_BAR_GAP * 5.0 + 4.0))
+    .w(px(VIS_BAR_W * 5.0 + VIS_BAR_GAP * 4.0 + 4.0))
 }
 
 fn vis_clock() -> f64 {
@@ -1379,7 +1374,7 @@ mod tests {
         let heights = (0..VIS_REST.len())
             .map(|i| visualizer_scale(0.0, false, i))
             .collect::<Vec<_>>();
-        assert_eq!(heights, VIS_REST);
+        assert_eq!(heights, VIS_REST.to_vec());
         assert!(visualizer_scale(0.0, true, 3) > visualizer_scale(0.0, true, 0));
     }
 

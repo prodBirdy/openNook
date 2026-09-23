@@ -14,7 +14,7 @@ use gpui::{
 use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 
 const BODY_SIZE: f32 = theme::BODY.size;
-const MONO_FAMILY: &str = "SF Mono";
+const MONO_FAMILY: &str = theme::MONO_FONT;
 
 pub(crate) fn notes_card(island: &mut Island, cx: &mut Context<Island>) -> impl IntoElement {
     let editing = island.notes_editing;

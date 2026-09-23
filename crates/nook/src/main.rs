@@ -1,4 +1,5 @@
 mod dotmatrix;
+mod fonts;
 mod icons;
 mod island;
 mod motion;
@@ -24,6 +25,7 @@ fn main() {
     });
     app.run(|cx: &mut App| {
         nook_core::init();
+        fonts::load(cx);
         platform::install();
         let task = cx.register_url_scheme("opennook");
         cx.foreground_executor()
