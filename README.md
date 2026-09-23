@@ -42,11 +42,12 @@ nook
 
 Experimental widgets sit behind a Settings toggle.
 
-Product preview (design mock):
+Product preview (design mock · v2):
 
-![Design mock · compact](docs/linux-03-compact.png)
-![Design mock · expanded](docs/linux-03-expanded.png)
-![Design mock · Settings Widgets](docs/linux-03-settings.png)
+![Design mock · v2 · compact](docs/linux-03-compact.png)
+![Design mock · v2 · expanded](docs/linux-03-expanded.png)
+![Design mock · v2 · tray](docs/linux-03-file-tray.png)
+![Design mock · v2 · Settings Widgets](docs/linux-03-settings.png)
 
 ## Install
 
