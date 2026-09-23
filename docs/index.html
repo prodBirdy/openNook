@@ -1,78 +1,823 @@
 <!doctype html>
 <html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>openNook</title>
-  <style>
-    body {
-      margin: 0;
-      min-height: 100vh;
-      display: grid;
-      place-items: center;
-      font: 16px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      background: #f3f3f3;
-      color: #111;
-    }
-    main { width: min(40rem, calc(100% - 3rem)); }
-    h1 { font-size: 1.25rem; font-weight: 600; margin: 0 0 0.35rem; }
-    .lede { margin: 0 0 1.5rem; color: #444; }
-    .win {
-      display: inline-block;
-      background: #111;
-      color: #fff;
-      padding: 0.7rem 1.15rem;
-      border-radius: 999px;
-      text-decoration: none;
-      font-weight: 500;
-    }
-    .legacy { margin: 0.85rem 0 0; font-size: 0.8rem; color: #555; }
-    .legacy a { color: inherit; }
-    .shots { margin: 1.5rem 0 0; }
-    .shots figure { margin: 0; }
-    .shots img { display: block; width: 100%; height: auto; border-radius: 0.5rem; }
-    .shots figcaption { margin: 0.35rem 0 0; font-size: 0.75rem; color: #555; }
-    .shots .lead { margin: 0 0 0.75rem; }
-    .shots .more { display: grid; grid-template-columns: 1fr 1fr; gap: 0.65rem; }
-    nav { margin-top: 1.25rem; font-size: 0.9rem; color: #555; }
-    nav a { color: inherit; }
-  </style>
-</head>
-<body>
-  <main>
-    <h1>openNook</h1>
-    <p class="lede">Native macOS and Linux Dynamic Island client</p>
-    <p>
-      <a class="win" href="https://github.com/prodBirdy/openNook/releases/download/v1.0.0/openNook-1.0.0.dmg">Download for Mac</a>
-    </p>
-    <p class="legacy">
-      <a href="https://github.com/prodBirdy/openNook/releases/download/v1.0.0-linux/openNook-1.0.0-x86_64-unknown-linux-gnu.tar.gz">Linux 1.0.0 (GPUI tarball)</a>
-    </p>
-    <div class="shots">
-      <figure class="lead">
-        <img src="linux-03-compact.png" alt="Design mock · v2 · compact island at top center">
-        <figcaption>Design mock · v2 · compact</figcaption>
-      </figure>
-      <div class="more">
-        <figure>
-          <img src="linux-03-expanded.png" alt="Design mock · v2 · expanded Nook tab">
-          <figcaption>Design mock · v2 · expanded</figcaption>
-        </figure>
-        <figure>
-          <img src="linux-03-settings.png" alt="Design mock · v2 · Settings Widgets">
-          <figcaption>Design mock · v2 · Settings Widgets</figcaption>
-        </figure>
-        <figure>
-          <img src="linux-03-file-tray.png" alt="Design mock · v2 · Tray tab">
-          <figcaption>Design mock · v2 · tray</figcaption>
-        </figure>
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>openNook — The top of your screen, finally useful.</title>
+    <meta
+      name="description"
+      content="openNook hangs a compact command center from the top edge of your display. Music, timers, files, weather and agents, one glance away, zero windows."
+    />
+    <meta property="og:title" content="openNook — The top of your screen, finally useful." />
+    <meta
+      property="og:description"
+      content="A native macOS and Linux command center that lives in the notch. Free, open source, written in Rust."
+    />
+    <meta property="og:type" content="website" />
+    <link rel="icon" href="linux-03-compact.png" type="image/png" />
+    <script>
+      tailwind = { config: { corePlugins: { preflight: false } } };
+    </script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Roboto+Mono:wght@400;500&display=swap"
+      rel="stylesheet"
+    />
+    <style>
+      *,
+      ::before,
+      ::after {
+        box-sizing: border-box;
+      }
+      html {
+        scroll-behavior: smooth;
+      }
+      body {
+        margin: 0;
+        background: #000;
+        color: #fff;
+        font-family: Inter, system-ui, sans-serif;
+        -webkit-font-smoothing: antialiased;
+      }
+      a {
+        color: inherit;
+        text-decoration: none;
+      }
+      .muted {
+        color: #ebebf599;
+      }
+      .faint {
+        color: #ebebf54d;
+      }
+      .screen {
+        background-image: linear-gradient(124deg, #33405c 25%, #1b1d26 53%, #0b0b0e 75%);
+        border: 1px solid #ffffff38;
+      }
+      .screen-tray {
+        background-image: linear-gradient(121deg, #2a3247 25%, #17181e 55%, #0b0b0e 75%);
+        border: 1px solid #ffffff38;
+      }
+      .island {
+        position: relative;
+        background: #000;
+        border-radius: 0 0 36px 36px;
+      }
+      .island-wing {
+        position: absolute;
+        top: 0;
+        width: 14px;
+        height: 14px;
+        pointer-events: none;
+      }
+      .island-wing.left {
+        left: -14px;
+      }
+      .island-wing.right {
+        right: -14px;
+      }
+      .island-glass {
+        background-image: linear-gradient(
+          180deg,
+          #000 0%,
+          #000 30%,
+          #0b0b12d6 60%,
+          #5b5b6e7a 85%,
+          #ffffff4d 100%
+        );
+        backdrop-filter: blur(14px);
+        box-shadow: 0 8px 24px #00000059, 0 1px 1px #ffffff2e;
+      }
+      .tab {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        padding: 6px 12px;
+        border-radius: 12px;
+        font-size: 12px;
+        line-height: 15px;
+        color: #ebebf599;
+        white-space: nowrap;
+      }
+      .tab.is-active {
+        background: #ffffff29;
+        color: #fff;
+      }
+      .widget {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        height: 32px;
+        padding: 0 9px;
+        background: #000;
+        border-radius: 0 0 14px 14px;
+        min-width: 0;
+      }
+      .widget-value {
+        font-size: 13px;
+        line-height: 16px;
+        font-weight: 600;
+        letter-spacing: -0.1px;
+        white-space: nowrap;
+      }
+      .wall {
+        background-image: linear-gradient(114deg, #232838 27%, #141519 73%);
+        border: 1px solid #ffffff38;
+      }
+      .cta-white:hover {
+        background: #f2f2f2;
+      }
+      .cta-ghost:hover {
+        background: #ffffff29;
+      }
+      .nav-link:hover,
+      .footer-link:hover {
+        color: #fff;
+      }
+      .icon {
+        width: 1em;
+        height: 1em;
+        display: block;
+        flex-shrink: 0;
+      }
+      .hero-island-scale {
+        width: min(780px, 100%);
+      }
+      @media (max-width: 860px) {
+        .hero-island-scale {
+          width: 780px;
+          transform: scale(0.62);
+          transform-origin: top center;
+        }
+        .hero-screen-pad {
+          height: 280px;
+        }
+      }
+      @media (max-width: 520px) {
+        .hero-island-scale {
+          transform: scale(0.44);
+        }
+        .hero-screen-pad {
+          height: 220px;
+        }
+      }
+      .mode-island-scale {
+        width: min(520px, 100%);
+      }
+      @media (max-width: 640px) {
+        .mode-island-scale {
+          width: 520px;
+          transform: scale(0.62);
+          transform-origin: top center;
+        }
+        .mode-screen-pad {
+          height: 180px;
+        }
+      }
+      .term {
+        font-family: "Roboto Mono", ui-monospace, monospace;
+        font-size: 12px;
+        line-height: 18px;
+      }
+      .caret {
+        display: inline-block;
+        width: 7px;
+        height: 14px;
+        background: #30d158;
+        margin-left: 4px;
+        vertical-align: -2px;
+        animation: blink 1s steps(1) infinite;
+      }
+      @keyframes blink {
+        50% {
+          opacity: 0;
+        }
+      }
+      .tip {
+        position: relative;
+      }
+      .tip-card {
+        display: none;
+        position: absolute;
+        left: 50%;
+        top: calc(100% + 10px);
+        transform: translateX(-50%);
+        width: min(280px, 70vw);
+        padding: 12px 14px;
+        background: #0e0f13f2;
+        border: 1px solid #ffffff38;
+        border-radius: 14px;
+        box-shadow: 0 12px 32px #000000a6;
+        z-index: 8;
+        text-align: left;
+      }
+      .tip:hover .tip-card,
+      .tip:focus-within .tip-card {
+        display: block;
+      }
+      .wave {
+        display: flex;
+        align-items: flex-end;
+        gap: 2px;
+        height: 14px;
+      }
+      .wave i {
+        display: block;
+        width: 2px;
+        background: #fff;
+        border-radius: 1px;
+      }
+      .ring {
+        width: 16px;
+        height: 16px;
+        border-radius: 999px;
+        background: conic-gradient(#0a84ff 0 62%, #ffffff24 62% 100%);
+        -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 2px), #000 0);
+        mask: radial-gradient(farthest-side, transparent calc(100% - 2px), #000 0);
+      }
+      .batt {
+        display: flex;
+        align-items: center;
+        gap: 2px;
+      }
+      .batt-shell {
+        width: 16px;
+        height: 9px;
+        border: 1.5px solid #30d158;
+        border-radius: 2px;
+        padding: 1px;
+      }
+      .batt-level {
+        width: 82%;
+        height: 100%;
+        background: #30d158;
+        border-radius: 1px;
+      }
+      .batt-nub {
+        width: 2px;
+        height: 5px;
+        background: #30d158;
+        border-radius: 0 1px 1px 0;
+      }
+      .skip-link {
+        position: absolute;
+        left: -999px;
+        top: 8px;
+        background: #fff;
+        color: #000;
+        padding: 8px 12px;
+        border-radius: 999px;
+        z-index: 20;
+      }
+      .skip-link:focus {
+        left: 12px;
+      }
+    </style>
+  </head>
+  <body>
+    <a class="skip-link" href="#download">Skip to download</a>
+
+    <header class="sticky top-0 z-30 bg-black/90 backdrop-blur-md">
+      <div
+        class="mx-auto flex w-full max-w-[1440px] flex-wrap items-center justify-between gap-x-6 gap-y-3 px-5 py-5 sm:px-10"
+      >
+        <a href="#top" class="text-[15px] font-semibold tracking-[-0.2px]">openNook</a>
+        <nav class="order-3 flex w-full flex-wrap items-center justify-center gap-x-7 gap-y-2 text-[13px] text-[#ebebf599] sm:order-none sm:w-auto">
+          <a class="nav-link" href="#widgets">Widgets</a>
+          <a class="nav-link" href="#terminal">Terminal</a>
+          <a class="nav-link" href="#platforms">Platforms</a>
+          <a class="nav-link" href="https://github.com/prodBirdy/openNook/releases">Changelog</a>
+        </nav>
+        <a
+          class="cta-ghost inline-flex items-center gap-1.5 rounded-full bg-white/10 px-3.5 py-2 text-[13px] font-medium"
+          href="#download"
+        >
+          <svg class="icon w-[13px] h-[13px]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M12 3v12" /><path d="m7 11 5 5 5-5" /><path d="M5 21h14" />
+          </svg>
+          Download
+        </a>
       </div>
-    </div>
-    <nav>
-      <a href="https://github.com/prodBirdy/openNook">Source</a>
-      ·
-      <a href="https://github.com/prodBirdy/openNook/releases">Releases</a>
-    </nav>
-  </main>
-</body>
+    </header>
+
+    <main id="top">
+      <section class="px-5 pt-[72px] sm:px-10">
+        <div class="mx-auto flex max-w-[900px] flex-col items-center gap-[22px] text-center">
+          <h1 class="text-[40px] font-semibold leading-[1.05] tracking-[-2px] sm:text-[56px] sm:tracking-[-2.5px] lg:text-[80px] lg:leading-[83px] lg:tracking-[-3px]">
+            The top of your screen, finally useful.
+          </h1>
+          <p class="max-w-[640px] text-[16px] leading-[25px] text-[#ebebf599]">
+            openNook hangs a compact command center from the top edge of your display. Music, timers,
+            files, weather and agents, one glance away, zero windows.
+          </p>
+          <div class="flex flex-wrap items-center justify-center gap-3 pt-2.5">
+            <a
+              class="cta-white inline-flex items-center gap-2 rounded-full bg-white px-6 py-3.5 text-[15px] font-semibold text-black"
+              href="#download"
+            >
+              <svg class="icon w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M12 3v12" /><path d="m7 11 5 5 5-5" /><path d="M5 21h14" />
+              </svg>
+              Download
+            </a>
+            <a
+              class="cta-ghost inline-flex items-center gap-2 rounded-full bg-white/10 px-6 py-3.5 text-[15px] font-medium"
+              href="https://github.com/prodBirdy/openNook"
+            >
+              <svg class="icon w-4 h-4" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                <path d="M12 .5C5.73.5.5 5.73.5 12.02c0 5.1 3.29 9.43 7.86 10.96.58.1.79-.25.79-.56 0-.28-.01-1.02-.02-2-3.2.7-3.88-1.54-3.88-1.54-.53-1.33-1.28-1.69-1.28-1.69-1.05-.72.08-.7.08-.7 1.16.08 1.77 1.2 1.77 1.2 1.03 1.77 2.7 1.26 3.36.96.1-.75.4-1.26.73-1.55-2.55-.29-5.23-1.28-5.23-5.7 0-1.26.45-2.29 1.19-3.1-.12-.29-.52-1.47.11-3.06 0 0 .97-.31 3.18 1.18a11.1 11.1 0 0 1 5.8 0c2.2-1.49 3.17-1.18 3.17-1.18.64 1.59.24 2.77.12 3.06.74.81 1.18 1.84 1.18 3.1 0 4.43-2.69 5.4-5.25 5.69.41.36.78 1.07.78 2.16 0 1.56-.01 2.81-.01 3.19 0 .31.21.67.8.56A10.52 10.52 0 0 0 23.5 12C23.5 5.73 18.27.5 12 .5Z" />
+              </svg>
+              Star on GitHub
+            </a>
+          </div>
+          <p class="text-[12px] text-[#ebebf54d]">
+            Free and open source · macOS and Linux · Written in Rust
+          </p>
+          <p class="text-[12px] text-[#ebebf599]">
+            <a class="underline decoration-white/20 underline-offset-4 hover:text-white" href="https://github.com/prodBirdy/openNook/releases/download/v0.3.0/openNook-0.3.0.dmg">macOS 0.3.0</a>
+            <span class="text-[#ebebf54d]"> · </span>
+            <a class="underline decoration-white/20 underline-offset-4 hover:text-white" href="https://github.com/prodBirdy/openNook/releases/download/v0.3.0-linux/openNook-0.3.0-x86_64-unknown-linux-gnu.tar.gz">Linux 0.3.0</a>
+          </p>
+        </div>
+
+        <div class="mx-auto mt-[22px] w-full max-w-[1200px] overflow-hidden">
+          <div class="screen hero-screen-pad relative flex h-[380px] flex-col items-center overflow-hidden rounded-t-[28px]">
+            <div class="hero-island-scale island shrink-0">
+              <svg class="island-wing left" viewBox="0 0 14 14" aria-hidden="true"><path d="M0 0h14v14C14 6.27 7.73 0 0 0z" fill="#000"/></svg>
+              <svg class="island-wing right" viewBox="0 0 14 14" aria-hidden="true"><path d="M0 0h14C6.27 0 0 6.27 0 14z" fill="#000"/></svg>
+              <div class="flex items-center gap-1.5 px-5 pb-2.5 pt-3.5">
+                <span class="tab is-active">
+                  <svg class="icon w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M20 10c0 6-8 12-8 12s-8-6-8-12a8 8 0 1 1 16 0Z"/><circle cx="12" cy="10" r="3"/></svg>
+                  Nook
+                </span>
+                <span class="tab">
+                  <svg class="icon w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect width="14" height="14" x="8" y="8" rx="2"/><path d="M4 16V4a2 2 0 0 1 2-2h12"/></svg>
+                  Tray
+                </span>
+                <span class="tab">
+                  <svg class="icon w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="m4 17 6-6-6-6"/><path d="M12 19h8"/></svg>
+                  Terminal
+                </span>
+                <span class="ml-auto faint">
+                  <svg class="icon w-[15px] h-[15px]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1Z"/></svg>
+                </span>
+              </div>
+              <div class="grid h-[128px] grid-cols-3 gap-4 px-5 pb-5">
+                <div class="flex min-w-0 flex-col justify-between">
+                  <div class="flex items-center gap-3">
+                    <img src="hero-art.jpg" alt="" width="52" height="52" class="h-[52px] w-[52px] rounded-[13px] border border-white/10 object-cover shadow-[0_3px_10px_-1px_#0006]" />
+                    <div class="min-w-0 text-left">
+                      <div class="truncate text-[16px] font-semibold leading-5 tracking-[-0.31px]">Sunset Boulevard</div>
+                      <div class="truncate text-[13px] leading-4 text-[#ebebf599]">Arlo Vance</div>
+                    </div>
+                  </div>
+                  <div class="flex items-center gap-2">
+                    <span class="w-[30px] text-left text-[11px] text-[#ebebf54d]">1:38</span>
+                    <div class="h-1.5 flex-1 overflow-hidden rounded-full bg-white/15">
+                      <div class="h-full w-[42%] rounded-full bg-white"></div>
+                    </div>
+                    <span class="w-[34px] text-right text-[11px] text-[#ebebf54d]">-2:14</span>
+                  </div>
+                  <div class="flex items-center justify-between text-white/80">
+                    <svg class="icon w-[18px] h-[18px]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/></svg>
+                    <svg class="icon w-[18px] h-[18px]" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M11 5.5 4 10v4l7 4.5V5.5Zm9 0L13 10v4l7 4.5V5.5Z"/></svg>
+                    <svg class="icon w-5 h-5" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M8 5v14l11-7L8 5Z"/></svg>
+                    <svg class="icon w-[18px] h-[18px]" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M4 5.5v13L11 14V10L4 5.5Zm9 0v13L20 14V10L13 5.5Z"/></svg>
+                    <svg class="icon w-[18px] h-[18px]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M5 17h3v-3a7 7 0 0 1 14 0"/><path d="m19 21 3-4-4-1"/></svg>
+                  </div>
+                </div>
+                <div class="flex min-w-0 flex-col justify-center text-left">
+                  <div class="flex items-center gap-2 border-b border-white/5 py-2">
+                    <span class="grid h-7 w-7 place-items-center rounded-full bg-[#d97757]/20 text-[10px] font-semibold text-[#d97757]">C</span>
+                    <div class="min-w-0">
+                      <div class="truncate text-[13px] font-medium">island theme pass</div>
+                      <div class="truncate text-[11px] text-[#ebebf599]">Claude · openNook · Working</div>
+                    </div>
+                  </div>
+                  <div class="flex items-center gap-2 py-2">
+                    <span class="grid h-7 w-7 place-items-center rounded-full bg-white/10 text-[10px] font-semibold text-white/70">●</span>
+                    <div class="min-w-0">
+                      <div class="truncate text-[13px] font-medium">hgi-erp</div>
+                      <div class="truncate text-[11px] text-[#ebebf599]">Codex · Waiting</div>
+                    </div>
+                  </div>
+                </div>
+                <div class="flex min-w-0 flex-col justify-center gap-2 text-left">
+                  <div class="flex items-end justify-between">
+                    <div class="flex items-end gap-[7px]">
+                      <span class="text-[10px] font-semibold tracking-[0.6px] text-[#ff453a]">TUESDAY</span>
+                      <span class="text-[22px] font-semibold leading-none tracking-[-0.8px]">23</span>
+                    </div>
+                    <span class="flex gap-2 text-white/40">
+                      <svg class="icon w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="m15 18-6-6 6-6"/></svg>
+                      <svg class="icon w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg>
+                    </span>
+                  </div>
+                  <div class="flex items-start gap-2">
+                    <span class="mt-1 h-6 w-0.5 rounded-full bg-[#0a84ff]"></span>
+                    <div>
+                      <div class="text-[13px] font-medium leading-4">Design sync</div>
+                      <div class="text-[11px] text-[#ebebf599]">10:30 – 11:00</div>
+                    </div>
+                  </div>
+                  <div class="flex items-start gap-2">
+                    <span class="mt-1 h-6 w-0.5 rounded-full bg-[#ff9f0a]"></span>
+                    <div>
+                      <div class="text-[13px] font-medium leading-4">1:1 with Jonas</div>
+                      <div class="text-[11px] text-[#ebebf599]">11:15 – 11:45</div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section id="widgets" class="px-5 py-[80px] sm:px-[60px] sm:py-[120px]">
+        <div class="mx-auto mb-14 flex max-w-[900px] flex-col items-center gap-3.5 text-center">
+          <p class="text-[12px] font-semibold tracking-[1.4px] text-[#ebebf54d]">WIDGET GALLERY</p>
+          <h2 class="text-[32px] font-semibold leading-tight tracking-[-1.2px] sm:text-[44px] sm:leading-[49px] sm:tracking-[-1.4px]">
+            Twenty widgets that never take a window.
+          </h2>
+          <p class="max-w-[560px] text-[16px] leading-[25px] text-[#ebebf599]">
+            Every widget collapses into the notch and expands on hover. Pick the four you actually
+            use.
+          </p>
+        </div>
+        <div class="wall mx-auto grid max-w-[1360px] grid-cols-2 gap-3 rounded-[32px] px-4 py-8 sm:gap-4 sm:px-8 sm:py-11 md:grid-cols-4">
+          <div class="widget">
+            <img src="hero-art.jpg" alt="" width="22" height="22" class="h-[22px] w-[22px] rounded-[6px] border border-white/15 object-cover" />
+            <span class="wave" aria-hidden="true"><i style="height:6px"></i><i style="height:12px"></i><i style="height:8px"></i><i style="height:14px"></i><i style="height:5px"></i></span>
+          </div>
+          <div class="widget">
+            <svg class="icon w-[17px] h-[17px] text-[#0a84ff]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect width="18" height="18" x="3" y="4" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/></svg>
+            <span class="widget-value">10:30</span>
+          </div>
+          <div class="widget">
+            <svg class="icon w-[17px] h-[17px] text-[#64d2ff]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M13.4 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-7.4"/><path d="M2 6h4"/><path d="M2 10h4"/><path d="m21.4 7.9-5.3 5.3a1 1 0 0 1-.5.3l-2.3.3.3-2.3a1 1 0 0 1 .3-.5l5.3-5.3a1.5 1.5 0 0 1 2.1 2.1Z"/></svg>
+            <span class="widget-value">2 lists</span>
+          </div>
+          <div class="widget">
+            <span class="ring" aria-hidden="true"></span>
+            <span class="widget-value">24:59</span>
+          </div>
+          <div class="widget" style="opacity:.92">
+            <svg class="icon w-[17px] h-[17px] text-[#bf5af2]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M19.07 4.93A10 10 0 0 1 12 22c-5.52 0-10-4.48-10-10 0-4.08 2.45-7.57 6-9.17"/><path d="M22 12A10 10 0 0 0 12 2"/><circle cx="12" cy="12" r="2"/></svg>
+            <span class="widget-value">403</span>
+          </div>
+          <div class="widget" style="opacity:.92">
+            <svg class="icon w-[17px] h-[17px] text-[#30d158]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="m9 11 3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>
+            <span class="widget-value">2 due</span>
+          </div>
+          <div class="widget" style="opacity:.92">
+            <svg class="icon w-[17px] h-[17px] text-[#64d2ff]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="m12 14 4-4"/><path d="M3.34 19a10 10 0 1 1 17.32 0"/></svg>
+            <span class="widget-value">284 Mbps</span>
+          </div>
+          <div class="widget" style="opacity:.92">
+            <span class="grid h-[18px] w-[18px] place-items-center rounded-full bg-[#d97757] text-[8px] font-bold">C</span>
+            <span class="widget-value truncate">island theme pass</span>
+          </div>
+          <div class="widget" style="opacity:.84">
+            <svg class="icon w-[17px] h-[17px] text-[#ebebf599]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="10" r="7"/><circle cx="12" cy="10" r="3"/><path d="M12 17v3M8 21h8"/></svg>
+            <span class="inline-flex items-center gap-1.5 text-[13px] font-semibold">Live<span class="h-[5px] w-[5px] rounded-full bg-[#ff453a]"></span></span>
+          </div>
+          <div class="widget" style="opacity:.84">
+            <span class="batt" aria-hidden="true"><span class="batt-shell"><span class="batt-level"></span></span><span class="batt-nub"></span></span>
+            <span class="widget-value">82%</span>
+          </div>
+          <div class="tip widget" style="opacity:.84" tabindex="0">
+            <svg class="icon w-[17px] h-[17px] text-[#0a84ff]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M7.9 20A9 9 0 1 0 4 16.1L2 22Z"/></svg>
+            <span class="widget-value">Lena</span>
+            <div class="tip-card">
+              <div class="mb-1 text-[13px] font-semibold">Messages</div>
+              <p class="text-[12.5px] leading-[18px] text-[#ebebf599]">
+                Incoming replies surface in the notch. Read and answer inline without leaving what
+                you're in.
+              </p>
+            </div>
+          </div>
+          <div class="widget" style="opacity:.84">
+            <svg class="icon w-[17px] h-[17px] text-[#ff9f0a]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M12 2v2"/><path d="m4.9 4.9 1.4 1.4"/><path d="M20 12h2"/><path d="M17 18a5 5 0 0 0-10 0"/><path d="M2 12h2"/><path d="M12 8a4 4 0 0 1 4 4"/></svg>
+            <span class="widget-value">18°</span>
+          </div>
+          <div class="widget" style="opacity:.76">
+            <svg class="icon w-[17px] h-[17px] text-[#30d158]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M20 13c0 5-3.5 7.5-7.7 8.9a2 2 0 0 1-1.3 0C6.5 20.5 3 18 3 13V6a2 2 0 0 1 1.3-1.9l7-2.6a2 2 0 0 1 1.4 0l7 2.6A2 2 0 0 1 21 6Z"/><path d="m9 12 2 2 4-4"/></svg>
+            <span class="widget-value text-[#30d158]">On</span>
+          </div>
+          <div class="widget" style="opacity:.76">
+            <svg class="icon w-[17px] h-[17px] text-[#ff9f0a]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>
+            <span class="widget-value text-[#ff9f0a]">UV 8</span>
+          </div>
+          <div class="widget" style="opacity:.76">
+            <svg class="icon w-[17px] h-[17px] text-[#ebebf599]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
+            <span class="widget-value">34%</span>
+          </div>
+          <div class="widget" style="opacity:.76">
+            <svg class="icon w-[17px] h-[17px] text-[#ff453a]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><path d="M12 19v3"/></svg>
+            <span class="widget-value">0:12</span>
+          </div>
+          <div class="widget" style="opacity:.68">
+            <svg class="icon w-[17px] h-[17px] text-[#ebebf599]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="m16 13 5.2 3.1a1 1 0 0 0 1.5-.9V8.8a1 1 0 0 0-1.5-.9L16 11"/><rect width="14" height="12" x="2" y="6" rx="2"/></svg>
+            <svg class="icon w-4 h-4 text-[#ff453a]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="m2 2 20 20"/><path d="M18.9 15a7 7 0 0 1-1.3 2.4"/><path d="M5 10v2a7 7 0 0 0 11.2 5.4"/><path d="M15 9.3V5a3 3 0 0 0-5.7-1.3"/></svg>
+          </div>
+          <div class="widget" style="opacity:.68">
+            <svg class="icon w-[17px] h-[17px] text-[#ebebf599]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect width="20" height="16" x="2" y="4" rx="2"/><path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"/></svg>
+            <span class="widget-value">3 new</span>
+          </div>
+          <div class="widget" style="opacity:.68">
+            <svg class="icon w-[17px] h-[17px] text-[#ff453a]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="m8 2 1.9 1.9"/><path d="M14.1 3.9 16 2"/><path d="M12 7v4"/><path d="M6 9a6 6 0 0 0 12 0"/><path d="M2 13h4"/><path d="M18 13h4"/><path d="m19 20-3-3"/><path d="m8 17-3 3"/></svg>
+            <span class="widget-value text-[#ff453a]">2 issues</span>
+          </div>
+          <div class="widget" style="opacity:.68">
+            <span class="relative grid h-5 w-5 place-items-center rounded-full bg-white">
+              <span class="absolute left-[5px] top-[7px] h-1.5 w-1 rounded-full bg-black"></span>
+              <span class="absolute right-[5px] top-[6px] h-1.5 w-1 rounded-full bg-black"></span>
+            </span>
+            <span class="inline-flex items-center gap-2">
+              <span class="widget-value">2 bots running</span>
+              <span class="h-[5px] w-[5px] rounded-full bg-[#30d158]"></span>
+            </span>
+          </div>
+        </div>
+      </section>
+
+      <section id="feels" class="px-5 py-[80px] sm:px-[60px] sm:py-[110px]">
+        <div class="mx-auto mb-14 flex max-w-[760px] flex-col items-center gap-3.5 text-center">
+          <p class="text-[12px] font-semibold tracking-[1.4px] text-[#ebebf54d]">HOW IT FEELS</p>
+          <h2 class="text-[32px] font-semibold leading-tight tracking-[-1.2px] sm:text-[44px] sm:leading-[49px] sm:tracking-[-1.4px]">
+            Quiet until you need it.
+          </h2>
+          <p class="max-w-[560px] text-[16px] leading-[25px] text-[#ebebf599]">
+            No dock icon, no menu bar clutter, no window to arrange. It lives in the space your
+            display was wasting anyway.
+          </p>
+        </div>
+        <div class="mx-auto grid w-full max-w-[1200px] gap-12 md:grid-cols-3 md:gap-12">
+          <article class="flex flex-col items-start gap-3">
+            <svg class="icon h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M4 14a1 1 0 0 1-.78-1.63l9.9-10.2a.5.5 0 0 1 .86.46l-1.92 6.02A1 1 0 0 0 13 10h7a1 1 0 0 1 .78 1.63l-9.9 10.2a.5.5 0 0 1-.86-.46l1.92-6.02A1 1 0 0 0 11 14z"/></svg>
+            <h3 class="text-[18px] font-semibold tracking-[-0.4px]">Rust-fast by design</h3>
+            <p class="text-[14px] leading-[22px] text-[#ebebf599]">
+              Written in Rust on GPUI and rendered on the GPU. Around 40 MB of memory, no launch
+              time, no Electron.
+            </p>
+          </article>
+          <article class="flex flex-col items-start gap-3">
+            <svg class="icon h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect width="18" height="11" x="3" y="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+            <h3 class="text-[18px] font-semibold tracking-[-0.4px]">Everything stays local</h3>
+            <p class="text-[14px] leading-[22px] text-[#ebebf599]">
+              No account, no telemetry, no cloud round trip. Your calendar and clipboard never leave
+              the machine.
+            </p>
+          </article>
+          <article class="flex flex-col items-start gap-3">
+            <svg class="icon h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect width="7" height="7" x="14" y="3" rx="1"/><path d="M10 21V8a1 1 0 0 0-1-1H4a1 1 0 0 0-1 1v12a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-5a1 1 0 0 0-1-1H10"/></svg>
+            <h3 class="text-[18px] font-semibold tracking-[-0.4px]">Yours to extend</h3>
+            <p class="text-[14px] leading-[22px] text-[#ebebf599]">
+              Widgets are small Rust crates. Drop one in, rebuild, done — or write your own in an
+              afternoon.
+            </p>
+          </article>
+        </div>
+      </section>
+
+      <section id="terminal" class="px-5 py-[80px] sm:px-[60px] sm:py-[110px]">
+        <div class="mx-auto mb-14 flex max-w-[760px] flex-col items-center gap-3.5 text-center">
+          <p class="text-[12px] font-semibold tracking-[1.4px] text-[#ebebf54d]">BEYOND WIDGETS</p>
+          <h2 class="text-[32px] font-semibold leading-tight tracking-[-1.2px] sm:text-[44px] sm:leading-[49px] sm:tracking-[-1.4px]">
+            A shelf and a shell, in the same place.
+          </h2>
+          <p class="max-w-[560px] text-[16px] leading-[25px] text-[#ebebf599]">
+            Two extra tabs turn the nook into the fastest file handoff and the shortest path to a
+            terminal on any desktop.
+          </p>
+        </div>
+
+        <div class="mx-auto flex w-full max-w-[1200px] flex-col gap-[72px]">
+          <div class="grid items-center gap-10 lg:grid-cols-[380px_1fr] lg:gap-[60px]">
+            <div class="flex flex-col items-start gap-3.5">
+              <div class="inline-flex items-center gap-2 text-[12px] font-semibold tracking-[0.6px] text-[#0a84ff]">
+                <svg class="icon w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9l-.81-1.2A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></svg>
+                TRAY
+              </div>
+              <h3 class="text-[26px] font-semibold leading-tight tracking-[-1px] sm:text-[30px] sm:leading-[35px]">
+                Drag files up, drop them anywhere
+              </h3>
+              <p class="text-[15px] leading-6 text-[#ebebf599]">
+                Park screenshots, PDFs and downloads in the nook, then drag them straight into any
+                app later. Nothing lands on your desktop.
+              </p>
+            </div>
+            <div class="screen-tray mode-screen-pad relative h-[250px] overflow-hidden rounded-t-3xl">
+              <div class="mode-island-scale island mx-auto">
+                <svg class="island-wing left" viewBox="0 0 14 14" aria-hidden="true"><path d="M0 0h14v14C14 6.27 7.73 0 0 0z" fill="#000"/></svg>
+                <svg class="island-wing right" viewBox="0 0 14 14" aria-hidden="true"><path d="M0 0h14C6.27 0 0 6.27 0 14z" fill="#000"/></svg>
+                <div class="flex items-center gap-1.5 px-5 pb-2.5 pt-3.5">
+                  <span class="tab">Nook</span>
+                  <span class="tab is-active">Tray</span>
+                  <span class="tab">Terminal</span>
+                </div>
+                <div class="px-5 pb-5">
+                  <div class="flex h-[108px] flex-col items-center justify-center gap-2 rounded-[14px] border-[1.5px] border-[#0a84ff] bg-[#0a84ff1a]">
+                    <svg class="icon h-[26px] w-[26px] text-[#0a84ff]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/><path d="M9 15h6"/><path d="M12 12v6"/></svg>
+                    <div class="text-[13px]">Drop files to keep them here</div>
+                    <div class="text-[11px] text-[#ebebf599]">Drag them out again whenever you need them</div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="grid items-center gap-10 lg:grid-cols-[1fr_380px] lg:gap-[60px]">
+            <div class="screen-tray mode-screen-pad relative order-2 h-[250px] overflow-hidden rounded-t-3xl lg:order-1">
+              <div class="mode-island-scale island mx-auto">
+                <svg class="island-wing left" viewBox="0 0 14 14" aria-hidden="true"><path d="M0 0h14v14C14 6.27 7.73 0 0 0z" fill="#000"/></svg>
+                <svg class="island-wing right" viewBox="0 0 14 14" aria-hidden="true"><path d="M0 0h14C6.27 0 0 6.27 0 14z" fill="#000"/></svg>
+                <div class="flex items-center gap-1.5 px-5 pb-2.5 pt-3.5">
+                  <span class="tab">Nook</span>
+                  <span class="tab">Tray</span>
+                  <span class="tab is-active">Terminal</span>
+                </div>
+                <div class="term space-y-0.5 px-5 pb-5 text-left text-[#ebebf599]">
+                  <div><span class="text-[#64d2ff]">~/projects/opennook</span> <span class="text-[#30d158]">❯</span> <span class="text-white">cargo build</span></div>
+                  <div><span class="text-[#ff9f0a]">Compiling</span> nook v0.4.1 (/Users/jonas/projects/opennook)</div>
+                  <div><span class="text-[#30d158]">Finished</span> `dev` profile [unoptimized + debuginfo] target(s) in 8.42s</div>
+                  <div><span class="text-[#64d2ff]">~/projects/opennook</span> <span class="text-[#30d158]">❯</span> <span class="text-white">git status</span></div>
+                  <div>On branch main</div>
+                  <div>nothing to commit, working tree clean</div>
+                  <div><span class="text-[#64d2ff]">~/projects/opennook</span> <span class="text-[#30d158]">❯</span><span class="caret" aria-hidden="true"></span></div>
+                </div>
+              </div>
+            </div>
+            <div class="order-1 flex flex-col items-start gap-3.5 lg:order-2">
+              <div class="inline-flex items-center gap-2 text-[12px] font-semibold tracking-[0.6px] text-[#30d158]">
+                <svg class="icon w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="m4 17 6-6-6-6"/><path d="M12 19h8"/></svg>
+                TERMINAL
+              </div>
+              <h3 class="text-[26px] font-semibold leading-tight tracking-[-1px] sm:text-[30px] sm:leading-[35px]">
+                A shell that hides itself
+              </h3>
+              <p class="text-[15px] leading-6 text-[#ebebf599]">
+                Run a build, tail a log, check a branch — then let it collapse back into the edge of
+                the screen while it keeps running.
+              </p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section id="platforms" class="px-5 py-[80px] sm:px-[60px] sm:py-[110px]">
+        <div class="mx-auto mb-14 flex max-w-[760px] flex-col items-center gap-3.5 text-center">
+          <p class="text-[12px] font-semibold tracking-[1.4px] text-[#ebebf54d]">ONE CODEBASE</p>
+          <h2 class="text-[32px] font-semibold leading-tight tracking-[-1.2px] sm:text-[44px] sm:leading-[49px] sm:tracking-[-1.4px]">
+            Native on each platform, not ported to it.
+          </h2>
+          <p class="max-w-[560px] text-[16px] leading-[25px] text-[#ebebf599]">
+            One Rust core on GPUI, rendered with whatever the operating system actually does best.
+          </p>
+        </div>
+        <div class="mx-auto grid w-full max-w-[1200px] gap-6 lg:grid-cols-2">
+          <article class="overflow-hidden rounded-[28px] border border-white/20 bg-[#0b0b0e]">
+            <div class="screen mode-screen-pad relative h-[230px] overflow-hidden">
+              <div class="mode-island-scale island island-glass mx-auto">
+                <div class="flex items-center gap-1.5 px-5 pb-2.5 pt-3.5">
+                  <span class="tab is-active">Nook</span>
+                  <span class="tab">Tray</span>
+                  <span class="tab">Terminal</span>
+                </div>
+                <div class="grid grid-cols-3 gap-3 px-5 pb-5 text-left">
+                  <div class="flex flex-col items-center justify-center gap-1">
+                    <span class="grid h-12 w-12 place-items-center rounded-full bg-white/10">
+                      <svg class="icon h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="10" r="7"/><circle cx="12" cy="10" r="3"/></svg>
+                    </span>
+                    <span class="text-[12px] text-[#ebebf599]">Mirror</span>
+                  </div>
+                  <div class="min-w-0 text-[12px]">
+                    <div class="font-medium">island theme pass</div>
+                    <div class="text-[#ebebf599]">Claude · Working</div>
+                    <div class="mt-2 font-medium">hgi-erp</div>
+                    <div class="text-[#ebebf599]">Codex · Waiting</div>
+                  </div>
+                  <div class="min-w-0 text-[12px]">
+                    <div class="text-[10px] font-semibold text-[#ff453a]">TUESDAY <span class="text-[18px] text-white">23</span></div>
+                    <div class="mt-1 flex gap-1.5"><span class="mt-1 h-4 w-0.5 bg-[#0a84ff]"></span><span>Design sync<br /><span class="text-[#ebebf599]">10:30 – 11:00</span></span></div>
+                  </div>
+                </div>
+              </div>
+            </div>
+            <div class="flex flex-col gap-4 p-7">
+              <div>
+                <h3 class="text-[22px] font-semibold tracking-[-0.6px]">macOS</h3>
+                <p class="mt-1 text-[12px] font-semibold tracking-[1px] text-[#64d2ff]">LIQUID GLASS</p>
+              </div>
+              <ul class="space-y-3 text-[14px] leading-5 text-[#ebebf599]">
+                <li class="flex gap-3"><svg class="icon mt-0.5 h-4 w-4 text-white" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="m5 12 5 5L20 7"/></svg>Liquid Glass materials with live vibrancy and blur behind every pane</li>
+                <li class="flex gap-3"><svg class="icon mt-0.5 h-4 w-4 text-white" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="m5 12 5 5L20 7"/></svg>Aligns to the real notch on MacBook displays, centered elsewhere</li>
+                <li class="flex gap-3"><svg class="icon mt-0.5 h-4 w-4 text-white" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="m5 12 5 5L20 7"/></svg>Menu bar and Spaces aware, so it never fights the system UI</li>
+              </ul>
+            </div>
+          </article>
+          <article class="overflow-hidden rounded-[28px] border border-white/20 bg-[#0b0b0e]">
+            <div class="screen mode-screen-pad relative h-[230px] overflow-hidden">
+              <div class="mode-island-scale island mx-auto">
+                <svg class="island-wing left" viewBox="0 0 14 14" aria-hidden="true"><path d="M0 0h14v14C14 6.27 7.73 0 0 0z" fill="#000"/></svg>
+                <svg class="island-wing right" viewBox="0 0 14 14" aria-hidden="true"><path d="M0 0h14C6.27 0 0 6.27 0 14z" fill="#000"/></svg>
+                <div class="flex items-center gap-1.5 px-5 pb-2.5 pt-3.5">
+                  <span class="tab is-active">Nook</span>
+                  <span class="tab">Tray</span>
+                  <span class="tab">Terminal</span>
+                </div>
+                <div class="grid grid-cols-3 gap-3 px-5 pb-5 text-left">
+                  <div class="flex flex-col items-center justify-center gap-1">
+                    <span class="grid h-12 w-12 place-items-center rounded-full bg-white/10">
+                      <svg class="icon h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="10" r="7"/><circle cx="12" cy="10" r="3"/></svg>
+                    </span>
+                    <span class="text-[12px] text-[#ebebf599]">Mirror</span>
+                  </div>
+                  <div class="min-w-0 text-[12px]">
+                    <div class="font-medium">island theme pass</div>
+                    <div class="text-[#ebebf599]">Claude · Working</div>
+                    <div class="mt-2 font-medium">hgi-erp</div>
+                    <div class="text-[#ebebf599]">Codex · Waiting</div>
+                  </div>
+                  <div class="min-w-0 text-[12px]">
+                    <div class="text-[10px] font-semibold text-[#ff453a]">TUESDAY <span class="text-[18px] text-white">23</span></div>
+                    <div class="mt-1 flex gap-1.5"><span class="mt-1 h-4 w-0.5 bg-[#0a84ff]"></span><span>Design sync<br /><span class="text-[#ebebf599]">10:30 – 11:00</span></span></div>
+                  </div>
+                </div>
+              </div>
+            </div>
+            <div class="flex flex-col gap-4 p-7">
+              <div>
+                <h3 class="text-[22px] font-semibold tracking-[-0.6px]">Linux</h3>
+                <p class="mt-1 text-[12px] font-semibold tracking-[1px] text-[#30d158]">WAYLAND &amp; X11</p>
+              </div>
+              <ul class="space-y-3 text-[14px] leading-5 text-[#ebebf599]">
+                <li class="flex gap-3"><svg class="icon mt-0.5 h-4 w-4 text-white" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="m5 12 5 5L20 7"/></svg>Runs natively on Wayland, with X11 support alongside it</li>
+                <li class="flex gap-3"><svg class="icon mt-0.5 h-4 w-4 text-white" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="m5 12 5 5L20 7"/></svg>Rendered with Vulkan through GPUI's Blade backend</li>
+                <li class="flex gap-3"><svg class="icon mt-0.5 h-4 w-4 text-white" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="m5 12 5 5L20 7"/></svg>Media, battery and notifications read straight from D-Bus</li>
+              </ul>
+            </div>
+          </article>
+        </div>
+      </section>
+
+      <section
+        id="download"
+        class="px-5 py-[90px] sm:px-[60px] sm:py-[110px]"
+        style="background-image: radial-gradient(ellipse 60% 80% at 50% 100%, #0a84ff2e 0%, transparent 100%)"
+      >
+        <div class="mx-auto flex max-w-[820px] flex-col items-center gap-6 text-center">
+          <h2 class="text-[36px] font-semibold leading-tight tracking-[-1.4px] sm:text-[52px] sm:leading-[57px] sm:tracking-[-1.8px]">
+            Get back the top of your screen.
+          </h2>
+          <p class="max-w-[520px] text-[16px] leading-[25px] text-[#ebebf599]">
+            Free, open source, and one binary per platform. It takes longer to read this page than to
+            install it.
+          </p>
+          <div class="flex flex-wrap items-center justify-center gap-3 pt-2">
+            <a
+              class="cta-white inline-flex items-center gap-2 rounded-full bg-white px-6 py-3.5 text-[15px] font-semibold text-black"
+              href="https://github.com/prodBirdy/openNook/releases/download/v0.3.0/openNook-0.3.0.dmg"
+            >
+              <svg class="icon w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M12 3v12" /><path d="m7 11 5 5 5-5" /><path d="M5 21h14" />
+              </svg>
+              Download for macOS
+            </a>
+            <a
+              class="cta-ghost inline-flex items-center gap-2 rounded-full bg-white/10 px-6 py-3.5 text-[15px] font-medium"
+              href="https://github.com/prodBirdy/openNook/releases/download/v0.3.0-linux/openNook-0.3.0-x86_64-unknown-linux-gnu.tar.gz"
+            >
+              <svg class="icon w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M4 20h16"/><path d="M12 4v12"/><path d="m8 12 4 4 4-4"/></svg>
+              Download for Linux
+            </a>
+            <a
+              class="cta-ghost inline-flex items-center gap-2 rounded-full bg-white/10 px-6 py-3.5 text-[15px] font-medium"
+              href="https://github.com/prodBirdy/openNook"
+            >
+              <svg class="icon w-4 h-4" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                <path d="M12 .5C5.73.5.5 5.73.5 12.02c0 5.1 3.29 9.43 7.86 10.96.58.1.79-.25.79-.56 0-.28-.01-1.02-.02-2-3.2.7-3.88-1.54-3.88-1.54-.53-1.33-1.28-1.69-1.28-1.69-1.05-.72.08-.7.08-.7 1.16.08 1.77 1.2 1.77 1.2 1.03 1.77 2.7 1.26 3.36.96.1-.75.4-1.26.73-1.55-2.55-.29-5.23-1.28-5.23-5.7 0-1.26.45-2.29 1.19-3.1-.12-.29-.52-1.47.11-3.06 0 0 .97-.31 3.18 1.18a11.1 11.1 0 0 1 5.8 0c2.2-1.49 3.17-1.18 3.17-1.18.64 1.59.24 2.77.12 3.06.74.81 1.18 1.84 1.18 3.1 0 4.43-2.69 5.4-5.25 5.69.41.36.78 1.07.78 2.16 0 1.56-.01 2.81-.01 3.19 0 .31.21.67.8.56A10.52 10.52 0 0 0 23.5 12C23.5 5.73 18.27.5 12 .5Z" />
+              </svg>
+              View source
+            </a>
+          </div>
+          <p class="text-[12px] text-[#ebebf54d]">
+            Latest verified builds are 0.3.0 ·
+            <a class="underline decoration-white/20 underline-offset-4 hover:text-white" href="https://github.com/prodBirdy/openNook/releases">All releases</a>
+          </p>
+        </div>
+      </section>
+    </main>
+
+    <footer class="flex flex-col items-start justify-between gap-4 border-t border-white/20 px-5 py-7 sm:flex-row sm:items-center sm:px-10">
+      <p class="text-[12px] text-[#ebebf54d]">© 2026 openNook · MIT licensed</p>
+      <div class="flex gap-6 text-[12px] text-[#ebebf54d]">
+        <a class="footer-link" href="https://github.com/prodBirdy/openNook">GitHub</a>
+        <a class="footer-link" href="https://github.com/prodBirdy/openNook#readme">Docs</a>
+      </div>
+    </footer>
+  </body>
 </html>

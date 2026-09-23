@@ -1,13 +1,20 @@
 # Launch page
 
-Shipped page is design A: light, centered, pill CTA. `index.html` is that page.
+Black, fluid landing rebuilt from the captain Pencil mock. `index.html` is the
+shipped GitHub Pages page.
 
 https://prodbirdy.github.io/openNook/
 
-Primary CTA is macOS 1.0.0: https://github.com/prodBirdy/openNook/releases/download/v1.0.0/openNook-1.0.0.dmg
+Verified download links (do not use the stale 1.0.0 paths):
 
-Linux secondary is the 1.0.0 GPUI tarball: https://github.com/prodBirdy/openNook/releases/download/v1.0.0-linux/openNook-1.0.0-x86_64-unknown-linux-gnu.tar.gz
+- macOS 0.3.0: https://github.com/prodBirdy/openNook/releases/download/v0.3.0/openNook-0.3.0.dmg
+- Linux 0.3.0 GPUI tarball: https://github.com/prodBirdy/openNook/releases/download/v0.3.0-linux/openNook-0.3.0-x86_64-unknown-linux-gnu.tar.gz
+- Repo / Star: https://github.com/prodBirdy/openNook
+- Releases / changelog: https://github.com/prodBirdy/openNook/releases
 
-Gallery frames are the NOOK-MOCK-0923 v2 design mocks (`docs/linux-03-*.png`): compact, expanded, tray, and Settings Widgets. They are design mocks, not live Linux GPUI captures.
+Hero, widget wall, tray drop-zone, terminal PTY, and platform islands are HTML
+chrome from the mock. `linux-03-*.png` remain as the v2 product stills (compact,
+expanded, tray, Settings) for README and any later shots.
 
-Pages is not enabled from this work. After merge: Settings → Pages → Deploy from a branch → `main` · `/docs`. No CNAME.
+Pages deploys from `main` · `/docs` via `.github/workflows/pages.yml`. No CNAME.
+No build step.
