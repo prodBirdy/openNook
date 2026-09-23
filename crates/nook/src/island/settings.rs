@@ -5,7 +5,7 @@ use crate::icons::lucide_color;
 use crate::theme;
 use crate::CloseWindow;
 use gpui::{
-    canvas, div, linear_color_stop, linear_gradient, prelude::*, px, AnyElement, Bounds, Context,
+    canvas, div, prelude::*, px, AnyElement, Bounds, Context,
     CursorStyle, ElementId, FocusHandle, FontWeight, KeyDownEvent, MouseButton, MouseMoveEvent,
     MouseUpEvent, Pixels, Rgba, ScrollHandle, ScrollWheelEvent, SharedString, Window,
 };
@@ -18,7 +18,7 @@ use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::{Duration, Instant};
 
 /// Default settings window. Width matches the Settings artboard (820).
-pub(super) const SETTINGS_SIZE: (f32, f32) = (820.0, 720.0);
+pub(super) const SETTINGS_SIZE: (f32, f32) = (900.0, 780.0);
 pub(super) const SETTINGS_MIN: (f32, f32) = (720.0, 520.0);
 
 // TODO(theme): move to theme.rs
@@ -42,18 +42,6 @@ const EXPORT_MUTED: Rgba = Rgba {
     g: 235.0 / 255.0,
     b: 245.0 / 255.0,
     a: 0.60,
-};
-const EXPORT_WELL_BORDER: Rgba = Rgba {
-    r: 1.0,
-    g: 1.0,
-    b: 1.0,
-    a: 0.08,
-};
-const EXPORT_LIST_BORDER: Rgba = Rgba {
-    r: 1.0,
-    g: 1.0,
-    b: 1.0,
-    a: 0.06,
 };
 const EXPORT_LIST_BG: Rgba = Rgba {
     r: 44.0 / 255.0,
@@ -1307,10 +1295,19 @@ impl SettingsView {
                 );
             }
         }
-        let used = settings.used_cells();
-        let capacity = AppSettings::TOTAL_CELLS;
-        let preview_count = format!("{used} of {capacity} slots used");
-        let island_count = format!("{used} of {capacity}");
+        let preview_n = settings
+            .ordered_widgets()
+            .into_iter()
+            .filter(|module| {
+                module.is_available()
+                    && settings.widget_visible(*module)
+                    && module.enabled(settings)
+                    && module.occupies_nook_cells()
+            })
+            .count();
+        let island_n = on_nook.len();
+        let preview_count = slot_header(preview_n, true);
+        let island_count = slot_header(island_n, false);
         let more_count = format!("{} available", available.len());
         let available_footer = blocked_available
             .then(|| "No room left. Turn off or shrink a widget to make room.".to_string());
@@ -1326,7 +1323,7 @@ impl SettingsView {
                 .flex_col()
                 .child(div().h(px(20.)))
                 .child(surface_header("Island Preview", preview_count))
-                .child(island_preview(settings))
+                .child(island_preview(settings, self.module))
                 .child(div().h(px(8.)))
                 .child(
                     div()
@@ -1353,7 +1350,7 @@ impl SettingsView {
                     } else {
                         available
                     },
-                    44.0,
+                    67.0,
                 ))
                 .when_some(available_footer, |d, text| {
                     d.child(div().h(px(8.))).child(
@@ -1394,7 +1391,7 @@ impl SettingsView {
         &self,
         module: WidgetModule,
         settings: &AppSettings,
-        on_island: bool,
+        _on_island: bool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let selected = self.module == module;
@@ -1416,27 +1413,25 @@ impl SettingsView {
                     s.bg(theme::FILL_TERTIARY)
                 }
             })
-            .when(on_island, |d| {
-                d.drag_over::<WidgetDrag>(move |style, drag, _, _| {
-                    if drag.0 == module {
-                        style
-                    } else {
-                        style.bg(theme::FILL_SECONDARY)
-                    }
-                })
-                .can_drop(move |value, _, _| {
-                    value
-                        .downcast_ref::<WidgetDrag>()
-                        .is_some_and(|drag| drag.0 != module)
-                })
-                .on_drop(cx.listener(move |_, drag: &WidgetDrag, _, cx| {
-                    nook_core::settings::tweak_app_settings(|settings| {
-                        let _ = settings.try_move_widget_to(drag.0, module);
-                    });
-                    cx.notify();
-                }))
-                .on_drag(WidgetDrag(module), |drag, _, _, cx| cx.new(|_| *drag))
+            .drag_over::<WidgetDrag>(move |style, drag, _, _| {
+                if drag.0 == module {
+                    style
+                } else {
+                    style.bg(theme::FILL_SECONDARY)
+                }
             })
+            .can_drop(move |value, _, _| {
+                value
+                    .downcast_ref::<WidgetDrag>()
+                    .is_some_and(|drag| drag.0 != module)
+            })
+            .on_drop(cx.listener(move |_, drag: &WidgetDrag, _, cx| {
+                nook_core::settings::tweak_app_settings(|settings| {
+                    let _ = settings.try_move_widget_to(drag.0, module);
+                });
+                cx.notify();
+            }))
+            .on_drag(WidgetDrag(module), |drag, _, _, cx| cx.new(|_| *drag))
             .cursor(CursorStyle::PointingHand)
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.module = module;
@@ -1451,9 +1446,7 @@ impl SettingsView {
                 }
                 cx.notify();
             }))
-            .when(on_island, |d| {
-                d.child(lucide_color("grip-vertical", 13.0, EXPORT_MUTED))
-            })
+            .child(lucide_color("grip-vertical", 13.0, EXPORT_MUTED))
             .child(widget_badge_glyph(module))
             .child(
                 div()
@@ -2791,7 +2784,16 @@ fn widget_caption(module: WidgetModule, settings: &AppSettings) -> String {
     let slots = slot_label(widget_slots(module, settings));
     match widget_blurb(module) {
         Some(blurb) => format!("{blurb} · {slots}"),
+        None if module.is_experimental() => "Experimental".into(),
         None => slots,
+    }
+}
+
+fn slot_header(count: usize, slots_used: bool) -> String {
+    if slots_used {
+        format!("{count} of {count} slots used")
+    } else {
+        format!("{count} of {count}")
     }
 }
 
@@ -2873,10 +2875,8 @@ fn island_list(rows: Vec<AnyElement>, rule_inset: f32) -> impl IntoElement {
     let mut group = div()
         .flex()
         .flex_col()
-        .rounded(px(10.))
+        .rounded(px(12.))
         .bg(EXPORT_LIST_BG)
-        .border_1()
-        .border_color(EXPORT_LIST_BORDER)
         .overflow_hidden();
     for (i, row) in rows.into_iter().enumerate() {
         if i > 0 {
@@ -2892,7 +2892,7 @@ fn island_list(rows: Vec<AnyElement>, rule_inset: f32) -> impl IntoElement {
     group
 }
 
-fn island_preview(settings: &AppSettings) -> impl IntoElement {
+fn island_preview(settings: &AppSettings, selected: WidgetModule) -> impl IntoElement {
     let cells: Vec<WidgetModule> = settings
         .ordered_widgets()
         .into_iter()
@@ -2905,58 +2905,56 @@ fn island_preview(settings: &AppSettings) -> impl IntoElement {
         .collect();
     let island = div()
         .id("island-preview")
-        .w_full()
-        .px(px(14.))
-        .py(px(14.))
-        .rounded(px(20.))
+        .px(px(16.))
+        .py(px(12.))
+        .rounded(px(28.))
         .bg(theme::ISLAND)
         .shadow_md()
         .flex()
         .items_center()
         .justify_center()
-        .gap(px(4.));
+        .gap(px(8.));
     let island = if cells.is_empty() {
         island.child(label("Nothing on the island yet.", theme::FOOTNOTE, false))
     } else {
         cells.into_iter().fold(island, |island, module| {
+            let hot = module == selected;
             island.child(
                 div()
                     .id(SharedString::from(format!(
                         "preview-{}",
                         module.name()
                     )))
-                    .flex_1()
-                    .min_w(px(0.))
-                    .px(px(4.))
+                    .px(px(8.))
                     .py(px(6.))
+                    .rounded(px(8.))
                     .flex()
                     .flex_col()
                     .items_center()
                     .justify_center()
-                    .gap(px(7.))
-                    .child(lucide_color(module.icon(), 17.0, theme::LABEL))
-                    .child(
-                        div()
-                            .text_size(px(10.))
-                            .line_height(px(13.))
-                            .text_color(EXPORT_MUTED)
-                            .child(module.name()),
-                    ),
+                    .gap(px(6.))
+                    .when(hot, |d| d.bg(EXPORT_ROW_FILL))
+                    .child(lucide_color(module.icon(), 18.0, theme::LABEL))
+                    .when(hot, |d| {
+                        d.child(
+                            div()
+                                .text_size(px(10.))
+                                .line_height(px(13.))
+                                .text_color(EXPORT_MUTED)
+                                .child(module.name()),
+                        )
+                    }),
             )
         })
     };
     div()
         .w_full()
-        .px(px(18.))
-        .py(px(18.))
-        .rounded(px(10.))
-        .border_1()
-        .border_color(EXPORT_WELL_BORDER)
-        .bg(linear_gradient(
-            90.0,
-            linear_color_stop(theme::rgba_from_u32(0x2A2A30, 1.0), 0.0),
-            linear_color_stop(theme::rgba_from_u32(0x141417, 1.0), 1.0),
-        ))
+        .px(px(16.))
+        .py(px(16.))
+        .rounded(px(12.))
+        .bg(EXPORT_LIST_BG)
+        .flex()
+        .justify_center()
         .child(island)
 }
 
@@ -2986,9 +2984,9 @@ fn module_chip(
     };
     div()
         .id(SharedString::from(format!("chip-{}", module.name())))
-        .h(px(22.))
-        .px(px(9.))
-        .rounded(px(6.))
+        .h(px(26.))
+        .px(px(11.))
+        .rounded_full()
         .bg(theme::with_alpha(theme::LABEL, 0.10))
         .flex()
         .items_center()
@@ -3660,7 +3658,7 @@ mod tests {
     #[test]
     fn settings_window_is_landscape() {
         let (w, h) = SETTINGS_SIZE;
-        assert_eq!((w, h), (820.0, 720.0));
+        assert_eq!((w, h), (900.0, 780.0));
         assert!(w > h, "default size stays landscape");
         let (min_w, min_h) = SETTINGS_MIN;
         assert!(min_w > min_h, "min size stays landscape");
@@ -3781,8 +3779,15 @@ mod tests {
             widget_caption(WidgetModule::Reminders, &settings),
             slot_label(settings.cells_for(WidgetModule::Reminders))
         );
+        assert_eq!(
+            widget_caption(WidgetModule::Observe, &settings),
+            "Experimental"
+        );
         assert_eq!(slot_label(1), "1 slot");
         assert_eq!(slot_label(2), "2 slots");
+        assert_eq!(slot_header(7, true), "7 of 7 slots used");
+        assert_eq!(slot_header(7, false), "7 of 7");
+        assert_eq!(slot_header(3, true), "3 of 3 slots used");
     }
 
     #[test]
