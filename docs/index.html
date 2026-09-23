@@ -33,6 +33,7 @@
       }
       html {
         scroll-behavior: smooth;
+        scroll-padding-top: 76px;
       }
       body {
         margin: 0;
@@ -143,38 +144,16 @@
         flex-shrink: 0;
       }
       .hero-island-scale {
-        width: min(780px, 100%);
-      }
-      @media (max-width: 860px) {
-        .hero-island-scale {
-          width: 780px;
-          transform: scale(0.62);
-          transform-origin: top center;
-        }
-        .hero-screen-pad {
-          height: 280px;
-        }
-      }
-      @media (max-width: 520px) {
-        .hero-island-scale {
-          transform: scale(0.44);
-        }
-        .hero-screen-pad {
-          height: 220px;
-        }
+        width: 780px;
+        flex-shrink: 0;
       }
       .mode-island-scale {
-        width: min(520px, 100%);
+        width: min(780px, 100%);
       }
-      @media (max-width: 640px) {
-        .mode-island-scale {
-          width: 520px;
-          transform: scale(0.62);
-          transform-origin: top center;
-        }
-        .mode-screen-pad {
-          height: 180px;
-        }
+      .screen-clip {
+        overflow-x: auto;
+        overflow-y: hidden;
+        -webkit-overflow-scrolling: touch;
       }
       .term {
         font-family: "Roboto Mono", ui-monospace, monospace;
@@ -343,8 +322,8 @@
         </div>
 
         <div class="mx-auto mt-[22px] w-full max-w-[1200px] overflow-hidden">
-          <div class="screen hero-screen-pad relative flex h-[380px] flex-col items-center overflow-hidden rounded-t-[28px]">
-            <div class="hero-island-scale island shrink-0">
+          <div class="screen screen-clip relative flex h-[380px] flex-col items-start rounded-t-[28px] md:items-center">
+            <div class="hero-island-scale island">
               <svg class="island-wing left" viewBox="0 0 14 14" aria-hidden="true"><path d="M0 0h14v14C14 6.27 7.73 0 0 0z" fill="#000"/></svg>
               <svg class="island-wing right" viewBox="0 0 14 14" aria-hidden="true"><path d="M0 0h14C6.27 0 0 6.27 0 14z" fill="#000"/></svg>
               <div class="flex items-center gap-1.5 px-5 pb-2.5 pt-3.5">
@@ -610,8 +589,8 @@
                 app later. Nothing lands on your desktop.
               </p>
             </div>
-            <div class="screen-tray mode-screen-pad relative h-[250px] overflow-hidden rounded-t-3xl">
-              <div class="mode-island-scale island mx-auto">
+            <div class="screen-tray screen-clip relative flex h-[250px] w-full flex-col items-stretch rounded-t-3xl md:items-center">
+              <div class="mode-island-scale island">
                 <svg class="island-wing left" viewBox="0 0 14 14" aria-hidden="true"><path d="M0 0h14v14C14 6.27 7.73 0 0 0z" fill="#000"/></svg>
                 <svg class="island-wing right" viewBox="0 0 14 14" aria-hidden="true"><path d="M0 0h14C6.27 0 0 6.27 0 14z" fill="#000"/></svg>
                 <div class="flex items-center gap-1.5 px-5 pb-2.5 pt-3.5">
@@ -631,8 +610,8 @@
           </div>
 
           <div class="grid items-center gap-10 lg:grid-cols-[1fr_380px] lg:gap-[60px]">
-            <div class="screen-tray mode-screen-pad relative order-2 h-[250px] overflow-hidden rounded-t-3xl lg:order-1">
-              <div class="mode-island-scale island mx-auto">
+            <div class="screen-tray screen-clip relative order-2 flex h-[250px] w-full flex-col items-stretch rounded-t-3xl md:items-center lg:order-1">
+              <div class="mode-island-scale island">
                 <svg class="island-wing left" viewBox="0 0 14 14" aria-hidden="true"><path d="M0 0h14v14C14 6.27 7.73 0 0 0z" fill="#000"/></svg>
                 <svg class="island-wing right" viewBox="0 0 14 14" aria-hidden="true"><path d="M0 0h14C6.27 0 0 6.27 0 14z" fill="#000"/></svg>
                 <div class="flex items-center gap-1.5 px-5 pb-2.5 pt-3.5">
@@ -680,8 +659,8 @@
         </div>
         <div class="mx-auto grid w-full max-w-[1200px] gap-6 lg:grid-cols-2">
           <article class="overflow-hidden rounded-[28px] border border-white/20 bg-[#0b0b0e]">
-            <div class="screen mode-screen-pad relative h-[230px] overflow-hidden">
-              <div class="mode-island-scale island island-glass mx-auto">
+            <div class="screen screen-clip relative flex h-[230px] flex-col items-start md:items-center">
+              <div class="mode-island-scale island island-glass">
                 <div class="flex items-center gap-1.5 px-5 pb-2.5 pt-3.5">
                   <span class="tab is-active">Nook</span>
                   <span class="tab">Tray</span>
@@ -720,8 +699,8 @@
             </div>
           </article>
           <article class="overflow-hidden rounded-[28px] border border-white/20 bg-[#0b0b0e]">
-            <div class="screen mode-screen-pad relative h-[230px] overflow-hidden">
-              <div class="mode-island-scale island mx-auto">
+            <div class="screen screen-clip relative flex h-[230px] flex-col items-start md:items-center">
+              <div class="mode-island-scale island">
                 <svg class="island-wing left" viewBox="0 0 14 14" aria-hidden="true"><path d="M0 0h14v14C14 6.27 7.73 0 0 0z" fill="#000"/></svg>
                 <svg class="island-wing right" viewBox="0 0 14 14" aria-hidden="true"><path d="M0 0h14C6.27 0 0 6.27 0 14z" fill="#000"/></svg>
                 <div class="flex items-center gap-1.5 px-5 pb-2.5 pt-3.5">
