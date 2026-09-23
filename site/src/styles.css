@@ -7,28 +7,30 @@
   --font-mono: "Roboto Mono", ui-monospace, monospace;
 }
 
-*,
-::before,
-::after {
-  box-sizing: border-box;
-}
+@layer base {
+  *,
+  ::before,
+  ::after {
+    box-sizing: border-box;
+  }
 
-html {
-  scroll-behavior: smooth;
-  scroll-padding-top: 76px;
-}
+  html {
+    scroll-behavior: smooth;
+    scroll-padding-top: 76px;
+  }
 
-body {
-  margin: 0;
-  background: #000;
-  color: #fff;
-  font-family: var(--font-sans);
-  -webkit-font-smoothing: antialiased;
-}
+  body {
+    margin: 0;
+    background: #000;
+    color: #fff;
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+  }
 
-a {
-  color: inherit;
-  text-decoration: none;
+  a {
+    color: inherit;
+    text-decoration: none;
+  }
 }
 
 .screen {
