@@ -12,8 +12,9 @@ Verified download links (do not use the stale 1.0.0 paths):
 - Repo / Star: https://github.com/prodBirdy/openNook
 - Releases / changelog: https://github.com/prodBirdy/openNook/releases
 
-Hero, widget wall, tray drop-zone, terminal PTY, and platform islands are HTML
-chrome from the captain mock. `linux-03-*.png` remain as the v2 product stills.
+Hero, widget gallery (compact + expanded SoT cards), tray drop-zone, terminal PTY,
+and platform islands are HTML chrome from the captain mock. `linux-03-*.png`
+remain as the v2 product stills. Album art is `album-art.jpg`.
 
 Pages deploys from `main` · `/docs` via `.github/workflows/pages.yml`. No CNAME.
 The CSS in `docs/assets/` is the Tailwind build — not `cdn.tailwindcss.com`.
