@@ -268,7 +268,7 @@ pub(super) fn visualizer(playing: bool, color: Option<Rgba>) -> impl IntoElement
     // when the island has extracted one.
     let color = color.unwrap_or(VIS_DEFAULT);
     let still = reduce_motion() || !playing;
-    // Clock-driven bars at ~15 fps via request_animation_frame — only while
+    // Clock-driven bars via request_animation_frame — only while
     // this element is on screen (Media compact face). No island-tick dirties.
     canvas(
         move |_, _, _| (),
@@ -276,10 +276,9 @@ pub(super) fn visualizer(playing: bool, color: Option<Rgba>) -> impl IntoElement
             let levels: [f64; VIS_BARS] = if still {
                 VIS_REST.map(|r| r as f64)
             } else {
-                // Quantize to 15 Hz so bar heights hold between paints.
-                // Core still samples 6 bands; take the first five for the face.
-                let t = (vis_clock() * 15.0).floor() / 15.0;
-                let raw = nook_core::audio::visualizer_levels_at(t);
+                // Core glides its noise between steps, so sample the live
+                // clock. Six bands; the face shows the first five.
+                let raw = nook_core::audio::visualizer_levels_at(vis_clock());
                 [raw[0], raw[1], raw[2], raw[3], raw[4]]
             };
             let bar_w = px(VIS_BAR_W);
@@ -321,12 +320,15 @@ fn vis_clock() -> f64 {
         .as_secs_f64()
 }
 
+/// Bar height as a fraction of [`VIS_H`]. Playing bars use the whole
+/// 2..14 px range (no per-bar floor, so every band visibly moves); paused and
+/// Reduce Motion show the mockup's resting 7/12/9/14/8.
 fn visualizer_scale(level: f64, playing: bool, index: usize) -> f32 {
-    let resting = VIS_REST[index];
     if playing {
-        (level as f32).clamp((resting * 0.5).max(VIS_MIN_H / VIS_H), 1.0)
+        let floor = VIS_MIN_H / VIS_H;
+        floor + (1.0 - floor) * (level as f32).clamp(0.0, 1.0)
     } else {
-        resting
+        VIS_REST[index]
     }
 }
 
@@ -1757,7 +1759,28 @@ mod tests {
             .map(|i| visualizer_scale(0.0, false, i))
             .collect::<Vec<_>>();
         assert_eq!(heights, VIS_REST);
-        assert!(visualizer_scale(0.0, true, 3) > visualizer_scale(0.0, true, 0));
+        // Playing: every bar spans the same 2..14 px range.
+        for i in 0..VIS_BARS {
+            assert_eq!(visualizer_scale(0.0, true, i), VIS_MIN_H / VIS_H);
+            assert_eq!(visualizer_scale(1.0, true, i), 1.0);
+        }
+    }
+
+    #[test]
+    fn compact_visualizer_moves_every_bar() {
+        // 10 s at the 30 Hz paint rate: each bar sweeps at least 40% of its height.
+        let heights: Vec<[f32; VIS_BARS]> = (0..300)
+            .map(|i| {
+                let raw = nook_core::audio::visualizer_levels_at(i as f64 / 30.0);
+                std::array::from_fn(|b| visualizer_scale(raw[b], true, b))
+            })
+            .collect();
+        for bar in 0..VIS_BARS {
+            let lo = heights.iter().map(|h| h[bar]).fold(f32::MAX, f32::min);
+            let hi = heights.iter().map(|h| h[bar]).fold(f32::MIN, f32::max);
+            assert!(hi - lo >= 0.4, "bar {bar} only spans {lo:.2}..{hi:.2}");
+            assert!(lo >= VIS_MIN_H / VIS_H && hi <= 1.0);
+        }
     }
 
     fn encode_rgba(w: u32, h: u32, format: image::ImageFormat) -> String {

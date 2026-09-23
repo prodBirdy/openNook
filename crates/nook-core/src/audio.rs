@@ -50,37 +50,76 @@ pub fn get_audio_levels() -> Vec<f64> {
 
 /// Synthetic six-band levels as a pure function of time. Used by the compact
 /// Media visualizer paint path — no dedicated thread, no island-tick dirties.
+///
+/// Every band is its own instrument on a shared ~124 BPM grid: kick on the
+/// beat, bass on the off-beat, snare on 2 and 4, mids on eighths, hats and
+/// air on sixteenths, each with its own wobble and glided noise. A short
+/// release (the level 50 ms earlier, decayed) keeps peaks from snapping shut.
 pub fn visualizer_levels_at(t: f64) -> [f64; 6] {
-    let energy_wave = (t * 0.15).sin() * 0.3 + 0.9;
-    // Soft energy envelope (was an EMA on the old 30 fps thread).
-    let energy = 0.5 * 0.7 + energy_wave * 0.3;
-    // ~160 BPM beat pulse.
-    let beat_phase = t * 2.67 * std::f64::consts::TAU;
-    let beat = (beat_phase.sin().max(0.0)).powf(4.0);
-
-    let noise = |band: u64| -> f64 {
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
-        let mut hasher = DefaultHasher::new();
-        ((t * 15.0) as u64)
-            .wrapping_mul(31)
-            .wrapping_add(band)
-            .hash(&mut hasher);
-        (hasher.finish() % 1000) as f64 / 1000.0 - 0.5
-    };
-
-    let mut levels = [
-        energy * (0.4 + beat * 0.5 + noise(0) * 0.1),
-        energy * (0.35 + beat * 0.3 + (t * 3.2).sin() * 0.15 + noise(1) * 0.08),
-        energy * (0.3 + (t * 5.7).sin() * 0.2 + (t * 7.3).cos() * 0.1 + noise(2) * 0.1),
-        energy * (0.28 + (t * 4.1).sin() * 0.18 + (t * 6.8).cos() * 0.12 + noise(3) * 0.08),
-        energy * (0.22 + (t * 8.3).sin() * 0.15 + beat * 0.1 + noise(4) * 0.1),
-        energy * (0.18 + (t * 11.2).sin() * 0.1 + (t * 9.7).cos() * 0.08 + noise(5) * 0.06),
-    ];
-    for level in &mut levels {
-        *level = level.clamp(0.08, 0.92);
+    let mut out = visualizer_raw_levels(t);
+    let prev = visualizer_raw_levels(t - 0.05);
+    for (level, before) in out.iter_mut().zip(prev) {
+        *level = level.max(before * 0.75).clamp(0.0, 1.0);
     }
-    levels
+    out
+}
+
+/// Beats per second of the synthetic groove (124 BPM).
+const VIS_BEAT_HZ: f64 = 124.0 / 60.0;
+
+fn visualizer_raw_levels(t: f64) -> [f64; 6] {
+    use std::f64::consts::TAU;
+    let beat =
+        |subdivision: f64, offset: f64| (t * VIS_BEAT_HZ * subdivision + offset).rem_euclid(1.0);
+    // Sharp attack at phase 0, exponential decay; `k` sets how percussive.
+    let pulse = |phase: f64, k: f64| (-phase * k).exp();
+    let noise = |band: u64, rate: f64| visualizer_glide_noise(t, rate, band);
+    // Slow phrase swell so the whole face breathes a little.
+    let energy = 0.88 + 0.12 * (t * TAU / 8.0).sin();
+
+    let levels = [
+        // Kick: punchy on every beat.
+        0.12 + 0.78 * pulse(beat(1.0, 0.0), 6.0) * (0.75 + 0.25 * noise(0, 4.0))
+            + 0.1 * noise(10, 6.0),
+        // Bass: off-beat push plus a rolling line.
+        0.13 + 0.5 * pulse(beat(1.0, 0.5), 5.0)
+            + 0.3 * noise(1, 5.0)
+            + 0.08 * (t * 3.1 * TAU).sin(),
+        // Snare / low-mids: backbeat on 2 and 4.
+        0.29 + 0.6 * pulse(beat(0.5, 0.5), 7.0) + 0.25 * noise(2, 7.0),
+        // Mids: eighth notes with a vocal-ish wobble.
+        0.22 + 0.38 * pulse(beat(2.0, 0.25), 4.0)
+            + 0.18 * (t * 1.7 * TAU).sin()
+            + 0.26 * noise(3, 9.0),
+        // Hats: sixteenths, busy.
+        0.075 + 0.36 * pulse(beat(4.0, 0.0), 8.0) + 0.42 * noise(4, 12.0),
+        // Air: flickery, off the sixteenth grid.
+        0.28 * pulse(beat(4.0, 0.5), 9.0) + 0.45 * noise(5, 15.0),
+    ];
+    levels.map(|level| (level * energy).clamp(0.0, 1.0))
+}
+
+/// Value noise in `[0, 1]` for `band`, stepping at `rate` Hz and gliding
+/// (smoothstep) between steps so bars move instead of jumping.
+fn visualizer_glide_noise(t: f64, rate: f64, band: u64) -> f64 {
+    let x = t * rate;
+    let step = x.floor();
+    let f = x - step;
+    let f = f * f * (3.0 - 2.0 * f);
+    let a = visualizer_hash(step as i64, band);
+    let b = visualizer_hash(step as i64 + 1, band);
+    a + (b - a) * f
+}
+
+/// splitmix64 → `[0, 1)`; cheap and deterministic per (step, band).
+fn visualizer_hash(step: i64, band: u64) -> f64 {
+    let mut z = (step as u64)
+        .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+        .wrapping_add(band.wrapping_mul(0xD1B5_4A32_D192_ED03));
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^= z >> 31;
+    (z >> 11) as f64 / (1u64 << 53) as f64
 }
 
 #[cfg(target_os = "macos")]
@@ -1395,6 +1434,50 @@ pub async fn media_seek(position: f64) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 10 s of the synthetic visualizer at the paint rate (30 Hz).
+    fn visualizer_samples() -> Vec<[f64; 6]> {
+        (0..300).map(|i| visualizer_levels_at(i as f64 / 30.0)).collect()
+    }
+
+    #[test]
+    fn visualizer_levels_stay_in_unit_range() {
+        for levels in visualizer_samples() {
+            for level in levels {
+                assert!((0.0..=1.0).contains(&level), "level {level} out of range");
+            }
+        }
+    }
+
+    #[test]
+    fn every_visualizer_band_moves() {
+        let samples = visualizer_samples();
+        for band in 0..6 {
+            let (lo, hi) = samples.iter().fold((f64::MAX, f64::MIN), |(lo, hi), s| {
+                (lo.min(s[band]), hi.max(s[band]))
+            });
+            assert!(hi - lo >= 0.4, "band {band} only swings {lo:.2}..{hi:.2}");
+        }
+    }
+
+    #[test]
+    fn visualizer_bands_are_distinct() {
+        let samples = visualizer_samples();
+        // The compact face shows bands 0..5; band 5 is not drawn.
+        let means: Vec<f64> = (0..5)
+            .map(|band| samples.iter().map(|s| s[band]).sum::<f64>() / samples.len() as f64)
+            .collect();
+        for a in 0..5 {
+            for b in a + 1..5 {
+                assert!(
+                    (means[a] - means[b]).abs() > 0.01,
+                    "bands {a} and {b} share a mean ({:.3} vs {:.3})",
+                    means[a],
+                    means[b]
+                );
+            }
+        }
+    }
 
     #[test]
     fn safari_artwork_rejects_deceptive_pages_and_private_urls() {
