@@ -5,9 +5,9 @@ use crate::icons::lucide_color;
 use crate::theme;
 use crate::CloseWindow;
 use gpui::{
-    canvas, div, prelude::*, px, AnyElement, Bounds, Context, CursorStyle, ElementId, FocusHandle,
-    FontWeight, KeyDownEvent, MouseButton, MouseMoveEvent, MouseUpEvent, Pixels, Rgba,
-    ScrollHandle, ScrollWheelEvent, SharedString, Window,
+    canvas, div, linear_color_stop, linear_gradient, prelude::*, px, AnyElement, Bounds, Context,
+    CursorStyle, ElementId, FocusHandle, FontWeight, KeyDownEvent, MouseButton, MouseMoveEvent,
+    MouseUpEvent, Pixels, Rgba, ScrollHandle, ScrollWheelEvent, SharedString, Window,
 };
 use nook_core::high_alert::HighAlertKind;
 use nook_core::settings::{AppSettings, IslandSwatch, WidgetModule, ISLAND_SWATCHES};
@@ -17,9 +17,9 @@ use std::rc::Rc;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::{Duration, Instant};
 
-/// Default settings window. Sidebar + grouped pane.
-pub(super) const SETTINGS_SIZE: (f32, f32) = (780.0, 560.0);
-pub(super) const SETTINGS_MIN: (f32, f32) = (680.0, 480.0);
+/// Default settings window. Width matches `openNook — Settings` (820).
+pub(super) const SETTINGS_SIZE: (f32, f32) = (820.0, 720.0);
+pub(super) const SETTINGS_MIN: (f32, f32) = (720.0, 520.0);
 
 // TODO(theme): move to theme.rs
 const SETTINGS_CANVAS: Rgba = Rgba {
@@ -29,11 +29,65 @@ const SETTINGS_CANVAS: Rgba = Rgba {
     a: 1.0,
 };
 
-const SIDEBAR_W: f32 = 180.0;
-/// Room for traffic lights on a transparent titlebar.
+const SIDEBAR_W: f32 = 212.0;
+/// Room for traffic lights on a transparent titlebar (macOS).
 const TITLEBAR_INSET: f32 = 52.0;
+/// Export title bar is 38pt. Linux has no traffic lights — use that.
+const TITLEBAR_INSET_LINUX: f32 = 38.0;
 const GROUP_PAD: f32 = 12.0;
 const ROW_H: f32 = 36.0;
+const WIDGET_ROW_H: f32 = 46.0;
+const EXPORT_MUTED: Rgba = Rgba {
+    r: 235.0 / 255.0,
+    g: 235.0 / 255.0,
+    b: 245.0 / 255.0,
+    a: 0.60,
+};
+const EXPORT_WELL_BORDER: Rgba = Rgba {
+    r: 1.0,
+    g: 1.0,
+    b: 1.0,
+    a: 0.08,
+};
+const EXPORT_LIST_BORDER: Rgba = Rgba {
+    r: 1.0,
+    g: 1.0,
+    b: 1.0,
+    a: 0.06,
+};
+const EXPORT_LIST_BG: Rgba = Rgba {
+    r: 44.0 / 255.0,
+    g: 44.0 / 255.0,
+    b: 46.0 / 255.0,
+    a: 1.0,
+};
+const EXPORT_SIDEBAR: Rgba = Rgba {
+    r: 22.0 / 255.0,
+    g: 22.0 / 255.0,
+    b: 24.0 / 255.0,
+    a: 0.56,
+};
+const EXPORT_ROW_FILL: Rgba = Rgba {
+    r: 1.0,
+    g: 1.0,
+    b: 1.0,
+    a: 0.10,
+};
+const EXPORT_ACCENT: Rgba = Rgba {
+    r: 10.0 / 255.0,
+    g: 132.0 / 255.0,
+    b: 1.0,
+    a: 1.0,
+};
+
+fn titlebar_inset() -> f32 {
+    if cfg!(target_os = "macos") {
+        TITLEBAR_INSET
+    } else {
+        TITLEBAR_INSET_LINUX
+    }
+}
+
 
 /// Last surface the user had open. Survives closing the window.
 static LAST_CATEGORY: AtomicU8 = AtomicU8::new(SettingsCategory::Widgets as u8);
@@ -93,7 +147,6 @@ trait WidgetModuleExt {
     fn name(self) -> &'static str;
     fn icon(self) -> &'static str;
     fn enabled(self, settings: &AppSettings) -> bool;
-    fn set_enabled(self, settings: &mut AppSettings);
 }
 
 #[derive(Clone, Copy)]
@@ -103,7 +156,7 @@ impl gpui::Render for WidgetDrag {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         div()
             .w(px(220.))
-            .h(px(ROW_H))
+            .h(px(46.))
             .px(px(10.))
             .rounded(px(8.))
             .bg(theme::GROUPED_BG)
@@ -176,11 +229,6 @@ impl WidgetModuleExt for WidgetModule {
 
     fn enabled(self, settings: &AppSettings) -> bool {
         settings.is_enabled(self)
-    }
-
-    fn set_enabled(self, settings: &mut AppSettings) {
-        let on = !settings.is_enabled(self);
-        let _ = settings.set_enabled(self, on);
     }
 }
 
@@ -588,6 +636,7 @@ impl gpui::Render for SettingsView {
             }))
             .size_full()
             .flex()
+            .font_family("Inter")
             .bg(if crate::platform::reduce_transparency() {
                 theme::WINDOW_BG
             } else {
@@ -615,7 +664,6 @@ impl gpui::Render for SettingsView {
                 )
             })
             .child(self.sidebar(cx))
-            .child(div().w(px(1.)).h_full().bg(hairline()))
             .child(match self.category {
                 SettingsCategory::Widgets => self
                     .render_widgets(
@@ -645,34 +693,33 @@ impl SettingsView {
             .flex_shrink_0()
             .flex()
             .flex_col()
-            .bg(theme::SETTINGS_WELL)
-            .pt(px(TITLEBAR_INSET))
+            .bg(EXPORT_SIDEBAR)
+            .pt(px(titlebar_inset() + 10.0))
             .px(px(10.))
-            .pb(px(16.))
-            .gap(px(2.))
+            .pb(px(10.))
+            .gap(px(1.))
             .child(self.sidebar_item(SettingsCategory::General, cx))
             .child(self.sidebar_item(SettingsCategory::Widgets, cx))
     }
 
     fn sidebar_item(&self, category: SettingsCategory, cx: &mut Context<Self>) -> impl IntoElement {
         let selected = self.category == category;
-        let icon_color = if selected {
-            theme::accent()
-        } else {
-            theme::SECONDARY_LABEL
+        let badge = match category {
+            SettingsCategory::General => theme::rgba_from_u32(0x8E8E93, 1.0),
+            SettingsCategory::Widgets => EXPORT_ACCENT,
         };
         div()
             .id(SharedString::from(format!("sidebar-{}", category.title())))
-            .h(px(28.))
-            .px(px(8.))
-            .rounded(px(theme::CONTROL_RADIUS))
+            .h(px(30.))
+            .px(px(7.))
+            .rounded(px(6.))
             .flex()
             .items_center()
-            .gap(px(8.))
-            .when(selected, |d| d.bg(theme::FILL_SECONDARY))
+            .gap(px(9.))
+            .when(selected, |d| d.bg(EXPORT_ROW_FILL))
             .hover(|s| if selected { s } else { s.bg(theme::FILL) })
             .tab_index(0)
-            .focus(|s| s.border_1().border_color(theme::accent()))
+            .focus(|s| s.border_1().border_color(EXPORT_ACCENT))
             .active(|s| s.opacity(0.85))
             .cursor(CursorStyle::PointingHand)
             .on_click(cx.listener(move |this, _, _, cx| {
@@ -681,40 +728,77 @@ impl SettingsView {
                 this.persist_nav();
                 cx.notify();
             }))
-            .child(lucide_color(category.icon(), 15.0, icon_color))
             .child(
                 div()
-                    .text_size(px(theme::BODY.size))
-                    .line_height(px(theme::BODY.leading))
-                    .font_weight(if selected {
-                        FontWeight::SEMIBOLD
-                    } else {
-                        FontWeight::NORMAL
-                    })
-                    .text_color(if selected {
-                        theme::LABEL
-                    } else {
-                        theme::SECONDARY_LABEL
-                    })
+                    .size(px(17.))
+                    .rounded(px(4.5))
+                    .bg(badge)
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .flex_shrink_0()
+                    .child(lucide_color(category.icon(), 11.0, theme::LABEL)),
+            )
+            .child(
+                div()
+                    .text_size(px(13.))
+                    .line_height(px(16.))
+                    .font_weight(FontWeight::NORMAL)
+                    .text_color(if selected { theme::LABEL } else { EXPORT_MUTED })
                     .child(category.title()),
             )
     }
 
-    fn pane(title: &'static str, body: impl IntoElement) -> impl IntoElement {
+    fn pane(
+        title: &'static str,
+        subtitle: Option<&'static str>,
+        body: impl IntoElement,
+    ) -> impl IntoElement {
         let body_id: ElementId = SharedString::from(format!("pane-body-{title}")).into();
         let scroll = pane_scroll(&body_id);
+        let export = subtitle.is_some();
+        let header = div()
+            .flex()
+            .flex_col()
+            .gap(px(if export { 5. } else { 0. }))
+            .child(
+                div()
+                    .text_size(px(if export { 22.0 } else { theme::TITLE_2.size }))
+                    .line_height(px(if export {
+                        26.0
+                    } else {
+                        theme::TITLE_2.leading
+                    }))
+                    .font_weight(if export {
+                        FontWeight::SEMIBOLD
+                    } else {
+                        theme::TITLE_2.emphasized
+                    })
+                    .text_color(theme::LABEL)
+                    .child(title),
+            )
+            .when_some(subtitle, |d, text| {
+                d.child(
+                    div()
+                        .text_size(px(12.))
+                        .line_height(px(17.))
+                        .text_color(EXPORT_MUTED)
+                        .child(text),
+                )
+            });
         let mut scroller = div()
             .id(body_id)
             .track_scroll(&scroll)
             .flex_1()
             .min_h(px(0.))
-            .px(px(20.))
+            .px(px(if export { 24. } else { 20. }))
+            .pt(px(if export { 22. } else { 0. }))
             .pb(px(24.))
             .overflow_x_hidden()
             .overflow_y_scroll()
             .flex()
             .flex_col()
-            .gap(px(16.))
+            .gap(px(if export { 0. } else { 16. }))
             .on_scroll_wheel({
                 let scroll = scroll.clone();
                 move |event: &ScrollWheelEvent, window: &mut Window, cx: &mut gpui::App| {
@@ -724,6 +808,7 @@ impl SettingsView {
                     }
                 }
             })
+            .when(export, |d| d.child(header))
             .child(body);
         scroller.style().restrict_scroll_to_axis = Some(true);
 
@@ -734,18 +819,20 @@ impl SettingsView {
             .h_full()
             .flex()
             .flex_col()
-            .pt(px(TITLEBAR_INSET))
-            .child(
-                div()
-                    .px(px(20.))
-                    .pb(px(12.))
-                    .flex_shrink_0()
-                    .text_size(px(theme::TITLE_2.size))
-                    .line_height(px(theme::TITLE_2.leading))
-                    .font_weight(theme::TITLE_2.emphasized)
-                    .text_color(theme::LABEL)
-                    .child(title),
-            )
+            .pt(px(titlebar_inset()))
+            .when(!export, |d| {
+                d.child(
+                    div()
+                        .px(px(20.))
+                        .pb(px(12.))
+                        .flex_shrink_0()
+                        .text_size(px(theme::TITLE_2.size))
+                        .line_height(px(theme::TITLE_2.leading))
+                        .font_weight(theme::TITLE_2.emphasized)
+                        .text_color(theme::LABEL)
+                        .child(title),
+                )
+            })
             .child(scroller)
     }
 
@@ -774,6 +861,7 @@ impl SettingsView {
     ) -> impl IntoElement {
         Self::pane(
             "General",
+            None,
             div()
                 .id("general-pane")
                 .flex()
@@ -1205,16 +1293,25 @@ impl SettingsView {
                 continue;
             }
             if module.enabled(settings) {
-                on_nook.push(self.widget_row(module, settings, cx).into_any_element());
+                on_nook.push(
+                    self.widget_row(module, settings, true, cx)
+                        .into_any_element(),
+                );
             } else {
                 if module.occupies_nook_cells() && !settings.can_enable(module) {
                     blocked_available = true;
                 }
-                available.push(self.widget_row(module, settings, cx).into_any_element());
+                available.push(
+                    self.widget_row(module, settings, false, cx)
+                        .into_any_element(),
+                );
             }
         }
         let used = settings.used_cells();
-        let capacity = format!("{used} of {} cells in use.", AppSettings::TOTAL_CELLS);
+        let capacity = AppSettings::TOTAL_CELLS;
+        let preview_count = format!("{used} of {capacity} slots used");
+        let island_count = format!("{used} of {capacity}");
+        let more_count = format!("{} available", available.len());
         let available_footer = blocked_available
             .then(|| "No room left. Turn off or shrink a widget to make room.".to_string());
 
@@ -1222,45 +1319,49 @@ impl SettingsView {
 
         Self::pane(
             "Widgets",
+            Some("Pick the widgets that live in the island and drag them into the order you want."),
             div()
                 .id("custom-widgets")
                 .flex()
                 .flex_col()
-                .gap(px(16.))
-                .child(section(
-                    "Nook",
-                    settings_group(vec![action_row(
-                        "customize-on-nook",
-                        "Customize Layout",
-                        "Edit on Island",
-                        cx,
-                        |_, _, _| {
-                            nook_core::automation::push_action(
-                                nook_core::automation::ExternalAction::EditWidgets,
-                            );
-                        },
-                    )
-                    .into_any_element()]),
-                    Some(capacity),
-                ))
-                .child(section(
-                    "On the Island",
-                    settings_group(if on_nook.is_empty() {
+                .child(div().h(px(20.)))
+                .child(surface_header("Island Preview", preview_count))
+                .child(island_preview(settings))
+                .child(div().h(px(8.)))
+                .child(
+                    div()
+                        .px(px(2.))
+                        .child(export_caption(
+                            "The island updates live as you make changes.",
+                        )),
+                )
+                .child(div().h(px(24.)))
+                .child(surface_header("In the Island", island_count))
+                .child(island_list(
+                    if on_nook.is_empty() {
                         vec![empty_hint("No widgets on the island yet.").into_any_element()]
                     } else {
                         on_nook
-                    }),
-                    Some("Drag to reorder. Size and options below."),
+                    },
+                    67.0,
                 ))
-                .child(section(
-                    "Available",
-                    settings_group(if available.is_empty() {
+                .child(div().h(px(22.)))
+                .child(surface_header("More Widgets", more_count))
+                .child(island_list(
+                    if available.is_empty() {
                         vec![empty_hint("Every widget is already on the island.").into_any_element()]
                     } else {
                         available
-                    }),
-                    available_footer,
+                    },
+                    44.0,
                 ))
+                .when_some(available_footer, |d, text| {
+                    d.child(div().h(px(8.))).child(
+                        div()
+                            .px(px(2.))
+                            .child(export_caption(text)),
+                    )
+                })
                 .when(show_module, |d| {
                     d.child(self.module_section(
                         settings,
@@ -1293,29 +1394,20 @@ impl SettingsView {
         &self,
         module: WidgetModule,
         settings: &AppSettings,
+        on_island: bool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let selected = self.module == module;
         let on = module.enabled(settings);
-        let caption = if module.occupies_nook_cells() {
-            format!("{} · {}", settings.size_for(module).label(), {
-                let cells = settings.cells_for(module);
-                if cells == 1 {
-                    "1 cell".to_string()
-                } else {
-                    format!("{cells} cells")
-                }
-            })
-        } else {
-            "Tray tab".to_string()
-        };
+        let can = on || settings.can_enable(module);
+        let caption = widget_caption(module, settings);
         div()
             .id(SharedString::from(format!("mod-{}", module.name())))
             .px(px(GROUP_PAD))
-            .min_h(px(ROW_H + 4.0))
+            .h(px(WIDGET_ROW_H))
             .flex()
             .items_center()
-            .gap(px(8.))
+            .gap(px(10.))
             .when(selected, |d| d.bg(theme::FILL))
             .hover(|s| {
                 if selected {
@@ -1324,24 +1416,27 @@ impl SettingsView {
                     s.bg(theme::FILL_TERTIARY)
                 }
             })
-            .drag_over::<WidgetDrag>(move |style, drag, _, _| {
-                if drag.0 == module {
-                    style
-                } else {
-                    style.bg(theme::FILL_SECONDARY)
-                }
+            .when(on_island, |d| {
+                d.drag_over::<WidgetDrag>(move |style, drag, _, _| {
+                    if drag.0 == module {
+                        style
+                    } else {
+                        style.bg(theme::FILL_SECONDARY)
+                    }
+                })
+                .can_drop(move |value, _, _| {
+                    value
+                        .downcast_ref::<WidgetDrag>()
+                        .is_some_and(|drag| drag.0 != module)
+                })
+                .on_drop(cx.listener(move |_, drag: &WidgetDrag, _, cx| {
+                    nook_core::settings::tweak_app_settings(|settings| {
+                        let _ = settings.try_move_widget_to(drag.0, module);
+                    });
+                    cx.notify();
+                }))
+                .on_drag(WidgetDrag(module), |drag, _, _, cx| cx.new(|_| *drag))
             })
-            .can_drop(move |value, _, _| {
-                value
-                    .downcast_ref::<WidgetDrag>()
-                    .is_some_and(|drag| drag.0 != module)
-            })
-            .on_drop(cx.listener(move |_, drag: &WidgetDrag, _, cx| {
-                nook_core::settings::tweak_app_settings(|settings| {
-                    let _ = settings.try_move_widget_to(drag.0, module);
-                });
-                cx.notify();
-            }))
             .cursor(CursorStyle::PointingHand)
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.module = module;
@@ -1356,9 +1451,10 @@ impl SettingsView {
                 }
                 cx.notify();
             }))
-            .on_drag(WidgetDrag(module), |drag, _, _, cx| cx.new(|_| *drag))
-            .child(lucide_color("grip-vertical", 14.0, theme::TERTIARY_LABEL))
-            .child(lucide_color(module.icon(), 15.0, theme::LABEL))
+            .when(on_island, |d| {
+                d.child(lucide_color("grip-vertical", 13.0, EXPORT_MUTED))
+            })
+            .child(widget_badge_glyph(module))
             .child(
                 div()
                     .flex_1()
@@ -1366,10 +1462,23 @@ impl SettingsView {
                     .flex()
                     .flex_col()
                     .gap(px(1.))
-                    .child(label(module.name(), theme::BODY, true))
-                    .child(label(caption, theme::SUBHEADLINE, false)),
+                    .child(
+                        div()
+                            .text_size(px(13.))
+                            .line_height(px(16.))
+                            .font_weight(FontWeight::NORMAL)
+                            .text_color(theme::LABEL)
+                            .child(module.name()),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(10.))
+                            .line_height(px(13.))
+                            .text_color(EXPORT_MUTED)
+                            .child(caption),
+                    ),
             )
-            .child(module_toggle(on, module, settings, cx))
+            .child(module_chip(on, can, module, cx))
     }
 
     fn size_picker(&self, settings: &AppSettings, cx: &mut Context<Self>) -> impl IntoElement {
@@ -2643,6 +2752,270 @@ fn module_blurb(module: WidgetModule) -> SharedString {
     }
 }
 
+fn widget_blurb(module: WidgetModule) -> Option<&'static str> {
+    match module {
+        WidgetModule::Music => Some("Now playing"),
+        WidgetModule::Calendar => Some("Next event"),
+        WidgetModule::Mirror => Some("Camera preview"),
+        WidgetModule::Agents => Some("Running tasks"),
+        WidgetModule::Timers => Some("Active timers"),
+        WidgetModule::Notes => Some("Quick capture"),
+        WidgetModule::Weather => Some("Current conditions"),
+        WidgetModule::Files => Some("Recent downloads"),
+        _ => None,
+    }
+}
+
+fn widget_slots(module: WidgetModule, settings: &AppSettings) -> u8 {
+    match module {
+        WidgetModule::Music | WidgetModule::Calendar | WidgetModule::Files => 2,
+        WidgetModule::Mirror
+        | WidgetModule::Agents
+        | WidgetModule::Timers
+        | WidgetModule::Notes
+        | WidgetModule::Weather => 1,
+        _ if module.occupies_nook_cells() => settings.cells_for(module),
+        _ => 2,
+    }
+}
+
+fn slot_label(slots: u8) -> String {
+    if slots == 1 {
+        "1 slot".into()
+    } else {
+        format!("{slots} slots")
+    }
+}
+
+fn widget_caption(module: WidgetModule, settings: &AppSettings) -> String {
+    let slots = slot_label(widget_slots(module, settings));
+    match widget_blurb(module) {
+        Some(blurb) => format!("{blurb} · {slots}"),
+        None => slots,
+    }
+}
+
+fn widget_badge_color(module: WidgetModule) -> Rgba {
+    theme::rgba_from_u32(
+        match module {
+            WidgetModule::Music => 0xFF375F,
+            WidgetModule::Calendar => 0xFF453A,
+            WidgetModule::Mirror => 0x64D2FF,
+            WidgetModule::Agents => 0xBF5AF2,
+            WidgetModule::Timers => 0xFF9F0A,
+            WidgetModule::Notes => 0xFFD60A,
+            WidgetModule::Weather => 0x0A84FF,
+            WidgetModule::Files => 0x5E5CE6,
+            WidgetModule::Reminders => 0xFF453A,
+            WidgetModule::Speed => 0x30D158,
+            WidgetModule::Battery => 0x30D158,
+            WidgetModule::Observe => 0x64D2FF,
+            WidgetModule::Meeting => 0xBF5AF2,
+            WidgetModule::Obsidian => 0x7C5CFF,
+            WidgetModule::Messages => 0x30D158,
+            WidgetModule::Vpn => 0x0A84FF,
+            WidgetModule::HighAlert => 0xFF9F0A,
+            WidgetModule::SysStats => 0xFF375F,
+            WidgetModule::Recorder => 0xFF453A,
+            WidgetModule::Notifications => 0xFF9F0A,
+        },
+        1.0,
+    )
+}
+
+fn widget_badge_glyph(module: WidgetModule) -> impl IntoElement {
+    div()
+        .size(px(22.))
+        .rounded(px(6.16))
+        .bg(widget_badge_color(module))
+        .flex()
+        .items_center()
+        .justify_center()
+        .flex_shrink_0()
+        .child(lucide_color(module.icon(), 13.0, theme::LABEL))
+}
+
+fn surface_header(
+    title: impl Into<SharedString>,
+    trailing: impl Into<SharedString>,
+) -> impl IntoElement {
+    div()
+        .w_full()
+        .px(px(2.))
+        .pb(px(8.))
+        .flex()
+        .items_center()
+        .child(
+            div()
+                .text_size(px(11.))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(EXPORT_MUTED)
+                .child(title.into()),
+        )
+        .child(div().flex_1())
+        .child(
+            div()
+                .text_size(px(11.))
+                .font_weight(FontWeight::NORMAL)
+                .text_color(EXPORT_MUTED)
+                .child(trailing.into()),
+        )
+}
+
+fn export_caption(text: impl Into<SharedString>) -> impl IntoElement {
+    div()
+        .text_size(px(11.))
+        .text_color(EXPORT_MUTED)
+        .child(text.into())
+}
+
+fn island_list(rows: Vec<AnyElement>, rule_inset: f32) -> impl IntoElement {
+    let mut group = div()
+        .flex()
+        .flex_col()
+        .rounded(px(10.))
+        .bg(EXPORT_LIST_BG)
+        .border_1()
+        .border_color(EXPORT_LIST_BORDER)
+        .overflow_hidden();
+    for (i, row) in rows.into_iter().enumerate() {
+        if i > 0 {
+            group = group.child(
+                div()
+                    .h(px(1.))
+                    .ml(px(rule_inset))
+                    .bg(theme::with_alpha(theme::LABEL, 0.08)),
+            );
+        }
+        group = group.child(row);
+    }
+    group
+}
+
+fn island_preview(settings: &AppSettings) -> impl IntoElement {
+    let cells: Vec<WidgetModule> = settings
+        .ordered_widgets()
+        .into_iter()
+        .filter(|module| {
+            module.is_available()
+                && settings.widget_visible(*module)
+                && module.enabled(settings)
+                && module.occupies_nook_cells()
+        })
+        .collect();
+    let island = div()
+        .id("island-preview")
+        .w_full()
+        .px(px(14.))
+        .py(px(14.))
+        .rounded(px(20.))
+        .bg(theme::ISLAND)
+        .shadow_md()
+        .flex()
+        .items_center()
+        .justify_center()
+        .gap(px(4.));
+    let island = if cells.is_empty() {
+        island.child(label("Nothing on the island yet.", theme::FOOTNOTE, false))
+    } else {
+        cells.into_iter().fold(island, |island, module| {
+            island.child(
+                div()
+                    .id(SharedString::from(format!(
+                        "preview-{}",
+                        module.name()
+                    )))
+                    .flex_1()
+                    .min_w(px(0.))
+                    .px(px(4.))
+                    .py(px(6.))
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .justify_center()
+                    .gap(px(7.))
+                    .child(lucide_color(module.icon(), 17.0, theme::LABEL))
+                    .child(
+                        div()
+                            .text_size(px(10.))
+                            .line_height(px(13.))
+                            .text_color(EXPORT_MUTED)
+                            .child(module.name()),
+                    ),
+            )
+        })
+    };
+    div()
+        .w_full()
+        .px(px(18.))
+        .py(px(18.))
+        .rounded(px(10.))
+        .border_1()
+        .border_color(EXPORT_WELL_BORDER)
+        .bg(linear_gradient(
+            90.0,
+            linear_color_stop(theme::rgba_from_u32(0x2A2A30, 1.0), 0.0),
+            linear_color_stop(theme::rgba_from_u32(0x141417, 1.0), 1.0),
+        ))
+        .child(island)
+}
+
+fn apply_module_enabled(module: WidgetModule, on: bool, cx: &mut Context<SettingsView>) {
+    let mut settings = nook_core::settings::get_app_settings();
+    let was_enabled = settings.show_notifications;
+    let _ = settings.set_enabled(module, on);
+    let request_notifications =
+        module == WidgetModule::Notifications && !was_enabled && settings.show_notifications;
+    nook_core::settings::update_app_settings(settings);
+    if request_notifications {
+        nook_core::notifications::ax_trusted(true);
+    }
+    cx.notify();
+}
+
+fn module_chip(
+    on: bool,
+    can: bool,
+    module: WidgetModule,
+    cx: &mut Context<SettingsView>,
+) -> impl IntoElement {
+    let (icon, caption, color) = if on {
+        ("minus", "Remove", theme::SECONDARY_LABEL)
+    } else {
+        ("plus", "Add", EXPORT_ACCENT)
+    };
+    div()
+        .id(SharedString::from(format!("chip-{}", module.name())))
+        .h(px(22.))
+        .px(px(9.))
+        .rounded(px(6.))
+        .bg(theme::with_alpha(theme::LABEL, 0.10))
+        .flex()
+        .items_center()
+        .gap(px(4.))
+        .flex_shrink_0()
+        .opacity(if can { 1.0 } else { 0.4 })
+        .cursor(if can {
+            CursorStyle::PointingHand
+        } else {
+            CursorStyle::Arrow
+        })
+        .on_click(cx.listener(move |_, _, _, cx| {
+            cx.stop_propagation();
+            if !can && !on {
+                return;
+            }
+            apply_module_enabled(module, !on, cx);
+        }))
+        .child(lucide_color(icon, 11.0, color))
+        .child(
+            div()
+                .text_size(px(theme::SUBHEADLINE.size))
+                .text_color(color)
+                .child(caption),
+        )
+}
+
 fn section(
     header: impl Into<SharedString>,
     group: impl IntoElement,
@@ -3030,43 +3403,6 @@ fn toggle_row(
         .child(toggle_knob(on))
 }
 
-fn module_toggle(
-    on: bool,
-    module: WidgetModule,
-    settings: &AppSettings,
-    cx: &mut Context<SettingsView>,
-) -> impl IntoElement {
-    let can = on || settings.can_enable(module);
-    div()
-        .id(SharedString::from(format!("tog-{}", module.name())))
-        .min_h(px(theme::HIT_MIN))
-        .flex()
-        .items_center()
-        .opacity(if can { 1.0 } else { 0.4 })
-        .cursor(if can {
-            CursorStyle::PointingHand
-        } else {
-            CursorStyle::Arrow
-        })
-        .on_click(cx.listener(move |_, _, _, cx| {
-            cx.stop_propagation();
-            if !can && !on {
-                return;
-            }
-            let mut s = nook_core::settings::get_app_settings();
-            let was_enabled = s.show_notifications;
-            module.set_enabled(&mut s);
-            let request_notifications =
-                module == WidgetModule::Notifications && !was_enabled && s.show_notifications;
-            nook_core::settings::update_app_settings(s);
-            if request_notifications {
-                nook_core::notifications::ax_trusted(true);
-            }
-            cx.notify();
-        }))
-        .child(toggle_knob(on))
-}
-
 fn color_swatch(
     swatch: IslandSwatch,
     selected: Option<u32>,
@@ -3324,11 +3660,11 @@ mod tests {
     #[test]
     fn settings_window_is_landscape() {
         let (w, h) = SETTINGS_SIZE;
-        assert_eq!((w, h), (780.0, 560.0));
+        assert_eq!((w, h), (820.0, 720.0));
         assert!(w > h, "default size stays landscape");
         let (min_w, min_h) = SETTINGS_MIN;
         assert!(min_w > min_h, "min size stays landscape");
-        assert!(min_w >= 680.0 && min_h >= 480.0);
+        assert_eq!(SIDEBAR_W, 212.0);
         assert!(w > SIDEBAR_W + 400.0, "pane has room beside the sidebar");
     }
 
@@ -3402,5 +3738,58 @@ mod tests {
         assert_eq!(settings.nook_row_count(), 1);
         assert_eq!(settings.used_cells(), 17);
         assert_eq!(settings.remaining_cells(), 0);
+    }
+
+    #[test]
+    fn widget_blurbs_map_export_labels_to_existing_modules() {
+        assert_eq!(widget_blurb(WidgetModule::Music), Some("Now playing"));
+        assert_eq!(widget_blurb(WidgetModule::Calendar), Some("Next event"));
+        assert_eq!(widget_blurb(WidgetModule::Mirror), Some("Camera preview"));
+        assert_eq!(widget_blurb(WidgetModule::Agents), Some("Running tasks"));
+        assert_eq!(widget_blurb(WidgetModule::Timers), Some("Active timers"));
+        assert_eq!(widget_blurb(WidgetModule::Notes), Some("Quick capture"));
+        assert_eq!(
+            widget_blurb(WidgetModule::Weather),
+            Some("Current conditions")
+        );
+        assert_eq!(widget_blurb(WidgetModule::Files), Some("Recent downloads"));
+        assert_eq!(widget_blurb(WidgetModule::Reminders), None);
+        assert_eq!(widget_blurb(WidgetModule::Speed), None);
+        assert_eq!(widget_blurb(WidgetModule::Battery), None);
+    }
+
+    #[test]
+    fn widget_captions_use_slots_not_cells() {
+        let settings = AppSettings::default();
+        assert_eq!(
+            widget_caption(WidgetModule::Music, &settings),
+            "Now playing · 2 slots"
+        );
+        assert_eq!(
+            widget_caption(WidgetModule::Calendar, &settings),
+            "Next event · 2 slots"
+        );
+        assert_eq!(
+            widget_caption(WidgetModule::Mirror, &settings),
+            "Camera preview · 1 slot"
+        );
+        assert_eq!(
+            widget_caption(WidgetModule::Files, &settings),
+            "Recent downloads · 2 slots"
+        );
+        assert_eq!(
+            widget_caption(WidgetModule::Reminders, &settings),
+            slot_label(settings.cells_for(WidgetModule::Reminders))
+        );
+        assert_eq!(slot_label(1), "1 slot");
+        assert_eq!(slot_label(2), "2 slots");
+    }
+
+    #[test]
+    fn every_module_has_a_badge_color() {
+        for module in WidgetModule::ALL {
+            let color = widget_badge_color(module);
+            assert!(color.a > 0.0, "{}", module.name());
+        }
     }
 }
