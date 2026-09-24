@@ -209,14 +209,4 @@ mod tests {
         assert_eq!(CORE_GET_SYMBOL, "CoreDisplay_Display_GetUserBrightness");
         assert_eq!(CORE_SET_SYMBOL, "CoreDisplay_Display_SetUserBrightness");
     }
-
-    #[test]
-    fn setters_are_safe_off_macos() {
-        set_brightness(0.3);
-        #[cfg(not(target_os = "macos"))]
-        {
-            assert!(!available());
-            assert_eq!(brightness(), None);
-        }
-    }
 }

@@ -11,6 +11,7 @@ use crate::widgets::{
     notes_card, notifications_card, observe_big_view, observe_card, obsidian_card, recorder_card,
     reminders_card,
     speed_card, sysstats_card, terminal_card, timer_card, vpn_card, weather_card,
+    OBSERVE_EXPANDED_BODY,
 };
 use gpui::{
     div, img, prelude::*, px, AnyElement, Context, CursorStyle, FontWeight, MouseButton,
@@ -171,14 +172,19 @@ impl Island {
             return div()
                 .id("nook-row")
                 .size_full()
+                .overflow_hidden()
                 .px(px(theme::NOOK_INSET))
                 .pb(px(theme::NOOK_INSET))
-                .child(observe_big_view(
-                    &self.observe,
-                    &self.settings,
-                    self.observe_hover.as_ref(),
-                    cx,
-                ))
+                .child(
+                    observe_big_view(
+                        &self.observe,
+                        &self.settings,
+                        self.observe_hover.as_ref(),
+                        cx,
+                    )
+                    .h(px(OBSERVE_EXPANDED_BODY - theme::NOOK_INSET))
+                    .flex_shrink_0(),
+                )
                 .into_any_element();
         }
         if !self.widget_edit && self.has_incoming_message() && self.mode() == CompactMode::Messages

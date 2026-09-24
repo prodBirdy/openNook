@@ -257,6 +257,10 @@ pub struct Island {
     pub(crate) observe_hover: Option<crate::widgets::ObserveHover>,
     /// Gallery Observe card is open as the full-width Nightwatch view.
     pub(crate) observe_expanded: bool,
+    /// Strip resize for Observe open is in flight; ignore a second click.
+    observe_open_pending: bool,
+    /// In-place Observe open/close uses `motion::RESIZE` instead of `MORPH`.
+    resize_smooth: bool,
     pub power: PowerSnapshot,
     pub(crate) lpm_pending: bool,
     pub(crate) lpm_error: Option<String>,
@@ -291,6 +295,12 @@ pub struct Island {
     pub(crate) weather_inflight: bool,
     pub last_tick: Instant,
     last_frame: Instant,
+    /// An `on_next_frame` callback is pending for the spring driver.
+    frame_driver_armed: bool,
+    /// Last `step_spring` result; render arms the driver while this is true.
+    springs_moving: bool,
+    /// When springs were last stepped (driver or poll loop).
+    last_spring_step: Instant,
     /// Last seen `nook_core::settings::settings_generation()`; the tick loop
     /// only clones the settings struct when this moves.
     settings_gen: u64,
@@ -508,6 +518,8 @@ impl Island {
             message_focus: None,
             observe_hover: None,
             observe_expanded: false,
+            observe_open_pending: false,
+            resize_smooth: false,
             power: nook_core::power::current(),
             lpm_pending: false,
             lpm_error: None,
@@ -534,6 +546,9 @@ impl Island {
             weather_inflight: false,
             last_tick: Instant::now(),
             last_frame: Instant::now(),
+            frame_driver_armed: false,
+            springs_moving: false,
+            last_spring_step: Instant::now(),
             settings_gen: nook_core::settings::settings_generation(),
             cursor_near: false,
             settings_open: false,
@@ -974,8 +989,16 @@ impl Island {
                     if this.release_stale_expand_pull() {
                         dirty = true;
                     }
-                    if this.step_spring(dt) {
-                        dirty = true;
+                    // Display link pauses while occluded; don't leave the driver armed forever.
+                    if !this.frame_driver_armed
+                        || now.duration_since(this.last_spring_step) > Duration::from_millis(100)
+                    {
+                        let moving = this.step_spring(dt);
+                        this.springs_moving = moving;
+                        this.last_spring_step = now;
+                        if moving {
+                            dirty = true;
+                        }
                     }
                     let any_working = this.agents.iter().any(|a| a.status.is_working());
                     if this.paints_live_widgets()
@@ -1745,11 +1768,55 @@ impl Island {
     }
 
     pub(crate) fn open_observe_expanded(&mut self, cx: &mut Context<Self>) {
-        if self.widget_edit {
+        if self.widget_edit || self.observe_expanded || self.observe_open_pending {
             return;
         }
+        let w = self.expanded_width();
+        let h = (self.notch_height.max(theme::NOTCH_MIN_H)
+            + crate::widgets::OBSERVE_EXPANDED_BODY)
+            .min(self.screen_height - theme::SCREEN_MARGIN);
+        let (_, top) = self.settings.island_origin(
+            self.screen_width,
+            self.screen_height,
+            w.max(1.0),
+            h.max(1.0),
+        );
+        let capture = self.file_drag || self.repositioning || self.pending_file_drag.is_some();
+        let needed = notch::quantized_overlay_height(
+            (top + h.max(1.0)) as f64,
+            self.screen_height as f64,
+            capture,
+        );
+        let published = notch::published_overlay_height();
+        if needed > published {
+            let _ = notch::set_overlay_height(needed);
+            self.observe_open_pending = true;
+            let resize = Self::spawn_strip_resize(cx);
+            cx.spawn(async move |this, cx| {
+                resize.await;
+                let _ = this.update(cx, |this, cx| {
+                    this.observe_open_pending = false;
+                    if !this.expanded {
+                        return;
+                    }
+                    this.commit_open_observe_expanded(cx);
+                });
+            })
+            .detach();
+            return;
+        }
+        self.commit_open_observe_expanded(cx);
+    }
+
+    fn commit_open_observe_expanded(&mut self, cx: &mut Context<Self>) {
+        if self.widget_edit || self.observe_expanded {
+            return;
+        }
+        self.observe_hover = None;
         self.observe_expanded = true;
         self.tab = Tab::Widgets;
+        self.resize_smooth = true;
+        self.content_transition_force = true;
         self.arm_content_transition();
         cx.notify();
     }
@@ -1758,13 +1825,18 @@ impl Island {
         if !self.observe_expanded {
             return;
         }
+        self.observe_hover = None;
         self.observe_expanded = false;
+        self.resize_smooth = true;
+        self.content_transition_force = true;
         self.arm_content_transition();
         cx.notify();
     }
 
     fn clear_observe_expanded(&mut self) {
+        self.observe_hover = None;
         self.observe_expanded = false;
+        self.observe_open_pending = false;
     }
 
     pub(crate) fn refresh_observe(&mut self, cx: &mut Context<Self>) {
@@ -3677,10 +3749,69 @@ impl Island {
         self.arm_content_transition();
     }
 
+    /// 60fps cap: skip extra vsyncs on a 120Hz panel (`1/60 s − 2ms`).
+    fn frame_step_due(elapsed: Duration) -> bool {
+        elapsed.as_secs_f64() >= 1.0 / 60.0 - 0.002
+    }
+
+    pub(super) fn springs_off_target(&self) -> bool {
+        let (tw, th) = self.target_size();
+        let overlay = if self.mode() == CompactMode::Meeting {
+            if self
+                .meeting_flash_until
+                .is_some_and(|until| Instant::now() < until)
+            {
+                1.0
+            } else {
+                0.0
+            }
+        } else {
+            media::album_overlay_target(self.hovered)
+        };
+        let hud_target = self
+            .hud
+            .filter(|_| self.hud_enabled())
+            .map(|h| h.display_value())
+            .unwrap_or(0.0);
+        (self.anim_w.value - tw).abs() > motion::REST_PX
+            || (self.anim_h.value - th).abs() > motion::REST_PX
+            || self.content_x.value.abs() > motion::REST_PX
+            || self.content_y.value.abs() > motion::REST_PX
+            || (1.0 - self.content_fade.value).abs() > motion::REST_ALPHA
+            || (self.overlay_fade.value - overlay).abs() > motion::REST_ALPHA
+            || (self.hud_fill.value - hud_target).abs() > motion::REST_ALPHA
+    }
+
+    pub(super) fn arm_frame_driver(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.frame_driver_armed {
+            return;
+        }
+        self.frame_driver_armed = true;
+        cx.on_next_frame(window, |this, window, cx| this.frame_tick(window, cx));
+    }
+
+    fn frame_tick(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.frame_driver_armed = false;
+        let now = Instant::now();
+        let elapsed = now.duration_since(self.last_spring_step);
+        if Self::frame_step_due(elapsed) {
+            let dt = elapsed.as_secs_f32().min(1.0 / 30.0);
+            self.last_spring_step = now;
+            self.springs_moving = self.step_spring(dt);
+            cx.notify();
+        }
+        if self.springs_moving {
+            self.arm_frame_driver(window, cx);
+        }
+    }
+
     /// Advance every animated value one frame on its `motion` spring.
     /// Returns whether we still need frames.
     fn step_spring(&mut self, dt: f32) -> bool {
         let (tw, th) = self.target_size();
+        if self.expanded != self.last_expanded || self.widget_edit != self.last_widget_edit {
+            self.resize_smooth = false;
+        }
         self.arm_content_transition();
 
         let mut moving = false;
@@ -3700,8 +3831,21 @@ impl Island {
             self.content_y.set(0.0);
             self.agent_morph_lite = false;
         } else {
-            moving |= self.anim_w.step(motion::MORPH, tw, dt, motion::REST_PX);
-            moving |= self.anim_h.step(motion::MORPH, th, dt, motion::REST_PX);
+            let size_spring = if self.resize_smooth {
+                motion::RESIZE
+            } else {
+                motion::MORPH
+            };
+            moving |= self.anim_w.step(size_spring, tw, dt, motion::REST_PX);
+            moving |= self.anim_h.step(size_spring, th, dt, motion::REST_PX);
+            if self.resize_smooth
+                && (self.anim_w.value - tw).abs() <= motion::REST_PX
+                && self.anim_w.velocity.abs() <= motion::REST_PX * 10.0
+                && (self.anim_h.value - th).abs() <= motion::REST_PX
+                && self.anim_h.velocity.abs() <= motion::REST_PX * 10.0
+            {
+                self.resize_smooth = false;
+            }
             moving |= self
                 .content_x
                 .step(motion::CONTEXT_SHIFT, 0.0, dt, motion::REST_PX);
@@ -4741,6 +4885,8 @@ mod tests {
             message_focus: None,
             observe_hover: None,
             observe_expanded: false,
+            observe_open_pending: false,
+            resize_smooth: false,
             power: PowerSnapshot::default(),
             lpm_pending: false,
             lpm_error: None,
@@ -4767,6 +4913,9 @@ mod tests {
             weather_inflight: false,
             last_tick: Instant::now(),
             last_frame: Instant::now(),
+            frame_driver_armed: false,
+            springs_moving: false,
+            last_spring_step: Instant::now(),
             settings_gen: 0,
             cursor_near: false,
             settings_open: false,
@@ -5290,6 +5439,28 @@ mod tests {
             "expanded_bottom={reserved} files bottom={}",
             ftop + fh
         );
+    }
+
+    #[test]
+    fn expanded_bottom_does_not_reserve_observe() {
+        let mut island = test_island();
+        island.expanded = true;
+        island.tab = Tab::Widgets;
+        island.notch_height = 38.0;
+        island.screen_width = 1800.0;
+        island.settings.show_observe = false;
+        island.settings.experimental_widgets = false;
+        let without = island.expanded_bottom();
+
+        island.settings.experimental_widgets = true;
+        island.settings.show_observe = true;
+        island.observe_expanded = false;
+        assert!(island
+            .visible_nook_items()
+            .iter()
+            .any(|(module, _)| *module == WidgetModule::Observe));
+        let with_visible = island.expanded_bottom();
+        assert_eq!(without, with_visible);
     }
 
     #[test]
@@ -6258,6 +6429,82 @@ mod tests {
         let (tw, th) = island.target_size();
         assert!((island.anim_w.value - tw).abs() < 0.5);
         assert!((island.anim_h.value - th).abs() < 0.5);
+    }
+
+    #[test]
+    fn frame_step_due_caps_at_60fps() {
+        assert!(Island::frame_step_due(Duration::from_millis(15)));
+        assert!(!Island::frame_step_due(Duration::from_millis(8)));
+        assert!(Island::frame_step_due(Duration::from_micros(16_700)));
+    }
+
+    #[test]
+    fn observe_open_resize_does_not_overshoot() {
+        let mut island = test_island();
+        island.expanded = true;
+        island.tab = Tab::Widgets;
+        island.notch_height = 38.0;
+        island.screen_width = 1800.0;
+        for _ in 0..400 {
+            if !island.step_spring(1.0 / 60.0) {
+                break;
+            }
+        }
+        assert!(!island.resize_smooth);
+
+        island.observe_expanded = true;
+        island.resize_smooth = true;
+        let target_h = island.target_size().1;
+        let mut moving = true;
+        for _ in 0..400 {
+            moving = island.step_spring(1.0 / 60.0);
+            assert!(
+                island.anim_h.value <= target_h + motion::REST_PX,
+                "observe open overshot: {} > {}",
+                island.anim_h.value,
+                target_h
+            );
+            if !moving {
+                break;
+            }
+        }
+        assert!(!moving);
+        assert!(!island.resize_smooth);
+    }
+
+    #[test]
+    fn observe_close_resize_does_not_undershoot() {
+        let mut island = test_island();
+        island.expanded = true;
+        island.tab = Tab::Widgets;
+        island.observe_expanded = true;
+        island.notch_height = 38.0;
+        island.screen_width = 1800.0;
+        for _ in 0..400 {
+            if !island.step_spring(1.0 / 60.0) {
+                break;
+            }
+        }
+        assert!(!island.resize_smooth);
+
+        island.observe_expanded = false;
+        island.resize_smooth = true;
+        let target_h = island.target_size().1;
+        let mut moving = true;
+        for _ in 0..400 {
+            moving = island.step_spring(1.0 / 60.0);
+            assert!(
+                island.anim_h.value + motion::REST_PX >= target_h,
+                "observe close undershot: {} < {}",
+                island.anim_h.value,
+                target_h
+            );
+            if !moving {
+                break;
+            }
+        }
+        assert!(!moving);
+        assert!(!island.resize_smooth);
     }
 
     /// The poll loop used to cap `dt` at 50ms. Semi-implicit Euler at MORPH

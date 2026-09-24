@@ -148,7 +148,7 @@ impl ObserveRange {
 
     fn spec(self) -> (&'static str, i64, i64) {
         match self {
-            Self::FiveMinutes => ("5m", 5 * 60, 15),
+            Self::FiveMinutes => ("5m", 5 * 60, 10),
             Self::FifteenMinutes => ("15m", 15 * 60, 30),
             Self::OneHour => ("1h", 60 * 60, 60),
             Self::SixHours => ("6h", 6 * 60 * 60, 300),
@@ -1759,6 +1759,7 @@ mod tests {
     #[test]
     fn range_labels_and_steps() {
         assert_eq!(ObserveRange::FiveMinutes.label(), "5m");
+        assert_eq!(ObserveRange::FiveMinutes.step_seconds(), 10);
         assert_eq!(ObserveRange::FifteenMinutes.seconds(), 900);
         assert_eq!(ObserveRange::SixHours.step_seconds(), 300);
         assert_eq!(ObserveRange::OneHour.duration_ms(), 3_600_000);

@@ -52,6 +52,15 @@ impl gpui::Render for Island {
         }
         self.sync_overlay_strip(body_top, th.max(1.0), cx);
 
+        if !self.suppressed {
+            if self.springs_off_target() {
+                self.springs_moving = true;
+            }
+            if self.springs_moving {
+                self.arm_frame_driver(window, cx);
+            }
+        }
+
         let mode = self.mode();
         let expanded = self.expanded;
         let hovered = self.hovered;
@@ -548,12 +557,14 @@ impl Island {
                 && (self.anim_h.value - th).abs() < 0.5
                 && self.anim_w.velocity.abs() < 1.0
                 && self.anim_h.velocity.abs() < 1.0;
-            if !settled || capture {
+            // Observe open grows the strip before flipping observe_expanded;
+            // a paint in between would otherwise shrink it back.
+            if !settled || capture || self.observe_open_pending {
                 return;
             }
         }
         if notch::set_overlay_height(needed) != needed {
-            Self::spawn_strip_resize(cx);
+            Self::spawn_strip_resize(cx).detach();
         }
     }
 
@@ -566,11 +577,10 @@ impl Island {
     /// expanded island. The pin pass sets the frame through AppKit once the
     /// current update has fully unwound (the same footing as `spawn_pin`),
     /// and GPUI picks the new size up through its own resize delegate.
-    fn spawn_strip_resize(cx: &mut Context<Island>) {
+    pub(super) fn spawn_strip_resize(cx: &mut Context<Island>) -> gpui::Task<()> {
         cx.spawn(async move |_, _| {
             platform::pin_island_windows();
         })
-        .detach();
     }
 
     pub(super) fn sync_geometry(&mut self, cx: &mut Context<Island>) {
@@ -588,7 +598,7 @@ impl Island {
         };
         self.screen_width = info.screen_width as f32;
         self.screen_height = info.screen_height as f32;
-        Self::spawn_strip_resize(cx);
+        Self::spawn_strip_resize(cx).detach();
     }
 }
 

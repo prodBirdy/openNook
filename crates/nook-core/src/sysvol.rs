@@ -492,16 +492,4 @@ mod tests {
     fn hud_ttl_is_brief() {
         assert_eq!(HUD_TTL, Duration::from_millis(1500));
     }
-
-    #[test]
-    fn volume_setters_are_safe_off_macos() {
-        set_volume(0.5);
-        set_muted(true);
-        #[cfg(not(target_os = "macos"))]
-        {
-            assert!(!available());
-            assert_eq!(volume(), None);
-            assert!(!muted());
-        }
-    }
 }

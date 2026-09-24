@@ -12,7 +12,7 @@ use gpui::{
     MouseButton, MouseDownEvent, MouseMoveEvent, PathBuilder, Pixels, Rgba, SharedString,
 };
 use nook_core::observe::{
-    ObserveChartKind, ObserveRange, ObserveSnapshot, ObserveSourceKind, RangeSeries, SamplePoint,
+    ObserveRange, ObserveSnapshot, ObserveSourceKind, SamplePoint,
 };
 use nook_core::settings::AppSettings;
 use std::cell::RefCell;
@@ -34,11 +34,15 @@ struct StackedSample {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+struct ChartBucket {
+    start: f64,
+    end: f64,
+    values: Option<[f64; 3]>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) struct ObserveHover {
-    pub query: String,
-    pub series: Option<String>,
-    pub ts: f64,
-    pub value: f64,
+    pub bucket: usize,
 }
 
 pub(crate) fn observe_card(
@@ -96,11 +100,10 @@ pub(crate) fn observe_big_view(
     settings: &AppSettings,
     hover: Option<&ObserveHover>,
     cx: &mut Context<Island>,
-) -> impl IntoElement {
+) -> gpui::Stateful<gpui::Div> {
     // Mockup `observe-big` (nNzAv): numeral + unit + range chips, caption,
     // 30 stacked status columns, legend. No other chrome; the × only shows
     // on hover. Empty data keeps the layout with a "—" numeral.
-    let _ = hover;
     let range = settings.observe.range;
     let mut chips = div().flex().items_center().gap(px(6.)).flex_shrink_0();
     for option in ObserveRange::all() {
@@ -109,11 +112,22 @@ pub(crate) fn observe_big_view(
 
     let statuses = status_series(snap);
     let featured = snap.metrics.first();
-    let headline = if !statuses.is_empty() {
+    let buckets = status_buckets(
+        &stacked_samples(&statuses, range.step_seconds() as f64),
+        range,
+        BIG_COLUMNS,
+    );
+    let hovered = hover.and_then(|h| buckets.get(h.bucket));
+    let headline = if let Some(bucket) = hovered {
+        match bucket.values {
+            Some(values) => compact_number(bucket_total(values)),
+            None => "—".into(),
+        }
+    } else if !statuses.is_empty() {
         let latest: f64 = statuses
             .iter()
             .filter_map(|series| series.points.last())
-            .map(|pt| pt.value.max(0.0))
+            .map(|pt| clamp_value(pt.value))
             .sum();
         compact_number(latest)
     } else {
@@ -122,7 +136,9 @@ pub(crate) fn observe_big_view(
             .map(compact_number)
             .unwrap_or_else(|| "—".into())
     };
-    let metric_label = if !statuses.is_empty() {
+    let metric_label = if let Some(bucket) = hovered {
+        format_bucket_range(bucket.start, bucket.end, range)
+    } else if !statuses.is_empty() {
         observe_metric_caption(Some("HTTP status"), settings)
     } else {
         observe_metric_caption(featured.map(|m| m.label.as_str()), settings)
@@ -139,13 +155,10 @@ pub(crate) fn observe_big_view(
         .child(div().flex_1())
         .child(chips);
 
-    let buckets = status_buckets(&stacked_samples(&statuses), range, BIG_COLUMNS);
-
     nook_pane("nook-observe-big")
         .group("nook-observe-big")
         .relative()
         .w_full()
-        .h_full()
         .bg(theme::ISLAND)
         .rounded(px(theme::ROW_RADIUS))
         .border_1()
@@ -159,7 +172,7 @@ pub(crate) fn observe_big_view(
                 .w_full()
                 .flex_shrink_0(),
         )
-        .child(status_columns(&buckets))
+        .child(status_chart(&buckets, hover, range, cx))
         .child(status_legend(status_totals(snap), range))
         .child(observe_close_btn(cx))
 }
@@ -170,6 +183,13 @@ const COLUMN_GAP: f32 = 3.0;
 const COLUMN_RADIUS: f32 = 3.0;
 const CLOSE_INSET: f32 = 12.0;
 const CLOSE_GLYPH: f32 = 16.0;
+const Y_GUTTER: f32 = 28.0;
+const X_AXIS_H: f32 = 14.0;
+const HOVER_DIM: f32 = 0.55;
+const X_TICKS: usize = 4;
+const TOOLTIP_W: f32 = 168.0;
+/// Connected Observe poll in `Island` is 15s; used when a series has no deltas.
+const POLL_SECS: f64 = 15.0;
 
 /// Mockup numeral format: one decimal, trailing `.0` dropped (`2.4k`, `84`).
 fn compact_number(value: f64) -> String {
@@ -195,86 +215,614 @@ fn compact_number(value: f64) -> String {
     format!("{text}{suffix}")
 }
 
-/// Bucket stacked samples into `count` equal slices of the selected range,
-/// ending at the newest sample. Each bucket is the per-group mean of the
-/// samples that fall in it; empty buckets are `None` (no bar).
+fn clamp_value(value: f64) -> f64 {
+    if value.is_finite() {
+        value.max(0.0)
+    } else {
+        0.0
+    }
+}
+
+fn bucket_total(values: [f64; 3]) -> f64 {
+    values.into_iter().map(clamp_value).sum()
+}
+
+fn now_secs() -> f64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0)
+}
+
+/// Bucket stacked samples into `count` wall-clock slices of the selected range,
+/// ending at the bucket that contains the newest sample. Each bucket is the
+/// per-group mean of samples in `[start, end)`; empty buckets stay `None`
+/// except a one-poll carry-forward after the first real sample.
 fn status_buckets(
     samples: &[StackedSample],
     range: ObserveRange,
     count: usize,
-) -> Vec<Option<[f64; 3]>> {
+) -> Vec<ChartBucket> {
+    if count == 0 {
+        return Vec::new();
+    }
+    let width = (range.seconds() as f64 / count as f64).max(1e-9);
+    let newest = samples
+        .iter()
+        .map(|sample| sample.ts)
+        .filter(|ts| ts.is_finite())
+        .fold(f64::NAN, f64::max);
+    let newest = if newest.is_finite() {
+        newest
+    } else {
+        now_secs()
+    };
+    let last_start = (newest / width).floor() * width;
+    let first_start = last_start - (count as f64 - 1.0) * width;
+
     let mut sums = vec![[0.0f64; 3]; count];
     let mut hits = vec![0usize; count];
-    if let Some(end) = samples.iter().map(|s| s.ts).reduce(f64::max) {
-        let span = range.seconds().max(1) as f64;
-        let start = end - span;
-        for sample in samples {
-            if sample.ts < start {
-                continue;
+    let mut last_hit_ts = vec![None::<f64>; count];
+    for sample in samples {
+        if !sample.ts.is_finite() {
+            continue;
+        }
+        let idx_f = (sample.ts - first_start) / width;
+        if idx_f < 0.0 {
+            continue;
+        }
+        let idx = idx_f.floor() as i64;
+        if idx < 0 || idx >= count as i64 {
+            continue;
+        }
+        let i = idx as usize;
+        for (sum, value) in sums[i].iter_mut().zip(sample.values) {
+            *sum += clamp_value(value);
+        }
+        hits[i] += 1;
+        last_hit_ts[i] = Some(last_hit_ts[i].map_or(sample.ts, |ts| ts.max(sample.ts)));
+    }
+
+    let mut buckets: Vec<ChartBucket> = (0..count)
+        .map(|i| {
+            let start = first_start + i as f64 * width;
+            ChartBucket {
+                start,
+                end: start + width,
+                values: (hits[i] > 0).then(|| sums[i].map(|v| clamp_value(v / hits[i] as f64))),
             }
-            let index = (((sample.ts - start) / span) * count as f64) as usize;
-            let index = index.min(count.saturating_sub(1));
-            for (sum, value) in sums[index].iter_mut().zip(sample.values) {
-                *sum += value.max(0.0);
+        })
+        .collect();
+
+    let max_gap = carry_gap(samples, range);
+    let mut last_real: Option<(f64, [f64; 3])> = None;
+    for (bucket, hit_ts) in buckets.iter_mut().zip(last_hit_ts) {
+        if let Some(values) = bucket.values {
+            last_real = Some((hit_ts.unwrap_or(bucket.start), values));
+        } else if let Some((ts, values)) = last_real {
+            if bucket.start - ts <= max_gap {
+                bucket.values = Some(values);
             }
-            hits[index] += 1;
         }
     }
-    sums.into_iter()
-        .zip(hits)
-        .map(|(sum, n)| (n > 0).then(|| sum.map(|v| v / n as f64)))
-        .collect()
+    buckets
 }
 
-/// 30 flex columns, bottom-aligned, 3pt gaps. Each column stacks 1–3xx
-/// (bottom), 4xx, 5xx (top); the column's 3pt radius clips the corners and
-/// the topmost present segment carries the 3 3 0 0 radius.
-fn status_columns(buckets: &[Option<[f64; 3]>]) -> impl IntoElement {
-    let max = buckets
+fn carry_gap(samples: &[StackedSample], range: ObserveRange) -> f64 {
+    let step = (range.step_seconds() as f64).max(1.0);
+    let mut times: Vec<f64> = samples
         .iter()
-        .flatten()
-        .map(|values| values.iter().sum::<f64>())
+        .map(|sample| sample.ts)
+        .filter(|ts| ts.is_finite())
+        .collect();
+    times.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let mut deltas: Vec<f64> = times
+        .windows(2)
+        .map(|pair| pair[1] - pair[0])
+        .filter(|d| *d > 0.0)
+        .collect();
+    if deltas.is_empty() {
+        return step.max(POLL_SECS);
+    }
+    deltas.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    deltas[deltas.len() / 2].max(step)
+}
+
+fn bucket_index_at(ratio: f32, count: usize) -> usize {
+    if count == 0 {
+        return 0;
+    }
+    let t = ratio.clamp(0.0, 1.0);
+    ((t * count as f32).floor() as usize).min(count - 1)
+}
+
+fn tooltip_flips_left(index: usize, count: usize) -> bool {
+    count > 0 && (index as f32 + 0.5) / count as f32 > 0.6
+}
+
+/// 1/2/5 × 10^n ticks from 0 to a nice max ≥ `data_max`. Prefers 4 ticks, then 3.
+fn nice_ticks(data_max: f64) -> (f64, Vec<f64>) {
+    let data_max = if data_max.is_finite() {
+        data_max.max(0.0)
+    } else {
+        0.0
+    };
+    if data_max <= 0.0 {
+        return (1.0, vec![0.0, 1.0]);
+    }
+    for n_intervals in [3, 2] {
+        let spacing = nice_num(data_max / n_intervals as f64, true);
+        if !(spacing > 0.0 && spacing.is_finite()) {
+            continue;
+        }
+        let nice_max = (data_max / spacing).ceil() * spacing;
+        let mut ticks = Vec::new();
+        let mut v = 0.0;
+        for _ in 0..8 {
+            ticks.push(v);
+            if v >= nice_max - spacing * 0.25 {
+                break;
+            }
+            v += spacing;
+        }
+        if (3..=4).contains(&ticks.len()) {
+            return (nice_max, ticks);
+        }
+    }
+    let nice_max = nice_num(data_max, false).max(data_max);
+    (nice_max, vec![0.0, nice_max])
+}
+
+fn nice_num(x: f64, round: bool) -> f64 {
+    if !x.is_finite() || x <= 0.0 {
+        return 1.0;
+    }
+    let exp = x.log10().floor();
+    let base = 10f64.powf(exp);
+    let f = x / base;
+    let nf = if round {
+        if f < 1.5 {
+            1.0
+        } else if f < 3.0 {
+            2.0
+        } else if f < 7.0 {
+            5.0
+        } else {
+            10.0
+        }
+    } else if f <= 1.0 {
+        1.0
+    } else if f <= 2.0 {
+        2.0
+    } else if f <= 5.0 {
+        5.0
+    } else {
+        10.0
+    };
+    nf * base
+}
+
+fn status_chart(
+    buckets: &[ChartBucket],
+    hover: Option<&ObserveHover>,
+    range: ObserveRange,
+    cx: &mut Context<Island>,
+) -> impl IntoElement {
+    let data_max = buckets
+        .iter()
+        .filter_map(|bucket| bucket.values)
+        .map(bucket_total)
         .fold(0.0, f64::max);
-    let mut chart = div()
-        .flex()
-        .items_end()
-        .gap(px(COLUMN_GAP))
-        .w_full()
+    let (nice_max, ticks) = nice_ticks(data_max);
+    let hover_idx = hover.map(|h| h.bucket);
+    let bounds_cell = Rc::new(RefCell::new(None::<Bounds<Pixels>>));
+    let count = buckets.len();
+
+    let mut gutter = div()
+        .w(px(Y_GUTTER))
+        .flex_shrink_0()
+        .relative()
+        .h_full();
+    if nice_max > 0.0 {
+        for tick in &ticks {
+            let t = (tick / nice_max) as f32;
+            gutter = gutter.child(
+                div()
+                    .absolute()
+                    .left(px(0.))
+                    .right(px(4.))
+                    .top(relative((1.0 - t).clamp(0.0, 1.0)))
+                    .mt(px(-theme::FOOTNOTE.leading * 0.5))
+                    .child(
+                        label(compact_number(*tick), theme::FOOTNOTE, false)
+                            .w_full()
+                            .text_right()
+                            .text_color(theme::tertiary_label()),
+                    ),
+            );
+        }
+    }
+
+    let mut x_row = div()
         .flex_1()
-        .min_h(px(0.));
-    for bucket in buckets {
-        let total = bucket.map(|v| v.iter().sum::<f64>()).unwrap_or(0.0);
-        let mut column = div().flex_1().min_w(px(0.));
-        if max > 0.0 && total > 0.0 {
-            let values = bucket.unwrap_or_default();
-            let top = values.iter().rposition(|v| *v > 0.0).unwrap_or(0);
-            column = column
-                .h(relative((total / max) as f32))
-                .rounded(px(COLUMN_RADIUS))
-                .overflow_hidden()
+        .min_w(px(0.))
+        .relative()
+        .h(px(X_AXIS_H));
+    if count > 0 {
+        let with_seconds = range.seconds() < 3600;
+        let last = X_TICKS.saturating_sub(1).max(1);
+        for i in 0..X_TICKS {
+            let boundary = i * count / last;
+            let t = boundary as f32 / count as f32;
+            let ts = if boundary >= count {
+                buckets.last().map(|b| b.end)
+            } else {
+                buckets.get(boundary).map(|b| b.start)
+            };
+            let Some(ts) = ts else {
+                continue;
+            };
+            let text = format_chart_time(ts, with_seconds);
+            let mut tick = div().absolute().top(px(0.)).child(
+                label(text, theme::FOOTNOTE, false).text_color(theme::tertiary_label()),
+            );
+            tick = if i == X_TICKS - 1 {
+                tick.right(px(0.))
+            } else if i == 0 {
+                tick.left(px(0.))
+            } else {
+                tick.left(relative(t.clamp(0.0, 1.0)))
+            };
+            x_row = x_row.child(tick);
+        }
+    }
+
+    let painted = buckets.to_vec();
+    let tooltip_bucket = hover_idx.and_then(|i| buckets.get(i).cloned());
+    let mut plot = div()
+        .id("observe-plot")
+        .relative()
+        .flex_1()
+        .min_w(px(0.))
+        .h_full()
+        .cursor(CursorStyle::Crosshair)
+        .on_mouse_move({
+            let bounds_cell = bounds_cell.clone();
+            cx.listener(move |this, event: &MouseMoveEvent, _, cx| {
+                let Some(bounds) = *bounds_cell.borrow() else {
+                    return;
+                };
+                let width: f32 = bounds.size.width.into();
+                if width < 1.0 || count == 0 {
+                    return;
+                }
+                let x: f32 = event.position.x.into();
+                let origin: f32 = bounds.origin.x.into();
+                let t = ((x - origin) / width).clamp(0.0, 1.0);
+                let idx = bucket_index_at(t, count);
+                if this.observe_hover.as_ref().map(|h| h.bucket) != Some(idx) {
+                    this.observe_hover = Some(ObserveHover { bucket: idx });
+                    cx.notify();
+                }
+            })
+        })
+        .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+            if !*hovered && this.observe_hover.is_some() {
+                this.observe_hover = None;
+                cx.notify();
+            }
+        }))
+        .child(
+            canvas(
+                {
+                    let bounds_cell = bounds_cell.clone();
+                    move |bounds, _, _| {
+                        *bounds_cell.borrow_mut() = Some(bounds);
+                        bounds
+                    }
+                },
+                {
+                    let painted = painted.clone();
+                    let ticks = ticks.clone();
+                    move |bounds, _, window, _| {
+                        paint_status_chart(
+                            window,
+                            bounds,
+                            &painted,
+                            hover_idx,
+                            nice_max,
+                            &ticks,
+                        );
+                    }
+                },
+            )
+            .w_full()
+            .h_full(),
+        );
+
+    if let Some(bucket) = tooltip_bucket {
+        if let Some(idx) = hover_idx {
+            plot = plot.child(chart_tooltip(&bucket, idx, count, range));
+        }
+    }
+
+    div()
+        .flex()
+        .flex_col()
+        .flex_1()
+        .min_h(px(0.))
+        .w_full()
+        .gap(px(2.))
+        .child(
+            div()
                 .flex()
-                .flex_col();
-            // Top-down children: 5xx, 4xx, then 1–3xx at the bottom.
-            for group in (0..3).rev() {
-                let value = values[group];
+                .flex_1()
+                .min_h(px(0.))
+                .w_full()
+                .child(gutter)
+                .child(plot),
+        )
+        .child(
+            div()
+                .flex()
+                .flex_shrink_0()
+                .w_full()
+                .child(div().w(px(Y_GUTTER)).flex_shrink_0())
+                .child(x_row),
+        )
+}
+
+fn chart_tooltip(
+    bucket: &ChartBucket,
+    index: usize,
+    count: usize,
+    range: ObserveRange,
+) -> impl IntoElement {
+    let flip = tooltip_flips_left(index, count);
+    let header = format_bucket_range(bucket.start, bucket.end, range);
+    let mut body = div()
+        .flex()
+        .flex_col()
+        .gap(px(4.))
+        .w_full()
+        .child(
+            label(header, theme::FOOTNOTE, false)
+                .flex_shrink_0()
+                .whitespace_nowrap()
+                .text_color(theme::secondary_label()),
+        );
+    if let Some(values) = bucket.values {
+        for group in [2usize, 1, 0] {
+            let value = clamp_value(values[group]);
+            let dim = value <= 0.0;
+            let color = if dim {
+                with_alpha(status_color(group), status_color(group).a * HOVER_DIM)
+            } else {
+                status_color(group)
+            };
+            let name = ["1–3xx", "4xx", "5xx"][group];
+            body = body.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(12.))
+                    .w_full()
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(6.))
+                            .flex_shrink_0()
+                            .child(div().size(px(6.)).rounded_full().flex_shrink_0().bg(color))
+                            .child(
+                                label(name, theme::FOOTNOTE, false).text_color(if dim {
+                                    theme::tertiary_label()
+                                } else {
+                                    theme::LABEL
+                                }),
+                            ),
+                    )
+                    .child(div().flex_1())
+                    .child(
+                        label(
+                            format!("{} req/s", compact_number(value)),
+                            theme::FOOTNOTE,
+                            false,
+                        )
+                        .flex_shrink_0()
+                        .whitespace_nowrap()
+                        .text_color(if dim {
+                            theme::tertiary_label()
+                        } else {
+                            theme::LABEL
+                        }),
+                    ),
+            );
+        }
+        body = body
+            .child(
+                div()
+                    .w_full()
+                    .h(px(1.))
+                    .bg(theme::FILL_SECONDARY)
+                    .flex_shrink_0(),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(12.))
+                    .w_full()
+                    .child(
+                        label("Total", theme::SUBHEADLINE, true)
+                            .flex_shrink_0()
+                            .whitespace_nowrap()
+                            .text_color(theme::LABEL),
+                    )
+                    .child(div().flex_1())
+                    .child(
+                        label(
+                            format!("{} req/s", compact_number(bucket_total(values))),
+                            theme::SUBHEADLINE,
+                            true,
+                        )
+                        .flex_shrink_0()
+                        .whitespace_nowrap()
+                        .text_color(theme::LABEL),
+                    ),
+            );
+    } else {
+        body = body.child(
+            label("No data", theme::FOOTNOTE, false).text_color(theme::tertiary_label()),
+        );
+    }
+
+    let left_t = if count == 0 {
+        0.0
+    } else {
+        (index as f32 + 1.0) / count as f32
+    };
+    let right_t = if count == 0 {
+        0.0
+    } else {
+        1.0 - index as f32 / count as f32
+    };
+
+    deferred(
+        div()
+            .absolute()
+            .top(px(4.))
+            .when(flip, |d| d.right(relative(right_t.clamp(0.0, 1.0))))
+            .when(!flip, |d| d.left(relative(left_t.clamp(0.0, 1.0))))
+            .when(flip, |d| d.mr(px(4.)))
+            .when(!flip, |d| d.ml(px(4.)))
+            .w(px(TOOLTIP_W))
+            .rounded(px(theme::CONTROL_RADIUS))
+            .bg(theme::GROUPED_BG)
+            .border_1()
+            .border_color(theme::FILL_SECONDARY)
+            .shadow_sm()
+            .px(px(8.))
+            .py(px(6.))
+            .child(body),
+    )
+}
+
+fn paint_status_chart(
+    window: &mut gpui::Window,
+    bounds: Bounds<Pixels>,
+    buckets: &[ChartBucket],
+    hover: Option<usize>,
+    nice_max: f64,
+    ticks: &[f64],
+) {
+    let x0: f32 = bounds.origin.x.into();
+    let y0: f32 = bounds.origin.y.into();
+    let w: f32 = bounds.size.width.into();
+    let h: f32 = bounds.size.height.into();
+    if w < 8.0 || h < 8.0 || buckets.is_empty() {
+        return;
+    }
+    let p = |x: f32, y: f32| point(px(x), px(y));
+    let count = buckets.len();
+    let gaps = COLUMN_GAP * count.saturating_sub(1) as f32;
+    let col_w = ((w - gaps) / count as f32).max(0.0);
+    let stride = col_w + COLUMN_GAP;
+    let y_at = |tick: f64| {
+        if nice_max <= 0.0 {
+            y0 + h
+        } else {
+            y0 + h * (1.0 - (tick / nice_max) as f32).clamp(0.0, 1.0)
+        }
+    };
+
+    for tick in ticks {
+        let y = y_at(*tick);
+        let mut grid = PathBuilder::stroke(px(1.0));
+        grid.move_to(p(x0, y));
+        grid.line_to(p(x0 + w, y));
+        if let Ok(built) = grid.build() {
+            window.paint_path(built, with_alpha(theme::LABEL, 0.06));
+        }
+    }
+
+    if let Some(idx) = hover {
+        if idx < count && col_w > 0.0 {
+            let left = x0 + idx as f32 * stride;
+            fill_rect(window, &p, left, y0, col_w, h, with_alpha(theme::LABEL, 0.08));
+        }
+    }
+
+    if nice_max > 0.0 && col_w > 0.0 {
+        for (i, bucket) in buckets.iter().enumerate() {
+            let Some(values) = bucket.values else {
+                continue;
+            };
+            let total = bucket_total(values);
+            if total <= 0.0 {
+                continue;
+            }
+            let dim = hover.is_some_and(|idx| idx != i);
+            let left = x0 + i as f32 * stride;
+            let topmost = values.iter().rposition(|v| clamp_value(*v) > 0.0);
+            let mut y = y0 + h;
+            for (group, raw) in values.iter().enumerate() {
+                let value = clamp_value(*raw);
                 if value <= 0.0 {
                     continue;
                 }
-                column = column.child(
-                    div()
-                        .w_full()
-                        .flex_shrink_0()
-                        .h(relative((value / total) as f32))
-                        .bg(status_color(group))
-                        .when(group == top, |d| d.rounded_t(px(COLUMN_RADIUS))),
-                );
+                let seg_h = (h as f64 * (value / nice_max)).clamp(0.0, h as f64) as f32;
+                let top = (y - seg_h).max(y0);
+                let mut color = status_color(group);
+                if dim {
+                    color.a *= HOVER_DIM;
+                }
+                let radius = if topmost == Some(group) {
+                    COLUMN_RADIUS.min(col_w * 0.5).min(((y - top) * 0.5).max(0.0))
+                } else {
+                    0.0
+                };
+                let mut bar = PathBuilder::fill();
+                rounded_top_rect(&mut bar, &p, left, top, col_w, y, radius);
+                if let Ok(built) = bar.build() {
+                    window.paint_path(built, color);
+                }
+                y = top;
             }
-        } else {
-            column = column.h(px(0.));
         }
-        chart = chart.child(column);
     }
-    chart
+
+    if let Some(idx) = hover {
+        if idx < count && col_w > 0.0 {
+            let cx = x0 + idx as f32 * stride + col_w * 0.5;
+            let mut guide = PathBuilder::stroke(px(1.0));
+            guide.move_to(p(cx, y0));
+            guide.line_to(p(cx, y0 + h));
+            if let Ok(built) = guide.build() {
+                window.paint_path(built, with_alpha(theme::LABEL, 0.45));
+            }
+        }
+    }
+}
+
+fn fill_rect(
+    window: &mut gpui::Window,
+    p: &impl Fn(f32, f32) -> gpui::Point<gpui::Pixels>,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    color: Rgba,
+) {
+    let mut path = PathBuilder::fill();
+    path.move_to(p(x, y));
+    path.line_to(p(x + w, y));
+    path.line_to(p(x + w, y + h));
+    path.line_to(p(x, y + h));
+    path.close();
+    if let Ok(built) = path.build() {
+        window.paint_path(built, color);
+    }
 }
 
 /// Hover-only close, inside the card at 12,12 (mockup has no chrome at rest).
@@ -391,11 +939,7 @@ fn metric_subtitle(reading: &nook_core::observe::MetricReading) -> String {
     if let Some(err) = &reading.error {
         return err.clone();
     }
-    if let Some(pt) = reading
-        .series
-        .first()
-        .and_then(|s| s.points.last())
-    {
+    if let Some(pt) = reading.series.first().and_then(|s| s.points.last()) {
         return relative_ago(pt.ts);
     }
     if let Some(value) = reading.last_value() {
@@ -461,6 +1005,9 @@ fn range_chip(option: ObserveRange, active: bool, cx: &mut Context<Island>) -> i
             MouseButton::Left,
             cx.listener(move |this, _: &MouseDownEvent, _, cx| {
                 cx.stop_propagation();
+                if this.observe_hover.take().is_some() {
+                    cx.notify();
+                }
                 if nook_core::settings::get_app_settings().observe.range != option {
                     nook_core::settings::tweak_app_settings(|s| {
                         nook_core::observe::set_range(&mut s.observe, option);
@@ -597,24 +1144,36 @@ fn bucket_step(range: ObserveRange) -> String {
     }
 }
 
-fn stacked_samples(series: &[StatusSeries]) -> Vec<StackedSample> {
-    let Some(reference) = series.iter().max_by_key(|series| series.points.len()) else {
-        return Vec::new();
-    };
-    reference
-        .points
+fn stacked_samples(series: &[StatusSeries], step: f64) -> Vec<StackedSample> {
+    let tol = (step * 0.5).max(1e-9);
+    let mut times: Vec<f64> = series
         .iter()
-        .map(|point| {
+        .flat_map(|status| status.points.iter().map(|point| point.ts))
+        .filter(|ts| ts.is_finite())
+        .collect();
+    if times.is_empty() {
+        return Vec::new();
+    }
+    times.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let mut slots = Vec::new();
+    for ts in times {
+        match slots.last() {
+            Some(&prev) if ts - prev < tol => {}
+            _ => slots.push(ts),
+        }
+    }
+    slots
+        .into_iter()
+        .map(|ts| {
             let mut values = [0.0; 3];
             for status in series {
-                if let Some(sample) = nook_core::observe::point_at_ts(&status.points, point.ts) {
-                    values[status.group] += sample.value.max(0.0);
+                if let Some(sample) = nook_core::observe::point_at_ts(&status.points, ts) {
+                    if (sample.ts - ts).abs() <= tol {
+                        values[status.group] += clamp_value(sample.value);
+                    }
                 }
             }
-            StackedSample {
-                ts: point.ts,
-                values,
-            }
+            StackedSample { ts, values }
         })
         .collect()
 }
@@ -623,293 +1182,29 @@ fn with_alpha(color: Rgba, a: f32) -> Rgba {
     Rgba { a, ..color }
 }
 
-fn mini_chart(
-    query: String,
-    kind: ObserveChartKind,
-    series: RangeSeries,
-    multi: bool,
-    color: Rgba,
-    hover: Option<&ObserveHover>,
-    cx: &mut Context<Island>,
-) -> impl IntoElement {
-    let bounds_cell = Rc::new(RefCell::new(None::<Bounds<Pixels>>));
-    let series_name = series.name.clone();
-    let points = series.points;
-    let hover_pt = hover.and_then(|h| {
-        nook_core::observe::point_at_ts(&points, h.ts)
-            .filter(|_| h.query == query)
-            .cloned()
-    });
-    let tooltip_t = hover_pt
-        .as_ref()
-        .and_then(|pt| sample_t(&points, pt.ts))
-        .unwrap_or(0.0);
-    let painted = samples_as_chart(&points);
-
-    let mut chart = div()
-        .id(SharedString::from(format!("chart-{query}")))
-        .relative()
-        .flex()
-        .w_full()
-        .h(px(48.))
-        .flex_shrink_0()
-        .cursor(CursorStyle::Crosshair)
-        .on_mouse_move({
-            let bounds_cell = bounds_cell.clone();
-            let points = points.clone();
-            let query = query.clone();
-            let series_name = series_name.clone();
-            cx.listener(move |this, event: &MouseMoveEvent, _, cx| {
-                let Some(bounds) = *bounds_cell.borrow() else {
-                    return;
-                };
-                let width: f32 = bounds.size.width.into();
-                if width < 1.0 || points.is_empty() {
-                    return;
-                }
-                let x: f32 = event.position.x.into();
-                let origin: f32 = bounds.origin.x.into();
-                let t = ((x - origin) / width).clamp(0.0, 1.0);
-                let Some(pt) = nook_core::observe::point_at_ratio(&points, t) else {
-                    return;
-                };
-                let next = ObserveHover {
-                    query: query.clone(),
-                    series: if multi && !series_name.is_empty() {
-                        Some(series_name.clone())
-                    } else {
-                        None
-                    },
-                    ts: pt.ts,
-                    value: pt.value,
-                };
-                if this.observe_hover.as_ref() != Some(&next) {
-                    this.observe_hover = Some(next);
-                    cx.notify();
-                }
-            })
-        })
-        .on_hover({
-            let query = query.clone();
-            cx.listener(move |this, hovered: &bool, _, cx| {
-                if !*hovered
-                    && this
-                        .observe_hover
-                        .as_ref()
-                        .is_some_and(|h| h.query == query)
-                {
-                    this.observe_hover = None;
-                    cx.notify();
-                }
-            })
-        })
-        .child(
-            canvas(
-                {
-                    let bounds_cell = bounds_cell.clone();
-                    move |bounds, _, _| {
-                        *bounds_cell.borrow_mut() = Some(bounds);
-                        bounds
-                    }
-                },
-                {
-                    let painted = painted.clone();
-                    let hover_t = tooltip_t;
-                    let show_hover = hover_pt.is_some();
-                    move |bounds, _, window, _| {
-                        let x0: f32 = bounds.origin.x.into();
-                        let y0: f32 = bounds.origin.y.into();
-                        let w: f32 = bounds.size.width.into();
-                        let h: f32 = bounds.size.height.into();
-                        if w < 8.0 || h < 8.0 {
-                            return;
-                        }
-                        let p = |x: f32, y: f32| point(px(x), px(y));
-
-                        let from_zero = kind == ObserveChartKind::Bars;
-                        let values: Vec<f64> = painted.iter().map(|pt| pt.1).collect();
-                        let ys = scale_series(&values, from_zero);
-                        if ys.is_empty() {
-                            return;
-                        }
-                        let y_at = |t: f32| y0 + h * (1.0 - t);
-                        let pts: Vec<(f32, f32)> = painted
-                            .iter()
-                            .zip(ys.iter())
-                            .map(|(pt, y)| (x0 + pt.0.clamp(0.0, 1.0) * w, y_at(*y)))
-                            .collect();
-                        match kind {
-                            ObserveChartKind::Bars => {
-                                paint_bars(window, x0, y0, w, h, &pts, color, p)
-                            }
-                            ObserveChartKind::Sparkline => {
-                                paint_sparkline(window, x0, y0, w, h, &pts, color, p)
-                            }
-                            ObserveChartKind::Off => {}
-                        }
-                        if show_hover {
-                            let hx = x0 + hover_t.clamp(0.0, 1.0) * w;
-                            if let Some((_, hy)) = painted.iter().zip(pts.iter()).min_by(|a, b| {
-                                (a.0 .0 - hover_t)
-                                    .abs()
-                                    .partial_cmp(&(b.0 .0 - hover_t).abs())
-                                    .unwrap_or(std::cmp::Ordering::Equal)
-                            }) {
-                                let mut rule = PathBuilder::stroke(px(1.0));
-                                rule.move_to(p(hx, y0));
-                                rule.line_to(p(hx, y0 + h));
-                                if let Ok(built) = rule.build() {
-                                    window.paint_path(built, with_alpha(theme::LABEL, 0.45));
-                                }
-                                fill_dot(window, hx, hy.1, 3.6, color);
-                            }
-                        }
-                    }
-                },
-            )
-            .w_full()
-            .h_full(),
-        );
-
-    if let Some(pt) = hover_pt {
-        let align_right = tooltip_t > 0.55;
-        let mut pop = div().flex().flex_col().gap(px(1.));
-        if let Some(name) = hover.and_then(|h| h.series.clone()) {
-            pop = pop.child(label(name, theme::FOOTNOTE, false));
-        }
-        pop = pop
-            .child(label(format_observe_ts(pt.ts), theme::FOOTNOTE, false))
-            .child(label(
-                nook_core::observe::format_chart_sample(&query, pt.value),
-                theme::SUBHEADLINE,
-                true,
-            ));
-        // Paint after ancestors so the card's overflow clip cannot hide the
-        // popover. Sit just above the sparkline so it doesn't cover the cursor.
-        chart = chart.child(deferred(
-            div()
-                .absolute()
-                .bottom(px(40.))
-                .when(align_right, |d| d.right(px(2.)))
-                .when(!align_right, |d| {
-                    d.left(relative(tooltip_t.clamp(0.0, 0.55)))
-                })
-                .rounded(px(theme::CONTROL_RADIUS))
-                .bg(theme::GROUPED_BG)
-                .border_1()
-                .border_color(theme::FILL_SECONDARY)
-                .shadow_sm()
-                .px_2()
-                .py(px(3.))
-                .child(pop),
-        ));
-    }
-
-    chart
-}
-
-/// x-ratio of `ts` across a series whose samples span `[t0, t0 + span]`.
-fn span_t(t0: f64, span: f64, ts: f64) -> f32 {
-    (((ts - t0) / span) as f32).clamp(0.0, 1.0)
-}
-
-fn samples_as_chart(points: &[SamplePoint]) -> Vec<(f32, f64)> {
-    let (Some(first), Some(last)) = (points.first(), points.last()) else {
-        return Vec::new();
-    };
-    let t0 = first.ts;
-    let span = (last.ts - t0).max(1e-9);
-    points
-        .iter()
-        .map(|p| (span_t(t0, span, p.ts), p.value))
-        .collect()
-}
-
-fn sample_t(points: &[SamplePoint], ts: f64) -> Option<f32> {
-    let t0 = points.first()?.ts;
-    let span = (points.last()?.ts - t0).max(1e-9);
-    Some(span_t(t0, span, ts))
-}
-
-fn format_observe_ts(ts: f64) -> String {
+fn format_chart_time(ts: f64, with_seconds: bool) -> String {
     use chrono::{Local, TimeZone};
+    if !ts.is_finite() {
+        return String::new();
+    }
     if let Some(dt) = Local.timestamp_opt(ts as i64, 0).single() {
-        dt.format("%H:%M:%S").to_string()
+        if with_seconds {
+            dt.format("%H:%M:%S").to_string()
+        } else {
+            dt.format("%H:%M").to_string()
+        }
     } else {
         String::new()
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn paint_bars(
-    window: &mut gpui::Window,
-    x0: f32,
-    y0: f32,
-    w: f32,
-    h: f32,
-    pts: &[(f32, f32)],
-    color: Rgba,
-    p: impl Fn(f32, f32) -> gpui::Point<gpui::Pixels>,
-) {
-    let bar_w = (w / 60.0 * 0.8).max(1.5);
-    let bottom = y0 + h;
-    for &(x, top) in pts {
-        let left = (x - bar_w * 0.5).max(x0);
-        let r = (bar_w * 0.28).min(4.0).min(((bottom - top) * 0.5).max(0.0));
-        let mut bar = PathBuilder::fill();
-        rounded_top_rect(&mut bar, &p, left, top, bar_w, bottom, r);
-        if let Ok(built) = bar.build() {
-            window.paint_path(built, color);
-        }
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn paint_sparkline(
-    window: &mut gpui::Window,
-    _x0: f32,
-    y0: f32,
-    _w: f32,
-    h: f32,
-    pts: &[(f32, f32)],
-    color: Rgba,
-    p: impl Fn(f32, f32) -> gpui::Point<gpui::Pixels>,
-) {
-    let baseline = y0 + h;
-
-    if pts.len() == 1 {
-        fill_dot(window, pts[0].0, pts[0].1, 2.4, color);
-        return;
-    }
-
-    let mut area = PathBuilder::fill();
-    area.move_to(p(pts[0].0, baseline));
-    area.line_to(p(pts[0].0, pts[0].1));
-    append_monotone(&mut area, pts);
-    let end = *pts.last().unwrap();
-    area.line_to(p(end.0, baseline));
-    area.close();
-    if let Ok(built) = area.build() {
-        window.paint_path(built, with_alpha(color, 0.22));
-    }
-
-    let mut glow = PathBuilder::fill();
-    glow.move_to(p(pts[0].0, (pts[0].1 + baseline) * 0.5));
-    glow.line_to(p(pts[0].0, pts[0].1));
-    append_monotone(&mut glow, pts);
-    glow.line_to(p(end.0, (end.1 + baseline) * 0.5));
-    glow.close();
-    if let Ok(built) = glow.build() {
-        window.paint_path(built, with_alpha(color, 0.16));
-    }
-
-    let mut line = PathBuilder::stroke(px(2.0));
-    line.move_to(p(pts[0].0, pts[0].1));
-    append_monotone(&mut line, pts);
-    if let Ok(built) = line.build() {
-        window.paint_path(built, color);
-    }
-    fill_dot(window, end.0, end.1, 2.4, color);
+fn format_bucket_range(start: f64, end: f64, range: ObserveRange) -> String {
+    let with_seconds = range.seconds() < 3600;
+    format!(
+        "{} – {}",
+        format_chart_time(start, with_seconds),
+        format_chart_time(end, with_seconds)
+    )
 }
 
 fn rounded_top_rect(
@@ -942,136 +1237,14 @@ fn rounded_top_rect(
     path.close();
 }
 
-fn fill_dot(window: &mut gpui::Window, cx: f32, cy: f32, r: f32, color: Rgba) {
-    let k = 0.552_284_8 * r;
-    let p = |x: f32, y: f32| point(px(x), px(y));
-    let mut path = PathBuilder::fill();
-    path.move_to(p(cx, cy - r));
-    path.cubic_bezier_to(p(cx + r, cy), p(cx + k, cy - r), p(cx + r, cy - k));
-    path.cubic_bezier_to(p(cx, cy + r), p(cx + r, cy + k), p(cx + k, cy + r));
-    path.cubic_bezier_to(p(cx - r, cy), p(cx - k, cy + r), p(cx - r, cy + k));
-    path.cubic_bezier_to(p(cx, cy - r), p(cx - r, cy - k), p(cx - k, cy - r));
-    path.close();
-    if let Ok(built) = path.build() {
-        window.paint_path(built, color);
-    }
-}
-
-fn append_monotone(path: &mut PathBuilder, pts: &[(f32, f32)]) {
-    for (c1, c2, to) in monotone_beziers(pts) {
-        path.cubic_bezier_to(
-            point(px(to.0), px(to.1)),
-            point(px(c1.0), px(c1.1)),
-            point(px(c2.0), px(c2.1)),
-        );
-    }
-}
-
-/// Fritsch–Carlson monotone cubic, same family as d3 `curveMonotoneX`.
-type BezierSegment = ((f32, f32), (f32, f32), (f32, f32));
-
-fn monotone_beziers(pts: &[(f32, f32)]) -> Vec<BezierSegment> {
-    let n = pts.len();
-    if n < 2 {
-        return Vec::new();
-    }
-    let mut dx = vec![0.0; n - 1];
-    let mut m = vec![0.0; n - 1];
-    for i in 0..n - 1 {
-        dx[i] = pts[i + 1].0 - pts[i].0;
-        let dy = pts[i + 1].1 - pts[i].1;
-        m[i] = if dx[i].abs() < 1e-6 { 0.0 } else { dy / dx[i] };
-    }
-    let mut t = vec![0.0; n];
-    t[0] = m[0];
-    t[n - 1] = m[n - 2];
-    for i in 1..n - 1 {
-        t[i] = if m[i - 1] * m[i] <= 0.0 {
-            0.0
-        } else {
-            (m[i - 1] + m[i]) / 2.0
-        };
-    }
-    for i in 0..n - 1 {
-        if m[i].abs() < 1e-8 {
-            t[i] = 0.0;
-            t[i + 1] = 0.0;
-            continue;
-        }
-        let a = t[i] / m[i];
-        let b = t[i + 1] / m[i];
-        let s = a * a + b * b;
-        if s > 9.0 {
-            let tau = 3.0 / s.sqrt();
-            t[i] = tau * a * m[i];
-            t[i + 1] = tau * b * m[i];
-        }
-    }
-    let mut out = Vec::with_capacity(n - 1);
-    for i in 0..n - 1 {
-        let d = dx[i] / 3.0;
-        out.push((
-            (pts[i].0 + d, pts[i].1 + t[i] * d),
-            (pts[i + 1].0 - d, pts[i + 1].1 - t[i + 1] * d),
-            pts[i + 1],
-        ));
-    }
-    out
-}
-
-fn scale_series(series: &[f64], from_zero: bool) -> Vec<f32> {
-    let finite: Vec<f64> = series.iter().copied().filter(|v| v.is_finite()).collect();
-    if finite.is_empty() {
-        return Vec::new();
-    }
-    let mut min = finite.iter().copied().fold(f64::INFINITY, f64::min);
-    let max = finite.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-    if from_zero && finite.iter().all(|v| *v >= 0.0) {
-        min = 0.0;
-    }
-    let span = (max - min).max(1e-9);
-    finite
-        .into_iter()
-        .map(|v| {
-            let t = ((v - min) / span) as f32;
-            0.06 + t.clamp(0.0, 1.0) * 0.88
-        })
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
-        bucket_step, compact_number, monotone_beziers, scale_series, stacked_samples,
-        status_buckets, StackedSample, StatusSeries, BIG_COLUMNS,
+        bucket_index_at, bucket_step, compact_number, nice_ticks, stacked_samples, status_buckets,
+        tooltip_flips_left, StackedSample, StatusSeries, BIG_COLUMNS,
     };
     use nook_core::observe::ObserveRange;
     use nook_core::observe::SamplePoint;
-
-    #[test]
-    fn scale_minmax_maps_into_padding() {
-        let ys = scale_series(&[0.0, 10.0], false);
-        assert!((ys[0] - 0.06).abs() < 1e-5);
-        assert!((ys[1] - 0.94).abs() < 1e-5);
-    }
-
-    #[test]
-    fn bars_scale_from_zero() {
-        let ys = scale_series(&[5.0, 10.0], true);
-        assert!(ys[0] < ys[1]);
-        assert!(ys[0] > 0.06);
-    }
-
-    #[test]
-    fn monotone_cubic_keeps_endpoints() {
-        let pts = [(0.0, 10.0), (10.0, 0.0), (20.0, 8.0)];
-        let segs = monotone_beziers(&pts);
-        assert_eq!(segs.len(), 2);
-        assert!((segs[1].2 .0 - 20.0).abs() < 1e-5);
-        assert!((segs[1].2 .1 - 8.0).abs() < 1e-5);
-        assert!(segs[0].0 .0 > pts[0].0);
-        assert!(segs[0].0 .0 < pts[1].0);
-    }
 
     #[test]
     fn status_samples_stack_success_and_errors() {
@@ -1081,21 +1254,88 @@ mod tests {
                 SamplePoint { ts: 2.0, value: b },
             ]
         };
-        let samples = stacked_samples(&[
-            StatusSeries {
-                group: 0,
-                points: points(10.0, 20.0),
-            },
-            StatusSeries {
-                group: 0,
-                points: points(1.0, 2.0),
-            },
-            StatusSeries {
-                group: 2,
-                points: points(3.0, 4.0),
-            },
-        ]);
+        let samples = stacked_samples(
+            &[
+                StatusSeries {
+                    group: 0,
+                    points: points(10.0, 20.0),
+                },
+                StatusSeries {
+                    group: 0,
+                    points: points(1.0, 2.0),
+                },
+                StatusSeries {
+                    group: 2,
+                    points: points(3.0, 4.0),
+                },
+            ],
+            1.0,
+        );
         assert_eq!(samples[1].values, [22.0, 0.0, 4.0]);
+    }
+
+    #[test]
+    fn stacked_samples_ignore_far_series() {
+        let samples = stacked_samples(
+            &[
+                StatusSeries {
+                    group: 0,
+                    points: vec![
+                        SamplePoint {
+                            ts: 10.0,
+                            value: 4.0,
+                        },
+                        SamplePoint {
+                            ts: 20.0,
+                            value: 5.0,
+                        },
+                    ],
+                },
+                StatusSeries {
+                    group: 1,
+                    points: vec![
+                        SamplePoint {
+                            ts: 1_000.0,
+                            value: 99.0,
+                        },
+                        SamplePoint {
+                            ts: 1_010.0,
+                            value: 98.0,
+                        },
+                    ],
+                },
+            ],
+            10.0,
+        );
+        assert_eq!(samples.len(), 4);
+        assert_eq!(
+            samples[0],
+            StackedSample {
+                ts: 10.0,
+                values: [4.0, 0.0, 0.0],
+            }
+        );
+        assert_eq!(
+            samples[1],
+            StackedSample {
+                ts: 20.0,
+                values: [5.0, 0.0, 0.0],
+            }
+        );
+        assert_eq!(
+            samples[2],
+            StackedSample {
+                ts: 1_000.0,
+                values: [0.0, 99.0, 0.0],
+            }
+        );
+        assert_eq!(
+            samples[3],
+            StackedSample {
+                ts: 1_010.0,
+                values: [0.0, 98.0, 0.0],
+            }
+        );
     }
 
     #[test]
@@ -1112,22 +1352,119 @@ mod tests {
         let range = ObserveRange::FifteenMinutes;
         assert_eq!(bucket_step(range), "30s");
         assert_eq!(bucket_step(ObserveRange::OneHour), "2m");
-        assert_eq!(status_buckets(&[], range, BIG_COLUMNS).len(), BIG_COLUMNS);
-        assert!(status_buckets(&[], range, BIG_COLUMNS).iter().all(Option::is_none));
+        assert_eq!(bucket_step(ObserveRange::FiveMinutes), "10s");
+        let empty = status_buckets(&[], range, BIG_COLUMNS);
+        assert_eq!(empty.len(), BIG_COLUMNS);
+        assert!(empty.iter().all(|b| b.values.is_none()));
+    }
 
-        let end = 10_000.0;
-        let sample = |ts: f64, v: [f64; 3]| StackedSample { ts, values: v };
-        let samples = [
-            sample(end - 900.0 - 10.0, [99.0, 0.0, 0.0]), // before the window
-            sample(end - 890.0, [10.0, 0.0, 0.0]),
-            sample(end - 880.0, [20.0, 2.0, 0.0]),
-            sample(end, [5.0, 1.0, 1.0]),
-        ];
-        let buckets = status_buckets(&samples, range, BIG_COLUMNS);
+    #[test]
+    fn continuous_series_fills_interior_columns() {
+        for range in ObserveRange::all() {
+            let width = range.seconds() as f64 / BIG_COLUMNS as f64;
+            let newest = 1_700_000_000.0;
+            let last_start = (newest / width).floor() * width;
+            let first_start = last_start - (BIG_COLUMNS as f64 - 1.0) * width;
+            let step = range.step_seconds() as f64;
+            let mut samples = Vec::new();
+            let mut ts = first_start;
+            while ts < last_start + width - 1e-9 {
+                samples.push(StackedSample {
+                    ts,
+                    values: [1.0, 0.0, 0.0],
+                });
+                ts += step;
+            }
+            let buckets = status_buckets(&samples, range, BIG_COLUMNS);
+            let first = buckets.iter().position(|b| b.values.is_some());
+            let last = buckets.iter().rposition(|b| b.values.is_some());
+            let (first, last) = (first.expect("expected samples"), last.expect("expected samples"));
+            assert!(
+                buckets[first..=last].iter().all(|b| b.values.is_some()),
+                "empty interior column for {range:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn buckets_align_to_wall_clock() {
+        let range = ObserveRange::FifteenMinutes;
+        let newest = 10_000.0;
+        let width = range.seconds() as f64 / BIG_COLUMNS as f64;
+        let buckets = status_buckets(
+            &[StackedSample {
+                ts: newest,
+                values: [1.0, 0.0, 0.0],
+            }],
+            range,
+            BIG_COLUMNS,
+        );
+        let last_start = (newest / width).floor() * width;
         assert_eq!(buckets.len(), BIG_COLUMNS);
-        assert_eq!(buckets[0], Some([15.0, 1.0, 0.0]), "mean of the first slice");
-        assert_eq!(buckets[BIG_COLUMNS - 1], Some([5.0, 1.0, 1.0]));
-        assert!(buckets[1..BIG_COLUMNS - 1].iter().all(Option::is_none));
+        assert!((buckets[BIG_COLUMNS - 1].start - last_start).abs() < 1e-9);
+        assert!(newest >= buckets[BIG_COLUMNS - 1].start);
+        assert!(newest < buckets[BIG_COLUMNS - 1].end);
+        for (i, bucket) in buckets.iter().enumerate() {
+            assert!((bucket.end - bucket.start - width).abs() < 1e-9);
+            assert!(
+                bucket.start.rem_euclid(width).abs() < 1e-6,
+                "bucket {i} start {} not aligned",
+                bucket.start
+            );
+        }
+        let first_start = last_start - (BIG_COLUMNS as f64 - 1.0) * width;
+        let edge = status_buckets(
+            &[
+                StackedSample {
+                    ts: first_start - 1e-6,
+                    values: [9.0, 0.0, 0.0],
+                },
+                StackedSample {
+                    ts: first_start,
+                    values: [2.0, 0.0, 0.0],
+                },
+                StackedSample {
+                    ts: first_start + width,
+                    values: [8.0, 0.0, 0.0],
+                },
+                StackedSample {
+                    ts: last_start,
+                    values: [4.0, 0.0, 0.0],
+                },
+                StackedSample {
+                    ts: newest,
+                    values: [4.0, 0.0, 0.0],
+                },
+            ],
+            range,
+            BIG_COLUMNS,
+        );
+        assert_eq!(edge[0].values, Some([2.0, 0.0, 0.0]));
+        assert_eq!(edge[1].values, Some([8.0, 0.0, 0.0]));
+        assert_eq!(edge[BIG_COLUMNS - 1].values, Some([4.0, 0.0, 0.0]));
+    }
+
+    #[test]
+    fn nice_ticks_from_2437() {
+        let (max, ticks) = nice_ticks(2437.0);
+        assert_eq!(max, 3000.0);
+        assert_eq!(ticks, vec![0.0, 1000.0, 2000.0, 3000.0]);
+    }
+
+    #[test]
+    fn bucket_index_maps_ratio_edges() {
+        assert_eq!(bucket_index_at(0.0, BIG_COLUMNS), 0);
+        assert_eq!(bucket_index_at(1.0, BIG_COLUMNS), 29);
+        assert_eq!(bucket_index_at(-0.2, BIG_COLUMNS), 0);
+        assert_eq!(bucket_index_at(1.2, BIG_COLUMNS), 29);
+    }
+
+    #[test]
+    fn tooltip_flips_after_sixty_percent() {
+        assert!(!tooltip_flips_left(0, BIG_COLUMNS));
+        assert!(!tooltip_flips_left(17, BIG_COLUMNS));
+        assert!(tooltip_flips_left(18, BIG_COLUMNS));
+        assert!(tooltip_flips_left(29, BIG_COLUMNS));
     }
 
     #[test]

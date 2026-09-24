@@ -101,6 +101,10 @@ pub fn aura_blob_offset(index: usize, t: f32) -> (f32, f32) {
 /// mass 0.8 ⇒ response 0.28s, damping fraction 0.84 — i.e. this, unnamed).
 pub const MORPH: Spring = Spring::snappy(0.30);
 
+/// In-place resize of an already-expanded island (Observe open/close); no
+/// bounce so the edge never passes its target.
+pub const RESIZE: Spring = Spring::smooth(0.26);
+
 /// Content swap after an expanded/mode change. No bounce: opacity that
 /// overshoots 1.0 just clips, so the crossfade must stay critically damped.
 pub const CROSSFADE: Spring = Spring::smooth(0.25);
