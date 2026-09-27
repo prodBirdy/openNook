@@ -5,7 +5,7 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## 1.0.0 - 2026-09-12
+## 1.0.0 - 2026-09-27
 
 The first open-source 1.0 release.
 
@@ -14,7 +14,13 @@ The first open-source 1.0 release.
 - Applied a HIG design pass across the app, including clearer permissions, keyboard access, Reduce Motion and Reduce Transparency, Increase Contrast, and Differentiate Without Color.
 - Trimmed the visible product to the baseline widget set: Agents, Media, Calendar, Reminders, Timers, Weather, Battery, Files, Notes, Speed, and Mirror. Experimental widgets remain behind a Settings toggle.
 - Media controls now use an optimistic interaction model, expanded cards keep a consistent width, and an empty Now Playing card still provides a player surface.
-- The Nook tab is now a wrapping grid of up to three rows (11 cells each), so more than two or three widgets can be on the island at once; widget sizes Small/Medium/Large set how much of a row a widget takes.
+- The expanded island is 1120 pt wide and the Nook tab is one row of 17 cells, so five or six widgets fit side by side; widget sizes Small/Medium/Large set how much of the row a widget takes.
+- Widgets were matched 1:1 to the design gallery: Media, Calendar, Notes, Observe, Obsidian, Timers, Reminders, Speed, Agents, Battery, Messages, Weather, VPN, Alert, Stats, Voice, Meetings, and Notify.
+- The media player has new transport glyphs, an AirPlay picker, an always-on queue slot, a "Not Playing" idle state, and a compact visualizer that animates all five bars.
+- Weather renders a Metal shader backdrop (12 moods) and always follows the current location.
+- Observe opens a full-width chart when the card is clicked, with stacked status columns, axis ticks, and a hover crosshair and tooltip. It no longer polls without a token.
+- The voice recorder has a scrubber, pause/resume, ±15 s skips, and Open in QuickTime / Show in Finder.
+- Island animations step at up to 60 fps on a display-synced frame driver.
 
 ### Removed
 
@@ -22,6 +28,9 @@ The first open-source 1.0 release.
 
 ### Fixed
 
+- Battery showed "No battery" because the startup snapshot was dropped.
+- Finder drags open the file tray before reaching the top screen edge (macOS 26 Spaces bar).
+- Calendar and Notes no longer repaint on every 30-second poll when nothing changed.
 - Media scrubber seeks stay optimistic: the time thumb no longer snaps back
   while MediaRemote is still catching up to the seek command.
 - Term tab aborted on wheel-scroll (and when collapsing the island while
