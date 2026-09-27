@@ -47,6 +47,19 @@ fn main() {
             KeyBinding::new("cmd-,", OpenSettings, None),
         ]);
         open_island(cx);
+        #[cfg(target_os = "macos")]
+        {
+            // Reinstalls keep the onboarded flag, so the grant is requested at
+            // launch instead of lazily.
+            if std::env::current_exe()
+                .ok()
+                .and_then(|p| p.to_str().map(|s| s.contains(".app/Contents/MacOS/")))
+                .unwrap_or(false)
+                && !platform::ax_process_trusted(false)
+            {
+                let _ = platform::ax_process_trusted(true);
+            }
+        }
         cx.activate(false);
     });
 }

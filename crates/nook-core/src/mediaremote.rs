@@ -228,8 +228,8 @@ struct StreamEvent {
     payload: Value,
 }
 
-/// Spawn the long-lived adapter `stream --diff` child (once). No-op for the
-/// debug `media-control` backend and when the adapter is missing.
+/// Spawn the long-lived adapter `stream` child (diff is the adapter default).
+/// No-op for the debug `media-control` backend and when the adapter is missing.
 pub fn ensure_stream() {
     if !adapter_supports_stream() {
         return;
@@ -356,6 +356,7 @@ fn stream_supervisor() {
                 let spawned_at = Instant::now();
                 let _ = read_stream(&mut child);
                 STREAM_ALIVE.store(false, Ordering::Relaxed);
+                stream_state().lock().unwrap_or_else(|e| e.into_inner()).primed = false;
                 let _ = child.kill();
                 let _ = child.wait();
                 // Only reset the backoff after a healthy run; an adapter that
@@ -363,11 +364,16 @@ fn stream_supervisor() {
                 if spawned_at.elapsed() >= Duration::from_secs(5) {
                     backoff = Duration::from_millis(200);
                 } else {
+                    log::warn!(
+                        "MediaRemote stream exited after {} ms",
+                        spawned_at.elapsed().as_millis()
+                    );
                     backoff = (backoff * 2).min(Duration::from_secs(30));
                 }
             }
             Err(err) => {
                 log::debug!("MediaRemote stream spawn failed: {err}");
+                stream_state().lock().unwrap_or_else(|e| e.into_inner()).primed = false;
                 backoff = (backoff * 2).min(Duration::from_secs(30));
             }
         }
@@ -388,7 +394,6 @@ fn spawn_stream_child() -> Result<std::process::Child, String> {
         .arg(script)
         .arg(framework)
         .arg("stream")
-        .arg("--diff")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -783,6 +788,9 @@ mod tests {
         );
     }
 
+    // Release builds only discover the adapter inside the .app bundle, so the
+    // workspace framework is not found there.
+    #[cfg(debug_assertions)]
     #[test]
     fn adapter_get_succeeds_when_framework_is_present() {
         let compiled = PathBuf::from(env!("CARGO_MANIFEST_DIR"))

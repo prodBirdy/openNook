@@ -28,7 +28,10 @@ The first open-source 1.0 release.
 
 ### Fixed
 
-- Spotify covers were missing in the packaged app: Spotify sends MediaRemote no artwork data, so the cover is now fetched from Spotify's artwork URL.
+- Now Playing froze in the packaged app (title and cover stuck on the track playing at launch): the MediaRemote stream was started with a `--diff` flag the bundled adapter rejects, so it never ran. A dead stream now falls back to fresh one-shot reads instead of a stale snapshot.
+- Spotify covers fall back to Spotify's artwork URL when MediaRemote has no artwork data.
+- Settings showed every permission twice (a status row and a button row); each is one row now, with Open Settings only when access is missing.
+- The packaged app asks for Accessibility at launch when it is not granted, so a reinstall prompts instead of silently failing.
 - Battery showed "No battery" because the startup snapshot was dropped.
 - Finder drags open the file tray before reaching the top screen edge (macOS 26 Spaces bar).
 - Calendar and Notes no longer repaint on every 30-second poll when nothing changed.

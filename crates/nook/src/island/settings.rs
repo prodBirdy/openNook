@@ -377,22 +377,20 @@ fn notification_permission_rows(cx: &mut Context<SettingsView>) -> Vec<AnyElemen
         PermissionState::Unavailable => PermissionStatus::Unsupported,
     };
     vec![
-        permission_row("Accessibility", ax).into_any_element(),
-        action_row(
+        permission_action_row(
             "notify-ax",
             "Accessibility",
-            "Open Privacy Settings",
+            ax,
             cx,
             |_, _, _| {
                 crate::platform::open_privacy_accessibility();
             },
         )
         .into_any_element(),
-        permission_row("Full Disk Access", fda).into_any_element(),
-        action_row(
+        permission_action_row(
             "notify-fda",
             "Full Disk Access",
-            "Open Privacy Settings",
+            fda,
             cx,
             |_, _, _| {
                 crate::platform::open_privacy_full_disk_access();
@@ -2479,18 +2477,12 @@ impl SettingsView {
                         .into_any_element(),
                 );
                 rows.push(
-                    permission_row("Accessibility", nook_core::eventtap::accessibility_status())
-                        .into_any_element(),
-                );
-                rows.push(
-                    action_row(
+                    permission_action_row(
                         "ax-status",
                         "Accessibility",
-                        "Open Privacy Settings",
+                        nook_core::eventtap::accessibility_status(),
                         cx,
-                        |_, _, _| {
-                            crate::platform::open_accessibility_settings();
-                        },
+                        |_, _, _| crate::platform::open_accessibility_settings(),
                     )
                     .into_any_element(),
                 );
@@ -3753,31 +3745,55 @@ fn stepper_btn(
             on_click(this, window, cx);
         }))
 }
-fn permission_row(
-    title: &'static str,
+
+fn permission_status_label(
     status: nook_core::eventtap::PermissionStatus,
-) -> impl IntoElement {
-    let (text, color) = match status {
+) -> (&'static str, Rgba) {
+    match status {
         nook_core::eventtap::PermissionStatus::Granted => ("Granted", theme::SUCCESS),
         nook_core::eventtap::PermissionStatus::Denied => ("Not Granted", theme::DESTRUCTIVE),
         nook_core::eventtap::PermissionStatus::Unsupported => {
             ("Not Available", theme::TERTIARY_LABEL)
         }
-    };
-    settings_row(title)
+    }
+}
+
+fn permission_action_row(
+    id: &'static str,
+    title: &'static str,
+    status: nook_core::eventtap::PermissionStatus,
+    cx: &mut Context<SettingsView>,
+    on_click: impl Fn(&mut SettingsView, &mut Window, &mut Context<SettingsView>) + 'static,
+) -> impl IntoElement {
+    let (text, color) = permission_status_label(status);
+    settings_row(id)
         .child(label(title, theme::BODY, true))
         .child(
             div()
                 .flex()
                 .items_center()
-                .gap(px(6.))
-                .child(div().size(px(7.)).rounded_full().bg(color))
+                .gap(px(10.))
                 .child(
                     div()
-                        .text_size(px(theme::SUBHEADLINE.size))
-                        .text_color(color)
-                        .child(text),
-                ),
+                        .flex()
+                        .items_center()
+                        .gap(px(6.))
+                        .child(div().size(px(7.)).rounded_full().bg(color))
+                        .child(
+                            div()
+                                .text_size(px(theme::SUBHEADLINE.size))
+                                .text_color(color)
+                                .child(text),
+                        ),
+                )
+                .when(status == nook_core::eventtap::PermissionStatus::Denied, |d| {
+                    d.child(push_button(
+                        SharedString::from(format!("{id}-btn")),
+                        "Open Settings",
+                        cx,
+                        on_click,
+                    ))
+                }),
         )
 }
 

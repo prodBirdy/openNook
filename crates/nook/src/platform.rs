@@ -1562,7 +1562,6 @@ fn invalidate_accent_color() {
 }
 /// Accessibility TCC via `AXIsProcessTrustedWithOptions`. `prompt` shows the
 /// system dialog (and deep-links if the user agrees).
-#[allow(dead_code)]
 pub fn ax_process_trusted(prompt: bool) -> bool {
     nook_core::notifications::ax_trusted(prompt)
 }

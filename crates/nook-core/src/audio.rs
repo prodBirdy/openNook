@@ -3,7 +3,7 @@ use crate::utils::fetch_artwork_from_url;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::Notify;
 
 /// Global resting audio levels (visualizer paints its own clock-driven bars).
@@ -226,30 +226,105 @@ async fn now_playing_from_adapter(track: crate::mediaremote::AdapterTrack) -> No
     data
 }
 
-/// Spotify 1.3 leaves MediaRemote `artworkData` empty; ask Spotify for the
-/// HTTPS cover URL and download it. At most once per (title, artist).
+/// MediaRemote can report the new title before Spotify's current track
+/// (and artwork URL) has switched; retry until they match.
+#[cfg(target_os = "macos")]
+struct SpotifyArtState {
+    pair: Option<(Option<String>, Option<String>)>,
+    since: Instant,
+    downloads: u8,
+    done: bool,
+    warned: bool,
+    last_url: Option<String>,
+    last_art: Option<String>,
+}
+
 #[cfg(target_os = "macos")]
 async fn spotify_artwork_url_fallback(title: Option<&str>, artist: Option<&str>) -> Option<String> {
-    static SPOTIFY_ART_ATTEMPT: OnceLock<
-        std::sync::Mutex<Option<(Option<String>, Option<String>)>>,
-    > = OnceLock::new();
+    static STATE: OnceLock<std::sync::Mutex<SpotifyArtState>> = OnceLock::new();
+    let state = STATE.get_or_init(|| {
+        std::sync::Mutex::new(SpotifyArtState {
+            pair: None,
+            since: Instant::now(),
+            downloads: 0,
+            done: false,
+            warned: false,
+            last_url: None,
+            last_art: None,
+        })
+    });
     let pair = (title.map(str::to_owned), artist.map(str::to_owned));
     {
-        let mut last = lock_mutex(SPOTIFY_ART_ATTEMPT.get_or_init(|| std::sync::Mutex::new(None)));
-        if last.as_ref() == Some(&pair) {
+        let mut s = lock_mutex(state);
+        if s.pair.as_ref() != Some(&pair) {
+            s.pair = Some(pair);
+            s.since = Instant::now();
+            s.downloads = 0;
+            s.done = false;
+            s.warned = false;
+        }
+        if s.done || s.downloads >= 3 {
             return None;
         }
-        *last = Some(pair);
     }
-    let raw = crate::utils::run_osascript(
-        r#"tell application "Spotify" to artwork url of current track"#,
-    )
-    .ok()?;
-    let url = raw.trim();
+
+    let raw = match crate::utils::run_osascript(
+        r#"tell application "Spotify" to (name of current track) & linefeed & (artwork url of current track)"#,
+    ) {
+        Ok(raw) => raw,
+        Err(err) => {
+            let mut s = lock_mutex(state);
+            if !s.warned {
+                s.warned = true;
+                log::warn!("Spotify artwork AppleScript failed: {err}");
+            }
+            return None;
+        }
+    };
+    let (name, url) = raw.split_once('\n')?;
+    let name = name.trim();
+    let url = url.trim();
     if !url.starts_with("https://") {
         return None;
     }
-    fetch_artwork_from_url(url).await
+    let title_ok = title.unwrap_or("").trim().eq_ignore_ascii_case(name);
+    if !title_ok {
+        let s = lock_mutex(state);
+        if s.since.elapsed() < Duration::from_secs(3) {
+            return None;
+        }
+    }
+
+    let url = url.to_string();
+    let cached = {
+        let mut s = lock_mutex(state);
+        if s.last_url.as_deref() == Some(url.as_str()) {
+            s.done = true;
+            s.last_art.clone()
+        } else {
+            None
+        }
+    };
+    if let Some(art) = cached {
+        return Some(art);
+    }
+
+    {
+        let mut s = lock_mutex(state);
+        if s.downloads >= 3 {
+            return None;
+        }
+        s.downloads = s.downloads.saturating_add(1);
+    }
+    log::debug!("Spotify artwork URL: {url}");
+    let art = fetch_artwork_from_url(&url).await?;
+    {
+        let mut s = lock_mutex(state);
+        s.last_url = Some(url);
+        s.last_art = Some(art.clone());
+        s.done = true;
+    }
+    Some(art)
 }
 
 #[cfg(target_os = "macos")]
