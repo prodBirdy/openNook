@@ -197,6 +197,14 @@ async fn now_playing_from_adapter(track: crate::mediaremote::AdapterTrack) -> No
             artwork = Some(resolved);
         }
     }
+    // Spotify publishes artworkMimeType but no artworkData to MediaRemote.
+    if artwork.is_none() && track.bundle_id.as_deref() == Some("com.spotify.client") {
+        if let Some(resolved) =
+            spotify_artwork_url_fallback(track.title.as_deref(), track.artist.as_deref()).await
+        {
+            artwork = Some(resolved);
+        }
+    }
     if track_changed || just_started || artwork.is_some() {
         set_cached_track(track.title.clone(), track.artist.clone(), artwork.clone());
     }
@@ -216,6 +224,32 @@ async fn now_playing_from_adapter(track: crate::mediaremote::AdapterTrack) -> No
     };
     save_last_played(&data);
     data
+}
+
+/// Spotify 1.3 leaves MediaRemote `artworkData` empty; ask Spotify for the
+/// HTTPS cover URL and download it. At most once per (title, artist).
+#[cfg(target_os = "macos")]
+async fn spotify_artwork_url_fallback(title: Option<&str>, artist: Option<&str>) -> Option<String> {
+    static SPOTIFY_ART_ATTEMPT: OnceLock<
+        std::sync::Mutex<Option<(Option<String>, Option<String>)>>,
+    > = OnceLock::new();
+    let pair = (title.map(str::to_owned), artist.map(str::to_owned));
+    {
+        let mut last = lock_mutex(SPOTIFY_ART_ATTEMPT.get_or_init(|| std::sync::Mutex::new(None)));
+        if last.as_ref() == Some(&pair) {
+            return None;
+        }
+        *last = Some(pair);
+    }
+    let raw = crate::utils::run_osascript(
+        r#"tell application "Spotify" to artwork url of current track"#,
+    )
+    .ok()?;
+    let url = raw.trim();
+    if !url.starts_with("https://") {
+        return None;
+    }
+    fetch_artwork_from_url(url).await
 }
 
 #[cfg(target_os = "macos")]
