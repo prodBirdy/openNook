@@ -28,6 +28,7 @@ The first open-source 1.0 release.
 
 ### Fixed
 
+- Spotify covers were missing in the packaged app: Spotify sends MediaRemote no artwork data, so the cover is now fetched from Spotify's artwork URL.
 - Battery showed "No battery" because the startup snapshot was dropped.
 - Finder drags open the file tray before reaching the top screen edge (macOS 26 Spaces bar).
 - Calendar and Notes no longer repaint on every 30-second poll when nothing changed.
