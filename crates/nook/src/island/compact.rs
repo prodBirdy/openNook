@@ -1,14 +1,14 @@
-//! Compact Live Activity: left | notch gap | right, plus mode dots.
+//! Compact Live Activity: left | notch gap | right.
 
 use super::media::{album_chip, visualizer};
-use super::ui::{label, timer_text};
+use super::ui::{label, slide_label, timer_text};
 use super::{CompactMode, Island};
 use crate::icons::{lucide, lucide_color};
 use crate::theme;
 use crate::widgets;
 use gpui::{
     canvas, div, prelude::*, px, relative, AnyElement, Context, CursorStyle, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, SharedString,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent,
 };
 use nook_core::sysvol::HudKind;
 use std::cell::RefCell;
@@ -36,6 +36,62 @@ const ALERT_ORANGE: gpui::Rgba = gpui::Rgba {
     b: 0.039,
     a: 1.0,
 };
+
+/// BODY 13pt semibold width estimate, capped for ellipsising flank labels.
+fn approx_label_w(text: &str) -> f32 {
+    (text.chars().count() as f32 * theme::COMPACT_BODY_CHAR_W + theme::COMPACT_LABEL_SLACK)
+        .min(theme::COMPACT_LABEL_MAX)
+}
+
+/// Compact face VPN trailing string: timer only while connected (name+timer
+/// overflows the narrow flank and clips on the left under `justify_end`).
+fn vpn_face_text(vpn: &nook_core::vpn::VpnSnapshot, show_timer: bool) -> String {
+    let now = std::time::SystemTime::now();
+    if !vpn.connected {
+        let name = vpn.display_name();
+        return if name.is_empty() {
+            "Disconnected".into()
+        } else {
+            format!("{name} · off")
+        };
+    }
+    if show_timer {
+        if let Some(elapsed) = vpn.elapsed_label(now) {
+            return elapsed;
+        }
+    }
+    vpn.display_name()
+}
+
+/// Trailing/leading compact label. Width/`min_w(0)` live on a flex_col
+/// *container* (leaf is a plain `label` — no `w`/`min_w`/`overflow_hidden` on
+/// the text itself). GPUI ellipsizes when the leaf stretches to that width;
+/// an `overflow_hidden` wrapper hard-clips mid-glyph instead.
+fn flank_text(text: impl Into<gpui::SharedString>) -> gpui::Div {
+    flank_label(text, None)
+}
+
+fn flank_label(text: impl Into<gpui::SharedString>, color: Option<gpui::Rgba>) -> gpui::Div {
+    let text = text.into();
+    let w = approx_label_w(text.as_ref());
+    let mut leaf = label(text, theme::BODY, true);
+    if let Some(c) = color {
+        leaf = leaf.text_color(c);
+    }
+    div()
+        .w(px(w))
+        .min_w(px(0.))
+        .flex_shrink_0()
+        .flex()
+        .flex_col()
+        .justify_center()
+        .child(leaf)
+}
+
+/// Long flank title in a flex ROW: fill the flank and ellipsize (vpn.rs S).
+fn flank_title(text: impl Into<gpui::SharedString>) -> gpui::Div {
+    label(text, theme::BODY, true).flex_1().min_w(px(0.))
+}
 
 /// Leading glyph centred in the mockup's 22pt slot.
 fn leading_icon(name: &'static str, color: gpui::Rgba) -> AnyElement {
@@ -92,6 +148,119 @@ fn battery_glyph(percent: Option<u8>, tint: gpui::Rgba) -> AnyElement {
 }
 
 impl Island {
+    /// Extra width so each equal flank fits its label/icon (capped).
+    pub(super) fn compact_content_extra(&self) -> f32 {
+        let need = self.compact_flank_need();
+        if need <= 0.0 {
+            return 0.0;
+        }
+        (2.0 * need + 2.0 * theme::COMPACT_FLANK_PAD).min(theme::COMPACT_CONTENT_EXTRA_MAX)
+    }
+
+    fn compact_flank_need(&self) -> f32 {
+        let mode = self.mode();
+        let (lead, trail) = match mode {
+            CompactMode::Idle if self.mirror_on => (LEADING_SLOT, MIRROR_LIVE_DOT),
+            CompactMode::Idle if self.high_alert_active() => {
+                let text = self
+                    .high_alert_remaining_secs()
+                    .map(super::ui::format_timer_compact)
+                    .unwrap_or_else(|| "On".into());
+                (LEADING_SLOT, approx_label_w(&text))
+            }
+            CompactMode::Idle => {
+                if let Some(snap) = self.weather_compact_snap() {
+                    let temp = nook_core::weather::format_temp(snap.temperature);
+                    (LEADING_SLOT, approx_label_w(&temp))
+                } else {
+                    (0.0, 0.0)
+                }
+            }
+            CompactMode::Media => (LEADING_SLOT, 18.0),
+            CompactMode::Agents => {
+                let title = self.agent_face_title().unwrap_or_default();
+                (LEADING_SLOT, approx_label_w(&title))
+            }
+            CompactMode::Files => (LEADING_SLOT, approx_label_w(&self.files.len().to_string())),
+            CompactMode::Timer => {
+                let text = self
+                    .face_timer()
+                    .map(|t| super::ui::format_timer_compact(t.remaining))
+                    .unwrap_or_else(|| "0s".into());
+                (LEADING_SLOT, approx_label_w(&text).max(40.0))
+            }
+            CompactMode::Observe => {
+                let text = match self.observe.alerts.as_slice() {
+                    [one] => one.name.clone(),
+                    _ => self.observe.firing_count().to_string(),
+                };
+                (LEADING_SLOT, approx_label_w(&text))
+            }
+            CompactMode::Battery => (
+                BATTERY_SHELL_W + BATTERY_NUB_W,
+                approx_label_w(&nook_core::power::format_percent(self.power.percent)),
+            ),
+            CompactMode::Vpn => {
+                let text = vpn_face_text(&self.vpn, self.settings.vpn_show_timer);
+                (LEADING_SLOT, approx_label_w(&text).max(40.0))
+            }
+            CompactMode::Notifications => {
+                let text = if self.notification_unread > 0 {
+                    format!("{} new", self.notification_unread)
+                } else if let Some(event) = self.notifications.first() {
+                    if event.title.is_empty() {
+                        event.app_name.clone()
+                    } else {
+                        event.title.clone()
+                    }
+                } else {
+                    String::new()
+                };
+                (LEADING_SLOT, approx_label_w(&text))
+            }
+            CompactMode::Onboard => {
+                // Dismiss + github hit targets.
+                let right = theme::HIT_MIN * 2.0 + 2.0;
+                (approx_label_w("openNook"), right)
+            }
+            CompactMode::Messages => {
+                let sender = self
+                    .messages
+                    .incoming
+                    .as_ref()
+                    .map(|p| p.sender.as_str())
+                    .unwrap_or("");
+                (LEADING_SLOT, approx_label_w(sender))
+            }
+            CompactMode::Share => {
+                let text = self.share.compact_label();
+                (LEADING_SLOT, approx_label_w(&text))
+            }
+            CompactMode::Recording | CompactMode::Meeting => (0.0, 0.0),
+        };
+        lead.max(trail)
+    }
+
+    fn weather_compact_snap(&self) -> Option<&nook_core::weather::WeatherSnapshot> {
+        let snap = self.weather.as_ref()?;
+        if !self.settings.weather.enabled || !self.settings.weather.show_on_compact_face {
+            return None;
+        }
+        Some(snap)
+    }
+
+    fn agent_face_title(&self) -> Option<String> {
+        let n = self.agents.len();
+        if n == 0 {
+            return None;
+        }
+        let waiting = self.agents.iter().filter(|a| !a.status.is_working());
+        waiting
+            .chain(self.agents.iter().filter(|a| a.status.is_working()))
+            .nth(self.agent_rotation % n)
+            .map(|a| a.title().to_string())
+    }
+
     pub(super) fn render_compact(
         &self,
         mode: CompactMode,
@@ -110,9 +279,8 @@ impl Island {
                 .items_center()
                 .w_full()
                 .h(px(notch_h))
-                // Mockup compact: padding 0 9 (theme::COMPACT_INSET is still 8 for
-                // chrome math elsewhere).
-                .px(px(9.0))
+                // Mockup compact: padding 0 9.
+                .px(px(theme::COMPACT_FLANK_PAD))
                 .child(
                     div()
                         .flex_1()
@@ -121,7 +289,6 @@ impl Island {
                         .flex()
                         .items_center()
                         .justify_start()
-                        .overflow_hidden()
                         .child(self.compact_left(mode, cx))
                         .when(mode != CompactMode::Idle && self.high_alert_active(), |d| {
                             d.child(div().ml(px(4.)).flex_shrink_0().child(lucide_color(
@@ -145,7 +312,6 @@ impl Island {
                         .flex()
                         .items_center()
                         .justify_end()
-                        .overflow_hidden()
                         .child(self.compact_right(mode, hovered, cx)),
                 ),
         )
@@ -157,7 +323,7 @@ impl Island {
             return leading_icon(hud_icon(kind), hud_tint(kind));
         }
         if let Some(name) = self.output_hud_label() {
-            return label(name.to_string(), theme::BODY, true).into_any_element();
+            return flank_text(name.to_string()).into_any_element();
         }
         match mode {
             CompactMode::Media => album_chip(
@@ -171,7 +337,7 @@ impl Island {
                 &self.agents,
                 self.agent_rotation,
                 self.pixel_t,
-                theme::island_fill(self.settings.island_color),
+                theme::island_fill(theme::island_color(&self.settings)),
                 self.size_morphing(),
             ),
             CompactMode::Files => super::files::compact_left(&self.files),
@@ -198,7 +364,7 @@ impl Island {
             CompactMode::Notifications => {
                 widgets::notifications_compact_left(self.notifications.first())
             }
-            CompactMode::Onboard => label("openNook", theme::BODY, true).into_any_element(),
+            CompactMode::Onboard => flank_text("openNook").into_any_element(),
             CompactMode::Messages => self
                 .messages
                 .incoming
@@ -212,8 +378,16 @@ impl Island {
                     leading_icon("webcam", theme::LABEL)
                 } else if self.high_alert_active() {
                     leading_icon("sun", ALERT_ORANGE)
+                } else if let Some(snap) = self.weather_compact_snap() {
+                    // Icon left, temperature on the right flank so both fit.
+                    let tint = if snap.is_day && matches!(snap.wmo_code, 0 | 1 | 2) {
+                        theme::SYSTEM_ORANGE
+                    } else {
+                        theme::LABEL
+                    };
+                    leading_icon(snap.icon(), tint)
                 } else {
-                    widgets::compact_weather(self)
+                    div().into_any_element()
                 }
             }
         }
@@ -232,10 +406,13 @@ impl Island {
             CompactMode::Media => {
                 visualizer(self.now_playing.is_playing, self.visualizer_color).into_any_element()
             }
-            // Pencil iZPif / jRPai: session title + slide dots while the face rotates.
-            CompactMode::Agents => widgets::agents_compact_right(&self.agents, self.agent_rotation),
+            // Title fills the right flank and ellipsizes (vpn.rs S row pattern).
+            CompactMode::Agents => match self.agent_face_title() {
+                Some(title) => flank_title(title).into_any_element(),
+                None => div().into_any_element(),
+            },
             CompactMode::Files => {
-                label(self.files.len().to_string(), theme::BODY, true).into_any_element()
+                flank_text(self.files.len().to_string()).into_any_element()
             }
             CompactMode::Timer => {
                 let text = self
@@ -243,6 +420,7 @@ impl Island {
                     .map(|t| super::ui::format_timer_compact(t.remaining))
                     .unwrap_or_else(|| "0s".into());
                 timer_text(text, theme::BODY)
+                    .flex_shrink_0()
                     .min_w(px(40.))
                     .text_right()
                     .into_any_element()
@@ -252,21 +430,16 @@ impl Island {
                     [one] => one.name.clone(),
                     _ => self.observe.firing_count().to_string(),
                 };
-                label(text, theme::BODY, true)
-                    .text_color(theme::DESTRUCTIVE)
-                    .into_any_element()
+                flank_label(text, Some(theme::DESTRUCTIVE)).into_any_element()
             }
             // Mockup: the percent stays white; the level fill carries the tint.
-            CompactMode::Battery => label(
-                nook_core::power::format_percent(self.power.percent),
-                theme::BODY,
-                true,
-            )
-            .into_any_element(),
+            CompactMode::Battery => flank_text(nook_core::power::format_percent(self.power.percent))
+                .into_any_element(),
             // Mirror compact (mockup): webcam leading, green live dot trailing.
             CompactMode::Idle if self.mirror_on => div()
                 .size(px(MIRROR_LIVE_DOT))
                 .rounded_full()
+                .flex_shrink_0()
                 .bg(theme::SUCCESS)
                 .into_any_element(),
             // High Alert compact (mockup): orange sun leading, orange value
@@ -277,46 +450,59 @@ impl Island {
                     .map(super::ui::format_timer_compact)
                     .unwrap_or_else(|| "On".into());
                 timer_text(text, theme::BODY)
+                    .flex_shrink_0()
                     .text_color(ALERT_ORANGE)
                     .into_any_element()
             }
-            CompactMode::Idle => div().into_any_element(),
-            CompactMode::Messages => self
-                .messages
-                .incoming
-                .as_ref()
-                .map(widgets::messages_compact_right)
-                .map(|el| el.into_any_element())
-                .unwrap_or_else(|| div().into_any_element()),
-            CompactMode::Share => {
-                label(self.share.compact_label(), theme::BODY, true).into_any_element()
+            CompactMode::Idle => {
+                if let Some(snap) = self.weather_compact_snap() {
+                    flank_text(nook_core::weather::format_temp(snap.temperature)).into_any_element()
+                } else {
+                    div().into_any_element()
+                }
             }
+            CompactMode::Messages => match self.messages.incoming.as_ref() {
+                Some(peek) => flank_text(peek.sender.clone()).into_any_element(),
+                None => div().into_any_element(),
+            },
+            CompactMode::Share => flank_text(self.share.compact_label()).into_any_element(),
             CompactMode::Vpn => {
-                let text = self
-                    .vpn
-                    .compact_right(self.settings.vpn_show_timer, std::time::SystemTime::now());
-                timer_text(text, theme::BODY)
-                    .min_w(px(40.))
+                let text = vpn_face_text(&self.vpn, self.settings.vpn_show_timer);
+                let color = if self.vpn.connected {
+                    theme::SUCCESS
+                } else {
+                    theme::tertiary_label()
+                };
+                flank_label(text, Some(color))
                     .text_right()
-                    .text_color(if self.vpn.connected {
-                        theme::SUCCESS
-                    } else {
-                        theme::tertiary_label()
-                    })
                     .into_any_element()
             }
             CompactMode::Recording => widgets::recorder_compact_right(self, cx),
             CompactMode::Meeting => {
                 widgets::meeting_compact_right(&self.meeting, self.overlay_fade.value)
             }
-            CompactMode::Notifications => widgets::notifications_compact_right(
-                self.notification_unread,
-                self.notifications.first(),
-            ),
+            CompactMode::Notifications => {
+                let text = if self.notification_unread > 0 {
+                    Some(format!("{} new", self.notification_unread))
+                } else {
+                    self.notifications.first().map(|event| {
+                        if event.title.is_empty() {
+                            event.app_name.clone()
+                        } else {
+                            event.title.clone()
+                        }
+                    })
+                };
+                match text {
+                    Some(t) => flank_text(t).into_any_element(),
+                    None => div().into_any_element(),
+                }
+            }
             CompactMode::Onboard => div()
                 .flex()
                 .items_center()
                 .gap(px(2.))
+                .flex_shrink_0()
                 .opacity(if hovered { 1.0 } else { 0.7 })
                 .child(
                     div()
@@ -425,79 +611,48 @@ impl Island {
             .into_any_element()
     }
 
-    pub(super) fn mode_dots(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        if self.hud_active() {
+    /// Now-playing title · artist in the media hover chin.
+    pub(super) fn compact_media_hover_title(&self, fade: f32) -> AnyElement {
+        let Some(title) = self
+            .now_playing
+            .title
+            .as_ref()
+            .filter(|t| !t.is_empty())
+        else {
+            return div().into_any_element();
+        };
+        if self.mode() != CompactMode::Media || !self.has_media() {
             return div().into_any_element();
         }
-        let modes = self.available_modes();
-        let current = self.mode();
-        if modes.len() <= 1 {
-            return div().into_any_element();
-        }
-        let mut row = div()
+        let artist = self
+            .now_playing
+            .artist
+            .as_ref()
+            .filter(|a| !a.is_empty());
+        let notch_h = self.notch_height.max(theme::NOTCH_MIN_H);
+        let combined = match artist {
+            Some(a) => format!("{title} · {a}"),
+            None => title.clone(),
+        };
+        // Vertically center the title line in the chin; rise tracks the fade.
+        let title_top = notch_h
+            + (theme::COMPACT_MEDIA_HOVER_CHIN - theme::SUBHEADLINE.leading) / 2.0
+            - 1.0;
+        div()
             .absolute()
-            .top(px(self.notch_height.max(theme::NOTCH_MIN_H)))
-            .bottom_0()
+            .top(px(title_top))
             .left_0()
             .right_0()
-            .flex()
-            .items_center()
-            .justify_center();
-        for mode in modes {
-            let active = mode == current;
-            let name = match mode {
-                CompactMode::Idle => "idle",
-                CompactMode::Media => "media",
-                CompactMode::Agents => "agents",
-                CompactMode::Files => "files",
-                CompactMode::Timer => "timer",
-                CompactMode::Observe => "observe",
-                CompactMode::Battery => "battery",
-                CompactMode::Vpn => "vpn",
-                CompactMode::Recording => "recording",
-                CompactMode::Meeting => "meeting",
-                CompactMode::Notifications => "notify",
-                CompactMode::Onboard => "onboard",
-                CompactMode::Messages => "messages",
-                CompactMode::Share => "share",
-            };
-            row = row.child(
+            .px(px(14.0))
+            .child(
                 div()
-                    .id(SharedString::from(format!("dot-{name}")))
-                    .h(px(theme::HIT_MIN))
-                    .mt(px(-theme::COMPACT_HOVER_CHIN))
-                    .w(px(theme::HIT_MIN))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .cursor(CursorStyle::PointingHand)
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |this, _: &MouseDownEvent, _, cx| {
-                            cx.stop_propagation();
-                            this.user_preferred = Some(mode);
-                            this.preferred = Some(mode);
-                            this.alert_preferred = None;
-                            nook_core::haptics::trigger(None);
-                            cx.notify();
-                        }),
-                    )
-                    .child(
-                        div()
-                            .id(SharedString::from(format!("dot-glyph-{name}")))
-                            .size(px(if active { 5.0 } else { 4.0 }))
-                            .rounded_full()
-                            .bg(if active {
-                                theme::LABEL
-                            } else {
-                                theme::tertiary_label()
-                            })
-                            .hover(|s| s.opacity(0.7))
-                            .active(|s| s.opacity(0.5)),
-                    ),
-            );
-        }
-        row.into_any_element()
+                    .relative()
+                    .top(px((1.0 - fade) * 4.0))
+                    .w_full()
+                    .overflow_hidden()
+                    .child(slide_label(combined, theme::SUBHEADLINE, true).w_full()),
+            )
+            .into_any_element()
     }
 }
 

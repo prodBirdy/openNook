@@ -84,7 +84,7 @@ pub(crate) fn observe_card(
     card_shell("nook-observe")
         .w_full()
         .cursor(CursorStyle::PointingHand)
-        .hover(|s| s.bg(theme::FILL_TERTIARY))
+        .active(|s| s.opacity(0.85))
         .on_mouse_down(
             MouseButton::Left,
             cx.listener(|this, _: &MouseDownEvent, _, cx| {

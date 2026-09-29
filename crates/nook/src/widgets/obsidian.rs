@@ -3,6 +3,7 @@
 //! Expanded face is the Pencil list mockup (vault summary + daily/recent rows).
 //! Capture / daily / refresh stay as corner controls so plumbing still works.
 
+use crate::icons::lucide_color;
 use crate::island::ui::{label, nook_empty, nook_icon_btn, nook_pane};
 use crate::island::Island;
 use crate::theme;
@@ -11,6 +12,7 @@ use gpui::{
     SharedString,
 };
 use nook_core::obsidian::{CivilDate, NoteEntry};
+use nook_core::settings::{WidgetModule, WidgetSize};
 use std::time::SystemTime;
 
 const ROW_H: f32 = 29.0;
@@ -23,10 +25,37 @@ pub(crate) fn obsidian_card(island: &mut Island, cx: &mut Context<Island>) -> im
     let flash = island.obsidian_flash.clone();
     let vault = island.settings.obsidian_vault.clone();
     let notes = island.obsidian_notes.clone();
+    let size = resolve_size(island, WidgetModule::Obsidian);
 
     let mut pane = card_shell("nook-obsidian").relative().w_full();
 
     let Some(vault_path) = vault else {
+        if size == WidgetSize::Small {
+            // S is too narrow for the full sentence — short clamped line.
+            return pane.child(
+                div()
+                    .flex_1()
+                    .w_full()
+                    .min_w(px(0.))
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .justify_center()
+                    .gap(px(6.))
+                    .child(lucide_color("book", theme::GLYPH_SM, theme::TERTIARY_LABEL))
+                    .child(
+                        div()
+                            .w_full()
+                            .min_w(px(0.))
+                            .text_size(px(theme::CALLOUT.size))
+                            .line_height(px(theme::CALLOUT.leading))
+                            .font_weight(theme::CALLOUT.weight)
+                            .text_color(theme::TERTIARY_LABEL)
+                            .text_center()
+                            .child("Choose a vault in Settings"),
+                    ),
+            );
+        }
         return pane.child(nook_empty(
             "book",
             "Choose a vault in Settings. openNook reads and writes Markdown in that folder.",
@@ -258,6 +287,42 @@ fn capture_field(
                 })
                 .child(SharedString::from(shown)),
         )
+}
+
+fn resolve_size(island: &Island, module: WidgetModule) -> WidgetSize {
+    #[cfg(debug_assertions)]
+    {
+        if island.gallery_mode {
+            let sizes = island.settings.distinct_sizes(module);
+            if !sizes.is_empty() {
+                return sizes[gallery_call_idx(module as u8) % sizes.len()];
+            }
+        }
+    }
+    island.settings.size_for(module)
+}
+
+#[cfg(debug_assertions)]
+fn gallery_call_idx(module: u8) -> usize {
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+    use std::time::{Duration, Instant};
+    thread_local! {
+        static STATE: RefCell<HashMap<u8, (Instant, usize)>> =
+            RefCell::new(HashMap::new());
+    }
+    STATE.with(|state| {
+        let mut map = state.borrow_mut();
+        let now = Instant::now();
+        let entry = map.entry(module).or_insert((now, 0));
+        if now.duration_since(entry.0) > Duration::from_millis(32) {
+            entry.1 = 0;
+        }
+        entry.0 = now;
+        let idx = entry.1;
+        entry.1 = idx + 1;
+        idx
+    })
 }
 
 fn notes_modified_today(notes: &[NoteEntry]) -> usize {

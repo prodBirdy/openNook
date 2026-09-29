@@ -66,7 +66,7 @@ pub(crate) fn messages_card(island: &mut Island, cx: &mut Context<Island>) -> im
             .into_any_element(),
         FdaStatus::Unavailable => card_shell("nook-messages")
             .w_full()
-            .child(nook_empty(
+            .child(centered_empty(
                 "message-circle",
                 "No Messages database on this Mac",
             ))
@@ -212,6 +212,33 @@ fn msg_row(
 
 fn card_shell(id: impl Into<gpui::ElementId>) -> gpui::Stateful<gpui::Div> {
     nook_pane(id).p(px(16.)).gap(px(10.))
+}
+
+/// Empty state that stays centered when the copy wraps at S widths.
+/// `nook_empty` leaves wrapped lines left-aligned, which reads off-center
+/// next to the M/L single-line cards.
+fn centered_empty(icon: &'static str, message: &str) -> impl IntoElement {
+    div()
+        .flex_1()
+        .w_full()
+        .min_w(px(0.))
+        .flex()
+        .flex_col()
+        .items_center()
+        .justify_center()
+        .gap(px(6.))
+        .child(lucide_color(icon, theme::GLYPH_SM, theme::TERTIARY_LABEL))
+        .child(
+            div()
+                .w_full()
+                .min_w(px(0.))
+                .text_size(px(theme::CALLOUT.size))
+                .line_height(px(theme::CALLOUT.leading))
+                .font_weight(theme::CALLOUT.weight)
+                .text_color(theme::TERTIARY_LABEL)
+                .text_center()
+                .child(SharedString::from(message.to_string())),
+        )
 }
 
 fn reply_row(
@@ -479,8 +506,4 @@ pub(crate) fn compact_left(_peek: &IncomingPeek) -> impl IntoElement {
             17.0,
             theme::secondary_label(),
         ))
-}
-
-pub(crate) fn compact_right(peek: &IncomingPeek) -> impl IntoElement {
-    crate::island::ui::slide_label(peek.sender.clone(), theme::BODY, true)
 }

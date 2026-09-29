@@ -1,6 +1,7 @@
 use crate::database::{get_connection, log_sql};
 use serde::{Deserialize, Serialize};
 use std::fs;
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
@@ -70,6 +71,28 @@ pub fn open_file(path: String) -> Result<(), String> {
     open::that(&path).map_err(|e| e.to_string())
 }
 
+/// Quick Look preview via `qlmanage -p` (spawned, not waited).
+pub fn quick_look(path: &str) -> Result<(), String> {
+    Command::new("/usr/bin/qlmanage")
+        .args(["-p", path])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
+/// Reveal the file in Finder (`open -R`).
+pub fn reveal(path: &str) -> Result<(), String> {
+    Command::new("/usr/bin/open")
+        .args(["-R", path])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
 pub fn resolve_path(path: String) -> Result<String, String> {
     fs::canonicalize(&path)
         .map(|p| p.to_string_lossy().into_owned())
@@ -103,7 +126,7 @@ fn drag_pasteboard_change_count() -> i64 {
 }
 
 static OUTBOUND_DRAG: AtomicBool = AtomicBool::new(false);
-static OUTBOUND_PATH: Mutex<Option<String>> = Mutex::new(None);
+static OUTBOUND_PATHS: Mutex<Option<Vec<String>>> = Mutex::new(None);
 static OUTBOUND_DROPPED: AtomicBool = AtomicBool::new(false);
 
 /// True while this process is the drag source (tray → Finder / other apps).
@@ -111,11 +134,11 @@ pub fn outbound_drag_active() -> bool {
     OUTBOUND_DRAG.load(Ordering::SeqCst)
 }
 
-pub fn begin_outbound_drag(path: &str) {
+pub fn begin_outbound_drag(paths: &[String]) {
     OUTBOUND_DRAG.store(true, Ordering::SeqCst);
     OUTBOUND_DROPPED.store(false, Ordering::SeqCst);
-    if let Ok(mut guard) = OUTBOUND_PATH.lock() {
-        *guard = Some(path.to_string());
+    if let Ok(mut guard) = OUTBOUND_PATHS.lock() {
+        *guard = Some(paths.to_vec());
     }
 }
 
@@ -125,13 +148,13 @@ pub fn finish_outbound_drag(dropped: bool) {
 }
 
 /// Consume a finished outbound drag. `None` while the session is still live.
-pub fn take_outbound_drag() -> Option<(String, bool)> {
+pub fn take_outbound_drag() -> Option<(Vec<String>, bool)> {
     if OUTBOUND_DRAG.load(Ordering::SeqCst) {
         return None;
     }
-    let mut guard = OUTBOUND_PATH.lock().ok()?;
-    let path = guard.take()?;
-    Some((path, OUTBOUND_DROPPED.load(Ordering::SeqCst)))
+    let mut guard = OUTBOUND_PATHS.lock().ok()?;
+    let paths = guard.take()?;
+    Some((paths, OUTBOUND_DROPPED.load(Ordering::SeqCst)))
 }
 
 #[cfg(target_os = "macos")]
@@ -309,7 +332,7 @@ mod tests {
     #[test]
     fn outbound_drag_state_excludes_inbound_and_reports_drop() {
         let _ = take_outbound_drag();
-        begin_outbound_drag("/tmp/example.txt");
+        begin_outbound_drag(&["/tmp/example.txt".into()]);
         assert!(outbound_drag_active());
         assert!(!file_drag_active());
         assert!(take_outbound_drag().is_none());
@@ -317,12 +340,15 @@ mod tests {
         assert!(!outbound_drag_active());
         assert_eq!(
             take_outbound_drag(),
-            Some(("/tmp/example.txt".into(), true))
+            Some((vec!["/tmp/example.txt".into()], true))
         );
         assert!(take_outbound_drag().is_none());
 
-        begin_outbound_drag("/tmp/keep.txt");
+        begin_outbound_drag(&["/tmp/a.txt".into(), "/tmp/b.txt".into()]);
         finish_outbound_drag(false);
-        assert_eq!(take_outbound_drag(), Some(("/tmp/keep.txt".into(), false)));
+        assert_eq!(
+            take_outbound_drag(),
+            Some((vec!["/tmp/a.txt".into(), "/tmp/b.txt".into()], false))
+        );
     }
 }

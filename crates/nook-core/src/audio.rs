@@ -221,6 +221,8 @@ async fn now_playing_from_adapter(track: crate::mediaremote::AdapterTrack) -> No
         app_name: track.app_name,
         bundle_id: track.bundle_id,
         motion_artwork_url: None,
+        shuffle: track.shuffle,
+        repeat: track.repeat,
     };
     save_last_played(&data);
     data
@@ -725,6 +727,8 @@ pub async fn get_now_playing() -> NowPlayingData {
                         _ => None,
                     },
                     motion_artwork_url: None,
+                    shuffle: None,
+                    repeat: None,
                 };
 
                 save_last_played(&data);
@@ -812,6 +816,8 @@ pub async fn get_now_playing() -> NowPlayingData {
                     app_name: Some("System".to_string()),
                     bundle_id: None,
                     motion_artwork_url: None,
+                    shuffle: None,
+                    repeat: None,
                 })
             })();
 
@@ -936,6 +942,8 @@ pub async fn get_now_playing() -> NowPlayingData {
                                 app_name: Some(name.replace("org.mpris.MediaPlayer2.", "")),
                                 bundle_id: None,
                                 motion_artwork_url: None,
+                                shuffle: None,
+                                repeat: None,
                             };
                             save_last_played(&data);
                             return data;
@@ -1171,6 +1179,30 @@ pub async fn media_play_pause() -> Result<(), String> {
         }
         Ok(())
     }
+}
+
+/// Toggle shuffle via MediaRemote. No AppleScript fallback.
+pub async fn media_toggle_shuffle() -> Result<(), String> {
+    note_media_event();
+    #[cfg(target_os = "macos")]
+    {
+        if crate::mediaremote::is_available() {
+            return crate::mediaremote::send(crate::mediaremote::MraCommand::ToggleShuffle);
+        }
+    }
+    Err("unsupported".into())
+}
+
+/// Toggle repeat via MediaRemote. No AppleScript fallback.
+pub async fn media_toggle_repeat() -> Result<(), String> {
+    note_media_event();
+    #[cfg(target_os = "macos")]
+    {
+        if crate::mediaremote::is_available() {
+            return crate::mediaremote::send(crate::mediaremote::MraCommand::ToggleRepeat);
+        }
+    }
+    Err("unsupported".into())
 }
 
 /// Skip to the next track.

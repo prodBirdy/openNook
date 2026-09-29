@@ -7,6 +7,7 @@ use crate::island::ui::{nook_empty, nook_pane};
 use crate::island::{Island, Tab};
 use crate::theme;
 use gpui::{div, prelude::*, px, relative, Context, FontWeight, SharedString};
+use nook_core::settings::{WidgetModule, WidgetSize};
 use nook_core::sysstats;
 use std::time::Duration;
 
@@ -14,6 +15,8 @@ const SAMPLE_INTERVAL: Duration = Duration::from_secs(1);
 
 pub(crate) fn sysstats_card(island: &mut Island, cx: &mut Context<Island>) -> impl IntoElement {
     island.ensure_sysstats(cx);
+    let size = resolve_size(island, WidgetModule::SysStats);
+    let compact = size == WidgetSize::Small;
     let snap = &island.sysstats;
     let cfg = &island.settings.sysstats;
     let mut rows = div()
@@ -35,15 +38,7 @@ pub(crate) fn sysstats_card(island: &mut Island, cx: &mut Context<Island>) -> im
     }
     if cfg.show_mem {
         any = true;
-        let value = if snap.mem_total == 0 {
-            "—".into()
-        } else {
-            format!(
-                "{} / {}",
-                sysstats::format_bytes(snap.mem_used),
-                sysstats::format_bytes(snap.mem_total)
-            )
-        };
+        let value = mem_value(snap.mem_used, snap.mem_total, compact);
         let t = ratio(snap.mem_used, snap.mem_total);
         rows = rows.child(stat_row("MEM", value, t, theme::LABEL));
     }
@@ -71,6 +66,32 @@ fn card_shell(id: impl Into<gpui::ElementId>) -> gpui::Stateful<gpui::Div> {
     nook_pane(id).p(px(16.)).gap(px(10.))
 }
 
+fn mem_value(used: u64, total: u64, compact: bool) -> String {
+    if total == 0 {
+        return "—".into();
+    }
+    let u = sysstats::format_bytes(used);
+    let t = sysstats::format_bytes(total);
+    if !compact {
+        return format!("{u} / {t}");
+    }
+    // "11.2 GB" / "29.8 GB" → "11.2/29.8 GB"
+    let (un, uu) = split_unit(&u);
+    let (tn, tu) = split_unit(&t);
+    if !tu.is_empty() && uu == tu {
+        format!("{un}/{tn} {tu}")
+    } else {
+        format!("{un}/{tn}")
+    }
+}
+
+fn split_unit(s: &str) -> (&str, &str) {
+    match s.rfind(' ') {
+        Some(i) => (&s[..i], &s[i + 1..]),
+        None => (s, ""),
+    }
+}
+
 fn stat_label(name: &'static str) -> impl IntoElement {
     div()
         .w(px(26.))
@@ -89,10 +110,15 @@ fn stat_row(name: &'static str, value: String, t: f32, color: gpui::Rgba) -> imp
         .items_center()
         .gap(px(8.))
         .child(stat_label(name))
-        .child(gauge(t, color))
         .child(
             div()
-                .w(px(62.))
+                .flex_1()
+                .min_w(px(24.))
+                .overflow_hidden()
+                .child(gauge(t, color)),
+        )
+        .child(
+            div()
                 .flex_shrink_0()
                 .text_size(px(9.))
                 .line_height(px(12.))
@@ -128,9 +154,45 @@ fn ratio(used: u64, total: u64) -> f32 {
     }
 }
 
+fn resolve_size(island: &Island, module: WidgetModule) -> WidgetSize {
+    #[cfg(debug_assertions)]
+    {
+        if island.gallery_mode {
+            let sizes = island.settings.distinct_sizes(module);
+            if !sizes.is_empty() {
+                return sizes[gallery_call_idx(module as u8) % sizes.len()];
+            }
+        }
+    }
+    island.settings.size_for(module)
+}
+
+#[cfg(debug_assertions)]
+fn gallery_call_idx(module: u8) -> usize {
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+    use std::time::{Duration, Instant};
+    thread_local! {
+        static STATE: RefCell<HashMap<u8, (Instant, usize)>> =
+            RefCell::new(HashMap::new());
+    }
+    STATE.with(|state| {
+        let mut map = state.borrow_mut();
+        let now = Instant::now();
+        let entry = map.entry(module).or_insert((now, 0));
+        if now.duration_since(entry.0) > Duration::from_millis(32) {
+            entry.1 = 0;
+        }
+        entry.0 = now;
+        let idx = entry.1;
+        entry.1 = idx + 1;
+        idx
+    })
+}
+
 impl Island {
     pub(crate) fn ensure_sysstats(&mut self, cx: &mut Context<Self>) {
-        if self.sysstats_sampling {
+        if self.gallery_mode || self.sysstats_sampling {
             return;
         }
         if !self.sysstats_should_sample() {

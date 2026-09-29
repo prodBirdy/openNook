@@ -308,7 +308,7 @@ fn recording_row(
                             return;
                         }
                         *a.borrow_mut() = None;
-                        platform::start_file_drag(&path, Some(window));
+                        platform::start_file_drag(std::slice::from_ref(&path), Some(window));
                     });
                 }))
                 .on_mouse_up(

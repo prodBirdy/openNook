@@ -42,6 +42,22 @@ pub struct NowPlayingData {
     /// Apple Music editorialVideo HLS loop, when the catalog has one.
     #[serde(default)]
     pub motion_artwork_url: Option<String>,
+    /// Shuffle on/off from MediaRemote `shuffleMode` (None when the player omits it).
+    #[serde(default)]
+    pub shuffle: Option<bool>,
+    /// Repeat mode from MediaRemote `repeatMode` (None when the player omits it).
+    #[serde(default)]
+    pub repeat: Option<RepeatMode>,
+}
+
+/// MediaRemote repeat mode (`repeatMode` 1=off, 2=one, 3=all).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum RepeatMode {
+    #[default]
+    Off,
+    One,
+    All,
 }
 
 /// One timed line from an LRC file.
@@ -72,6 +88,7 @@ pub struct SyncedLyrics {
 pub enum QueueSource {
     MusicPlaylist,
     Spotify,
+    MediaRemote,
 }
 
 /// Why the island hides the upcoming list. Music's real Playing Next queue
@@ -82,6 +99,8 @@ pub enum QueueSource {
 pub enum QueueHidden {
     Shuffle,
     Radio,
+    /// Streamed Apple Music catalog track (`URL track`) — no local playlist.
+    Streaming,
     Idle,
     NeedsSpotifyAuth,
     PremiumRequired,
@@ -98,24 +117,29 @@ pub enum QueueJump {
     /// Sequential `POST /v1/me/player/next` count, plus the track uri so we
     /// can try `PUT /v1/me/player/play` with context+offset first.
     Spotify { skip_count: u32, uri: String },
+    /// MediaRemote exposes the upcoming list but no play-this-item command.
+    Unavailable,
 }
 
 /// One upcoming row. Artwork stays optional: Spotify uses a 64px URL (lazy),
 /// Music rows may ship without art.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct QueueItem {
     pub id: String,
     pub title: String,
     pub artist: String,
     pub artwork_url: Option<String>,
     pub artwork_base64: Option<String>,
+    /// Seconds, when the adapter provided it. AppleScript rows leave this None.
+    #[serde(default)]
+    pub duration: Option<f64>,
     pub source: QueueSource,
     pub jump: QueueJump,
 }
 
 /// Separate fetch from now-playing. Empty `items` + no `hidden` means "nothing
 /// to show", not an error.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct PlaybackQueue {
     pub source: Option<QueueSource>,
     pub label: String,

@@ -1,8 +1,7 @@
-//! On-island widget customize mode — Droppy / Control Center style.
+//! On-island widget customize mode — Control Center / Notification Center style.
 //!
-//! Active widgets sit in dashed frames with a red − on the corner. Tap a dock
-//! chip to add/remove; drag is secondary for place/reorder. Cancel / Done
-//! commit or revert.
+//! Live reflow on drag, a gallery of unused widgets, − to remove, S/M/L on
+//! each pane. Cancel / Done commit or revert.
 
 use super::Island;
 use crate::icons::lucide_color;
@@ -11,14 +10,16 @@ use gpui::{
     div, prelude::*, px, AnyElement, App, Context, CursorStyle, FontWeight, MouseButton,
     MouseDownEvent, ScrollHandle, ScrollWheelEvent, SharedString, Window,
 };
-use nook_core::settings::WidgetModule;
+use nook_core::settings::{WidgetModule, WidgetSize};
 use std::cell::RefCell;
-use std::time::{Duration, Instant};
 
-const DOCK_ICON: f32 = 44.0;
-const DOCK_COL: f32 = 56.0;
-const DOCK_GAP: f32 = 10.0;
-const DOCK_LABEL_H: f32 = 14.0;
+const GALLERY_FACE_H: f32 = 40.0;
+const GALLERY_CELL_W: f32 = 9.0;
+const GALLERY_GAP: f32 = 10.0;
+const GALLERY_RADIUS: f32 = 10.0;
+const SIZE_CAPSULE_H: f32 = 22.0;
+pub(super) const EDIT_ROW_GAP: f32 = 12.0;
+const EDIT_FRAME_RADIUS: f32 = theme::CONTROL_RADIUS + 10.0;
 
 thread_local! {
     static PICKER_SCROLL: RefCell<ScrollHandle> = RefCell::new(ScrollHandle::default());
@@ -28,58 +29,36 @@ fn picker_scroll() -> ScrollHandle {
     PICKER_SCROLL.with_borrow(|h| h.clone())
 }
 
-/// Where a customize drag started.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) enum NookDragKind {
-    /// Dock icon → place / replace on a slot.
-    Place,
-    /// Pane → pane reorder.
-    Reorder,
-}
-
 /// Drag payload for customize mode.
 #[derive(Clone, Copy)]
 pub(super) struct NookWidgetDrag {
     pub module: WidgetModule,
-    pub kind: NookDragKind,
+    pub width: f32,
 }
 
 impl gpui::Render for NookWidgetDrag {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        match self.kind {
-            // Droppy: lifted app icon with a soft glow — no chrome card.
-            NookDragKind::Place => div()
-                .size(px(DOCK_ICON + 8.0))
-                .rounded(px(theme::INNER_RADIUS + 2.0))
-                .bg(theme::GROUPED_BG)
-                .border_1()
-                .border_color(theme::SEPARATOR)
-                .shadow_lg()
-                .flex()
-                .items_center()
-                .justify_center()
-                .child(lucide_color(module_icon(self.module), 24.0, theme::LABEL)),
-            NookDragKind::Reorder => div()
-                .h(px(56.))
-                .min_w(px(100.))
-                .px(px(14.))
-                .rounded(px(theme::CONTROL_RADIUS + 6.0))
-                .bg(theme::WINDOW_BG)
-                .border_1()
-                .border_color(theme::SEPARATOR)
-                .shadow_lg()
-                .flex()
-                .items_center()
-                .gap(px(8.))
-                .child(lucide_color(module_icon(self.module), 18.0, theme::LABEL))
-                .child(
-                    div()
-                        .text_size(px(theme::BODY.size))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(theme::LABEL)
-                        .child(module_short(self.module)),
-                ),
-        }
+        div()
+            .w(px(self.width.max(1.0)))
+            .h(px(56.))
+            .px(px(14.))
+            .rounded(px(theme::CONTROL_RADIUS + 6.0))
+            .bg(theme::WINDOW_BG)
+            .border_1()
+            .border_color(theme::SEPARATOR)
+            .shadow_lg()
+            .opacity(0.9)
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .child(lucide_color(module_icon(self.module), 18.0, theme::LABEL))
+            .child(
+                div()
+                    .text_size(px(theme::BODY.size))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(theme::LABEL)
+                    .child(module_short(self.module)),
+            )
     }
 }
 
@@ -133,112 +112,134 @@ pub(super) fn module_short(module: WidgetModule) -> &'static str {
     }
 }
 
+/// Insertion slot among panes whose widths are `widths`, laid out from `left`
+/// with `gap` between them. Picks the first pane whose midpoint is to the
+/// right of `x`, or `widths.len()` if the pointer is past every midpoint.
+pub(super) fn insert_index(widths: &[f32], left: f32, gap: f32, x: f32) -> usize {
+    let mut edge = left;
+    for (i, &w) in widths.iter().enumerate() {
+        let mid = edge + w * 0.5;
+        if x < mid {
+            return i;
+        }
+        edge += w + gap;
+    }
+    widths.len()
+}
+
 impl Island {
     pub(super) fn render_widget_edit_picker(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let cell_w = self.nook_cell_width();
         let modules: Vec<WidgetModule> = self
             .settings
             .ordered_widgets()
             .into_iter()
             .filter(|m| {
-                m.occupies_nook_cells() && m.is_available() && self.settings.widget_visible(*m)
+                m.occupies_nook_cells()
+                    && m.is_available()
+                    && self.settings.widget_visible(*m)
+                    && !self.settings.is_enabled(*m)
             })
             .collect();
-        let n = modules.len();
-        let chips_w = if n == 0 {
-            0.0
+
+        let body = if modules.is_empty() {
+            div()
+                .id("widget-edit-picker")
+                .flex_1()
+                .min_w(px(0.))
+                .h_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(
+                    div()
+                        .text_size(px(theme::FOOTNOTE.size))
+                        .line_height(px(theme::FOOTNOTE.leading))
+                        .text_color(theme::secondary_label())
+                        .child("All widgets are in use"),
+                )
+                .into_any_element()
         } else {
-            n as f32 * DOCK_COL + (n.saturating_sub(1) as f32) * DOCK_GAP
-        };
-        let row_h = DOCK_ICON + 4.0 + DOCK_LABEL_H;
-        let show_budget_hint = self
-            .widget_edit_budget_hint_at
-            .is_some_and(|t| t.elapsed() < Duration::from_secs(2));
-
-        let mut chips = div()
-            .id("widget-edit-picker-row")
-            .flex()
-            .flex_row()
-            .items_start()
-            .gap(px(DOCK_GAP))
-            .h(px(row_h))
-            .w(px(chips_w))
-            .flex_shrink_0();
-
-        for module in modules {
-            let on = self.settings.is_enabled(module);
-            let can = on || self.settings.can_enable(module);
-            chips = chips.child(self.picker_chip(module, on, can, cx));
-        }
-
-        let scroll = picker_scroll();
-        let mut scroller = div()
-            .id("widget-edit-picker")
-            .track_scroll(&scroll)
-            .flex_1()
-            .min_w(px(0.))
-            .h(px(row_h))
-            .overflow_x_scroll()
-            .overflow_y_hidden()
-            .on_scroll_wheel({
-                let scroll = scroll.clone();
-                move |event: &ScrollWheelEvent, window: &mut Window, cx: &mut App| {
-                    let delta = event.delta.pixel_delta(window.line_height());
-                    if scroll.max_offset().width > px(0.5)
-                        && (delta.x.abs() > px(0.5) || delta.y.abs() > px(0.5))
-                    {
-                        cx.stop_propagation();
-                    }
+            let n = modules.len();
+            let mut cards_w = 0.0;
+            for (i, module) in modules.iter().enumerate() {
+                cards_w += (self.settings.cells_for(*module) as f32 * GALLERY_CELL_W).max(36.0);
+                if i + 1 < n {
+                    cards_w += GALLERY_GAP;
                 }
-            })
-            .child(chips);
-        scroller.style().restrict_scroll_to_axis = Some(false);
+            }
+            let mut cards = div()
+                .id("widget-edit-picker-row")
+                .flex()
+                .flex_row()
+                .items_start()
+                .gap(px(GALLERY_GAP))
+                .h_full()
+                .w(px(cards_w))
+                .flex_shrink_0();
+            for module in modules {
+                cards = cards.child(self.gallery_card(module, cell_w, cx));
+            }
+            let scroll = picker_scroll();
+            let mut scroller = div()
+                .id("widget-edit-picker")
+                .track_scroll(&scroll)
+                .flex_1()
+                .min_w(px(0.))
+                .h_full()
+                .overflow_x_scroll()
+                .overflow_y_hidden()
+                .on_scroll_wheel({
+                    let scroll = scroll.clone();
+                    move |event: &ScrollWheelEvent, window: &mut Window, cx: &mut App| {
+                        let delta = event.delta.pixel_delta(window.line_height());
+                        if scroll.max_offset().width > px(0.5)
+                            && (delta.x.abs() > px(0.5) || delta.y.abs() > px(0.5))
+                        {
+                            cx.stop_propagation();
+                        }
+                    }
+                })
+                .child(cards);
+            scroller.style().restrict_scroll_to_axis = Some(false);
+            scroller.into_any_element()
+        };
 
         div()
             .w_full()
             .h(px(theme::WIDGET_EDIT_PICKER_H))
             .flex_shrink_0()
             .px(px(theme::NOOK_INSET))
-            .pb(px(if show_budget_hint { 8.0 } else { 14.0 }))
+            .pb(px(10.))
             .pt(px(4.))
             .flex()
-            .flex_col()
-            .justify_center()
-            .gap(px(4.))
-            .child(scroller)
-            .when(show_budget_hint, |d| {
-                d.child(
-                    div()
-                        .w_full()
-                        .text_size(px(theme::FOOTNOTE.size))
-                        .line_height(px(theme::FOOTNOTE.leading))
-                        .text_color(theme::tertiary_label())
-                        .child("No room — remove a widget first"),
-                )
-            })
+            .items_center()
+            .child(body)
     }
 
-    fn picker_chip(
+    fn gallery_card(
         &self,
         module: WidgetModule,
-        on: bool,
-        can: bool,
+        cell_w: f32,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let must_replace = !on && !can;
+        let short = self.settings.cells_short_for(module);
+        let no_space = short > 0;
+        let cells = self.settings.cells_for(module);
+        let face_w = (cells as f32 * GALLERY_CELL_W).max(36.0);
+        let row_w = cells as f32 * cell_w;
         let drag = NookWidgetDrag {
             module,
-            kind: NookDragKind::Place,
+            width: row_w,
         };
-        let accent_fill = theme::with_alpha(theme::accent(), 0.18);
-        let mut chip = div()
+        div()
             .id(SharedString::from(format!("pick-{}", module as u8)))
-            .w(px(DOCK_COL))
             .flex_shrink_0()
             .flex()
             .flex_col()
             .items_center()
             .gap(px(4.))
-            .opacity(if must_replace {
+            .opacity(if no_space {
                 theme::DISABLED_OPACITY
             } else {
                 1.0
@@ -246,92 +247,69 @@ impl Island {
             .cursor(CursorStyle::PointingHand)
             .on_click(cx.listener(move |this, _, _, cx| {
                 cx.stop_propagation();
-                if this.settings.is_enabled(module) {
-                    nook_core::settings::tweak_app_settings(|s| {
-                        let _ = s.set_enabled(module, false);
-                    });
-                    this.settings = nook_core::settings::get_app_settings();
-                    this.widget_edit_budget_hint_at = None;
-                    this.force_content_transition();
+                if this.settings.cells_short_for(module) > 0 {
                     nook_core::haptics::trigger(None);
                     cx.notify();
-                } else if this.settings.can_enable(module) {
-                    nook_core::settings::tweak_app_settings(|s| {
-                        let _ = s.set_enabled(module, true);
-                    });
+                    return;
+                }
+                let mut ok = false;
+                nook_core::settings::tweak_app_settings(|s| {
+                    ok = s.insert_widget_at(module, usize::MAX);
+                });
+                if ok {
                     this.settings = nook_core::settings::get_app_settings();
-                    this.widget_edit_budget_hint_at = None;
                     this.force_content_transition();
-                    nook_core::haptics::trigger(None);
-                    cx.notify();
-                } else {
-                    this.widget_edit_budget_hint_at = Some(Instant::now());
                     nook_core::haptics::trigger(None);
                     cx.notify();
                 }
-            }));
-        // Drag remains a secondary place affordance when the chip fits.
-        if !must_replace {
-            chip = chip.on_drag(drag, |drag, _, _, cx| cx.new(|_| *drag));
-        }
-        let accent_hover = theme::with_alpha(theme::accent(), 0.28);
-        chip.child(
-            div()
-                .id(SharedString::from(format!("pick-icon-{}", module as u8)))
-                .relative()
-                .size(px(DOCK_ICON))
-                .rounded(px(theme::INNER_RADIUS))
-                .bg(if on { accent_fill } else { theme::FILL })
-                .border_1()
-                .border_color(if on {
-                    theme::accent()
-                } else {
-                    theme::SEPARATOR
-                })
-                .flex()
-                .items_center()
-                .justify_center()
-                .hover(|s| s.bg(accent_hover).border_color(theme::accent()))
-                .active(|s| s.opacity(0.85))
-                .child(lucide_color(module_icon(module), 20.0, theme::LABEL))
-                .when(on, |d| {
-                    d.child(
-                        div()
-                            .absolute()
-                            .bottom(px(-3.))
-                            .right(px(-3.))
-                            .size(px(15.))
-                            .rounded_full()
-                            .bg(theme::accent())
-                            .border_2()
-                            .border_color(theme::WINDOW_BG)
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .child(lucide_color("check", 9.0, theme::LABEL)),
-                    )
-                }),
-        )
-        .child(
-            div()
-                .w_full()
-                .h(px(DOCK_LABEL_H))
-                .flex()
-                .items_center()
-                .justify_center()
-                .overflow_hidden()
-                .child(
+            }))
+            .on_drag(drag, |drag, _, _, cx| cx.new(|_| *drag))
+            .child(
+                div()
+                    .id(SharedString::from(format!("pick-face-{}", module as u8)))
+                    .relative()
+                    .w(px(face_w))
+                    .h(px(GALLERY_FACE_H))
+                    .rounded(px(GALLERY_RADIUS))
+                    .bg(theme::FILL)
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(lucide_color(module_icon(module), 16.0, theme::LABEL))
+                    .when(!no_space, |d| {
+                        d.child(
+                            div()
+                                .absolute()
+                                .top(px(4.))
+                                .left(px(4.))
+                                .size(px(16.))
+                                .rounded_full()
+                                .bg(theme::accent())
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .child(lucide_color("plus", 10.0, theme::LABEL)),
+                        )
+                    }),
+            )
+            .child(
+                div()
+                    .text_size(px(theme::FOOTNOTE.size))
+                    .line_height(px(theme::FOOTNOTE.leading))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(theme::secondary_label())
+                    .whitespace_nowrap()
+                    .child(module_short(module)),
+            )
+            .when(no_space, |d| {
+                d.child(
                     div()
-                        .w_full()
-                        .text_size(px(10.))
-                        .font_weight(FontWeight::MEDIUM)
+                        .text_size(px(theme::FOOTNOTE.size))
+                        .line_height(px(theme::FOOTNOTE.leading))
                         .text_color(theme::secondary_label())
-                        .whitespace_nowrap()
-                        .overflow_hidden()
-                        .text_ellipsis()
-                        .child(module_short(module)),
-                ),
-        )
+                        .child("No space"),
+                )
+            })
     }
 }
 
@@ -390,30 +368,30 @@ pub(super) fn edit_action_btn(
         )
 }
 
-/// Dashed edit frame + red − on the corner (iOS jiggle / Droppy).
+/// Solid edit frame, − inside the pane, optional S/M/L capsule.
 pub(super) fn edit_chrome(
     module: WidgetModule,
     child: AnyElement,
+    pane_width: f32,
+    selected: WidgetSize,
+    size_opts: &[(WidgetSize, bool)],
     cx: &mut Context<Island>,
 ) -> AnyElement {
     let drag = NookWidgetDrag {
         module,
-        kind: NookDragKind::Reorder,
+        width: pane_width,
     };
-    let accent_hi = theme::with_alpha(theme::accent(), 0.80);
-    let accent_lo = theme::with_alpha(theme::accent(), 0.16);
-    div()
+    let mut frame = div()
         .id(SharedString::from(format!("edit-pane-{}", module as u8)))
         .relative()
         .size_full()
-        .rounded(px(theme::CONTROL_RADIUS + 10.0))
+        .rounded(px(EDIT_FRAME_RADIUS))
         .border_1()
-        .border_dashed()
         .border_color(theme::SEPARATOR)
         .child(
             div()
                 .size_full()
-                .rounded(px(theme::CONTROL_RADIUS + 9.0))
+                .rounded(px(EDIT_FRAME_RADIUS - 1.0))
                 .overflow_hidden()
                 .child(child),
         )
@@ -422,61 +400,22 @@ pub(super) fn edit_chrome(
                 .id(SharedString::from(format!("hit-{}", module as u8)))
                 .absolute()
                 .inset_0()
-                .rounded(px(theme::CONTROL_RADIUS + 10.0))
+                .rounded(px(EDIT_FRAME_RADIUS))
                 .occlude()
                 .cursor(CursorStyle::OpenHand)
-                .drag_over::<NookWidgetDrag>(move |style, drag, _, _| {
-                    if drag.module == module {
-                        style
-                    } else {
-                        style.bg(accent_lo).border_color(accent_hi)
-                    }
-                })
-                .can_drop(move |value, _, _| {
-                    value
-                        .downcast_ref::<NookWidgetDrag>()
-                        .is_some_and(|drag| drag.module != module)
-                })
-                .on_drop(cx.listener(move |this, drag: &NookWidgetDrag, _, cx| {
-                    if drag.module == module {
-                        return;
-                    }
-                    let mut ok = false;
-                    nook_core::settings::tweak_app_settings(|s| {
-                        ok = match drag.kind {
-                            NookDragKind::Reorder => s.try_move_widget_to(drag.module, module),
-                            NookDragKind::Place => s.place_widget_on(drag.module, module),
-                        };
-                    });
-                    if ok {
-                        this.settings = nook_core::settings::get_app_settings();
-                        this.widget_edit_budget_hint_at = None;
-                        this.force_content_transition();
-                        nook_core::haptics::trigger(None);
-                        cx.notify();
-                    } else {
-                        this.widget_edit_budget_hint_at = Some(Instant::now());
-                        nook_core::haptics::trigger(None);
-                        cx.notify();
-                    }
-                }))
                 .on_drag(drag, |drag, _, _, cx| cx.new(|_| *drag)),
         )
-        // − sits on the corner of the dashed frame, Droppy / springboard style.
         .child(
             div()
                 .id(SharedString::from(format!("rm-{}", module as u8)))
                 .absolute()
-                .top(px(-7.))
-                .right(px(-7.))
-                .size(px(22.))
-                .rounded_full()
-                .bg(theme::DESTRUCTIVE)
-                .shadow_sm()
-                .occlude()
+                .top(px(6.))
+                .left(px(6.))
+                .size(px(theme::HIT_MIN))
                 .flex()
                 .items_center()
                 .justify_center()
+                .occlude()
                 .cursor(CursorStyle::PointingHand)
                 .hover(|s| s.opacity(0.9))
                 .on_mouse_down(
@@ -492,73 +431,179 @@ pub(super) fn edit_chrome(
                         cx.notify();
                     }),
                 )
-                // `minus.svg` is not in the asset pack; lucide path still used for tint.
-                .child(lucide_color("minus", 12.0, theme::LABEL)),
-        )
+                .child(
+                    div()
+                        .size(px(20.))
+                        .rounded_full()
+                        .bg(theme::FILL_SECONDARY)
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(lucide_color("minus", 12.0, theme::LABEL)),
+                ),
+        );
+    if size_opts.len() > 1 {
+        let mut capsule = div()
+            .id(SharedString::from(format!("size-{}", module as u8)))
+            .h(px(SIZE_CAPSULE_H))
+            .px(px(2.))
+            .rounded(px(SIZE_CAPSULE_H / 2.0))
+            .bg(theme::SCRIM)
+            .flex()
+            .flex_row()
+            .items_center()
+            .occlude()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|_, _: &MouseDownEvent, _, cx| {
+                    cx.stop_propagation();
+                }),
+            );
+        for &(size, fits) in size_opts {
+            let on = size == selected;
+            let mut seg = div()
+                .id(SharedString::from(format!(
+                    "size-{}-{}",
+                    module as u8,
+                    size.label()
+                )))
+                .h(px(SIZE_CAPSULE_H - 4.0))
+                .px(px(8.))
+                .rounded(px((SIZE_CAPSULE_H - 4.0) / 2.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .when(on, |d| d.bg(theme::FILL))
+                .opacity(if fits {
+                    1.0
+                } else {
+                    theme::DISABLED_OPACITY
+                })
+                .child(
+                    div()
+                        .text_size(px(theme::FOOTNOTE.size))
+                        .line_height(px(theme::FOOTNOTE.leading))
+                        .font_weight(if on {
+                            FontWeight::SEMIBOLD
+                        } else {
+                            FontWeight::MEDIUM
+                        })
+                        .text_color(theme::LABEL)
+                        .child(size.label()),
+                );
+            if fits {
+                seg = seg.cursor(CursorStyle::PointingHand).on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                        cx.stop_propagation();
+                        nook_core::settings::tweak_app_settings(|s| {
+                            let _ = s.set_size(module, size);
+                        });
+                        this.settings = nook_core::settings::get_app_settings();
+                        this.force_content_transition();
+                        nook_core::haptics::trigger(None);
+                        cx.notify();
+                    }),
+                );
+            }
+            capsule = capsule.child(seg);
+        }
+        frame = frame.child(
+            div()
+                .absolute()
+                .bottom(px(6.))
+                .left_0()
+                .right_0()
+                .flex()
+                .justify_center()
+                .child(capsule),
+        );
+    }
+    frame.into_any_element()
+}
+
+/// Insertion preview at the live-reflow index.
+pub(super) fn insert_placeholder(width: f32, fits: bool) -> AnyElement {
+    div()
+        .w(px(width.max(1.0)))
+        .h_full()
+        .flex_shrink_0()
+        .rounded(px(EDIT_FRAME_RADIUS))
+        .border_1()
+        .border_color(if fits {
+            theme::accent()
+        } else {
+            theme::SEPARATOR
+        })
+        .bg(if fits {
+            theme::with_alpha(theme::accent(), 0.12)
+        } else {
+            theme::FILL_TERTIARY
+        })
+        .flex()
+        .items_center()
+        .justify_center()
+        .when(!fits, |d| {
+            d.child(
+                div()
+                    .text_size(px(theme::FOOTNOTE.size))
+                    .line_height(px(theme::FOOTNOTE.leading))
+                    .text_color(theme::secondary_label())
+                    .child("Not enough space"),
+            )
+        })
         .into_any_element()
 }
 
-/// Dashed drop target spanning leftover (or full) row width.
+/// Quiet leftover space at the end of the customize row.
 /// `width_px <= 0` flex-fills the row.
-pub(super) fn empty_edit_slot(width_px: f32, cx: &mut Context<Island>) -> AnyElement {
+pub(super) fn empty_edit_slot(width_px: f32) -> AnyElement {
     let flex = width_px <= 0.0;
     let show_caption = flex || width_px > 160.0;
-    let accent_hi = theme::with_alpha(theme::accent(), 0.80);
-    let accent_lo = theme::with_alpha(theme::accent(), 0.16);
-    let mute = theme::tertiary_label();
     div()
         .id("edit-empty-slot")
         .when(flex, |d| d.flex_1())
         .when(!flex, |d| d.w(px(width_px)).flex_shrink_0())
         .h_full()
         .min_w(px(if flex { 96.0 } else { width_px.min(96.0) }))
-        .rounded(px(theme::CONTROL_RADIUS + 10.0))
-        .border_1()
-        .border_dashed()
-        .border_color(theme::SEPARATOR)
-        .occlude()
+        .rounded(px(EDIT_FRAME_RADIUS))
+        .bg(theme::FILL_TERTIARY)
         .flex()
         .flex_col()
         .items_center()
         .justify_center()
         .gap(px(6.))
-        .drag_over::<NookWidgetDrag>(move |style, drag, _, _| {
-            if drag.kind == NookDragKind::Place {
-                style.bg(accent_lo).border_color(accent_hi)
-            } else {
-                style
-            }
-        })
-        .can_drop(|value, _, _| {
-            value
-                .downcast_ref::<NookWidgetDrag>()
-                .is_some_and(|drag| drag.kind == NookDragKind::Place)
-        })
-        .on_drop(cx.listener(|this, drag: &NookWidgetDrag, _, cx| {
-            if drag.kind != NookDragKind::Place {
-                return;
-            }
-            let mut ok = false;
-            nook_core::settings::tweak_app_settings(|s| {
-                ok = s.place_widget_append(drag.module);
-            });
-            if ok {
-                this.settings = nook_core::settings::get_app_settings();
-                this.force_content_transition();
-                nook_core::haptics::trigger(None);
-                cx.notify();
-            }
-        }))
-        .child(lucide_color("plus", 20.0, mute))
+        .child(lucide_color("plus", 20.0, theme::tertiary_label()))
         .when(show_caption, |d| {
             d.child(
                 div()
                     .text_size(px(theme::FOOTNOTE.size))
                     .line_height(px(theme::FOOTNOTE.leading))
                     .font_weight(theme::FOOTNOTE.weight)
-                    .text_color(mute)
-                    .child("Tap or drag a widget to add it"),
+                    .text_color(theme::secondary_label())
+                    .child("Drag widgets here"),
             )
         })
         .into_any_element()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn insert_index_picks_the_first_midpoint_to_the_right() {
+        let widths = [100.0, 80.0, 60.0];
+        let gap = 12.0;
+        let left = 20.0;
+        // mids at 70, 172, 254
+        assert_eq!(insert_index(&widths, left, gap, 0.0), 0);
+        assert_eq!(insert_index(&widths, left, gap, 69.9), 0);
+        assert_eq!(insert_index(&widths, left, gap, 70.0), 1);
+        assert_eq!(insert_index(&widths, left, gap, 171.9), 1);
+        assert_eq!(insert_index(&widths, left, gap, 172.0), 2);
+        assert_eq!(insert_index(&widths, left, gap, 253.9), 2);
+        assert_eq!(insert_index(&widths, left, gap, 254.0), 3);
+        assert_eq!(insert_index(&[], left, gap, 50.0), 0);
+    }
 }

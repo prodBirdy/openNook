@@ -8,6 +8,7 @@ use gpui::{
     div, prelude::*, px, AnyElement, Context, CursorStyle, MouseButton, MouseDownEvent, Rgba,
 };
 use nook_core::meetings::{MeetingApp, MeetingSnapshot};
+use nook_core::settings::{WidgetModule, WidgetSize};
 
 pub(crate) fn compact_left(snap: &MeetingSnapshot) -> AnyElement {
     lucide_color(
@@ -37,6 +38,8 @@ pub(crate) fn meeting_card(snap: &MeetingSnapshot, cx: &mut Context<Island>) -> 
             .child(nook_empty("video", "No meeting"))
             .into_any_element();
     };
+    let size = resolve_size();
+    let icon_only = size == WidgetSize::Small;
     let elapsed = format_elapsed(snap.elapsed_secs());
     let verified = snap.mute_verified();
     let muted = snap.muted();
@@ -62,22 +65,32 @@ pub(crate) fn meeting_card(snap: &MeetingSnapshot, cx: &mut Context<Island>) -> 
             div()
                 .flex_1()
                 .min_h(px(0.))
+                .min_w(px(0.))
                 .flex()
                 .items_center()
                 .gap(px(8.))
-                .child(div().size(px(6.)).rounded_full().bg(theme::SYSTEM_ORANGE))
                 .child(
                     div()
+                        .size(px(6.))
+                        .rounded_full()
+                        .flex_shrink_0()
+                        .bg(theme::SYSTEM_ORANGE),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(0.))
                         .flex()
                         .flex_col()
                         .gap(px(1.))
-                        .min_w(px(0.))
-                        .child(label(
-                            format!("{} · Standup", app.label()),
-                            theme::CALLOUT,
-                            false,
+                        .child(
+                            label(
+                                format!("{} · Standup", app.label()),
+                                theme::CALLOUT,
+                                false,
+                            )
+                            .text_color(theme::LABEL),
                         )
-                        .text_color(theme::LABEL))
                         .child(
                             label(
                                 format!("{} · {} in", state_line.to_lowercase(), elapsed),
@@ -94,6 +107,7 @@ pub(crate) fn meeting_card(snap: &MeetingSnapshot, cx: &mut Context<Island>) -> 
                 .items_center()
                 .gap(px(8.))
                 .pt(px(4.))
+                .flex_shrink_0()
                 .when(
                     !snap.accessibility_trusted && app != MeetingApp::Meet,
                     |d| {
@@ -102,32 +116,89 @@ pub(crate) fn meeting_card(snap: &MeetingSnapshot, cx: &mut Context<Island>) -> 
                         }))
                     },
                 )
-                .when(snap.accessibility_trusted || app == MeetingApp::Meet, |d| {
-                    d.child(action_btn(
-                        "meeting-mute",
-                        mic_icon,
-                        mute_caption,
-                        mic_color,
-                        true,
-                        cx,
-                        |this, cx| this.toggle_meeting_mute(cx),
-                    ))
-                    .child(action_btn(
-                        "meeting-leave",
-                        "phone-off",
-                        "Leave",
-                        theme::DESTRUCTIVE,
-                        true,
-                        cx,
-                        |this, cx| this.leave_meeting(cx),
-                    ))
-                }),
+                .when(
+                    (snap.accessibility_trusted || app == MeetingApp::Meet) && icon_only,
+                    |d| {
+                        d.child(icon_action(
+                            "meeting-mute",
+                            mic_icon,
+                            mic_color,
+                            true,
+                            cx,
+                            |this, cx| this.toggle_meeting_mute(cx),
+                        ))
+                        .child(icon_action(
+                            "meeting-leave",
+                            "phone-off",
+                            theme::DESTRUCTIVE,
+                            true,
+                            cx,
+                            |this, cx| this.leave_meeting(cx),
+                        ))
+                    },
+                )
+                .when(
+                    (snap.accessibility_trusted || app == MeetingApp::Meet) && !icon_only,
+                    |d| {
+                        d.child(action_btn(
+                            "meeting-mute",
+                            mic_icon,
+                            mute_caption,
+                            mic_color,
+                            true,
+                            cx,
+                            |this, cx| this.toggle_meeting_mute(cx),
+                        ))
+                        .child(action_btn(
+                            "meeting-leave",
+                            "phone-off",
+                            "Leave",
+                            theme::DESTRUCTIVE,
+                            true,
+                            cx,
+                            |this, cx| this.leave_meeting(cx),
+                        ))
+                    },
+                ),
         )
         .into_any_element()
 }
 
 fn card_shell(id: impl Into<gpui::ElementId>) -> gpui::Stateful<gpui::Div> {
     nook_pane(id).p(px(16.)).gap(px(10.))
+}
+
+fn icon_action(
+    id: &'static str,
+    icon: &'static str,
+    color: Rgba,
+    enabled: bool,
+    cx: &mut Context<Island>,
+    on_click: impl Fn(&mut Island, &mut Context<Island>) + 'static,
+) -> impl IntoElement {
+    div()
+        .id(id)
+        .size(px(24.))
+        .flex_shrink_0()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded_full()
+        .bg(theme::FILL)
+        .opacity(if enabled { 1.0 } else { 0.4 })
+        .when(enabled, |d| {
+            d.hover(|s| s.bg(theme::FILL_SECONDARY))
+                .active(|s| s.opacity(0.85))
+                .cursor(CursorStyle::PointingHand)
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                        cx.stop_propagation();
+                        on_click(this, cx);
+                    }),
+                )
+        })
+        .child(lucide_color(icon, 14.0, color))
 }
 
 fn action_btn(
@@ -143,6 +214,7 @@ fn action_btn(
         .id(id)
         .h(px(24.))
         .px(px(10.))
+        .flex_shrink_0()
         .flex()
         .items_center()
         .gap(px(6.))
@@ -188,6 +260,44 @@ fn format_elapsed(secs: u32) -> String {
     } else {
         format!("{} min", secs.div_ceil(60).max(1))
     }
+}
+
+/// Live island uses saved size; gallery capture (`NOOK_GALLERY`) renders S/M/L in order.
+fn resolve_size() -> WidgetSize {
+    let settings = nook_core::settings::get_app_settings();
+    #[cfg(debug_assertions)]
+    {
+        if std::env::var_os("NOOK_GALLERY").is_some() {
+            let sizes = settings.distinct_sizes(WidgetModule::Meeting);
+            if !sizes.is_empty() {
+                return sizes[gallery_call_idx(WidgetModule::Meeting as u8) % sizes.len()];
+            }
+        }
+    }
+    settings.size_for(WidgetModule::Meeting)
+}
+
+#[cfg(debug_assertions)]
+fn gallery_call_idx(module: u8) -> usize {
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+    use std::time::{Duration, Instant};
+    thread_local! {
+        static STATE: RefCell<HashMap<u8, (Instant, usize)>> =
+            RefCell::new(HashMap::new());
+    }
+    STATE.with(|state| {
+        let mut map = state.borrow_mut();
+        let now = Instant::now();
+        let entry = map.entry(module).or_insert((now, 0));
+        if now.duration_since(entry.0) > Duration::from_millis(32) {
+            entry.1 = 0;
+        }
+        entry.0 = now;
+        let idx = entry.1;
+        entry.1 = idx + 1;
+        idx
+    })
 }
 
 #[cfg(test)]

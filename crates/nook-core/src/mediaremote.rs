@@ -52,6 +52,10 @@ pub struct AdapterTrack {
     pub is_playing: bool,
     pub app_name: Option<String>,
     pub bundle_id: Option<String>,
+    /// `shuffleMode`: 1=off → false, 2/3=on → true; absent → None.
+    pub shuffle: Option<bool>,
+    /// `repeatMode`: 1=Off, 2=One, 3=All; absent → None.
+    pub repeat: Option<crate::models::RepeatMode>,
 }
 
 enum Backend {
@@ -464,6 +468,100 @@ fn run(args: &[&str]) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
+/// One row from the adapter `queue` command.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AdapterQueueItem {
+    pub title: String,
+    pub artist: String,
+    pub album: Option<String>,
+    pub duration: Option<f64>,
+    pub identifier: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct AdapterQueueJson {
+    #[serde(default)]
+    items: Vec<AdapterQueueItemJson>,
+    #[serde(default)]
+    #[allow(dead_code)]
+    index: Option<i64>,
+}
+
+#[derive(Deserialize)]
+struct AdapterQueueItemJson {
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    artist: Option<String>,
+    #[serde(default)]
+    album: Option<String>,
+    #[serde(default)]
+    duration: Option<f64>,
+    #[serde(default)]
+    identifier: Option<String>,
+}
+
+/// `adapter_queue`. Kept off the hot now-playing path: one-shot perl, not stream.
+pub fn fetch_queue() -> Result<Vec<AdapterQueueItem>, String> {
+    match backend() {
+        Some(Backend::Adapter { .. }) => {}
+        _ => return Err("MediaRemote queue needs the adapter backend".into()),
+    }
+    let stdout = run(&["queue"])?;
+    parse_queue_output(&stdout)
+}
+
+pub fn parse_queue_output(stdout: &str) -> Result<Vec<AdapterQueueItem>, String> {
+    let trimmed = stdout.trim();
+    if trimmed.is_empty() || trimmed == "null" {
+        return Ok(Vec::new());
+    }
+    let parsed: AdapterQueueJson =
+        serde_json::from_str(trimmed).map_err(|e| format!("invalid MediaRemote queue JSON: {e}"))?;
+    Ok(parsed
+        .items
+        .into_iter()
+        .filter_map(|row| {
+            let title = row.title.filter(|t| !t.is_empty())?;
+            Some(AdapterQueueItem {
+                title,
+                artist: row.artist.unwrap_or_default(),
+                album: row.album.filter(|a| !a.is_empty()),
+                duration: row.duration.filter(|d| d.is_finite() && *d > 0.0),
+                identifier: row.identifier.filter(|id| !id.is_empty()),
+            })
+        })
+        .collect())
+}
+
+/// The adapter window starts at the now-playing track. Drop it so the list is next-only.
+pub fn drop_current_queue_item(
+    items: Vec<AdapterQueueItem>,
+    current_title: Option<&str>,
+    current_artist: Option<&str>,
+) -> Vec<AdapterQueueItem> {
+    let Some(first) = items.first() else {
+        return items;
+    };
+    let title = current_title.map(str::trim).filter(|t| !t.is_empty());
+    let Some(title) = title else {
+        return items;
+    };
+    if !eq_ignore_ascii(title, &first.title) {
+        return items;
+    }
+    if let Some(artist) = current_artist.map(str::trim).filter(|a| !a.is_empty()) {
+        if !first.artist.is_empty() && !eq_ignore_ascii(artist, &first.artist) {
+            return items;
+        }
+    }
+    items.into_iter().skip(1).collect()
+}
+
+fn eq_ignore_ascii(a: &str, b: &str) -> bool {
+    a.eq_ignore_ascii_case(b)
+}
+
 /// `adapter_get` / `get --now`. `Ok(None)` means no now-playing item (`null`).
 /// Prefers the live `stream` cell when the supervisor has primed it so a
 /// poll never forks perl. One-shot `get --now` remains the startup primer
@@ -564,7 +662,29 @@ fn parse_get_output(stdout: &str) -> Result<Option<AdapterTrack>, String> {
         is_playing: json_bool(obj.get("playing")).unwrap_or(false),
         app_name: app_name_from_bundle(bundle.as_deref(), parent.as_deref()),
         bundle_id,
+        shuffle: parse_shuffle_mode(obj.get("shuffleMode")),
+        repeat: parse_repeat_mode(obj.get("repeatMode")),
     }))
+}
+
+/// MediaRemote shuffleMode: 1=off, 2=albums, 3=tracks.
+fn parse_shuffle_mode(value: Option<&Value>) -> Option<bool> {
+    match json_i64(value)? {
+        1 => Some(false),
+        2 | 3 => Some(true),
+        _ => None,
+    }
+}
+
+/// MediaRemote repeatMode: 1=off, 2=one, 3=all.
+fn parse_repeat_mode(value: Option<&Value>) -> Option<crate::models::RepeatMode> {
+    use crate::models::RepeatMode;
+    match json_i64(value)? {
+        1 => Some(RepeatMode::Off),
+        2 => Some(RepeatMode::One),
+        3 => Some(RepeatMode::All),
+        _ => None,
+    }
 }
 
 fn json_string(value: Option<&Value>) -> Option<String> {
@@ -599,6 +719,14 @@ fn json_bool(value: Option<&Value>) -> Option<bool> {
             "false" | "0" | "no" => Some(false),
             _ => None,
         },
+        _ => None,
+    }
+}
+
+fn json_i64(value: Option<&Value>) -> Option<i64> {
+    match value? {
+        Value::Number(n) => n.as_i64().or_else(|| n.as_f64().map(|f| f as i64)),
+        Value::String(s) => s.trim().parse().ok(),
         _ => None,
     }
 }
@@ -675,6 +803,44 @@ mod tests {
         assert_eq!(track.app_name.as_deref(), Some("Spotify"));
         assert_eq!(track.bundle_id.as_deref(), Some("com.spotify.client"));
         assert_eq!(track.artwork_base64.as_deref(), Some("abc"));
+        assert_eq!(track.shuffle, None);
+        assert_eq!(track.repeat, None);
+    }
+
+    #[test]
+    fn parse_shuffle_and_repeat_modes() {
+        use crate::models::RepeatMode;
+        let json = r#"{
+            "bundleIdentifier": "com.apple.Music",
+            "playing": true,
+            "title": "Sunset Boulevard",
+            "shuffleMode": 3,
+            "repeatMode": 2
+        }"#;
+        let track = parse_get_output(json).unwrap().unwrap();
+        assert_eq!(track.shuffle, Some(true));
+        assert_eq!(track.repeat, Some(RepeatMode::One));
+
+        assert_eq!(parse_shuffle_mode(Some(&serde_json::json!(1))), Some(false));
+        assert_eq!(parse_shuffle_mode(Some(&serde_json::json!(2))), Some(true));
+        assert_eq!(parse_shuffle_mode(Some(&serde_json::json!(3))), Some(true));
+        assert_eq!(parse_shuffle_mode(Some(&serde_json::json!(0))), None);
+        assert_eq!(parse_shuffle_mode(None), None);
+
+        assert_eq!(
+            parse_repeat_mode(Some(&serde_json::json!(1))),
+            Some(RepeatMode::Off)
+        );
+        assert_eq!(
+            parse_repeat_mode(Some(&serde_json::json!(2))),
+            Some(RepeatMode::One)
+        );
+        assert_eq!(
+            parse_repeat_mode(Some(&serde_json::json!(3))),
+            Some(RepeatMode::All)
+        );
+        assert_eq!(parse_repeat_mode(Some(&serde_json::json!(9))), None);
+        assert_eq!(parse_repeat_mode(None), None);
     }
 
     #[test]
@@ -696,6 +862,87 @@ mod tests {
         assert_eq!(MraCommand::TogglePlayPause as i32, 2);
         assert_eq!(MraCommand::NextTrack as i32, 4);
         assert_eq!(MraCommand::PreviousTrack as i32, 5);
+    }
+
+    #[test]
+    fn parse_queue_json_drops_nothing_here() {
+        let json = r#"{
+            "index": 1,
+            "items": [
+                {"title":"Now","artist":"A","album":"X","duration":120.5,"identifier":"1"},
+                {"title":"Next","artist":"B","duration":null},
+                {"title":"","artist":"skip-me"}
+            ]
+        }"#;
+        let items = parse_queue_output(json).unwrap();
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].title, "Now");
+        assert_eq!(items[0].duration, Some(120.5));
+        assert_eq!(items[1].title, "Next");
+        assert_eq!(items[1].duration, None);
+        assert_eq!(items[1].album, None);
+    }
+
+    #[test]
+    fn drop_current_skips_matching_first_row() {
+        let items = vec![
+            AdapterQueueItem {
+                title: "Talking to God (feat. Honor Roll)".into(),
+                artist: "Nyla Symone".into(),
+                album: None,
+                duration: Some(194.0),
+                identifier: Some("1339::1349".into()),
+            },
+            AdapterQueueItem {
+                title: "All Nighter".into(),
+                artist: "Kardinal Offishall".into(),
+                album: None,
+                duration: Some(227.0),
+                identifier: Some("1339::1350".into()),
+            },
+        ];
+        let next = drop_current_queue_item(
+            items.clone(),
+            Some("Talking to God (feat. Honor Roll)"),
+            Some("Nyla Symone"),
+        );
+        assert_eq!(next.len(), 1);
+        assert_eq!(next[0].title, "All Nighter");
+
+        let kept = drop_current_queue_item(items, Some("Other Song"), None);
+        assert_eq!(kept.len(), 2);
+        assert_eq!(kept[0].title, "Talking to God (feat. Honor Roll)");
+    }
+
+    #[test]
+    fn parse_queue_empty_and_null() {
+        assert!(parse_queue_output("null").unwrap().is_empty());
+        assert!(parse_queue_output("").unwrap().is_empty());
+        assert!(parse_queue_output(r#"{"items":[]}"#).unwrap().is_empty());
+    }
+
+    #[cfg(debug_assertions)]
+    #[ignore = "live MediaRemote; run with --ignored when Music is playing"]
+    #[test]
+    fn live_fetch_queue_prints() {
+        if !is_available() {
+            return;
+        }
+        let items = fetch_queue().expect("adapter queue");
+        println!("fetch_queue {} items", items.len());
+        for (i, item) in items.iter().enumerate() {
+            println!(
+                "{i} {} | {} | {:?}",
+                item.title, item.artist, item.duration
+            );
+        }
+        let np = get_now_playing().ok().flatten();
+        let next = drop_current_queue_item(
+            items,
+            np.as_ref().and_then(|t| t.title.as_deref()),
+            np.as_ref().and_then(|t| t.artist.as_deref()),
+        );
+        println!("upcoming {} items", next.len());
     }
 
     #[cfg(not(debug_assertions))]

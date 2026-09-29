@@ -1,6 +1,8 @@
 //! Expanded island: Nook (media / calendar / mirror) vs Tray (files).
 
-use super::edit::{edit_chrome, empty_edit_slot};
+use super::edit::{
+    edit_chrome, empty_edit_slot, insert_index, insert_placeholder, NookWidgetDrag, EDIT_ROW_GAP,
+};
 use super::media::nook_media_pane;
 use super::ui::{empty_state, pill_btn};
 use super::{CompactMode, Island, Tab};
@@ -14,10 +16,10 @@ use crate::widgets::{
     OBSERVE_EXPANDED_BODY,
 };
 use gpui::{
-    div, img, prelude::*, px, AnyElement, Context, CursorStyle, FontWeight, MouseButton,
-    MouseDownEvent, ObjectFit, RenderImage, ScrollWheelEvent,
+    div, img, prelude::*, px, AnyElement, Context, CursorStyle, DragMoveEvent, FontWeight,
+    MouseButton, MouseDownEvent, ObjectFit, RenderImage, ScrollWheelEvent,
 };
-use nook_core::settings::{AppSettings, WidgetModule};
+use nook_core::settings::{AppSettings, WidgetModule, WidgetSize};
 
 /// Browse rows at or above this cell sum stretch to fill the island width.
 /// Below it, panes stay proportional and centered (single-row layout).
@@ -34,11 +36,12 @@ const TAB_RADIUS: f32 = 12.0;
 const TAB_ICON: f32 = 12.0;
 const TAB_GAP: f32 = 6.0;
 const SETTINGS_GLYPH: f32 = 15.0;
-/// Gallery Mirror card: pad 16, a 64pt face (fill `#FFFFFF29`, ring
-/// `#FFFFFF38`, 22pt webcam) with the 11/14 status line 8pt below it.
+/// Live Mirror face is 64pt; off state fills the cell inside its 16pt insets.
 const MIRROR_PAD: f32 = 16.0;
 const MIRROR_FACE: f32 = 64.0;
 const MIRROR_ICON: f32 = 22.0;
+const MIRROR_OFF_FACE: f32 = theme::NOOK_BODY - 2.0 * MIRROR_PAD;
+const MIRROR_OFF_ICON: f32 = 32.0;
 const MIRROR_GAP: f32 = 8.0;
 
 impl Island {
@@ -246,7 +249,7 @@ impl Island {
                     agents_card(
                         &self.agents,
                         self.pixel_t,
-                        theme::island_fill(self.settings.island_color),
+                        theme::island_fill(theme::island_color(&self.settings)),
                         self.size_morphing(),
                         cx,
                     )
@@ -386,6 +389,57 @@ impl Island {
                 d.on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _, cx| {
                     this.on_wheel(event, cx);
                 }))
+            })
+            .when(editing, |d| {
+                d.on_drag_move::<NookWidgetDrag>(cx.listener(
+                    |this, ev: &DragMoveEvent<NookWidgetDrag>, _, cx| {
+                        let Some(drag) = ev.dragged_item().downcast_ref::<NookWidgetDrag>() else {
+                            return;
+                        };
+                        if !ev.bounds.contains(&ev.event.position) {
+                            if this.edit_insert.is_some() {
+                                this.edit_insert = None;
+                                cx.notify();
+                            }
+                            return;
+                        }
+                        let cell_w = this.nook_cell_width();
+                        let widths: Vec<f32> = this
+                            .visible_nook_items()
+                            .into_iter()
+                            .filter(|(m, _)| *m != drag.module)
+                            .map(|(_, cells)| cells as f32 * cell_w)
+                            .collect();
+                        let left = f32::from(ev.bounds.origin.x) + theme::NOOK_INSET;
+                        let x = f32::from(ev.event.position.x);
+                        let idx = insert_index(&widths, left, EDIT_ROW_GAP, x);
+                        let next = Some((drag.module, idx));
+                        if this.edit_insert != next {
+                            this.edit_insert = next;
+                            cx.notify();
+                        }
+                    },
+                ))
+                .can_drop(|value, _, _| value.downcast_ref::<NookWidgetDrag>().is_some())
+                .on_drop(cx.listener(|this, drag: &NookWidgetDrag, _, cx| {
+                    let idx = match this.edit_insert {
+                        Some((m, i)) if m == drag.module => i,
+                        _ => usize::MAX,
+                    };
+                    this.edit_insert = None;
+                    let on_row = this.settings.is_enabled(drag.module);
+                    if !on_row && this.settings.cells_short_for(drag.module) > 0 {
+                        cx.notify();
+                        return;
+                    }
+                    nook_core::settings::tweak_app_settings(|s| {
+                        let _ = s.insert_widget_at(drag.module, idx);
+                    });
+                    this.settings = nook_core::settings::get_app_settings();
+                    this.force_content_transition();
+                    nook_core::haptics::trigger(None);
+                    cx.notify();
+                }))
             });
 
         if packed.is_empty() {
@@ -430,66 +484,113 @@ impl Island {
                     .when(!editing && !row_stretches, |d| d.justify_center())
                     // Mockup separates panes by whitespace only — no rules.
                     .when(!editing, |d| d.gap(px(theme::NOOK_DIVIDER)))
-                    .when(editing, |d| d.gap(px(12.)));
+                    .when(editing, |d| d.gap(px(EDIT_ROW_GAP)));
 
-                for (module, cells, child) in row_panes {
-                    let child = if editing {
-                        edit_chrome(module, child, cx)
-                    } else {
-                        child
+                if editing {
+                    let insert = self.edit_insert;
+                    let was_on = insert
+                        .map(|(m, _)| row_panes.iter().any(|(mod_, _, _)| *mod_ == m))
+                        .unwrap_or(false);
+                    let live: Vec<(WidgetModule, u8, AnyElement)> = row_panes
+                        .into_iter()
+                        .filter(|(m, _, _)| insert.map(|(dm, _)| dm != *m).unwrap_or(true))
+                        .collect();
+                    let n_live = live.len();
+                    let insert_idx = insert.map(|(_, idx)| idx.min(n_live));
+                    let emit_gap = |this: &Self| {
+                        let (m, _) = insert?;
+                        let cells = this.settings.cells_for(m);
+                        let fits = was_on || this.settings.cells_short_for(m) == 0;
+                        Some(insert_placeholder(cells as f32 * cell_w, fits))
                     };
-                    if editing {
+                    for (j, (module, cells, child)) in live.into_iter().enumerate() {
+                        if insert_idx == Some(j) {
+                            if let Some(gap) = emit_gap(self) {
+                                row = row.child(gap);
+                            }
+                        }
                         let width = cells as f32 * cell_w;
-                        row = row.child(cell_pane(width, child));
-                    } else if row_stretches {
-                        let basis = if module == WidgetModule::Music {
-                            queue_extra
-                        } else {
+                        let size_opts: Vec<(WidgetSize, bool)> = self
+                            .settings
+                            .distinct_sizes(module)
+                            .into_iter()
+                            .map(|sz| (sz, self.settings.size_fits(module, sz)))
+                            .collect();
+                        let selected = self.settings.size_for(module);
+                        row = row.child(cell_pane(
+                            width,
+                            edit_chrome(module, child, width, selected, &size_opts, cx),
+                        ));
+                    }
+                    if insert_idx == Some(n_live) {
+                        if let Some(gap) = emit_gap(self) {
+                            row = row.child(gap);
+                        }
+                    }
+                    let hovering = insert.is_some();
+                    if is_last && !hovering && (remaining > 0 || row_was_empty) {
+                        let slot_w = if row_was_empty {
                             0.0
+                        } else {
+                            remaining as f32 * cell_w
                         };
-                        let mut pane = div()
-                            .h_full()
-                            .min_w(px(0.))
-                            .rounded(px(theme::ROW_RADIUS))
-                            .overflow_hidden()
-                            .border_1()
-                            .border_color(theme::FILL_TERTIARY)
-                            .flex_basis(px(basis))
-                            .child(child);
-                        pane.style().flex_grow = Some(cells as f32);
-                        pane.style().flex_shrink = Some(1.0);
-                        row = row.child(pane);
-                    } else {
-                        let width = cells as f32 * cell_w
-                            + if module == WidgetModule::Music {
+                        row = row.child(empty_edit_slot(slot_w));
+                    }
+                } else {
+                    for (module, cells, child) in row_panes {
+                        if row_stretches {
+                            let basis = if module == WidgetModule::Music {
                                 queue_extra
                             } else {
                                 0.0
                             };
-                        row = row.child(
-                            div()
-                                .w(px(width))
+                            let mut pane = div()
                                 .h_full()
                                 .min_w(px(0.))
                                 .rounded(px(theme::ROW_RADIUS))
                                 .overflow_hidden()
                                 .border_1()
                                 .border_color(theme::FILL_TERTIARY)
-                                .flex_shrink_0()
-                                .child(child),
-                        );
+                                .flex_basis(px(basis))
+                                .on_mouse_down(
+                                    MouseButton::Right,
+                                    cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                                        cx.stop_propagation();
+                                        this.begin_widget_edit(cx);
+                                    }),
+                                )
+                                .child(child);
+                            pane.style().flex_grow = Some(cells as f32);
+                            pane.style().flex_shrink = Some(1.0);
+                            row = row.child(pane);
+                        } else {
+                            let width = cells as f32 * cell_w
+                                + if module == WidgetModule::Music {
+                                    queue_extra
+                                } else {
+                                    0.0
+                                };
+                            row = row.child(
+                                div()
+                                    .w(px(width))
+                                    .h_full()
+                                    .min_w(px(0.))
+                                    .rounded(px(theme::ROW_RADIUS))
+                                    .overflow_hidden()
+                                    .border_1()
+                                    .border_color(theme::FILL_TERTIARY)
+                                    .flex_shrink_0()
+                                    .on_mouse_down(
+                                        MouseButton::Right,
+                                        cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                                            cx.stop_propagation();
+                                            this.begin_widget_edit(cx);
+                                        }),
+                                    )
+                                    .child(child),
+                            );
+                        }
                     }
-                }
-
-                // Leftover budget → dashed drop slot spanning the free cells;
-                // a fresh empty row (full last row under MAX_ROWS) flex-fills.
-                if editing && is_last && (remaining > 0 || row_was_empty) {
-                    let slot_w = if row_was_empty {
-                        0.0
-                    } else {
-                        remaining as f32 * cell_w
-                    };
-                    row = row.child(empty_edit_slot(slot_w, cx));
                 }
 
                 grid = grid.child(row);
@@ -537,7 +638,6 @@ fn cell_pane(width: f32, child: impl IntoElement) -> AnyElement {
         .h_full()
         .min_w(px(0.))
         .flex_shrink_0()
-        // Edit − badges hang outside the dashed frame; don't clip them.
         .child(child)
         .into_any_element()
 }
@@ -638,7 +738,7 @@ fn labeled_tab(
         )
 }
 
-fn mirror_pane(island: &Island, cx: &mut Context<Island>) -> impl IntoElement {
+pub(super) fn mirror_pane(island: &Island, cx: &mut Context<Island>) -> impl IntoElement {
     let live = island.mirror_on;
     let frame = island.mirror_frame.clone();
     div()
@@ -655,7 +755,7 @@ fn mirror_pane(island: &Island, cx: &mut Context<Island>) -> impl IntoElement {
             div()
                 .id("mirror-btn")
                 .relative()
-                .size(px(MIRROR_FACE))
+                .size(px(if live { MIRROR_FACE } else { MIRROR_OFF_FACE }))
                 .flex_shrink_0()
                 .rounded_full()
                 .overflow_hidden()
@@ -675,7 +775,18 @@ fn mirror_pane(island: &Island, cx: &mut Context<Island>) -> impl IntoElement {
                 )
                 .when(live, |d| d.child(mirror_frame_el(frame)))
                 .when(!live, |d| {
-                    d.child(lucide_color("webcam", MIRROR_ICON, theme::LABEL))
+                    d.flex_col()
+                        .gap(px(4.))
+                        .child(lucide_color("webcam", MIRROR_OFF_ICON, theme::LABEL))
+                        .child(
+                            div()
+                                .text_size(px(theme::SUBHEADLINE.size))
+                                .line_height(px(theme::SUBHEADLINE.leading))
+                                .font_weight(FontWeight::NORMAL)
+                                .text_color(theme::secondary_label())
+                                .whitespace_nowrap()
+                                .child("Tap to start"),
+                        )
                 })
                 // Ring above the video — a border on this box paints under it.
                 .child(
@@ -689,15 +800,17 @@ fn mirror_pane(island: &Island, cx: &mut Context<Island>) -> impl IntoElement {
         )
         // The capture API exposes no device name or format, so the status
         // line states what a tap does instead of the gallery's camera spec.
-        .child(
-            div()
-                .text_size(px(theme::SUBHEADLINE.size))
-                .line_height(px(theme::SUBHEADLINE.leading))
-                .font_weight(FontWeight::NORMAL)
-                .text_color(theme::secondary_label())
-                .whitespace_nowrap()
-                .child(if live { "Live" } else { "Tap to start" }),
-        )
+        .when(live, |d| {
+            d.child(
+                div()
+                    .text_size(px(theme::SUBHEADLINE.size))
+                    .line_height(px(theme::SUBHEADLINE.leading))
+                    .font_weight(FontWeight::NORMAL)
+                    .text_color(theme::secondary_label())
+                    .whitespace_nowrap()
+                    .child("Live"),
+            )
+        })
 }
 
 fn mirror_frame_el(frame: Option<std::sync::Arc<RenderImage>>) -> AnyElement {

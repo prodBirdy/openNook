@@ -28,21 +28,6 @@ pub(crate) fn compact_left(latest: Option<&NotificationEvent>) -> AnyElement {
     lucide_color("bell", 17.0, theme::SECONDARY_LABEL).into_any_element()
 }
 
-pub(crate) fn compact_right(unread: usize, latest: Option<&NotificationEvent>) -> AnyElement {
-    if unread > 0 {
-        return label(format!("{unread} new"), theme::BODY, true).into_any_element();
-    }
-    if let Some(event) = latest {
-        let text = if event.title.is_empty() {
-            event.app_name.clone()
-        } else {
-            event.title.clone()
-        };
-        return label(text, theme::BODY, true).into_any_element();
-    }
-    div().into_any_element()
-}
-
 pub(crate) fn notifications_card(
     events: &[NotificationEvent],
     cx: &mut Context<Island>,

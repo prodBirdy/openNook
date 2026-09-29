@@ -1,10 +1,11 @@
 //! Compact album chip, visualizer, and expanded Now Playing pane.
 
 use super::ui::{
-    card_chrome, scroll_body, slide_label, timer_text, MEDIA_ART, MEDIA_ART_RADIUS, MEDIA_PLAY,
-    MEDIA_PROGRESS_HIT, MEDIA_TIME_PAD_GAP, MEDIA_TIME_PAD_TOP,
+    card_chrome, label, scroll_body, slide_label, timer_text, MEDIA_ART, MEDIA_ART_RADIUS,
+    MEDIA_PLAY, MEDIA_PROGRESS_HIT, MEDIA_TIME_PAD_GAP, MEDIA_TIME_PAD_TOP,
 };
-use super::{Island, QUEUE_PANEL_W, QUEUE_ROW_H};
+use super::Island;
+use nook_core::audio_devices::{OutputDevice, OutputTransport};
 use crate::icons::lucide_color;
 use crate::theme;
 use gpui::{
@@ -12,7 +13,7 @@ use gpui::{
     AnyElement, BoxShadow, Context, CursorStyle, FontWeight, Image, MouseButton, MouseDownEvent,
     Rgba, SharedString,
 };
-use nook_core::models::{NowPlayingData, PlaybackQueue, QueueItem};
+use nook_core::models::{NowPlayingData, PlaybackQueue, QueueItem, RepeatMode};
 use std::sync::{Mutex, OnceLock};
 
 const MAX_ARTWORK_BYTES: usize = 5 * 1024 * 1024;
@@ -116,6 +117,9 @@ pub(super) fn album_chip(
             cx.listener(move |this, _: &MouseDownEvent, _, cx| {
                 cx.stop_propagation();
                 this.note_media_play_pause(cx);
+                if this.gallery_mode {
+                    return;
+                }
                 nook_core::runtime().spawn(async {
                     let _ = nook_core::audio::media_play_pause().await;
                 });
@@ -349,12 +353,33 @@ const MEDIA_TITLE: crate::theme::Text = crate::theme::Text {
     weight: FontWeight::NORMAL,
     emphasized: FontWeight::SEMIBOLD,
 };
+/// Lyrics panel current line — Pencil export 17/20 bold.
+const LYRIC_CURRENT: crate::theme::Text = crate::theme::Text {
+    size: 17.0,
+    leading: 20.0,
+    weight: FontWeight::NORMAL,
+    emphasized: FontWeight::BOLD,
+};
+/// Gap between stacked lyric lines.
+const LYRIC_GAP: f32 = 4.0;
+/// One synced-line step (current leading + gap) for the Apple Music scroll.
+pub(super) const LYRIC_LINE_PITCH: f32 = LYRIC_CURRENT.leading + LYRIC_GAP;
+/// Current-line top as a fraction of the lines viewport.
+const LYRIC_ANCHOR: f32 = 0.30;
+/// Neighbor rest alphas on `theme::LABEL`. Past is slightly dimmer than next.
+const LYRIC_PAST_ALPHA: f32 = 0.25;
+const LYRIC_NEXT_ALPHA: f32 = 0.35;
+const LYRIC_PAST_FAR_ALPHA: f32 = 0.16;
+const LYRIC_NEXT_FAR_ALPHA: f32 = 0.22;
 #[allow(dead_code)]
 const NOOK_PROGRESS_H: f32 = 6.0;
-/// Gallery pane pad `8 12`. Vertical is 7 here: the rows (52 + 22 + 40)
-/// need 114 of the 128pt body, which the mockup's 8 overshoots by 2.
+/// Pencil Media Card pad `8 12`.
 const NOOK_PAD_X: f32 = 12.0;
-const NOOK_PAD_Y: f32 = 7.0;
+const NOOK_PAD_Y: f32 = 8.0;
+/// AirPlay / Up Next row height (Pencil).
+const PANEL_ROW_H: f32 = 28.0;
+const QUEUE_ART: f32 = 20.0;
+const QUEUE_ART_RADIUS: f32 = 5.0;
 /// Artwork ring `#FFFFFF1A` (shadow `0 3 10 #00000066` is inline below).
 const NOOK_ART_RING: Rgba = Rgba {
     r: 1.0,
@@ -367,7 +392,7 @@ const NOOK_ART_RING: Rgba = Rgba {
 /// transport. With no track loaded the same chrome stays up — "Not
 /// Playing", the last player's name, zeroed scrubber, dimmed controls —
 /// instead of a separate empty state.
-/// Lyrics sit beside the player when enabled.
+/// AirPlay / Up Next / Lyrics each replace the body inside the same pane.
 pub(crate) fn nook_media_pane(island: &Island, cx: &mut Context<Island>) -> AnyElement {
     set_reduce_motion(island.reduce_motion);
     let has = island.has_media();
@@ -402,14 +427,10 @@ pub(crate) fn nook_media_pane(island: &Island, cx: &mut Context<Island>) -> AnyE
         .as_deref()
         .and_then(|b64| artwork_element(b64, NOOK_ART, NOOK_ART_RADIUS));
     let queue_open = island.queue_panel_visible();
-    // Queue claims the trailing column; lyrics stay hidden while it is open.
-    let lyrics = if queue_open {
-        None
-    } else {
-        lyrics_pane(island)
-    };
     let show_picker = island.output_picker_enabled();
     let picker_open = island.output_picker_open && show_picker;
+    let lyrics_open = island.lyrics_panel_visible();
+    let show_lyrics_btn = island.lyrics_panel_available();
     // The list slot is always drawn (gallery); it only works where the
     // player exposes a local queue.
     let queue_enabled = island.settings.show_media_queue
@@ -427,13 +448,14 @@ pub(crate) fn nook_media_pane(island: &Island, cx: &mut Context<Island>) -> AnyE
             div()
                 .flex_1()
                 .min_w(px(0.))
+                .min_h(px(0.))
                 .overflow_hidden()
                 .flex()
                 .flex_col()
                 .justify_center()
                 .gap(px(2.))
                 .child(if has {
-                    slide_label(title, MEDIA_TITLE, true)
+                    slide_label(title.clone(), MEDIA_TITLE, true)
                         .w_full()
                         .into_any_element()
                 } else {
@@ -447,7 +469,7 @@ pub(crate) fn nook_media_pane(island: &Island, cx: &mut Context<Island>) -> AnyE
                         .child("Not Playing")
                         .into_any_element()
                 })
-                .child(slide_label(artist, theme::BODY, false).w_full()),
+                .child(slide_label(artist.clone(), theme::BODY, false).w_full()),
         );
 
     let body = if picker_open {
@@ -460,8 +482,31 @@ pub(crate) fn nook_media_pane(island: &Island, cx: &mut Context<Island>) -> AnyE
             .min_w(px(0.))
             .min_h(px(0.))
             .overflow_hidden()
-            .child(header)
-            .child(output_picker_list(island, cx))
+            .child(output_picker_list(island, &title, cx))
+            .into_any_element()
+    } else if queue_open {
+        div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .w_full()
+            .h_full()
+            .min_w(px(0.))
+            .min_h(px(0.))
+            .overflow_hidden()
+            .child(up_next_panel(island, cx))
+            .into_any_element()
+    } else if lyrics_open {
+        div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .w_full()
+            .h_full()
+            .min_w(px(0.))
+            .min_h(px(0.))
+            .overflow_hidden()
+            .child(lyrics_panel(island, &title, &artist, cx))
             .into_any_element()
     } else {
         div()
@@ -472,14 +517,15 @@ pub(crate) fn nook_media_pane(island: &Island, cx: &mut Context<Island>) -> AnyE
             .h_full()
             .min_w(px(0.))
             .min_h(px(0.))
-            .justify_between()
+            .gap(px(8.))
             .overflow_hidden()
             .child(header.flex_shrink_0().h(px(NOOK_ART)))
             .child(
                 div()
                     .w_full()
-                    .h(px(22.))
+                    .h(px(16.))
                     .flex_shrink_0()
+                    .min_h(px(0.))
                     .child(nook_progress(
                         island, progress, elapsed, duration, seekable, cx,
                     )),
@@ -487,13 +533,15 @@ pub(crate) fn nook_media_pane(island: &Island, cx: &mut Context<Island>) -> AnyE
             .child(
                 div()
                     .w_full()
-                    .h(px(40.))
+                    .h(px(28.))
                     .flex_shrink_0()
+                    .min_h(px(0.))
                     .opacity(if has { 1.0 } else { theme::DISABLED_OPACITY })
                     .child(nook_transport(
                         playing,
                         queue_enabled,
                         queue_open,
+                        show_lyrics_btn,
                         show_picker,
                         picker_icon,
                         cx,
@@ -502,29 +550,20 @@ pub(crate) fn nook_media_pane(island: &Island, cx: &mut Context<Island>) -> AnyE
             .into_any_element()
     };
 
-    let player = div()
-        .id("nook-media")
+    let fade = island.media_view_fade.value.clamp(0.0, 1.0);
+    let shift = island.media_view_shift.value;
+    let body = div()
         .relative()
-        .h_full()
-        .min_h(px(theme::NOOK_BODY - 4.0))
-        .px(px(NOOK_PAD_X))
-        .py(px(NOOK_PAD_Y))
-        .overflow_hidden()
+        .top(px(shift))
+        .opacity(fade)
         .flex()
-        .gap(px(12.))
-        .child(body)
-        .when_some(lyrics, |d, pane| d.child(pane));
-    // When the queue is open, the pane is often wider than the nominal cell
-    // width (flex-grown Nook column). Let the player absorb the leftover so
-    // the fixed-width Up Next panel does not leave a dead strip on the right.
-    let player = if queue_open {
-        player
-            .flex_1()
-            .min_w(px(island.music_player_width()))
-            .into_any_element()
-    } else {
-        player.flex_1().min_w(px(0.)).into_any_element()
-    };
+        .flex_col()
+        .flex_1()
+        .w_full()
+        .h_full()
+        .min_w(px(0.))
+        .min_h(px(0.))
+        .child(body);
 
     div()
         .id("nook-media-col")
@@ -532,19 +571,20 @@ pub(crate) fn nook_media_pane(island: &Island, cx: &mut Context<Island>) -> AnyE
         .h_full()
         .overflow_hidden()
         .flex()
-        .gap(px(12.))
-        .child(player)
-        .when(queue_open, |d| {
-            d.child(
-                div()
-                    .w(px(1.))
-                    .h_full()
-                    .flex_shrink_0()
-                    .my(px(4.))
-                    .bg(theme::SEPARATOR),
-            )
-            .child(up_next_panel(&island.queue, cx))
-        })
+        .child(
+            div()
+                .id("nook-media")
+                .relative()
+                .flex_1()
+                .min_w(px(0.))
+                .min_h(px(theme::NOOK_BODY - 4.0))
+                .h_full()
+                .px(px(NOOK_PAD_X))
+                .py(px(NOOK_PAD_Y))
+                .overflow_hidden()
+                .flex()
+                .child(body),
+        )
         .into_any_element()
 }
 
@@ -605,12 +645,12 @@ fn nook_transport(
     playing: bool,
     queue_enabled: bool,
     queue_open: bool,
+    show_lyrics_btn: bool,
     show_picker: bool,
     picker_icon: &'static str,
     cx: &mut Context<Island>,
 ) -> impl IntoElement {
-    // Equal leading/trailing slots keep play geometrically centered while
-    // the list / output glyphs sit on the edges.
+    // List flush left; lyrics (when present) sits immediately left of AirPlay.
     div()
         .w_full()
         .flex()
@@ -630,6 +670,9 @@ fn nook_transport(
             cx,
             |this, _, cx| {
                 this.note_media_skip(cx);
+                if this.gallery_mode {
+                    return;
+                }
                 nook_core::runtime().spawn(async {
                     let _ = nook_core::audio::media_previous_track().await;
                 });
@@ -644,6 +687,9 @@ fn nook_transport(
             cx,
             |this, _, cx| {
                 this.note_media_skip(cx);
+                if this.gallery_mode {
+                    return;
+                }
                 nook_core::runtime().spawn(async {
                     let _ = nook_core::audio::media_next_track().await;
                 });
@@ -651,36 +697,40 @@ fn nook_transport(
         ))
         .child(
             div()
-                .w(px(theme::HIT_MIN))
                 .flex_shrink_0()
                 .flex()
                 .items_center()
                 .justify_end()
+                .when(show_lyrics_btn, |d| d.child(lyrics_toggle_btn(false, cx)))
                 .when(show_picker, |d| {
                     d.child(output_picker_btn(picker_icon, false, cx))
                 }),
         )
 }
 
-/// Gallery list slot: 15pt glyph flush left in a 28pt slot. Always drawn;
-/// without a local queue it is dimmed and inert.
+/// Gallery list slot: 15pt glyph flush left in a 28pt slot. Active state is
+/// the Pencil filled chip (FILL + accent). Always drawn; without a local
+/// queue it is dimmed and inert.
 fn queue_toggle_btn(open: bool, enabled: bool, cx: &mut Context<Island>) -> impl IntoElement {
-    div()
+    let btn = div()
         .id("nook-queue-toggle")
         .size(px(theme::HIT_MIN))
+        .flex_shrink_0()
         .flex()
         .items_center()
-        .justify_start()
+        .justify_center()
+        .when(open, |d| d.rounded(px(14.)).bg(theme::FILL))
+        .when(!open, |d| d.justify_start())
         .child(lucide_color(
             "list",
             15.0,
             if open {
-                theme::LABEL
+                theme::accent()
             } else {
                 theme::tertiary_label()
             },
-        ))
-        .when(!enabled, |d| d.opacity(theme::DISABLED_OPACITY))
+        ));
+    btn.when(!enabled, |d| d.opacity(theme::DISABLED_OPACITY))
         .when(enabled, |d| {
             d.hover(|s| s.opacity(0.85))
                 .active(|s| s.opacity(0.75))
@@ -699,18 +749,20 @@ fn output_picker_btn(icon: &'static str, open: bool, cx: &mut Context<Island>) -
     div()
         .id("nook-output-picker")
         .size(px(theme::HIT_MIN))
+        .flex_shrink_0()
         .flex()
         .items_center()
-        // Gallery: 16pt glyph flush right in the 28pt slot.
-        .justify_end()
+        .justify_center()
+        .when(open, |d| d.rounded(px(14.)).bg(theme::FILL))
+        .when(!open, |d| d.justify_end())
         .hover(|s| s.opacity(0.85))
         .active(|s| s.opacity(0.75))
         .cursor(CursorStyle::PointingHand)
         .child(lucide_color(
             icon,
-            16.0,
+            if open { 15.0 } else { 16.0 },
             if open {
-                theme::LABEL
+                theme::accent()
             } else {
                 theme::tertiary_label()
             },
@@ -724,167 +776,507 @@ fn output_picker_btn(icon: &'static str, open: bool, cx: &mut Context<Island>) -
         )
 }
 
-fn lyrics_pane(island: &Island) -> Option<AnyElement> {
+/// True when the current track has showable lyrics (synced window or plain lines).
+pub(crate) fn lyrics_available(island: &Island) -> bool {
     if !island.settings.show_lyrics {
-        return None;
+        return false;
     }
-    let lyrics = island.lyrics.as_ref()?;
+    let Some(lyrics) = island.lyrics.as_ref() else {
+        return false;
+    };
     if lyrics.instrumental {
-        return None;
+        return false;
     }
     if lyrics.has_synced() {
-        let [prev, cur, next] = lyrics.highlight_window(island.lyrics_position_ms());
-        return Some(lyrics_window(prev, cur, next));
+        return true;
     }
-    let plain = lyrics.plain.as_deref()?;
-    let mut lines = plain.lines().filter(|line| !line.trim().is_empty());
-    let first = lines.next()?;
-    Some(lyrics_window(
-        None,
-        Some(first.trim()),
-        lines.next().map(str::trim),
-    ))
+    lyrics
+        .plain
+        .as_deref()
+        .is_some_and(|p| p.lines().any(|line| !line.trim().is_empty()))
 }
 
-fn lyrics_window(prev: Option<&str>, cur: Option<&str>, next: Option<&str>) -> AnyElement {
+fn lyrics_toggle_btn(open: bool, cx: &mut Context<Island>) -> impl IntoElement {
     div()
-        .id("lyrics-pane")
+        .id("nook-lyrics-toggle")
+        .size(px(theme::HIT_MIN))
+        .flex_shrink_0()
+        .flex()
+        .items_center()
+        .justify_center()
+        .when(open, |d| d.rounded(px(14.)).bg(theme::FILL))
+        .hover(|s| s.opacity(0.85))
+        .active(|s| s.opacity(0.75))
+        .cursor(CursorStyle::PointingHand)
+        .child(lucide_color(
+            "mic-vocal",
+            15.0,
+            if open {
+                theme::accent()
+            } else {
+                theme::tertiary_label()
+            },
+        ))
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                cx.stop_propagation();
+                this.toggle_lyrics_panel(cx);
+            }),
+        )
+}
+
+fn lyrics_panel(
+    island: &Island,
+    title: &SharedString,
+    artist: &SharedString,
+    cx: &mut Context<Island>,
+) -> impl IntoElement {
+    // Compact header + five-line window; current stays at LYRIC_ANCHOR.
+    let thumb = island
+        .now_playing
+        .artwork_base64
+        .as_deref()
+        .and_then(|b64| artwork_element(b64, QUEUE_ART, QUEUE_ART_RADIUS));
+    let [past2, past1, cur, next1, next2] = lyrics_five_lines(island);
+    let scroll = island.lyrics_scroll.value;
+    let fade = island.lyrics_fade.value.clamp(0.0, 1.0);
+    let sliding = island
+        .lyrics
+        .as_ref()
+        .is_some_and(|lyrics| lyrics.has_synced())
+        && scroll.abs() > crate::motion::REST_PX;
+    let current_alpha = LYRIC_NEXT_ALPHA + (1.0 - LYRIC_NEXT_ALPHA) * fade;
+    let past1_alpha = if sliding {
+        1.0 + (LYRIC_PAST_ALPHA - 1.0) * fade
+    } else {
+        LYRIC_PAST_ALPHA
+    };
+
+    div()
+        .id("nook-lyrics")
         .flex_1()
-        .min_w(px(72.))
-        .max_w(px(220.))
+        .w_full()
         .h_full()
+        .min_w(px(0.))
+        .min_h(px(0.))
+        .overflow_hidden()
         .flex()
         .flex_col()
-        .justify_center()
-        .gap(px(2.))
-        .overflow_hidden()
-        .child(lyric_line(prev.unwrap_or(""), false))
-        .child(lyric_line(cur.unwrap_or(""), true))
-        .child(lyric_line(next.unwrap_or(""), false))
-        .into_any_element()
+        .child(
+            div()
+                .w_full()
+                .h(px(PANEL_ROW_H))
+                .flex_shrink_0()
+                .min_h(px(0.))
+                .overflow_hidden()
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .when_some(thumb, |d, art| {
+                    d.child(
+                        div()
+                            .size(px(QUEUE_ART))
+                            .rounded(px(QUEUE_ART_RADIUS))
+                            .overflow_hidden()
+                            .flex_shrink_0()
+                            .border_1()
+                            .border_color(NOOK_ART_RING)
+                            .child(art),
+                    )
+                })
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(0.))
+                        .min_h(px(0.))
+                        .overflow_hidden()
+                        .flex()
+                        .items_center()
+                        .gap(px(6.))
+                        .child(
+                            div()
+                                .flex_shrink_0()
+                                .overflow_hidden()
+                                .text_ellipsis()
+                                .whitespace_nowrap()
+                                .text_size(px(theme::BODY.size))
+                                .line_height(px(theme::BODY.leading))
+                                .font_weight(theme::BODY.emphasized)
+                                .text_color(theme::LABEL)
+                                .child(title.clone()),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w(px(0.))
+                                .overflow_hidden()
+                                .text_ellipsis()
+                                .whitespace_nowrap()
+                                .text_size(px(theme::BODY.size))
+                                .line_height(px(theme::BODY.leading))
+                                .text_color(theme::secondary_label())
+                                .child(artist.clone()),
+                        ),
+                )
+                .child(lyrics_toggle_btn(true, cx)),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w(px(0.))
+                .min_h(px(0.))
+                .w_full()
+                .h_full()
+                .overflow_hidden()
+                .relative()
+                .child(
+                    div()
+                        .id("nook-lyrics-lines")
+                        .absolute()
+                        .w_full()
+                        .top(relative(LYRIC_ANCHOR))
+                        .mt(px(-2.0 * LYRIC_LINE_PITCH + scroll))
+                        .flex()
+                        .flex_col()
+                        .gap(px(LYRIC_GAP))
+                        .child(lyric_line(
+                            past2.as_deref().unwrap_or(""),
+                            false,
+                            LYRIC_PAST_FAR_ALPHA,
+                        ))
+                        .child(lyric_line(
+                            past1.as_deref().unwrap_or(""),
+                            false,
+                            past1_alpha,
+                        ))
+                        .child(lyric_line(
+                            cur.as_deref().unwrap_or(""),
+                            true,
+                            current_alpha,
+                        ))
+                        .child(lyric_line(
+                            next1.as_deref().unwrap_or(""),
+                            false,
+                            LYRIC_NEXT_ALPHA,
+                        ))
+                        .child(lyric_line(
+                            next2.as_deref().unwrap_or(""),
+                            false,
+                            LYRIC_NEXT_FAR_ALPHA,
+                        )),
+                ),
+        )
 }
 
-fn lyric_line(text: &str, current: bool) -> AnyElement {
+fn lyrics_five_lines(island: &Island) -> [Option<String>; 5] {
+    let Some(lyrics) = island.lyrics.as_ref() else {
+        return [None, None, None, None, None];
+    };
+    if lyrics.has_synced() {
+        let live = lyrics.active_index(island.lyrics_position_ms());
+        let idx = live;
+        let [a, b, c, d, e] = lyrics.highlight_at_5(idx);
+        return [
+            a.map(str::to_string),
+            b.map(str::to_string),
+            c.map(str::to_string),
+            d.map(str::to_string),
+            e.map(str::to_string),
+        ];
+    }
+    let Some(plain) = lyrics.plain.as_deref() else {
+        return [None, None, None, None, None];
+    };
+    let collected: Vec<String> = plain
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .take(5)
+        .map(|s| s.trim().to_string())
+        .collect();
+    match collected.as_slice() {
+        [a, b, c, d, e] => [
+            Some(a.clone()),
+            Some(b.clone()),
+            Some(c.clone()),
+            Some(d.clone()),
+            Some(e.clone()),
+        ],
+        [a, b, c, d] => [
+            None,
+            Some(a.clone()),
+            Some(b.clone()),
+            Some(c.clone()),
+            Some(d.clone()),
+        ],
+        [a, b, c] => [
+            None,
+            Some(a.clone()),
+            Some(b.clone()),
+            Some(c.clone()),
+            None,
+        ],
+        [a, b] => [None, None, Some(a.clone()), Some(b.clone()), None],
+        [a] => [None, None, Some(a.clone()), None, None],
+        _ => [None, None, None, None, None],
+    }
+}
+
+fn lyric_line(text: &str, current: bool, alpha: f32) -> AnyElement {
+    let color = theme::with_alpha(theme::LABEL, alpha.clamp(0.0, 1.0));
     if text.is_empty() {
         return div()
-            .h(px(theme::CALLOUT.leading))
+            .h(px(LYRIC_CURRENT.leading))
             .w_full()
+            .min_h(px(0.))
+            .flex_shrink_0()
             .into_any_element();
     }
-    slide_label(text.to_string(), theme::CALLOUT, current)
+    if current {
+        let max_h = LYRIC_CURRENT.leading * 2.0;
+        return div()
+            .w_full()
+            .min_w(px(0.))
+            .flex_shrink_0()
+            .max_h(px(max_h))
+            .overflow_hidden()
+            .child(
+                div()
+                    .w_full()
+                    .min_w(px(0.))
+                    .line_clamp(2)
+                    .text_size(px(LYRIC_CURRENT.size))
+                    .line_height(px(LYRIC_CURRENT.leading))
+                    .font_weight(LYRIC_CURRENT.emphasized)
+                    .text_color(color)
+                    .child(text.to_string()),
+            )
+            .into_any_element();
+    }
+    div()
         .w_full()
+        .h(px(LYRIC_CURRENT.leading))
+        .min_w(px(0.))
+        .flex_shrink_0()
+        .overflow_hidden()
+        .text_ellipsis()
+        .whitespace_nowrap()
+        .text_size(px(LYRIC_CURRENT.size))
+        .line_height(px(LYRIC_CURRENT.leading))
+        .font_weight(LYRIC_CURRENT.emphasized)
+        .text_color(color)
+        .child(text.to_string())
         .into_any_element()
 }
 
-fn output_picker_list(island: &Island, cx: &mut Context<Island>) -> impl IntoElement {
+fn output_picker_list(
+    island: &Island,
+    track_title: &SharedString,
+    cx: &mut Context<Island>,
+) -> impl IntoElement {
+    // Pencil "Media — AirPlay": header + device rows with kind + radio trailing.
     let mut list = div()
         .id("nook-output-list")
         .flex()
         .flex_col()
+        .flex_1()
         .min_w(px(0.))
-        .w(px(200.))
+        .min_h(px(0.))
+        .w_full()
         .h_full()
         .overflow_hidden();
-    // Styled after the Control Center Sound panel: a small section title,
-    // rows with a circular icon chip, and a checkmark on the active device.
+
     list = list.child(
         div()
+            .w_full()
+            .h(px(PANEL_ROW_H))
+            .flex_shrink_0()
+            .min_h(px(0.))
+            .overflow_hidden()
             .flex()
             .items_center()
-            .justify_between()
-            .mb(px(6.))
+            .gap(px(8.))
             .child(
                 div()
-                    .text_color(theme::SECONDARY_LABEL)
+                    .flex_shrink_0()
+                    .text_color(theme::LABEL)
+                    .text_size(px(theme::BODY.size))
+                    .line_height(px(theme::BODY.leading))
+                    .font_weight(theme::BODY.emphasized)
+                    .whitespace_nowrap()
+                    .child("AirPlay"),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(0.))
+                    .min_h(px(0.))
+                    .overflow_hidden()
+                    .text_ellipsis()
+                    .whitespace_nowrap()
+                    .text_color(theme::tertiary_label())
                     .text_size(px(theme::SUBHEADLINE.size))
                     .line_height(px(theme::SUBHEADLINE.leading))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child("Sound"),
+                    .child(track_title.clone()),
             )
             .child(output_picker_btn("airplay", true, cx)),
     );
+
     if island.output_devices.is_empty() {
         list = list.child(
             div()
-                .text_color(theme::SECONDARY_LABEL)
-                .text_size(px(theme::SUBHEADLINE.size))
-                .child("No output devices"),
+                .flex_1()
+                .min_w(px(0.))
+                .min_h(px(0.))
+                .w_full()
+                .overflow_hidden()
+                .flex()
+                .flex_col()
+                .items_center()
+                .justify_center()
+                .gap(px(4.))
+                .child(
+                    div()
+                        .text_color(theme::secondary_label())
+                        .text_size(px(theme::BODY.size))
+                        .line_height(px(theme::BODY.leading))
+                        .child("No output devices"),
+                )
+                .child(
+                    div()
+                        .text_color(theme::tertiary_label())
+                        .text_size(px(theme::SUBHEADLINE.size))
+                        .line_height(px(theme::SUBHEADLINE.leading))
+                        .child("AirPlay starts from Control Center."),
+                ),
         );
     } else {
-        let mut rows = div().flex().flex_col().gap(px(1.));
+        let mut rows = div().flex().flex_col().min_w(px(0.)).min_h(px(0.));
         for device in &island.output_devices {
-            let id = device.id;
-            let name = device.name.clone();
-            let icon = device.icon();
-            let selected = device.is_default;
-            rows = rows.child(
-                div()
-                    .id(SharedString::from(format!("out-dev-{id}")))
-                    .flex()
-                    .items_center()
-                    .gap(px(8.))
-                    .h(px(30.))
-                    .rounded(px(theme::CONTROL_RADIUS))
-                    .px(px(4.))
-                    .hover(|s| s.bg(theme::FILL_TERTIARY))
-                    .active(|s| s.bg(theme::FILL_SECONDARY))
-                    .cursor(CursorStyle::PointingHand)
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |this, _: &MouseDownEvent, _, cx| {
-                            cx.stop_propagation();
-                            this.select_output_device(id, cx);
-                        }),
-                    )
-                    .child(
-                        div()
-                            .size(px(theme::HIT_MIN))
-                            .flex_shrink_0()
-                            .rounded_full()
-                            .bg(if selected {
-                                theme::LABEL
-                            } else {
-                                theme::FILL_SECONDARY
-                            })
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .child(lucide_color(
-                                icon,
-                                12.0,
-                                if selected {
-                                    theme::WINDOW_BG
-                                } else {
-                                    theme::LABEL
-                                },
-                            )),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w(px(0.))
-                            .overflow_hidden()
-                            .text_ellipsis()
-                            .text_color(theme::LABEL)
-                            .text_size(px(theme::SUBHEADLINE.size))
-                            .line_height(px(theme::SUBHEADLINE.leading))
-                            .child(name),
-                    )
-                    .when(selected, |d| {
-                        d.child(lucide_color("check", 13.0, theme::LABEL))
-                    }),
-            );
+            rows = rows.child(output_device_row(device, cx));
         }
-        list = list.child(scroll_body("nook-output-rows", rows));
+        list = list.child(
+            div()
+                .flex_1()
+                .min_w(px(0.))
+                .min_h(px(0.))
+                .child(scroll_body("nook-output-rows", rows)),
+        );
     }
-    list.child(
-        div()
-            .mt(px(4.))
-            .text_color(theme::tertiary_label())
-            .text_size(px(theme::FOOTNOTE.size))
-            .line_height(px(theme::FOOTNOTE.leading))
-            .child("AirPlay starts from Control Center."),
-    )
+    list
+}
+
+fn output_device_row(device: &OutputDevice, cx: &mut Context<Island>) -> impl IntoElement {
+    let id = device.id;
+    let name = device.name.clone();
+    let icon = device_row_icon(device);
+    let kind = device_kind(device);
+    let selected = device.is_default;
+    div()
+        .id(SharedString::from(format!("out-dev-{id}")))
+        .w_full()
+        .h(px(PANEL_ROW_H))
+        .flex_shrink_0()
+        .min_w(px(0.))
+        .min_h(px(0.))
+        .overflow_hidden()
+        .flex()
+        .items_center()
+        .gap(px(10.))
+        .cursor(CursorStyle::PointingHand)
+        .hover(|s| s.opacity(0.85))
+        .active(|s| s.opacity(0.75))
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                cx.stop_propagation();
+                this.select_output_device(id, cx);
+            }),
+        )
+        .child(
+            div()
+                .size(px(20.))
+                .flex_shrink_0()
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(lucide_color(
+                    icon,
+                    15.0,
+                    if selected {
+                        theme::LABEL
+                    } else {
+                        theme::secondary_label()
+                    },
+                )),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w(px(0.))
+                .overflow_hidden()
+                .flex()
+                .flex_col()
+                .child(
+                    label(name, theme::BODY, selected)
+                        .text_color(if selected {
+                            theme::LABEL
+                        } else {
+                            theme::secondary_label()
+                        })
+                        .text_ellipsis()
+                        .whitespace_nowrap(),
+                ),
+        )
+        .child(
+            div()
+                .flex_shrink_0()
+                .min_w(px(0.))
+                .min_h(px(0.))
+                .overflow_hidden()
+                .text_ellipsis()
+                .whitespace_nowrap()
+                .text_color(theme::tertiary_label())
+                .text_size(px(theme::SUBHEADLINE.size))
+                .line_height(px(theme::SUBHEADLINE.leading))
+                .when_some(kind, |d, k| d.child(k)),
+        )
+        .child(
+            div()
+                .w(px(theme::HIT_MIN))
+                .h(px(20.))
+                .flex_shrink_0()
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(if selected {
+                    lucide_color("check", 14.0, theme::accent()).into_any_element()
+                } else {
+                    div()
+                        .size(px(12.))
+                        .rounded_full()
+                        .border_1()
+                        .border_color(theme::tertiary_label())
+                        .into_any_element()
+                }),
+        )
+}
+
+fn device_row_icon(device: &OutputDevice) -> &'static str {
+    match device.transport {
+        OutputTransport::BuiltIn => "laptop",
+        OutputTransport::Hdmi | OutputTransport::DisplayPort => "tv",
+        _ => device.icon(),
+    }
+}
+
+/// Kind caption from HAL transport only — no HomePod / Apple TV invention.
+fn device_kind(device: &OutputDevice) -> Option<&'static str> {
+    match device.transport {
+        OutputTransport::BuiltIn => Some("This Mac"),
+        OutputTransport::Unknown => None,
+        other => Some(other.label()),
+    }
 }
 
 #[allow(dead_code)]
@@ -1120,6 +1512,9 @@ fn nook_play(playing: bool, cx: &mut Context<Island>) -> impl IntoElement {
             cx.listener(move |this, _: &MouseDownEvent, _, cx| {
                 cx.stop_propagation();
                 this.note_media_play_pause(cx);
+                if this.gallery_mode {
+                    return;
+                }
                 nook_core::runtime().spawn(async {
                     let _ = nook_core::audio::media_play_pause().await;
                 });
@@ -1281,28 +1676,17 @@ fn progress_block(
         )
 }
 
-fn up_next_panel(queue: &PlaybackQueue, cx: &mut Context<Island>) -> impl IntoElement {
-    let label = if queue.label.is_empty() {
-        "Playing Next".to_string()
-    } else {
-        queue.label.clone()
-    };
-    let empty_msg = queue_empty_message(queue);
-    let mut rows = div()
-        .id("up-next-rows")
-        .flex_1()
-        .min_h(px(QUEUE_ROW_H))
-        .overflow_y_scroll();
+fn up_next_panel(island: &Island, cx: &mut Context<Island>) -> impl IntoElement {
+    // Pencil "Media — Up Next": active list toggle + title; shuffle/repeat
+    // only when MediaRemote reports the modes.
+    use nook_core::models::QueueHidden;
+    let queue = &island.queue;
+    let shuffle = island.now_playing.shuffle;
+    let repeat = island.now_playing.repeat;
+    let streaming = matches!(queue.hidden, Some(QueueHidden::Streaming));
+    let mut rows = div().flex().flex_col().min_h(px(0.));
     if queue.items.is_empty() {
-        rows = rows.child(
-            div()
-                .pt(px(4.))
-                .pr(px(4.))
-                .text_size(px(theme::FOOTNOTE.size))
-                .line_height(px(theme::FOOTNOTE.leading))
-                .text_color(theme::SECONDARY_LABEL)
-                .child(empty_msg),
-        );
+        rows = rows.child(queue_empty_state(queue, streaming, cx));
     } else {
         for (i, item) in queue.items.iter().enumerate() {
             rows = rows.child(queue_row(i, item, cx));
@@ -1310,23 +1694,178 @@ fn up_next_panel(queue: &PlaybackQueue, cx: &mut Context<Island>) -> impl IntoEl
     }
     div()
         .id("up-next")
-        .w(px(QUEUE_PANEL_W))
-        .flex_shrink_0()
+        .flex_1()
+        .w_full()
         .h_full()
-        .min_h(px(theme::NOOK_BODY - 4.0))
+        .min_w(px(0.))
+        .min_h(px(0.))
         .overflow_hidden()
         .flex()
         .flex_col()
         .child(
             div()
-                .pb(px(6.))
-                .text_size(px(theme::SUBHEADLINE.size))
-                .line_height(px(theme::SUBHEADLINE.leading))
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(theme::LABEL)
-                .child(label),
+                .w_full()
+                .h(px(PANEL_ROW_H))
+                .flex_shrink_0()
+                .min_h(px(0.))
+                .overflow_hidden()
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .child(queue_toggle_btn(true, true, cx))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(0.))
+                        .min_h(px(0.))
+                        .overflow_hidden()
+                        .text_ellipsis()
+                        .whitespace_nowrap()
+                        .text_size(px(theme::BODY.size))
+                        .line_height(px(theme::BODY.leading))
+                        .font_weight(theme::BODY.emphasized)
+                        .text_color(theme::LABEL)
+                        .child("Up Next"),
+                )
+                .when_some(shuffle, |d, on| d.child(shuffle_btn(on, cx)))
+                .when_some(repeat, |d, mode| d.child(repeat_btn(mode, cx))),
         )
-        .child(rows)
+        .child(scroll_body("nook-up-next-rows", rows))
+}
+
+fn queue_empty_state(
+    queue: &PlaybackQueue,
+    streaming: bool,
+    cx: &mut Context<Island>,
+) -> impl IntoElement {
+    if streaming {
+        return div()
+            .flex_1()
+            .min_w(px(0.))
+            .min_h(px(0.))
+            .w_full()
+            .overflow_hidden()
+            .flex()
+            .flex_col()
+            .justify_center()
+            .gap(px(6.))
+            .pt(px(4.))
+            .child(
+                div()
+                    .text_size(px(theme::SUBHEADLINE.size))
+                    .line_height(px(theme::SUBHEADLINE.leading))
+                    .text_color(theme::secondary_label())
+                    .child("Up Next isn't available for streamed songs"),
+            )
+            .child(
+                div()
+                    .id("nook-open-music")
+                    .flex_shrink_0()
+                    .text_size(px(theme::CALLOUT.size))
+                    .line_height(px(theme::CALLOUT.leading))
+                    .text_color(theme::accent())
+                    .cursor(CursorStyle::PointingHand)
+                    .hover(|s| s.opacity(0.85))
+                    .active(|s| s.opacity(0.75))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|_this, _: &MouseDownEvent, _, cx| {
+                            cx.stop_propagation();
+                            let _ = std::process::Command::new("open")
+                                .args(["-b", "com.apple.Music"])
+                                .spawn();
+                        }),
+                    )
+                    .child("Open in Music"),
+            )
+            .into_any_element();
+    }
+    div()
+        .flex_1()
+        .min_w(px(0.))
+        .min_h(px(0.))
+        .w_full()
+        .pt(px(8.))
+        .text_size(px(theme::SUBHEADLINE.size))
+        .line_height(px(theme::SUBHEADLINE.leading))
+        .text_color(theme::secondary_label())
+        .child(queue_empty_message(queue))
+        .into_any_element()
+}
+
+fn shuffle_btn(on: bool, cx: &mut Context<Island>) -> impl IntoElement {
+    div()
+        .id("nook-shuffle")
+        .size(px(24.))
+        .flex_shrink_0()
+        .flex()
+        .items_center()
+        .justify_center()
+        .hover(|s| s.opacity(0.85))
+        .active(|s| s.opacity(0.75))
+        .cursor(CursorStyle::PointingHand)
+        .child(lucide_color(
+            "shuffle",
+            14.0,
+            if on {
+                theme::accent()
+            } else {
+                theme::secondary_label()
+            },
+        ))
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                cx.stop_propagation();
+                this.note_media_toggle_shuffle(cx);
+                if this.gallery_mode {
+                    return;
+                }
+                nook_core::runtime().spawn(async {
+                    let _ = nook_core::audio::media_toggle_shuffle().await;
+                });
+            }),
+        )
+}
+
+fn repeat_btn(mode: RepeatMode, cx: &mut Context<Island>) -> impl IntoElement {
+    let (icon, active) = match mode {
+        RepeatMode::Off => ("repeat", false),
+        RepeatMode::One => ("repeat-1", true),
+        RepeatMode::All => ("repeat", true),
+    };
+    div()
+        .id("nook-repeat")
+        .size(px(24.))
+        .flex_shrink_0()
+        .flex()
+        .items_center()
+        .justify_center()
+        .hover(|s| s.opacity(0.85))
+        .active(|s| s.opacity(0.75))
+        .cursor(CursorStyle::PointingHand)
+        .child(lucide_color(
+            icon,
+            14.0,
+            if active {
+                theme::accent()
+            } else {
+                theme::tertiary_label()
+            },
+        ))
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                cx.stop_propagation();
+                this.note_media_toggle_repeat(cx);
+                if this.gallery_mode {
+                    return;
+                }
+                nook_core::runtime().spawn(async {
+                    let _ = nook_core::audio::media_toggle_repeat().await;
+                });
+            }),
+        )
 }
 
 fn queue_empty_message(queue: &PlaybackQueue) -> SharedString {
@@ -1338,7 +1877,8 @@ fn queue_empty_message(queue: &PlaybackQueue) -> SharedString {
         Some(QueueHidden::PremiumRequired) => "Not available in Spotify",
         Some(QueueHidden::AutomationDenied) => "Needs Music automation",
         Some(QueueHidden::Shuffle) => "Hidden while shuffling",
-        Some(QueueHidden::Radio) => "Hidden during radio",
+        Some(QueueHidden::Radio) => "Not available for radio",
+        Some(QueueHidden::Streaming) => "Up Next isn't available for streamed songs",
         Some(QueueHidden::Idle) | None => "No upcoming tracks",
     })
 }
@@ -1356,69 +1896,107 @@ fn queue_row(index: usize, item: &QueueItem, cx: &mut Context<Island>) -> impl I
         .or_else(|| nook_core::queue::cached_artwork(&item.id).and_then(|hit| hit));
     let art = thumb
         .as_deref()
-        .and_then(|b64| artwork_element(b64, 32.0, 6.0))
+        .and_then(|b64| artwork_element(b64, QUEUE_ART, QUEUE_ART_RADIUS))
         .unwrap_or_else(|| {
             div()
-                .size(px(32.))
-                .rounded(px(theme::CONTROL_RADIUS))
+                .size(px(QUEUE_ART))
+                .rounded(px(QUEUE_ART_RADIUS))
                 .bg(theme::FILL_TERTIARY)
                 .flex()
                 .items_center()
                 .justify_center()
-                .child(lucide_color("music", 12.0, theme::SECONDARY_LABEL))
+                .child(lucide_color("music", 10.0, theme::secondary_label()))
                 .into_any_element()
         });
     let title = item.title.clone();
     let artist = item.artist.clone();
-    let jump = item.clone();
+    let clickable = !matches!(item.jump, nook_core::models::QueueJump::Unavailable);
+    let duration = item.duration.filter(|d| *d > 0.0).map(format_time);
     div()
         .id(SharedString::from(format!("up-next-{index}")))
-        .h(px(QUEUE_ROW_H))
+        .h(px(PANEL_ROW_H))
         .w_full()
+        .flex_shrink_0()
+        .min_h(px(0.))
+        .overflow_hidden()
         .flex()
         .items_center()
-        .gap(px(8.))
-        .rounded(px(theme::CONTROL_RADIUS))
-        .hover(|s| s.bg(theme::FILL_TERTIARY))
-        .active(|s| s.bg(theme::FILL_SECONDARY))
-        .cursor(CursorStyle::PointingHand)
-        .on_mouse_down(
-            MouseButton::Left,
-            cx.listener(move |this, _: &MouseDownEvent, _, cx| {
-                cx.stop_propagation();
-                let item = jump.clone();
-                let context = this.queue.context_uri.clone();
-                nook_core::runtime().spawn(async move {
-                    let _ = nook_core::audio::media_jump_to_queue_item(item, context).await;
-                });
-            }),
+        .gap(px(10.))
+        .when(clickable, |d| {
+            let jump = item.clone();
+            d.cursor(CursorStyle::PointingHand)
+                .hover(|s| s.opacity(0.85))
+                .active(|s| s.opacity(0.75))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                        cx.stop_propagation();
+                        if this.gallery_mode {
+                            return;
+                        }
+                        let item = jump.clone();
+                        let context = this.queue.context_uri.clone();
+                        nook_core::runtime().spawn(async move {
+                            let _ = nook_core::audio::media_jump_to_queue_item(item, context)
+                                .await;
+                        });
+                    }),
+                )
+        })
+        .child(
+            div()
+                .size(px(QUEUE_ART))
+                .rounded(px(QUEUE_ART_RADIUS))
+                .overflow_hidden()
+                .flex_shrink_0()
+                .border_1()
+                .border_color(NOOK_ART_RING)
+                .child(art),
         )
-        .child(art)
         .child(
             div()
                 .flex_1()
                 .min_w(px(0.))
+                .min_h(px(0.))
                 .overflow_hidden()
                 .flex()
-                .flex_col()
+                .items_center()
+                .gap(px(6.))
                 .child(
                     div()
-                        .text_size(px(theme::CALLOUT.size))
-                        .font_weight(theme::CALLOUT.emphasized)
-                        .text_color(theme::LABEL)
+                        .flex_shrink_0()
+                        .overflow_hidden()
                         .text_ellipsis()
                         .whitespace_nowrap()
+                        .text_size(px(theme::CALLOUT.size))
+                        .line_height(px(theme::CALLOUT.leading))
+                        .font_weight(theme::CALLOUT.emphasized)
+                        .text_color(theme::LABEL)
                         .child(title),
                 )
                 .child(
                     div()
-                        .text_size(px(theme::FOOTNOTE.size))
-                        .text_color(theme::SECONDARY_LABEL)
+                        .flex_1()
+                        .min_w(px(0.))
+                        .overflow_hidden()
                         .text_ellipsis()
                         .whitespace_nowrap()
+                        .text_size(px(theme::CALLOUT.size))
+                        .line_height(px(theme::CALLOUT.leading))
+                        .text_color(theme::secondary_label())
                         .child(artist),
                 ),
         )
+        .when_some(duration, |d, stamp| {
+            d.child(
+                div()
+                    .flex_shrink_0()
+                    .text_size(px(theme::FOOTNOTE.size))
+                    .line_height(px(theme::FOOTNOTE.leading))
+                    .text_color(theme::secondary_label())
+                    .child(stamp),
+            )
+        })
 }
 
 fn transport_row(playing: bool, cx: &mut Context<Island>) -> impl IntoElement {
@@ -1433,6 +2011,9 @@ fn transport_row(playing: bool, cx: &mut Context<Island>) -> impl IntoElement {
             cx,
             |this, _, cx| {
                 this.note_media_skip(cx);
+                if this.gallery_mode {
+                    return;
+                }
                 nook_core::runtime().spawn(async {
                     let _ = nook_core::audio::media_previous_track().await;
                 });
@@ -1445,6 +2026,9 @@ fn transport_row(playing: bool, cx: &mut Context<Island>) -> impl IntoElement {
             cx,
             |this, _, cx| {
                 this.note_media_skip(cx);
+                if this.gallery_mode {
+                    return;
+                }
                 nook_core::runtime().spawn(async {
                     let _ = nook_core::audio::media_next_track().await;
                 });
@@ -1501,6 +2085,9 @@ fn play_btn(playing: bool, cx: &mut Context<Island>) -> impl IntoElement {
             cx.listener(move |this, _: &MouseDownEvent, _, cx| {
                 cx.stop_propagation();
                 this.note_media_play_pause(cx);
+                if this.gallery_mode {
+                    return;
+                }
                 nook_core::runtime().spawn(async {
                     let _ = nook_core::audio::media_play_pause().await;
                 });
@@ -1687,7 +2274,8 @@ fn color_dist(a: Rgba, b: Rgba) -> f32 {
 // artwork-colour bleed. `art_palette` below stays: island/mod.rs still
 // reads it for the aura state.
 
-static ART_BOUNDS: OnceLock<Mutex<(u64, f32, f32, f32, f32)>> = OnceLock::new();
+type ArtBoundsCache = (u64, f32, f32, f32, f32);
+static ART_BOUNDS: OnceLock<Mutex<ArtBoundsCache>> = OnceLock::new();
 
 fn report_art_bounds(x: f32, y: f32, w: f32, h: f32) {
     let cache = ART_BOUNDS.get_or_init(|| Mutex::new((0, 0.0, 0.0, 0.0, 0.0)));

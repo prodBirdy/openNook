@@ -409,10 +409,10 @@ pub struct AppSettings {
     /// Default off — suppression also hides caps-lock and keyboard-backlight bezels.
     #[serde(default)]
     pub replace_system_hud: bool,
-    /// Island fill as `0xRRGGBB`. `None` uses the default black Live Activity
-    /// fill.
+    /// Tint the island with the macOS accent colour (System Settings → Appearance).
+    /// Off = the default black Live Activity fill.
     #[serde(default)]
-    pub island_color: Option<u32>,
+    pub island_accent: bool,
     /// Per-widget widths in Nook cells. Missing entries use [`WidgetModule::default_cells`].
     #[serde(default = "default_widget_widths")]
     pub widget_widths: Vec<(WidgetModule, u8)>,
@@ -461,44 +461,6 @@ fn default_island_x() -> f32 {
 fn default_glass_gradient() -> f32 {
     0.5
 }
-
-/// Named island fills shown in Settings. `None` is the default black.
-#[derive(Clone, Copy)]
-pub struct IslandSwatch {
-    pub name: &'static str,
-    pub rgb: Option<u32>,
-}
-
-pub const ISLAND_SWATCHES: [IslandSwatch; 7] = [
-    IslandSwatch {
-        name: "Black",
-        rgb: None,
-    },
-    IslandSwatch {
-        name: "Graphite",
-        rgb: Some(0x1C1C1E),
-    },
-    IslandSwatch {
-        name: "Navy",
-        rgb: Some(0x0B1C33),
-    },
-    IslandSwatch {
-        name: "Forest",
-        rgb: Some(0x0C1F14),
-    },
-    IslandSwatch {
-        name: "Burgundy",
-        rgb: Some(0x2A0D12),
-    },
-    IslandSwatch {
-        name: "Indigo",
-        rgb: Some(0x1A1233),
-    },
-    IslandSwatch {
-        name: "Olive",
-        rgb: Some(0x1A1C10),
-    },
-];
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
@@ -675,7 +637,7 @@ impl Default for AppSettings {
             hide_when_maximized: false,
             show_volume_brightness_hud: true,
             replace_system_hud: false,
-            island_color: None,
+            island_accent: false,
             widget_widths: default_widget_widths(),
             share: ShareSettings::default(),
             terminal_enabled: false,
@@ -916,6 +878,94 @@ impl AppSettings {
         self.set_cells(module, cells)
     }
 
+    /// Put `module` at `index` among the current Nook row (`nook_items()` order with
+    /// `module` itself removed first). Enables it if it is off. Returns false and
+    /// changes nothing when the result would not fit in [`Self::MAX_ROWS`].
+    pub fn insert_widget_at(&mut self, module: WidgetModule, index: usize) -> bool {
+        if !module.occupies_nook_cells() || !module.is_available() {
+            return false;
+        }
+        let order_snapshot = self.widget_order.clone();
+        let was_enabled = self.is_enabled(module);
+
+        let row: Vec<WidgetModule> = self
+            .nook_items()
+            .into_iter()
+            .map(|(m, _)| m)
+            .filter(|m| *m != module)
+            .collect();
+
+        let mut order = self.ordered_widgets();
+        order.retain(|m| *m != module);
+        let insert_at = if index >= row.len() {
+            match row.last() {
+                Some(last) => order
+                    .iter()
+                    .position(|m| m == last)
+                    .map(|i| i + 1)
+                    .unwrap_or(order.len()),
+                None => order.len(),
+            }
+        } else {
+            order
+                .iter()
+                .position(|m| *m == row[index])
+                .unwrap_or(order.len())
+        };
+        order.insert(insert_at, module);
+        self.widget_order = order;
+
+        if !was_enabled {
+            self.write_enabled(module, true);
+        }
+        if self.nook_rows().len() > Self::MAX_ROWS {
+            self.widget_order = order_snapshot;
+            if !was_enabled {
+                self.write_enabled(module, false);
+            }
+            return false;
+        }
+        true
+    }
+
+    /// Cells the row is short by to add `module` at its current width (0 = fits / already on).
+    pub fn cells_short_for(&self, module: WidgetModule) -> u8 {
+        if self.is_enabled(module) || !module.occupies_nook_cells() {
+            return 0;
+        }
+        self.cells_for(module)
+            .saturating_sub(self.remaining_cells())
+    }
+
+    /// Distinct S/M/L sizes this widget really has (dedupe sizes that map to the
+    /// same cell count), in S, M, L order.
+    pub fn distinct_sizes(&self, module: WidgetModule) -> Vec<WidgetSize> {
+        let min = module.min_cells();
+        let def = module.default_cells().max(min);
+        let max = self.max_cells_for(module);
+        let mut out = Vec::new();
+        let mut seen = Vec::new();
+        for size in WidgetSize::ALL {
+            let cells = match size {
+                WidgetSize::Small => min,
+                WidgetSize::Medium => def.min(max),
+                WidgetSize::Large => max,
+            };
+            if seen.contains(&cells) {
+                continue;
+            }
+            seen.push(cells);
+            out.push(size);
+        }
+        out
+    }
+
+    /// Whether switching `module` to `size` still fits the row.
+    pub fn size_fits(&self, module: WidgetModule, size: WidgetSize) -> bool {
+        let mut trial = self.clone();
+        trial.set_size(module, size)
+    }
+
     /// Max width a widget may grow to, capped by one row ([`Self::TOTAL_CELLS`]).
     pub fn max_cells_for(&self, module: WidgetModule) -> u8 {
         module.max_cells().min(Self::TOTAL_CELLS)
@@ -1108,14 +1158,6 @@ impl AppSettings {
         self.island_x = default_island_x();
         self.island_y = 0.0;
     }
-
-    pub fn island_swatch_name(&self) -> &'static str {
-        ISLAND_SWATCHES
-            .iter()
-            .find(|swatch| swatch.rgb == self.island_color)
-            .map(|swatch| swatch.name)
-            .unwrap_or("Custom")
-    }
 }
 
 static WINDOW_SETTINGS: std::sync::OnceLock<RwLock<WindowSettings>> = std::sync::OnceLock::new();
@@ -1125,8 +1167,28 @@ static APP_SETTINGS: std::sync::OnceLock<RwLock<AppSettings>> = std::sync::OnceL
 const METRICS_TOKEN_SERVICE: &str = "com.prodBirdy.openNook.metrics";
 #[cfg(target_os = "macos")]
 const METRICS_TOKEN_ACCOUNT: &str = "warmup-bearer";
+
+/// Dev gallery / capture launches set `NOOK_GALLERY` or `NOOK_NO_KEYCHAIN` so
+/// settings load never prompts for the metrics keychain item. Once set, also
+/// makes [`store_metrics_token`] a no-op — writing an empty token would delete
+/// the owner's real keychain entry.
+#[cfg(all(debug_assertions, target_os = "macos"))]
+static KEYCHAIN_DISABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
+#[cfg(all(debug_assertions, target_os = "macos"))]
+fn keychain_disabled() -> bool {
+    *KEYCHAIN_DISABLED.get_or_init(|| {
+        std::env::var_os("NOOK_GALLERY").is_some()
+            || std::env::var_os("NOOK_NO_KEYCHAIN").is_some()
+    })
+}
+
 #[cfg(target_os = "macos")]
 fn load_metrics_token() -> Option<String> {
+    #[cfg(debug_assertions)]
+    if keychain_disabled() {
+        return None;
+    }
     security_framework::passwords::get_generic_password(
         METRICS_TOKEN_SERVICE,
         METRICS_TOKEN_ACCOUNT,
@@ -1137,6 +1199,10 @@ fn load_metrics_token() -> Option<String> {
 
 #[cfg(target_os = "macos")]
 fn store_metrics_token(token: &str) -> Result<(), String> {
+    #[cfg(debug_assertions)]
+    if keychain_disabled() {
+        return Ok(());
+    }
     if token.is_empty() {
         let _ = security_framework::passwords::delete_generic_password(
             METRICS_TOKEN_SERVICE,
@@ -1371,7 +1437,7 @@ mod tests {
         assert!(!parsed.hide_when_maximized);
         assert!(parsed.show_volume_brightness_hud);
         assert!(!parsed.replace_system_hud);
-        assert_eq!(parsed.island_color, None);
+        assert!(!parsed.island_accent);
         assert_eq!(parsed.share.device_alias, "openNook");
         assert!(parsed.share.localsend_pin.is_empty());
         assert!(!parsed.terminal_enabled);
@@ -1459,13 +1525,24 @@ mod tests {
     }
 
     #[test]
-    fn island_swatch_name_matches_the_palette() {
+    fn old_island_color_json_falls_back_to_default_black() {
+        let parsed: AppSettings =
+            serde_json::from_str(r#"{"island_color":1842204}"#).unwrap();
+        assert!(!parsed.island_accent);
+    }
+
+    #[test]
+    fn island_accent_round_trips() {
         let mut settings = AppSettings::default();
-        assert_eq!(settings.island_swatch_name(), "Black");
-        settings.island_color = Some(0x1C1C1E);
-        assert_eq!(settings.island_swatch_name(), "Graphite");
-        settings.island_color = Some(0x123456);
-        assert_eq!(settings.island_swatch_name(), "Custom");
+        assert!(!settings.island_accent);
+        settings.island_accent = true;
+        let json = serde_json::to_string(&settings).unwrap();
+        let back: AppSettings = serde_json::from_str(&json).unwrap();
+        assert!(back.island_accent);
+        settings.island_accent = false;
+        let json = serde_json::to_string(&settings).unwrap();
+        let back: AppSettings = serde_json::from_str(&json).unwrap();
+        assert!(!back.island_accent);
     }
 
     #[test]
@@ -1743,6 +1820,169 @@ mod tests {
         assert_eq!(
             settings.cells_for(WidgetModule::Music),
             settings.max_cells_for(WidgetModule::Music)
+        );
+    }
+
+    #[test]
+    fn insert_widget_at_places_at_start_middle_and_end() {
+        let mut settings = AppSettings::default();
+        // Defaults: Music, Calendar, Timers.
+        assert_eq!(
+            settings
+                .nook_items()
+                .into_iter()
+                .map(|(m, _)| m)
+                .collect::<Vec<_>>(),
+            vec![
+                WidgetModule::Music,
+                WidgetModule::Calendar,
+                WidgetModule::Timers
+            ]
+        );
+
+        assert!(settings.insert_widget_at(WidgetModule::Battery, 0));
+        assert_eq!(
+            settings
+                .nook_items()
+                .into_iter()
+                .map(|(m, _)| m)
+                .collect::<Vec<_>>(),
+            vec![
+                WidgetModule::Battery,
+                WidgetModule::Music,
+                WidgetModule::Calendar,
+                WidgetModule::Timers
+            ]
+        );
+
+        // Reorder Battery into the middle (index 2 among row-without-Battery).
+        assert!(settings.insert_widget_at(WidgetModule::Battery, 2));
+        assert_eq!(
+            settings
+                .nook_items()
+                .into_iter()
+                .map(|(m, _)| m)
+                .collect::<Vec<_>>(),
+            vec![
+                WidgetModule::Music,
+                WidgetModule::Calendar,
+                WidgetModule::Battery,
+                WidgetModule::Timers
+            ]
+        );
+
+        assert!(settings.insert_widget_at(WidgetModule::Battery, 99));
+        assert_eq!(
+            settings
+                .nook_items()
+                .into_iter()
+                .map(|(m, _)| m)
+                .collect::<Vec<_>>(),
+            vec![
+                WidgetModule::Music,
+                WidgetModule::Calendar,
+                WidgetModule::Timers,
+                WidgetModule::Battery
+            ]
+        );
+    }
+
+    #[test]
+    fn insert_widget_at_reorders_already_enabled() {
+        let mut settings = AppSettings::default();
+        let order_before = settings.widget_order.clone();
+        assert!(settings.insert_widget_at(WidgetModule::Music, 99));
+        assert_ne!(settings.widget_order, order_before);
+        assert_eq!(
+            settings.nook_items().last().map(|(m, _)| *m),
+            Some(WidgetModule::Music)
+        );
+        assert!(settings.show_media);
+    }
+
+    #[test]
+    fn insert_widget_at_refuses_overflow_and_leaves_settings() {
+        let mut settings = AppSettings::default();
+        assert!(settings.set_enabled(WidgetModule::Battery, true));
+        assert!(settings.set_enabled(WidgetModule::Weather, true));
+        assert_eq!(settings.used_cells(), AppSettings::TOTAL_CELLS);
+        let order_before = settings.widget_order.clone();
+        let enabled_before = settings.show_high_alert;
+        assert!(!settings.insert_widget_at(WidgetModule::HighAlert, 0));
+        assert_eq!(settings.widget_order, order_before);
+        assert_eq!(settings.show_high_alert, enabled_before);
+        assert!(!settings.is_enabled(WidgetModule::HighAlert));
+    }
+
+    #[test]
+    fn cells_short_for_reports_deficit() {
+        let mut settings = AppSettings::default();
+        // 11 used, 6 free; Battery needs 3 → fits.
+        assert_eq!(settings.cells_short_for(WidgetModule::Battery), 0);
+        assert_eq!(settings.cells_short_for(WidgetModule::Music), 0); // already on
+        assert!(settings.set_enabled(WidgetModule::Battery, true));
+        assert!(settings.set_enabled(WidgetModule::Weather, true));
+        // Full row; HighAlert needs 3 → short by 3.
+        assert_eq!(settings.remaining_cells(), 0);
+        assert_eq!(settings.cells_short_for(WidgetModule::HighAlert), 3);
+        assert_eq!(settings.cells_short_for(WidgetModule::Files), 0); // not a Nook cell
+    }
+
+    #[test]
+    fn distinct_sizes_dedupes_identical_cell_counts() {
+        let settings = AppSettings::default();
+        // Timers: min 2, default 3, max 6 — three real widths.
+        assert_eq!(
+            settings.distinct_sizes(WidgetModule::Timers),
+            vec![WidgetSize::Small, WidgetSize::Medium, WidgetSize::Large]
+        );
+        // Uniqueness + S→M→L order for every module. When min == default,
+        // Small and Medium share a cell count and only one entry remains.
+        for module in WidgetModule::ALL {
+            let sizes = settings.distinct_sizes(module);
+            let min = module.min_cells();
+            let def = module.default_cells().max(min);
+            let max = settings.max_cells_for(module);
+            let mut cells = Vec::new();
+            for size in &sizes {
+                let c = match size {
+                    WidgetSize::Small => min,
+                    WidgetSize::Medium => def.min(max),
+                    WidgetSize::Large => max,
+                };
+                assert!(
+                    !cells.contains(&c),
+                    "{module:?} listed {size:?} twice for {c} cells"
+                );
+                cells.push(c);
+            }
+            if min == def.min(max) {
+                assert!(
+                    !sizes.contains(&WidgetSize::Medium)
+                        || !sizes.contains(&WidgetSize::Small),
+                    "{module:?}: min==default should dedupe S/M"
+                );
+            }
+            let rank = |s: WidgetSize| match s {
+                WidgetSize::Small => 0u8,
+                WidgetSize::Medium => 1,
+                WidgetSize::Large => 2,
+            };
+            assert!(sizes.windows(2).all(|w| rank(w[0]) < rank(w[1])));
+        }
+    }
+
+    #[test]
+    fn size_fits_matches_set_size_refusal() {
+        let mut settings = AppSettings::default();
+        assert!(settings.set_enabled(WidgetModule::Battery, true));
+        assert!(settings.set_enabled(WidgetModule::Weather, true));
+        assert!(settings.size_fits(WidgetModule::Battery, WidgetSize::Small));
+        assert!(settings.size_fits(WidgetModule::Battery, WidgetSize::Medium));
+        assert!(!settings.size_fits(WidgetModule::Battery, WidgetSize::Large));
+        assert_eq!(
+            settings.cells_for(WidgetModule::Battery),
+            WidgetModule::Battery.default_cells()
         );
     }
 

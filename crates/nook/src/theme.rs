@@ -26,6 +26,21 @@ pub fn rgba_from_u32(rgb: u32, a: f32) -> Rgba {
     }
 }
 
+/// Pack 0..1 RGB channels into `0xRRGGBB`, rounding each channel to u8.
+fn pack_rgb(r: f32, g: f32, b: f32) -> u32 {
+    let to_u8 = |c: f32| (c.clamp(0.0, 1.0) * 255.0).round() as u8 as u32;
+    (to_u8(r) << 16) | (to_u8(g) << 8) | to_u8(b)
+}
+
+/// Island tint as `0xRRGGBB`: the macOS accent when `island_accent` is on, else `None` (black).
+pub fn island_color(settings: &nook_core::settings::AppSettings) -> Option<u32> {
+    if !settings.island_accent {
+        return None;
+    }
+    let c = accent();
+    Some(pack_rgb(c.r, c.g, c.b))
+}
+
 /// Solid island fill from Settings, or the default black.
 pub fn island_fill(color: Option<u32>) -> Rgba {
     match color {
@@ -60,7 +75,8 @@ pub fn compact_glass_ceiling(notch_h: f32) -> f32 {
     } else {
         NOTCH_MIN_H
     };
-    notch + COMPACT_HOVER_CHIN + COMPACT_HEIGHT_OVERFLOW
+    // Budget for the tallest compact hover chin (media title line + dots).
+    notch + COMPACT_MEDIA_HOVER_CHIN + COMPACT_HEIGHT_OVERFLOW
 }
 
 /// How far a full resisted stretch opens the veil. `1` finishes the fall
@@ -446,6 +462,18 @@ pub const COMPACT_HOVER_EXTRA: f32 = 88.0;
 pub const COMPACT_HUD_EXTRA: f32 = 120.0;
 pub const COMPACT_LIVE_EXTRA: f32 = 72.0;
 pub const COMPACT_HOVER_CHIN: f32 = 11.0;
+/// Media compact hover chin: one SUBHEADLINE title line, vertically centered.
+pub const COMPACT_MEDIA_HOVER_CHIN: f32 = 24.0;
+/// Approx advance of BODY 13pt semibold for compact flank width estimates.
+pub const COMPACT_BODY_CHAR_W: f32 = 8.2;
+/// Slack added on top of the per-char estimate so glyphs are not hard-clipped.
+pub const COMPACT_LABEL_SLACK: f32 = 4.0;
+/// Horizontal pad on each side of the compact face (matches `render_compact`).
+pub const COMPACT_FLANK_PAD: f32 = 9.0;
+/// Cap on content-driven compact width beyond the notch.
+pub const COMPACT_CONTENT_EXTRA_MAX: f32 = 160.0;
+/// Long compact flank labels ellipsize past this width.
+pub const COMPACT_LABEL_MAX: f32 = 72.0;
 /// React `WidgetWrapper` padding (`1rem`).
 pub const WIDGET_PAD: f32 = 16.0;
 /// How far a row highlight bleeds back out of the card's content margin. Also
@@ -535,3 +563,24 @@ pub const MIRROR_FACE: f32 = 112.0;
 /// (20×20 pt minimum). Interactive rows and controls hold this floor even when
 /// their visible artwork is smaller.
 pub const HIT_MIN: f32 = 28.0;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pack_rgb_rounds_channels_to_u8() {
+        assert_eq!(pack_rgb(0.0, 0.0, 0.0), 0x000000);
+        assert_eq!(pack_rgb(1.0, 1.0, 1.0), 0xFFFFFF);
+        assert_eq!(pack_rgb(0.039, 0.518, 1.0), 0x0A84FF);
+        assert_eq!(pack_rgb(-0.2, 1.4, 0.5), 0x00FF80);
+    }
+
+    #[test]
+    fn island_color_is_none_when_accent_tint_is_off() {
+        let settings = nook_core::settings::AppSettings::default();
+        assert!(!settings.island_accent);
+        assert_eq!(island_color(&settings), None);
+        assert_eq!(island_fill(island_color(&settings)), ISLAND);
+    }
+}

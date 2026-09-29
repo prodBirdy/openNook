@@ -11,8 +11,9 @@ use crate::island::Island;
 use crate::theme;
 use gpui::{
     canvas, div, linear_color_stop, linear_gradient, prelude::*, px, AnyElement, Context, Corners,
-    Rgba,
+    CursorStyle, MouseButton, MouseDownEvent, Rgba,
 };
+use nook_core::settings::{WidgetModule, WidgetSize};
 use nook_core::weather::{self, WeatherSnapshot};
 
 /// Metric column caption (Pencil uses 9/12; theme Footnote floors at 10).
@@ -25,8 +26,9 @@ const METRIC_CAPTION: theme::Text = theme::Text {
 
 pub(crate) fn weather_card(island: &mut Island, cx: &mut Context<Island>) -> impl IntoElement {
     island.ensure_weather(cx);
+    let size = resolve_size(island, WidgetModule::Weather);
     let body = match (&island.weather, &island.weather_error) {
-        (Some(snap), _) => forecast_body(snap).into_any_element(),
+        (Some(snap), _) => forecast_body(snap, size).into_any_element(),
         (None, Some(_)) => div()
             .flex_1()
             .flex()
@@ -54,10 +56,8 @@ pub(crate) fn weather_card(island: &mut Island, cx: &mut Context<Island>) -> imp
     // error and empty states stay on clean island black.
     let animate = !island.reduce_motion;
     match island.weather.as_ref() {
-        Some(snap) => mood_shell(snap, body, animate),
-        None => card_shell("nook-weather")
-            .w_full()
-            .child(body)
+        Some(snap) => mood_shell(snap, body, animate, cx),
+        None => open_weather_on_click(card_shell("nook-weather").w_full().child(body), cx)
             .into_any_element(),
     }
 }
@@ -76,72 +76,99 @@ const CARD_STROKE: Rgba = Rgba {
     a: 0x14 as f32 / 255.0,
 };
 
+/// Left-click opens Weather.app; stop propagation so the island doesn't collapse.
+fn open_weather_on_click(
+    el: gpui::Stateful<gpui::Div>,
+    cx: &mut Context<Island>,
+) -> gpui::Stateful<gpui::Div> {
+    el.cursor(CursorStyle::PointingHand).on_mouse_down(
+        MouseButton::Left,
+        cx.listener(|_this, _: &MouseDownEvent, _, cx| {
+            cx.stop_propagation();
+            let _ = std::process::Command::new("/usr/bin/open")
+                .args(["-b", "com.apple.weather"])
+                .spawn();
+        }),
+    )
+}
+
 /// The scene fills the whole pane edge to edge on an absolute layer behind
 /// the padded content — never an inset box — clipped to the card radius.
 /// Layers, bottom up: mood wash (fallback), shader image, content, stroke.
-fn mood_shell(snap: &WeatherSnapshot, body: AnyElement, animate: bool) -> AnyElement {
+fn mood_shell(
+    snap: &WeatherSnapshot,
+    body: AnyElement,
+    animate: bool,
+    cx: &mut Context<Island>,
+) -> AnyElement {
     let mood = weather_mood(snap);
     let fade = Rgba {
         a: 0.0,
         ..mood.wash
     };
-    div()
-        .id("nook-weather")
-        .relative()
-        .w_full()
-        .h_full()
-        .min_h(px(0.))
-        .flex_shrink_0()
-        .flex()
-        .flex_col()
-        .overflow_hidden()
-        .rounded(px(CARD_RADIUS))
-        .child(
-            div()
-                .absolute()
-                .inset_0()
-                .rounded(px(CARD_RADIUS))
-                .bg(linear_gradient(
-                    225.,
-                    linear_color_stop(mood.wash, 0.),
-                    linear_color_stop(fade, 0.75),
-                )),
-        )
-        .child(scene_layer(weather_scene(snap), animate))
-        .child(
-            div()
-                .relative()
-                .w_full()
-                .h_full()
-                .min_h(px(0.))
-                .flex()
-                .flex_col()
-                .p(px(16.))
-                .gap(px(10.))
-                .child(body),
-        )
-        .child(
-            div()
-                .absolute()
-                .inset_0()
-                .rounded(px(CARD_RADIUS))
-                .border_1()
-                .border_color(CARD_STROKE),
-        )
-        .into_any_element()
+    let night = !snap.is_day;
+    open_weather_on_click(
+        div()
+            .id("nook-weather")
+            .relative()
+            .w_full()
+            .h_full()
+            .min_h(px(0.))
+            .flex_shrink_0()
+            .flex()
+            .flex_col()
+            .overflow_hidden()
+            .rounded(px(CARD_RADIUS))
+            .child(
+                div()
+                    .absolute()
+                    .inset_0()
+                    .rounded(px(CARD_RADIUS))
+                    .bg(linear_gradient(
+                        225.,
+                        linear_color_stop(mood.wash, 0.),
+                        linear_color_stop(fade, 0.75),
+                    )),
+            )
+            .child(scene_layer(weather_scene(snap), night, animate))
+            .child(
+                div()
+                    .relative()
+                    .w_full()
+                    .h_full()
+                    .min_h(px(0.))
+                    .flex()
+                    .flex_col()
+                    .p(px(16.))
+                    .gap(px(10.))
+                    .child(body),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .inset_0()
+                    .rounded(px(CARD_RADIUS))
+                    .border_1()
+                    .border_color(CARD_STROKE),
+            ),
+        cx,
+    )
+    .into_any_element()
 }
 
 /// Shader image, sized to the pane in device pixels. Keeps requesting frames
 /// while it is painted and animating; once the card leaves the tree nothing
 /// asks again, so the scene stops on its own. Reduce Motion paints one still.
-fn scene_layer(scene: u8, animate: bool) -> impl IntoElement {
+fn scene_layer(scene: u8, night: bool, animate: bool) -> impl IntoElement {
     canvas(
         |_, _, _| (),
         move |bounds, _, window, _| {
             let scale = window.scale_factor();
             let width = (f32::from(bounds.size.width) * scale).round().max(0.0) as u32;
             let height = (f32::from(bounds.size.height) * scale).round().max(0.0) as u32;
-            let Some(frame) = crate::weather_shader::render(scene, width, height, animate) else {
+            let Some(frame) =
+                crate::weather_shader::render(scene, night, width, height, animate)
+            else {
                 // Metal is unavailable: the mood wash below stays visible.
                 return;
             };
@@ -174,7 +201,7 @@ fn display_text(text: impl Into<gpui::SharedString>) -> gpui::Div {
         .child(text.into())
 }
 
-fn forecast_body(snap: &WeatherSnapshot) -> impl IntoElement {
+fn forecast_body(snap: &WeatherSnapshot, size: WidgetSize) -> impl IntoElement {
     let place = if snap.location_name.is_empty() {
         snap.label().to_string()
     } else {
@@ -184,7 +211,13 @@ fn forecast_body(snap: &WeatherSnapshot) -> impl IntoElement {
         (Some(hi), Some(lo)) => Some((weather::format_temp(hi), weather::format_temp(lo))),
         _ => None,
     };
-    let condition = format!("{} · {}", snap.label(), place);
+    // Night clear tiles on the board read "Clear night", not plain "Clear".
+    let scene_label = if !snap.is_day && matches!(snap.wmo_code, 0 | 1) {
+        "Clear night"
+    } else {
+        snap.label()
+    };
+    let condition = format!("{scene_label} · {place}");
     let wind = snap
         .wind_speed
         .map(|v| format!("{} km/h", v.round() as i64))
@@ -194,12 +227,15 @@ fn forecast_body(snap: &WeatherSnapshot) -> impl IntoElement {
         .map(|h| format!("{h}%"))
         .unwrap_or_else(|| "—".into());
     let (uv_text, uv_color) = uv_display(snap.uv_index);
+    // S: temp + condition + H/L only. M: hide metric captions so both columns fit.
+    let show_stats = size != WidgetSize::Small;
+    let show_captions = size == WidgetSize::Large;
 
     div()
         .relative()
         .w_full()
         .h_full()
-        .overflow_hidden()
+        .min_w(px(0.))
         .flex()
         .items_center()
         .justify_between()
@@ -214,10 +250,7 @@ fn forecast_body(snap: &WeatherSnapshot) -> impl IntoElement {
                 .child(display_text(weather::format_temp(snap.temperature)))
                 .child(
                     label(condition, theme::FOOTNOTE, false)
-                        .text_color(theme::TERTIARY_LABEL)
-                        .overflow_hidden()
-                        .text_ellipsis()
-                        .whitespace_nowrap(),
+                        .text_color(theme::TERTIARY_LABEL),
                 )
                 .when_some(range, |d, (hi, lo)| {
                     d.child(
@@ -225,27 +258,45 @@ fn forecast_body(snap: &WeatherSnapshot) -> impl IntoElement {
                             .flex()
                             .items_center()
                             .gap(px(6.))
+                            .min_w(px(0.))
                             .child(
                                 label(format!("H {hi}"), theme::FOOTNOTE, false)
+                                    .flex_shrink_0()
                                     .text_color(theme::SECONDARY_LABEL),
                             )
                             .child(
                                 label(format!("L {lo}"), theme::FOOTNOTE, false)
+                                    .flex_1()
+                                    .min_w(px(0.))
                                     .text_color(theme::TERTIARY_LABEL),
                             ),
                     )
                 }),
         )
-        .child(
-            div()
-                .flex_shrink_0()
-                .flex()
-                .flex_col()
-                .gap(px(7.))
-                .child(metric_row("wind", "WIND", wind, theme::LABEL))
-                .child(metric_row("droplets", "HUMIDITY", humidity, theme::LABEL))
-                .child(metric_row("sun", "UV", uv_text, uv_color)),
-        )
+        .when(show_stats, |d| {
+            d.child(
+                div()
+                    .flex_shrink_0()
+                    .flex()
+                    .flex_col()
+                    .gap(px(7.))
+                    .child(metric_row(
+                        "wind",
+                        "WIND",
+                        wind,
+                        theme::LABEL,
+                        show_captions,
+                    ))
+                    .child(metric_row(
+                        "droplets",
+                        "HUMIDITY",
+                        humidity,
+                        theme::LABEL,
+                        show_captions,
+                    ))
+                    .child(metric_row("sun", "UV", uv_text, uv_color, show_captions)),
+            )
+        })
 }
 
 struct Mood {
@@ -263,7 +314,9 @@ fn weather_mood(snap: &WeatherSnapshot) -> Mood {
 
 /// Shader scene (`u_mood`): 0 Clear · 1 Cloudy · 2 Overcast · 3 Rain ·
 /// 4 Storm · 5 Snow · 6 Sleet · 7 Fog · 8 Wind · 9 Cold · 10 Night · 11 Heat.
-/// Storm / heat / cold / night / wind take priority over the WMO buckets.
+/// Night is a separate shader flag (`u_night`), not mood 10 — clear-at-night
+/// stays Clear (0) with `night = true`. Storm / heat / cold / wind still beat
+/// the WMO buckets.
 fn weather_scene(snap: &WeatherSnapshot) -> u8 {
     let windy = snap.wind_speed.map(|w| w >= 40.0).unwrap_or(false);
     let hot = snap.temperature >= 30.0;
@@ -278,9 +331,6 @@ fn weather_scene(snap: &WeatherSnapshot) -> u8 {
     }
     if cold {
         return 9;
-    }
-    if !snap.is_day && matches!(code, 0 | 1) {
-        return 10;
     }
     if windy {
         return 8;
@@ -297,13 +347,30 @@ fn weather_scene(snap: &WeatherSnapshot) -> u8 {
     }
 }
 
+/// Night wash target — mixes toward this deep navy when `!is_day`.
+const NIGHT_WASH: u32 = 0x0B1026;
+
+fn mix_rgb(a: u32, b: u32, t: f32) -> u32 {
+    let mix = |ca: u32, cb: u32| -> u32 {
+        let v = ca as f32 + (cb as f32 - ca as f32) * t;
+        v.round().clamp(0.0, 255.0) as u32
+    };
+    let ar = (a >> 16) & 0xff;
+    let ag = (a >> 8) & 0xff;
+    let ab = a & 0xff;
+    let br = (b >> 16) & 0xff;
+    let bg = (b >> 8) & 0xff;
+    let bb = b & 0xff;
+    (mix(ar, br) << 16) | (mix(ag, bg) << 8) | mix(ab, bb)
+}
+
 /// Flat wash per scene — the Metal-less fallback and the compact glyph tint.
 fn mood_rgba(snap: &WeatherSnapshot) -> (u32, u8) {
-    match weather_scene(snap) {
+    let (rgb, alpha) = match weather_scene(snap) {
         4 => (0x7A5CFF, 0x47),  // storm
         11 => (0xFF9F0A, 0x3D), // heat
         9 => (0x64D2FF, 0x3D),  // cold
-        10 => (0x5E5CE6, 0x3D), // night
+        10 => (0x5E5CE6, 0x3D), // night mood (legacy; clear-at-night uses 0)
         8 => (0x2BD9C4, 0x3D),  // wind
         0 => (0x3AA3FF, 0x3D),  // clear
         2 => (0x6B707A, 0x3D),  // overcast
@@ -312,6 +379,11 @@ fn mood_rgba(snap: &WeatherSnapshot) -> (u32, u8) {
         3 => (0x4C6FFF, 0x3D),  // rain
         5 => (0xA8C8FF, 0x3D),  // snow
         _ => (0x8E9AAF, 0x33),  // cloudy
+    };
+    if snap.is_day {
+        (rgb, alpha)
+    } else {
+        (mix_rgb(rgb, NIGHT_WASH, 0.55), alpha)
     }
 }
 
@@ -347,6 +419,7 @@ fn metric_row(
     name: &'static str,
     value: impl Into<gpui::SharedString>,
     value_color: gpui::Rgba,
+    show_caption: bool,
 ) -> impl IntoElement {
     div()
         .w_full()
@@ -354,12 +427,14 @@ fn metric_row(
         .items_center()
         .gap(px(6.))
         .child(lucide_color(icon, 11.0, theme::TERTIARY_LABEL))
-        .child(
-            label(name, METRIC_CAPTION, false)
-                .flex_1()
-                .min_w(px(0.))
-                .text_color(theme::TERTIARY_LABEL),
-        )
+        .when(show_caption, |d| {
+            d.child(
+                label(name, METRIC_CAPTION, false)
+                    .flex_1()
+                    .min_w(px(0.))
+                    .text_color(theme::TERTIARY_LABEL),
+            )
+        })
         .child(
             label(value, theme::FOOTNOTE, true)
                 .text_color(value_color)
@@ -367,40 +442,41 @@ fn metric_row(
         )
 }
 
-fn compact_icon_tint(snap: &WeatherSnapshot) -> Rgba {
-    // Compact cloudy/clear day glyph reads orange in Pencil; otherwise mood wash.
-    if snap.is_day && matches!(snap.wmo_code, 0 | 1 | 2) {
-        return theme::SYSTEM_ORANGE;
+/// Live island uses settings size; gallery renders S/M/L in order per module.
+fn resolve_size(island: &Island, module: WidgetModule) -> WidgetSize {
+    #[cfg(debug_assertions)]
+    {
+        if island.gallery_mode {
+            let sizes = island.settings.distinct_sizes(module);
+            if !sizes.is_empty() {
+                return sizes[gallery_call_idx(module as u8) % sizes.len()];
+            }
+        }
     }
-    let (rgb, _) = mood_rgba(snap);
-    theme::rgba_from_u32(rgb, 1.0)
+    island.settings.size_for(module)
 }
 
-pub(crate) fn compact_weather(island: &Island) -> AnyElement {
-    let Some(snap) = island.weather.as_ref() else {
-        return div().into_any_element();
-    };
-    if !island.settings.weather.enabled || !island.settings.weather.show_on_compact_face {
-        return div().into_any_element();
+#[cfg(debug_assertions)]
+fn gallery_call_idx(module: u8) -> usize {
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+    use std::time::{Duration, Instant};
+    thread_local! {
+        static STATE: RefCell<HashMap<u8, (Instant, usize)>> =
+            RefCell::new(HashMap::new());
     }
-    div()
-        .flex()
-        .items_center()
-        .gap(px(12.))
-        .child(
-            div()
-                .size(px(22.))
-                .flex()
-                .items_center()
-                .justify_center()
-                .child(lucide_color(snap.icon(), 17.0, compact_icon_tint(snap))),
-        )
-        .child(label(
-            weather::format_temp(snap.temperature),
-            theme::BODY,
-            true,
-        ))
-        .into_any_element()
+    STATE.with(|state| {
+        let mut map = state.borrow_mut();
+        let now = Instant::now();
+        let entry = map.entry(module).or_insert((now, 0));
+        if now.duration_since(entry.0) > Duration::from_millis(32) {
+            entry.1 = 0;
+        }
+        entry.0 = now;
+        let idx = entry.1;
+        entry.1 = idx + 1;
+        idx
+    })
 }
 
 impl Island {
@@ -415,7 +491,7 @@ impl Island {
     }
 
     pub(crate) fn ensure_weather(&mut self, cx: &mut Context<Self>) {
-        if self.weather_inflight {
+        if self.gallery_mode || self.weather_inflight {
             return;
         }
         if !self.settings.weather.enabled {
@@ -491,19 +567,20 @@ mod tests {
 
     #[test]
     fn scene_priority_branches() {
-        // Storm beats heat, cold, night and wind.
+        // Storm beats heat, cold and wind.
         assert_eq!(weather_scene(&snap(95, 35.0, false, Some(60.0))), 4);
         assert_eq!(weather_scene(&snap(99, -10.0, true, None)), 4);
-        // Heat at 30° and above, before cold / night / wind.
+        // Heat at 30° and above, before cold / wind.
         assert_eq!(weather_scene(&snap(0, 30.0, false, Some(60.0))), 11);
         // Cold at -5° and below.
         assert_eq!(weather_scene(&snap(3, -5.0, true, Some(60.0))), 9);
-        // Night only for clear codes after dark.
-        assert_eq!(weather_scene(&snap(0, 12.0, false, None)), 10);
-        assert_eq!(weather_scene(&snap(1, 12.0, false, Some(60.0))), 10);
+        // Clear at night keeps Clear (0); night is a shader flag, not mood 10.
+        assert_eq!(weather_scene(&snap(0, 12.0, false, None)), 0);
+        assert_eq!(weather_scene(&snap(1, 12.0, false, None)), 0);
         assert_eq!(weather_scene(&snap(3, 12.0, false, None)), 2);
-        // Wind at 40 km/h and above, over the WMO buckets.
+        // Wind at 40 km/h and above, over the WMO buckets (also at night).
         assert_eq!(weather_scene(&snap(0, 12.0, true, Some(40.0))), 8);
+        assert_eq!(weather_scene(&snap(1, 12.0, false, Some(60.0))), 8);
         assert_eq!(weather_scene(&snap(61, 12.0, true, Some(45.0))), 8);
         assert_eq!(weather_scene(&snap(0, 12.0, true, Some(39.9))), 0);
     }
@@ -532,7 +609,12 @@ mod tests {
     #[test]
     fn fallback_wash_follows_the_scene() {
         assert_eq!(mood_rgba(&snap(95, 12.0, true, None)), (0x7A5CFF, 0x47));
-        assert_eq!(mood_rgba(&snap(0, 12.0, false, None)), (0x5E5CE6, 0x3D));
         assert_eq!(mood_rgba(&snap(2, 12.0, true, None)), (0x8E9AAF, 0x33));
+        // Clear day wash; clear night mixes toward the navy night target.
+        assert_eq!(mood_rgba(&snap(0, 12.0, true, None)), (0x3AA3FF, 0x3D));
+        assert_eq!(
+            mood_rgba(&snap(0, 12.0, false, None)),
+            (mix_rgb(0x3AA3FF, NIGHT_WASH, 0.55), 0x3D)
+        );
     }
 }

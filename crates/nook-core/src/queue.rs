@@ -87,9 +87,22 @@ pub fn is_spotify_app(app_name: Option<&str>, bundle_id: Option<&str>) -> bool {
     bundle.eq_ignore_ascii_case("com.spotify.client") || name.eq_ignore_ascii_case("Spotify")
 }
 
-/// Up Next is local AppleScript against Music.app only.
+/// Music has an AppleScript fallback; MediaRemote can fill Up Next for any
+/// now-playing app that reports a queue (Music, Spotify, …).
 pub fn supports_local_queue(app_name: Option<&str>, bundle_id: Option<&str>) -> bool {
     is_music_app(app_name, bundle_id)
+        || is_spotify_app(app_name, bundle_id)
+        || mediaremote_ready()
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn mediaremote_ready() -> bool {
+    crate::mediaremote::is_available()
+}
+
+#[cfg(not(any(target_os = "macos", test)))]
+fn mediaremote_ready() -> bool {
+    false
 }
 
 pub fn queue_identity(np: &NowPlayingData) -> (Option<String>, Option<String>, Option<String>) {
@@ -124,6 +137,7 @@ pub fn music_window(
             artist: artist.clone(),
             artwork_url: None,
             artwork_base64: None,
+            duration: None,
             source: QueueSource::MusicPlaylist,
             jump: QueueJump::MusicTrack { index: *index },
         })
@@ -132,8 +146,8 @@ pub fn music_window(
 }
 
 /// Parse the AppleScript snapshot format:
-/// first line `ok|idx|total` / `hide|shuffle` / `hide|radio` / `denied|-1743` / `idle`
-/// then `index\ttitle\tartist` rows.
+/// first line `ok|idx|total` / `hide|shuffle` / `hide|radio` / `hide|streaming` /
+/// `denied|-1743` / `idle` then `index\ttitle\tartist` rows.
 pub fn parse_music_snapshot(stdout: &str) -> PlaybackQueue {
     // AppleScript `return` is CR. Rust's `str::lines` only splits on LF / CRLF,
     // so normalize before parsing or every row collapses into the header.
@@ -151,6 +165,7 @@ pub fn parse_music_snapshot(stdout: &str) -> PlaybackQueue {
         let reason = match rest {
             "shuffle" => QueueHidden::Shuffle,
             "radio" => QueueHidden::Radio,
+            "streaming" => QueueHidden::Streaming,
             _ => QueueHidden::Idle,
         };
         return hidden(reason);
@@ -211,9 +226,16 @@ tell application "Music"
         if player state is stopped then return "idle"
         if shuffle enabled then return "hide|shuffle"
         set trackClass to (class of current track as text)
-        if trackClass contains "URL" or trackClass contains "radio" then return "hide|radio"
-        set plClass to (class of current playlist as text)
-        if plClass contains "radio" then return "hide|radio"
+        -- Radio playlist first; streamed catalog URL tracks error on current playlist.
+        set playlistOk to false
+        try
+            set plClass to (class of current playlist as text)
+            set playlistOk to true
+            if plClass contains "radio" then return "hide|radio"
+        end try
+        if trackClass contains "URL" then return "hide|streaming"
+        if trackClass contains "radio" then return "hide|radio"
+        if not playlistOk then return "error|playlist|unavailable"
         set idx to index of current track
         set total to count of tracks of current playlist
         set firstIdx to idx + 1
@@ -276,6 +298,9 @@ async fn fetch_music_queue() -> PlaybackQueue {
 }
 
 pub async fn fetch_playback_queue(np: &NowPlayingData) -> PlaybackQueue {
+    if let Some(queue) = try_mediaremote_queue(np) {
+        return queue;
+    }
     if is_spotify_app(np.app_name.as_deref(), np.bundle_id.as_deref()) {
         spotify_local_queue()
     } else if is_music_app(np.app_name.as_deref(), np.bundle_id.as_deref()) {
@@ -283,6 +308,47 @@ pub async fn fetch_playback_queue(np: &NowPlayingData) -> PlaybackQueue {
     } else {
         PlaybackQueue::default()
     }
+}
+
+#[cfg(target_os = "macos")]
+fn try_mediaremote_queue(np: &NowPlayingData) -> Option<PlaybackQueue> {
+    let raw = crate::mediaremote::fetch_queue().ok()?;
+    let upcoming = crate::mediaremote::drop_current_queue_item(
+        raw,
+        np.title.as_deref(),
+        np.artist.as_deref(),
+    );
+    let items: Vec<QueueItem> = upcoming
+        .into_iter()
+        .map(|row| QueueItem {
+            id: row
+                .identifier
+                .clone()
+                .unwrap_or_else(|| format!("mr-{}-{}", row.title, row.artist)),
+            title: row.title,
+            artist: row.artist,
+            artwork_url: None,
+            artwork_base64: None,
+            duration: row.duration,
+            source: QueueSource::MediaRemote,
+            jump: QueueJump::Unavailable,
+        })
+        .collect();
+    if items.is_empty() {
+        return None;
+    }
+    Some(PlaybackQueue {
+        source: Some(QueueSource::MediaRemote),
+        label: "Up Next".into(),
+        items,
+        hidden: None,
+        context_uri: None,
+    })
+}
+
+#[cfg(not(target_os = "macos"))]
+fn try_mediaremote_queue(_: &NowPlayingData) -> Option<PlaybackQueue> {
+    None
 }
 
 /// Spotify desktop scripting has no playlist/queue list — only the current
@@ -303,6 +369,7 @@ pub async fn jump_to_item(item: &QueueItem, context_uri: Option<&str>) -> Result
             let _ = context_uri;
             Err("Spotify queue jump needs the Web API, which is disabled".into())
         }
+        QueueJump::Unavailable => Err("this queue cannot jump to a track".into()),
     }
 }
 
@@ -365,6 +432,13 @@ mod tests {
         let shuffle = parse_music_snapshot("hide|shuffle");
         assert_eq!(shuffle.hidden, Some(QueueHidden::Shuffle));
         assert!(shuffle.items.is_empty());
+
+        let streaming = parse_music_snapshot("hide|streaming");
+        assert_eq!(streaming.hidden, Some(QueueHidden::Streaming));
+        assert!(streaming.items.is_empty());
+
+        let radio = parse_music_snapshot("hide|radio");
+        assert_eq!(radio.hidden, Some(QueueHidden::Radio));
     }
 
     #[test]
@@ -374,7 +448,26 @@ mod tests {
         assert!(is_spotify_app(Some("Spotify"), None));
         assert!(!is_spotify_app(Some("Safari"), Some("com.apple.Safari")));
         assert!(supports_local_queue(Some("Music"), None));
-        assert!(!supports_local_queue(Some("Spotify"), None));
+        assert!(supports_local_queue(Some("Spotify"), None));
+    }
+
+    #[test]
+    fn mediaremote_json_drops_current_and_keeps_duration() {
+        let json = r#"{
+            "index":1,
+            "items":[
+                {"title":"Now","artist":"A","duration":10},
+                {"title":"Next","artist":"B","duration":125.4},
+                {"title":"Later","artist":"C"}
+            ]
+        }"#;
+        let raw = crate::mediaremote::parse_queue_output(json).unwrap();
+        let upcoming =
+            crate::mediaremote::drop_current_queue_item(raw, Some("Now"), Some("A"));
+        assert_eq!(upcoming.len(), 2);
+        assert_eq!(upcoming[0].title, "Next");
+        assert_eq!(upcoming[0].duration, Some(125.4));
+        assert_eq!(upcoming[1].duration, None);
     }
 
     #[test]

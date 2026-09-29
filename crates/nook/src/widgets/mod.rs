@@ -21,24 +21,17 @@ mod timers;
 mod vpn;
 mod weather;
 
-pub(crate) use agents::{
-    agents_card, compact_left as agents_compact_left, compact_right as agents_compact_right,
-};
+pub(crate) use agents::{agents_card, compact_left as agents_compact_left};
 pub(crate) use battery::{battery_card, tint as battery_tint};
 pub(crate) use calendar::calendar_card;
 pub(crate) use high_alert::high_alert_card;
 pub(crate) use meeting::{
     compact_left as meeting_compact_left, compact_right as meeting_compact_right, meeting_card,
 };
-pub(crate) use messages::{
-    compact_left as messages_compact_left, compact_right as messages_compact_right, messages_card,
-};
+pub(crate) use messages::{compact_left as messages_compact_left, messages_card};
 pub(crate) use notes::notes_card;
 pub(crate) use notes_editor::{NotesEditor, NotesEditorEvent};
-pub(crate) use notifications::{
-    compact_left as notifications_compact_left, compact_right as notifications_compact_right,
-    notifications_card,
-};
+pub(crate) use notifications::{compact_left as notifications_compact_left, notifications_card};
 pub(crate) use observe::{
     observe_big_view, observe_card, ObserveHover, OBSERVE_EXPANDED_BODY,
 };
@@ -54,4 +47,4 @@ pub(crate) use sysstats::sysstats_card;
 pub(crate) use terminal::{terminal_card, terminal_pane_min_height, TerminalEvent, TerminalView};
 pub(crate) use timers::{compact_left as timer_compact_left, timer_card};
 pub(crate) use vpn::vpn_card;
-pub(crate) use weather::{compact_weather, weather_card};
+pub(crate) use weather::weather_card;

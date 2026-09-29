@@ -426,6 +426,73 @@ impl EntityInputHandler for QuickAdd {
     }
 }
 
+fn shape_single_line(window: &mut Window, s: &str) -> Option<WrappedLine> {
+    let run = gpui::TextRun {
+        len: s.len(),
+        font: editor_font(),
+        color: theme::TEXT.into(),
+        background_color: None,
+        underline: None,
+        strikethrough: None,
+    };
+    window
+        .text_system()
+        .shape_text(s.to_owned().into(), px(FONT_SIZE), &[run], None, None)
+        .ok()
+        .and_then(|lines| lines.into_iter().next())
+}
+
+/// Single-line ellipsis for the placeholder: the canvas paints raw text with
+/// no wrapping, so at narrow widths the placeholder used to hard-clip at the
+/// field edge ("Remind me to call mom a"). Typed text is untouched.
+fn fit_placeholder(window: &mut Window, placeholder: &str, max_w: Pixels) -> String {
+    let max: f32 = max_w.into();
+    if placeholder.is_empty() || max <= 0.0 {
+        return placeholder.to_string();
+    }
+    let Some(line) = shape_single_line(window, placeholder) else {
+        return placeholder.to_string();
+    };
+    let end_x: f32 = line
+        .position_for_index(placeholder.len(), px(LINE_HEIGHT))
+        .map(|p| p.x.into())
+        .unwrap_or(f32::MAX);
+    if end_x <= max {
+        return placeholder.to_string();
+    }
+    let ellipsis_w: f32 = shape_single_line(window, "…")
+        .and_then(|l| l.position_for_index("…".len(), px(LINE_HEIGHT)))
+        .map(|p| p.x.into())
+        .unwrap_or(8.0);
+    if ellipsis_w >= max {
+        return "…".into();
+    }
+    // Widest char-boundary prefix that leaves room for the ellipsis.
+    let mut bounds: Vec<usize> = placeholder.char_indices().map(|(i, _)| i).collect();
+    bounds.push(placeholder.len());
+    let mut best = 0usize;
+    let mut lo = 0usize;
+    let mut hi = bounds.len();
+    while lo < hi {
+        let mid = (lo + hi) / 2;
+        let idx = bounds[mid];
+        let fits = line
+            .position_for_index(idx, px(LINE_HEIGHT))
+            .map(|p| {
+                let x: f32 = p.x.into();
+                x + ellipsis_w <= max
+            })
+            .unwrap_or(false);
+        if fits {
+            best = idx;
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    format!("{}…", &placeholder[..best])
+}
+
 fn editor_font() -> Font {
     Font {
         family: "SF Pro".into(),
@@ -455,7 +522,7 @@ fn paint_field(
     };
 
     let display = if text.is_empty() {
-        placeholder.to_string()
+        fit_placeholder(window, &placeholder, bounds.size.width)
     } else {
         text.clone()
     };
@@ -552,6 +619,7 @@ impl Render for QuickAdd {
                     .px(px(8.))
                     .rounded(px(theme::CONTROL_RADIUS))
                     .bg(theme::FILL_TERTIARY)
+                    .overflow_hidden()
                     .opacity(if self.saving {
                         theme::DISABLED_OPACITY
                     } else {

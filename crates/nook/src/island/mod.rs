@@ -5,6 +5,8 @@ mod compact;
 mod edit;
 mod expanded;
 mod files;
+#[cfg(debug_assertions)]
+mod gallery;
 mod marquee;
 pub(crate) mod media;
 mod render;
@@ -28,7 +30,7 @@ use nook_core::files::FileTrayItem;
 use nook_core::high_alert::HighAlertOwner;
 use nook_core::meetings::MeetingSnapshot;
 use nook_core::messages::MessagesSnapshot;
-use nook_core::models::{NowPlayingData, PlaybackQueue, SyncedLyrics};
+use nook_core::models::{NowPlayingData, PlaybackQueue, RepeatMode, SyncedLyrics};
 use nook_core::notch;
 use nook_core::notifications::NotificationEvent;
 use nook_core::observe::{MetricHistory, ObserveSnapshot};
@@ -188,6 +190,12 @@ pub struct Island {
     lyrics_anchor_elapsed: f64,
     lyrics_anchor_at: Instant,
     lyrics_timer_gen: u64,
+    /// Last committed synced line; drives Apple Music-style advance.
+    lyrics_line_idx: Option<usize>,
+    /// Lines-column offset in px; springs to 0 after a +1 advance.
+    lyrics_scroll: SpringValue,
+    /// Line-advance fade 0..1 (incoming 0.35→1, outgoing 1→0.25).
+    lyrics_fade: SpringValue,
     /// 2–3 dominant artwork colors for the ambient media glow.
     pub aura_palette: Option<[gpui::Rgba; 3]>,
     /// Seconds of aura drift, only advanced while the glow is on screen.
@@ -279,6 +287,10 @@ pub struct Island {
     widget_edit_snapshot: Option<AppSettings>,
     /// Brief "No room" caption under the picker after a blocked tap.
     widget_edit_budget_hint_at: Option<Instant>,
+    /// Live insertion preview while a customize drag hovers the row:
+    /// (dragged module, index among the row with that module removed).
+    /// `None` when nothing is being dragged over it.
+    pub(crate) edit_insert: Option<(WidgetModule, usize)>,
     /// Last `widget_edit` seen by [`Self::arm_content_transition`].
     last_widget_edit: bool,
     /// Next arm forces a content crossfade even if expand/tab/mode match.
@@ -326,6 +338,10 @@ pub struct Island {
     content_y: SpringValue,
     /// Play/pause scrim over the compact album art, 0..1 on `motion::REVEAL`.
     overlay_fade: SpringValue,
+    /// Media pane body dissolve when swapping Now Playing ↔ Up Next / Lyrics / AirPlay.
+    media_view_fade: SpringValue,
+    /// Short vertical travel for the same swap (px); positive = enter from below.
+    media_view_shift: SpringValue,
     /// Mute HUD flash on the meeting face; overlay springs to 1 while this is live.
     meeting_flash_until: Option<Instant>,
     /// Mirrors Accessibility › Display › "Reduce motion"; refreshed by the
@@ -392,8 +408,10 @@ pub struct Island {
     /// Output-device list for the media-card picker. Rebuilt when the HAL dirty flag flips.
     pub(crate) output_devices: Vec<nook_core::audio_devices::OutputDevice>,
     pub(crate) output_picker_open: bool,
-    /// Side panel with Playing Next / Up Next; toggled by the list control.
+    /// Up Next replaces the Now Playing body; toggled by the list control.
     pub(crate) queue_open: bool,
+    /// Lyrics panel replaces the Now Playing body; toggled by mic-vocal.
+    pub(crate) lyrics_open: bool,
     output_hud_name: Option<String>,
     output_hud_until: Option<Instant>,
     pub recording: bool,
@@ -414,16 +432,30 @@ pub struct Island {
     alt_held: bool,
     /// Cleared tray stash for Undo (files.rs renders the Undo chip).
     pub(crate) last_cleared_files: Option<(Vec<FileTrayItem>, Instant)>,
+    /// Scroll state of the tray card strip (`#files-list`).
+    pub(crate) files_scroll: gpui::ScrollHandle,
+    /// Path of the tray file whose action sheet is open (right-click / "…").
+    pub(crate) tray_menu: Option<String>,
+    /// Path of the tray card under the pointer (Space = Quick Look, Delete = remove).
+    pub(crate) tray_hover: Option<String>,
     /// Transient flash when a tray path vanishes.
     pub(crate) tray_flash: Option<(String, Instant)>,
     /// Calendar TCC asked once from `refresh_calendar`.
     calendar_access_requested: bool,
     /// One-shot warn when expanding while the settings DB is a temp fallback.
     fallback_db_noticed: bool,
+    /// Dev-only component gallery window. Skips pollers and blocks media I/O.
+    pub(crate) gallery_mode: bool,
+    /// Persistent scroll offset for the debug gallery (must outlive re-renders).
+    #[cfg(debug_assertions)]
+    pub(crate) gallery_scroll: gpui::ScrollHandle,
+    /// Selected gallery section tab (`0` Compact … `4` Primitives).
+    #[cfg(debug_assertions)]
+    pub(crate) gallery_tab: u8,
 }
 
 struct PendingFileDrag {
-    path: String,
+    paths: Vec<String>,
     screen_x: f64,
     screen_y: f64,
 }
@@ -467,6 +499,9 @@ impl Island {
             lyrics_anchor_elapsed: 0.0,
             lyrics_anchor_at: Instant::now(),
             lyrics_timer_gen: 0,
+            lyrics_line_idx: None,
+            lyrics_scroll: SpringValue::at(0.0),
+            lyrics_fade: SpringValue::at(1.0),
             aura_palette: None,
             aura_t: 0.0,
             last_aura_frame: Instant::now(),
@@ -534,6 +569,7 @@ impl Island {
             widget_edit: false,
             widget_edit_snapshot: None,
             widget_edit_budget_hint_at: None,
+            edit_insert: None,
             last_widget_edit: false,
             content_transition_force: false,
             first_run,
@@ -561,6 +597,8 @@ impl Island {
             content_x: SpringValue::at(0.0),
             content_y: SpringValue::at(0.0),
             overlay_fade: SpringValue::at(0.0),
+            media_view_fade: SpringValue::at(1.0),
+            media_view_shift: SpringValue::at(0.0),
             meeting_flash_until: None,
             reduce_motion: platform::reduce_motion(),
             blur: 0.0,
@@ -604,6 +642,7 @@ impl Island {
             output_devices: nook_core::audio_devices::snapshot(),
             output_picker_open: false,
             queue_open: false,
+            lyrics_open: false,
             output_hud_name: None,
             output_hud_until: None,
             recording: false,
@@ -620,9 +659,17 @@ impl Island {
             hover_exit_at: None,
             alt_held: false,
             last_cleared_files: None,
+            files_scroll: gpui::ScrollHandle::new(),
+            tray_menu: None,
+            tray_hover: None,
             tray_flash: None,
             calendar_access_requested: false,
             fallback_db_noticed: false,
+            gallery_mode: false,
+            #[cfg(debug_assertions)]
+            gallery_scroll: gpui::ScrollHandle::new(),
+            #[cfg(debug_assertions)]
+            gallery_tab: 0,
         };
         // Start at the compact idle size so the first paint isn't a jump.
         let (w, h) = this.target_size();
@@ -707,6 +754,16 @@ impl Island {
                     // (macOS 26 opens the Spaces bar there). False without a drag.
                     let approach = nook_core::mouse::hit_test_drop_approach(mx, my);
                     let mut dirty = false;
+                    if (!this.expanded || this.tab != Tab::Files)
+                        && (this.tray_menu.is_some() || this.tray_hover.is_some())
+                    {
+                        this.tray_menu = None;
+                        this.tray_hover = None;
+                    }
+                    if this.edit_insert.is_some() && !cx.has_active_drag() {
+                        this.edit_insert = None;
+                        dirty = true;
+                    }
                     // Settings hold strings/vecs; clone them only when the
                     // store's generation says something was actually written.
                     let settings_gen = nook_core::settings::settings_generation();
@@ -789,9 +846,11 @@ impl Island {
                     if this.poll_pending_file_drag(None) {
                         dirty = true;
                     }
-                    if let Some((path, dropped)) = nook_core::files::take_outbound_drag() {
-                        if dropped {
-                            this.remove_file(&path, cx);
+                    if let Some((paths, dropped)) = nook_core::files::take_outbound_drag() {
+                        // Keep tray entries after a copy-out; only prune paths
+                        // that Finder (or another app) actually moved away.
+                        if dropped && prune_moved(&mut this.files, &paths) {
+                            let _ = nook_core::files::save_file_tray(this.files.clone());
                             dirty = true;
                         }
                     }
@@ -849,6 +908,7 @@ impl Island {
                                 && !this.shell_focused
                                 && !this.mirror_on
                                 && !this.file_drag
+                                && this.tray_menu.is_none()
                                 && !nook_core::files::outbound_drag_active();
                             if can_collapse {
                                 let exit_at = *this.hover_exit_at.get_or_insert(now);
@@ -1111,7 +1171,9 @@ impl Island {
                         || this.now_playing.is_playing != playing.is_playing
                         || this.now_playing.elapsed_time != playing.elapsed_time
                         || this.now_playing.app_name != playing.app_name
-                        || this.now_playing.bundle_id != playing.bundle_id;
+                        || this.now_playing.bundle_id != playing.bundle_id
+                        || this.now_playing.shuffle != playing.shuffle
+                        || this.now_playing.repeat != playing.repeat;
                     let album_changed = this.now_playing.artist != playing.artist
                         || this.now_playing.album != playing.album;
                     let art_changed = this.now_playing.artwork_base64 != playing.artwork_base64;
@@ -1163,6 +1225,8 @@ impl Island {
                     }
                     this.now_playing.app_name = playing.app_name;
                     this.now_playing.bundle_id = playing.bundle_id;
+                    this.now_playing.shuffle = playing.shuffle;
+                    this.now_playing.repeat = playing.repeat;
                     this.lyrics_anchor_elapsed = this.now_playing.elapsed_time.unwrap_or(0.0);
                     this.lyrics_anchor_at = Instant::now();
                     this.visualizer_color = media::visualizer_color_from_art(
@@ -1872,6 +1936,15 @@ impl Island {
             self.queue_open = false;
             dirty = true;
         }
+        if self.lyrics_open
+            && (!self.settings.show_lyrics
+                || !self.expanded
+                || !self.has_media()
+                || (self.lyrics.is_some() && !media::lyrics_available(self)))
+        {
+            self.lyrics_open = false;
+            dirty = true;
+        }
         if nook_core::audio_devices::take_dirty() {
             let devices = nook_core::audio_devices::snapshot();
             let old_id = self
@@ -1910,7 +1983,14 @@ impl Island {
     }
 
     pub(crate) fn output_picker_enabled(&self) -> bool {
-        self.settings.audio_output_picker && nook_core::audio_devices::available()
+        if !self.settings.audio_output_picker {
+            return false;
+        }
+        // Gallery ships mock devices; HAL availability is irrelevant there.
+        if self.gallery_mode {
+            return !self.output_devices.is_empty();
+        }
+        nook_core::audio_devices::available()
     }
 
     pub(crate) fn output_hud_label(&self) -> Option<&str> {
@@ -1922,20 +2002,44 @@ impl Island {
         }
     }
 
+    /// Kick the media-pane body fade/shift. Call *before* flipping open flags
+    /// so a sub-view → sub-view swap can still see the prior panel. Destination
+    /// is a sub-view when `into_subview` is true; false returns to Now Playing.
+    fn begin_media_view_transition(&mut self, into_subview: bool) {
+        let was_subview = self.output_picker_open || self.queue_open || self.lyrics_open;
+        self.media_view_fade.set(0.0);
+        if self.reduce_motion {
+            self.media_view_shift.set(0.0);
+            return;
+        }
+        let shift = if into_subview {
+            if was_subview { 6.0 } else { 8.0 }
+        } else {
+            -8.0
+        };
+        self.media_view_shift.set(shift);
+    }
+
     pub(crate) fn toggle_output_picker(&mut self, cx: &mut Context<Self>) {
         if !self.output_picker_enabled() {
-            self.output_picker_open = false;
+            if self.output_picker_open {
+                self.begin_media_view_transition(false);
+                self.output_picker_open = false;
+            }
             cx.notify();
             return;
         }
         if self.output_picker_open {
+            self.begin_media_view_transition(false);
             self.output_picker_open = false;
         } else {
+            self.begin_media_view_transition(true);
             nook_core::audio_devices::refresh();
             self.output_devices = nook_core::audio_devices::snapshot();
             let _ = nook_core::audio_devices::take_dirty();
             self.output_picker_open = true;
             self.queue_open = false;
+            self.lyrics_open = false;
         }
         cx.notify();
     }
@@ -1948,18 +2052,24 @@ impl Island {
                 self.now_playing.bundle_id.as_deref(),
             )
         {
-            self.queue_open = false;
+            if self.queue_open {
+                self.begin_media_view_transition(false);
+                self.queue_open = false;
+            }
             cx.notify();
             return;
         }
-        self.queue_open = !self.queue_open;
+        let opening = !self.queue_open;
+        self.begin_media_view_transition(opening);
+        self.queue_open = opening;
         if self.queue_open {
             self.output_picker_open = false;
+            self.lyrics_open = false;
             // Always re-pull on open so a prior empty/error does not stick,
             // and so a stuck inflight flag cannot block the panel forever.
             self.queue_key = None;
             self.queue_inflight = false;
-            if self.maybe_start_queue_fetch() {
+            if !self.gallery_mode && self.maybe_start_queue_fetch() {
                 let np = self.now_playing.clone();
                 cx.spawn(async move |this, cx| {
                     let queue = cx
@@ -1980,13 +2090,47 @@ impl Island {
         cx.notify();
     }
 
-    /// Width the Music cell claims: base cells plus the open queue panel.
+    /// Lyrics replace the Now Playing body; only when lines exist for the track.
+    pub(crate) fn toggle_lyrics_panel(&mut self, cx: &mut Context<Self>) {
+        if !self.lyrics_panel_available() {
+            if self.lyrics_open {
+                self.begin_media_view_transition(false);
+                self.lyrics_open = false;
+            }
+            cx.notify();
+            return;
+        }
+        let opening = !self.lyrics_open;
+        self.begin_media_view_transition(opening);
+        self.lyrics_open = opening;
+        if self.lyrics_open {
+            self.output_picker_open = false;
+            self.queue_open = false;
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn lyrics_panel_available(&self) -> bool {
+        self.settings.show_lyrics
+            && self.settings.show_media
+            && self.has_media()
+            && media::lyrics_available(self)
+    }
+
+    pub(crate) fn lyrics_panel_visible(&self) -> bool {
+        self.lyrics_open && self.lyrics_panel_available() && self.expanded && self.tab == Tab::Widgets
+    }
+
+    /// Width the Music cell claims (Up Next replaces the body — no extra width).
     #[cfg(test)]
     pub(crate) fn music_pane_width(&self, cells: u8) -> f32 {
         cells as f32 * theme::NOOK_CELL + self.queue_extra_width()
     }
 
     pub(crate) fn select_output_device(&mut self, id: u32, cx: &mut Context<Self>) {
+        if self.gallery_mode {
+            return;
+        }
         match nook_core::audio_devices::set_default_output(id) {
             Ok(()) => {
                 for device in &mut self.output_devices {
@@ -2027,22 +2171,9 @@ impl Island {
             )
     }
 
-    /// Extra island width while the Playing Next side panel is open.
+    /// Up Next replaces the Now Playing body inside the same pane — no widen.
     pub(crate) fn queue_extra_width(&self) -> f32 {
-        if self.queue_panel_visible() {
-            QUEUE_PANEL_W + QUEUE_SIDE_CHROME
-        } else {
-            0.0
-        }
-    }
-
-    /// Width reserved for Now Playing (art / scrubber / transport) while the
-    /// queue panel is open. Matches the Music cell's closed size so controls
-    /// are not flex-shrunk away.
-    pub(crate) fn music_player_width(&self) -> f32 {
-        self.settings
-            .cells_for(nook_core::settings::WidgetModule::Music) as f32
-            * theme::NOOK_CELL
+        0.0
     }
 
     pub(crate) fn queue_panel_visible(&self) -> bool {
@@ -2132,6 +2263,9 @@ impl Island {
         let position = duration * ratio as f64;
         // Re-anchors the lyrics clock, sets elapsed, and arms seek_intent.
         self.note_media_seek(position, cx);
+        if self.gallery_mode {
+            return true;
+        }
         nook_core::runtime().spawn(async move {
             let _ = nook_core::audio::media_seek(position).await;
         });
@@ -2155,6 +2289,7 @@ impl Island {
         self.lyrics_anchor_elapsed = position;
         self.lyrics_anchor_at = Instant::now();
         self.arm_lyrics_line_timer(cx);
+        self.sync_lyrics_line_motion();
         cx.notify();
     }
 
@@ -2177,7 +2312,28 @@ impl Island {
         self.lyrics_anchor_elapsed = 0.0;
         self.lyrics_anchor_at = Instant::now();
         self.arm_lyrics_line_timer(cx);
+        self.sync_lyrics_line_motion();
         cx.notify();
+    }
+
+    /// Optimistic shuffle flip while MediaRemote catches up.
+    pub(crate) fn note_media_toggle_shuffle(&mut self, cx: &mut Context<Self>) {
+        if let Some(on) = self.now_playing.shuffle.as_mut() {
+            *on = !*on;
+            cx.notify();
+        }
+    }
+
+    /// Optimistic repeat cycle Off → All → One → Off while MediaRemote catches up.
+    pub(crate) fn note_media_toggle_repeat(&mut self, cx: &mut Context<Self>) {
+        if let Some(mode) = self.now_playing.repeat.as_mut() {
+            *mode = match *mode {
+                RepeatMode::Off => RepeatMode::All,
+                RepeatMode::All => RepeatMode::One,
+                RepeatMode::One => RepeatMode::Off,
+            };
+            cx.notify();
+        }
     }
 
     fn lyrics_timer_should_run(&self) -> bool {
@@ -2193,6 +2349,51 @@ impl Island {
 
     fn disarm_lyrics_timer(&mut self) {
         self.lyrics_timer_gen = self.lyrics_timer_gen.wrapping_add(1);
+    }
+
+    fn synced_lyrics_index(&self) -> Option<usize> {
+        self.lyrics.as_ref().and_then(|lyrics| {
+            if lyrics.has_synced() {
+                lyrics.active_index(self.lyrics_position_ms())
+            } else {
+                None
+            }
+        })
+    }
+
+    fn park_lyrics_motion(&mut self) {
+        self.lyrics_scroll.set(0.0);
+        self.lyrics_fade.set(1.0);
+    }
+
+    /// Kick scroll/fade when the synced line index moves. +1 scrolls the
+    /// stack; any other jump is a short crossfade. First bind parks.
+    fn sync_lyrics_line_motion(&mut self) {
+        let next = self.synced_lyrics_index();
+        if !self.lyrics_panel_visible() {
+            self.lyrics_line_idx = next;
+            self.park_lyrics_motion();
+            return;
+        }
+        if next == self.lyrics_line_idx {
+            return;
+        }
+        let prev = self.lyrics_line_idx;
+        self.lyrics_line_idx = next;
+        let sequential = matches!((prev, next), (Some(from), Some(to)) if to == from + 1);
+        if self.reduce_motion {
+            self.park_lyrics_motion();
+            return;
+        }
+        if sequential {
+            self.lyrics_fade.set(0.0);
+            self.lyrics_scroll.set(media::LYRIC_LINE_PITCH);
+        } else if prev.is_some() && next.is_some() {
+            self.lyrics_fade.set(0.0);
+            self.lyrics_scroll.set(0.0);
+        } else {
+            self.park_lyrics_motion();
+        }
     }
 
     pub(crate) fn toggle_mirror(&mut self, cx: &mut Context<Self>) {
@@ -2226,6 +2427,7 @@ impl Island {
                 if this.lyrics_timer_gen != gen {
                     return;
                 }
+                this.sync_lyrics_line_motion();
                 cx.notify();
                 this.arm_lyrics_line_timer(cx);
             });
@@ -2238,6 +2440,8 @@ impl Island {
             if self.lyrics.is_some() || self.lyrics_key.is_some() {
                 self.lyrics = None;
                 self.lyrics_key = None;
+                self.lyrics_line_idx = None;
+                self.park_lyrics_motion();
                 self.disarm_lyrics_timer();
             }
             return;
@@ -2247,6 +2451,8 @@ impl Island {
         if title.is_empty() && artist.is_empty() {
             self.lyrics = None;
             self.lyrics_key = None;
+            self.lyrics_line_idx = None;
+            self.park_lyrics_motion();
             self.disarm_lyrics_timer();
             return;
         }
@@ -2256,6 +2462,8 @@ impl Island {
         }
         self.lyrics_key = Some(key.clone());
         self.lyrics = None;
+        self.lyrics_line_idx = None;
+        self.park_lyrics_motion();
         self.disarm_lyrics_timer();
         let album = self.now_playing.album.clone();
         let duration = self.now_playing.duration;
@@ -2278,6 +2486,7 @@ impl Island {
                     return;
                 }
                 this.lyrics = fetched.map(Arc::new);
+                this.sync_lyrics_line_motion();
                 this.arm_lyrics_line_timer(cx);
                 cx.notify();
             });
@@ -3274,6 +3483,9 @@ impl Island {
     }
 
     pub(super) fn apply_hud_slider(&mut self, ratio: f32, cx: &mut Context<Self>) {
+        if self.gallery_mode {
+            return;
+        }
         let Some(kind) = self.hud.map(|h| h.kind) else {
             return;
         };
@@ -3397,10 +3609,13 @@ impl Island {
             return (base_w + extra, h);
         }
         if self.hovered {
-            return (
-                base_w + theme::COMPACT_HOVER_EXTRA,
-                base_h + theme::COMPACT_HOVER_CHIN,
-            );
+            let chin = if self.mode() == CompactMode::Media && self.has_media() {
+                theme::COMPACT_MEDIA_HOVER_CHIN
+            } else {
+                theme::COMPACT_HOVER_CHIN
+            };
+            let extra = theme::COMPACT_HOVER_EXTRA.max(self.compact_content_extra());
+            return (base_w + extra, base_h + chin);
         }
         if self.hud_active() {
             return (
@@ -3416,10 +3631,8 @@ impl Island {
             };
             return (self.notch_width + theme::IDLE_NOTCH_OVERFLOW, h);
         }
-        (
-            base_w + theme::COMPACT_LIVE_EXTRA,
-            base_h + theme::COMPACT_HEIGHT_OVERFLOW,
-        )
+        let extra = theme::COMPACT_LIVE_EXTRA.max(self.compact_content_extra());
+        (base_w + extra, base_h + theme::COMPACT_HEIGHT_OVERFLOW)
     }
 
     /// Ask CoreLocation for the current fix when weather is on and the
@@ -3473,7 +3686,7 @@ impl Island {
         let screen_cap = (self.screen_width - theme::SCREEN_MARGIN)
             .min(theme::EXPANDED_MAX_WIDTH + self.queue_extra_width());
         let base = (self.screen_width - theme::SCREEN_MARGIN).min(theme::EXPANDED_MAX_WIDTH);
-        // Music "Up Next" widens beyond the base when open.
+        // Up Next replaces the media body; queue_extra_width stays 0.
         let width = base + self.queue_extra_width();
         width.min(screen_cap)
     }
@@ -3557,6 +3770,7 @@ impl Island {
         self.widget_edit_snapshot = Some(self.settings.clone());
         self.widget_edit = true;
         self.widget_edit_budget_hint_at = None;
+        self.edit_insert = None;
         self.tab = Tab::Widgets;
         self.clear_observe_expanded();
         self.expanded = true;
@@ -3581,6 +3795,7 @@ impl Island {
         self.widget_edit = false;
         self.widget_edit_snapshot = None;
         self.widget_edit_budget_hint_at = None;
+        self.edit_insert = None;
         // Live tweaks already persisted; refresh local cache from store.
         self.settings = nook_core::settings::get_app_settings();
         self.arm_content_transition();
@@ -3594,6 +3809,7 @@ impl Island {
         }
         self.widget_edit = false;
         self.widget_edit_budget_hint_at = None;
+        self.edit_insert = None;
         self.arm_content_transition();
         cx.notify();
     }
@@ -3780,6 +3996,12 @@ impl Island {
             || (1.0 - self.content_fade.value).abs() > motion::REST_ALPHA
             || (self.overlay_fade.value - overlay).abs() > motion::REST_ALPHA
             || (self.hud_fill.value - hud_target).abs() > motion::REST_ALPHA
+            || (1.0 - self.media_view_fade.value).abs() > motion::REST_ALPHA
+            || self.media_view_shift.value.abs() > motion::REST_PX
+            || self.lyrics_scroll.value.abs() > motion::REST_PX
+            || (1.0 - self.lyrics_fade.value).abs() > motion::REST_ALPHA
+            || (self.lyrics_panel_visible()
+                && self.lyrics_line_idx != self.synced_lyrics_index())
     }
 
     pub(super) fn arm_frame_driver(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -3813,6 +4035,7 @@ impl Island {
             self.resize_smooth = false;
         }
         self.arm_content_transition();
+        self.sync_lyrics_line_motion();
 
         let mut moving = false;
         if let Some(at) = self.widget_edit_budget_hint_at {
@@ -3829,6 +4052,9 @@ impl Island {
             self.anim_h.set(th);
             self.content_x.set(0.0);
             self.content_y.set(0.0);
+            self.media_view_shift.set(0.0);
+            self.lyrics_scroll.set(0.0);
+            self.lyrics_fade.set(1.0);
             self.agent_morph_lite = false;
         } else {
             let size_spring = if self.resize_smooth {
@@ -3852,10 +4078,34 @@ impl Island {
             moving |= self
                 .content_y
                 .step(motion::CONTEXT_SHIFT, 0.0, dt, motion::REST_PX);
+            moving |= self.media_view_shift.step(
+                motion::Spring::smooth(0.26),
+                0.0,
+                dt,
+                motion::REST_PX,
+            );
+            moving |= self.lyrics_scroll.step(
+                motion::Spring::smooth(0.34),
+                0.0,
+                dt,
+                motion::REST_PX,
+            );
         }
         moving |= self
             .content_fade
             .step(motion::CROSSFADE, 1.0, dt, motion::REST_ALPHA);
+        moving |= self.media_view_fade.step(
+            motion::Spring::smooth(0.22),
+            1.0,
+            dt,
+            motion::REST_ALPHA,
+        );
+        moving |= self.lyrics_fade.step(
+            motion::Spring::smooth(0.24),
+            1.0,
+            dt,
+            motion::REST_ALPHA,
+        );
         if !self.reduce_motion
             && self.agent_morph_lite
             && (self.anim_w.value - tw).abs() <= motion::REST_PX
@@ -3973,6 +4223,11 @@ impl Island {
             cx.notify();
             return;
         }
+        if self.lyrics_open {
+            self.lyrics_open = false;
+            cx.notify();
+            return;
+        }
         if self.timer_composer {
             self.timer_composer = false;
             cx.notify();
@@ -4014,6 +4269,39 @@ impl Island {
         let own = self.focus.as_ref().is_some_and(|f| f.is_focused(window));
         if !own {
             return;
+        }
+        if self.widget_edit {
+            if ks.key == "escape" {
+                self.cancel_widget_edit(cx);
+                return;
+            }
+            if ks.key == "enter" {
+                self.finish_widget_edit(cx);
+                return;
+            }
+            if ks.key == "space" {
+                // Don't toggle the island while customizing.
+                return;
+            }
+        }
+        if self.expanded && self.tab == Tab::Files {
+            if ks.key == "escape" && self.tray_menu.is_some() {
+                self.tray_menu = None;
+                cx.notify();
+                return;
+            }
+            if ks.key == "space" {
+                if let Some(p) = self.tray_hover.clone() {
+                    self.quick_look_file(&p);
+                    return;
+                }
+            }
+            if ks.key == "backspace" || ks.key == "delete" {
+                if let Some(p) = self.tray_hover.take() {
+                    self.remove_file(&p, cx);
+                    return;
+                }
+            }
         }
         if ks.key == "escape" {
             self.dismiss(window, cx);
@@ -4705,10 +4993,10 @@ impl Island {
         self.sync_pomodoro_awake();
     }
 
-    pub(crate) fn arm_file_drag(&mut self, path: String) {
+    pub(crate) fn arm_file_drag(&mut self, paths: Vec<String>) {
         let (screen_x, screen_y) = nook_core::mouse::current_mouse_logical();
         self.pending_file_drag = Some(PendingFileDrag {
-            path,
+            paths,
             screen_x,
             screen_y,
         });
@@ -4725,12 +5013,19 @@ impl Island {
         if dx * dx + dy * dy < motion::DRAG_SLOP as f64 {
             return false;
         }
-        let path = self.pending_file_drag.take().unwrap().path;
-        if self.forget_missing_tray_path(&path) {
+        let paths = self.pending_file_drag.take().unwrap().paths;
+        let mut remaining = Vec::with_capacity(paths.len());
+        for path in paths {
+            if self.forget_missing_tray_path(&path) {
+                continue;
+            }
+            remaining.push(path);
+        }
+        if remaining.is_empty() {
             return true;
         }
         nook_core::haptics::trigger(None);
-        platform::start_file_drag(&path, window);
+        platform::start_file_drag(&remaining, window);
         true
     }
 
@@ -4738,11 +5033,36 @@ impl Island {
         let Some(pending) = self.pending_file_drag.take() else {
             return false;
         };
-        if self.forget_missing_tray_path(&pending.path) {
+        // Multi-path ("Drag All") click does nothing — only a real drag acts.
+        if pending.paths.len() != 1 {
+            return false;
+        }
+        let path = pending.paths.into_iter().next().unwrap();
+        if self.forget_missing_tray_path(&path) {
             return true;
         }
-        let _ = nook_core::files::open_file(pending.path);
+        let _ = nook_core::files::open_file(path);
         false
+    }
+
+    /// Quick Look preview (`qlmanage -p`). Missing paths leave the tray.
+    pub(crate) fn quick_look_file(&mut self, path: &str) {
+        if self.forget_missing_tray_path(path) {
+            return;
+        }
+        if let Err(err) = nook_core::files::quick_look(path) {
+            log::warn!("quick look failed for {path}: {err}");
+        }
+    }
+
+    /// Reveal in Finder (`open -R`). Missing paths leave the tray.
+    pub(crate) fn reveal_file(&mut self, path: &str) {
+        if self.forget_missing_tray_path(path) {
+            return;
+        }
+        if let Err(err) = nook_core::files::reveal(path) {
+            log::warn!("reveal failed for {path}: {err}");
+        }
     }
 
     /// Drop a tray entry whose file is gone. Returns true if the tray changed.
@@ -4776,9 +5096,26 @@ impl Island {
     }
 }
 
-pub(crate) const QUEUE_ROW_H: f32 = 40.0;
+/// After a successful outbound drop, drop tray entries whose paths no longer
+/// exist (Finder moved them). Copied-elsewhere paths stay. Returns whether the
+/// tray changed.
+fn prune_moved(files: &mut Vec<FileTrayItem>, dropped: &[String]) -> bool {
+    let before = files.len();
+    files.retain(|f| {
+        if !dropped.iter().any(|p| p == &f.path) {
+            return true;
+        }
+        std::path::Path::new(&f.path).exists()
+    });
+    files.len() != before
+}
+
+#[allow(dead_code)] // kept for call sites / tests that still name the old side panel
+pub(crate) const QUEUE_ROW_H: f32 = 28.0;
+#[allow(dead_code)]
 pub(crate) const QUEUE_PANEL_W: f32 = 240.0;
-/// Flex gaps (12 + 12) plus the 1px rule between player and queue.
+/// Former side-panel chrome; Up Next no longer widens the island.
+#[allow(dead_code)]
 pub(crate) const QUEUE_SIDE_CHROME: f32 = 25.0;
 
 /// Paint camera pixels immediately. `img(Image)` goes through GPUI's async
@@ -4796,26 +5133,10 @@ fn mirror_render_image(bgra: Vec<u8>) -> Option<std::sync::Arc<gpui::RenderImage
     ])))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::island::files::{file_grid_metrics, file_tile_height, files_pane_min_height};
-    use crate::island::ui::format_timer;
-    use nook_core::agents::{AgentKind, AgentStatus};
-    use nook_core::notifications::NotificationEvent;
-    use std::collections::{HashMap, VecDeque};
-    use std::rc::Rc;
-    use std::sync::{Mutex, MutexGuard};
-
-    /// `outbound_drag_active` is process-global; overlay tests that toggle it
-    /// must not overlap.
-    static OVERLAY_MOUSE: Mutex<()> = Mutex::new(());
-
-    fn lock_overlay() -> MutexGuard<'static, ()> {
-        OVERLAY_MOUSE.lock().unwrap_or_else(|e| e.into_inner())
-    }
-
-    fn test_island() -> Island {
+/// Side-effect-free Island for unit tests and the debug component gallery.
+#[cfg(any(test, debug_assertions))]
+impl Island {
+    pub(crate) fn mock() -> Island {
         Island {
             notch_width: 180.0,
             notch_height: 32.0,
@@ -4834,6 +5155,9 @@ mod tests {
             lyrics_anchor_elapsed: 0.0,
             lyrics_anchor_at: Instant::now(),
             lyrics_timer_gen: 0,
+            lyrics_line_idx: None,
+            lyrics_scroll: SpringValue::at(0.0),
+            lyrics_fade: SpringValue::at(1.0),
             aura_palette: None,
             aura_t: 0.0,
             last_aura_frame: Instant::now(),
@@ -4878,7 +5202,7 @@ mod tests {
             awake_deadline: None,
             awake_active: false,
             observe: ObserveSnapshot::default(),
-            observe_history: HashMap::new(),
+            observe_history: MetricHistory::new(),
             messages: MessagesSnapshot::default(),
             message_draft: String::new(),
             selected_conversation: None,
@@ -4901,6 +5225,7 @@ mod tests {
             widget_edit: false,
             widget_edit_snapshot: None,
             widget_edit_budget_hint_at: None,
+            edit_insert: None,
             last_widget_edit: false,
             content_transition_force: false,
             first_run: false,
@@ -4928,6 +5253,8 @@ mod tests {
             content_x: SpringValue::at(0.0),
             content_y: SpringValue::at(0.0),
             overlay_fade: SpringValue::at(0.0),
+            media_view_fade: SpringValue::at(1.0),
+            media_view_shift: SpringValue::at(0.0),
             meeting_flash_until: None,
             reduce_motion: false,
             blur: 0.0,
@@ -4970,6 +5297,7 @@ mod tests {
             output_devices: Vec::new(),
             output_picker_open: false,
             queue_open: false,
+            lyrics_open: false,
             output_hud_name: None,
             output_hud_until: None,
             recording: false,
@@ -4986,10 +5314,43 @@ mod tests {
             hover_exit_at: None,
             alt_held: false,
             last_cleared_files: None,
+            files_scroll: gpui::ScrollHandle::new(),
+            tray_menu: None,
+            tray_hover: None,
             tray_flash: None,
             calendar_access_requested: false,
             fallback_db_noticed: false,
+            gallery_mode: false,
+            #[cfg(debug_assertions)]
+            gallery_scroll: gpui::ScrollHandle::new(),
+            #[cfg(debug_assertions)]
+            gallery_tab: 0,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::island::files::{file_grid_metrics, file_tile_height, files_pane_min_height};
+    use crate::island::ui::format_timer;
+    use crate::theme;
+    use nook_core::agents::{AgentKind, AgentSession, AgentStatus};
+    use nook_core::files::FileTrayItem;
+    use nook_core::notifications::NotificationEvent;
+    use nook_core::settings::WidgetModule;
+    use std::sync::{Mutex, MutexGuard};
+
+    /// `outbound_drag_active` is process-global; overlay tests that toggle it
+    /// must not overlap.
+    static OVERLAY_MOUSE: Mutex<()> = Mutex::new(());
+
+    fn lock_overlay() -> MutexGuard<'static, ()> {
+        OVERLAY_MOUSE.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn test_island() -> Island {
+        Island::mock()
     }
 
     fn with_file(island: &mut Island) {
@@ -5233,18 +5594,10 @@ mod tests {
 
         island.queue_open = true;
         assert!(island.queue_panel_visible());
-        assert!(island.queue_extra_width() > 0.0);
-        assert!(island.expanded_width() > closed);
-        // Music cell must claim the extra width — otherwise the panel
-        // crushes the player inside a fixed cell while the island grows empty.
-        assert!(
-            (island.music_pane_width(5) - closed_music - island.queue_extra_width()).abs() < 0.5
-        );
-        assert_eq!(
-            island.music_player_width(),
-            5.0 * theme::NOOK_CELL,
-            "queue open must keep the player column at the closed Music width"
-        );
+        // Up Next replaces the body — same island / Music width as closed.
+        assert_eq!(island.queue_extra_width(), 0.0);
+        assert_eq!(island.expanded_width(), closed);
+        assert_eq!(island.music_pane_width(5), closed_music);
     }
 
     #[test]
@@ -5268,6 +5621,7 @@ mod tests {
         island.expanded = true;
         island.tab = Tab::Widgets;
         island.screen_width = 1800.0;
+        let closed = island.expanded_width();
         island.queue_open = true;
         let w = island.expanded_width();
         let need = island.settings.nook_content_width(
@@ -5280,7 +5634,10 @@ mod tests {
             "expanded_width={w} need={need} max={}",
             theme::EXPANDED_MAX_WIDTH
         );
-        assert!(w > theme::EXPANDED_MAX_WIDTH);
+        // Up Next no longer pushes past the expanded max.
+        assert_eq!(island.queue_extra_width(), 0.0);
+        assert_eq!(w, closed);
+        assert!(w <= theme::EXPANDED_MAX_WIDTH + 0.5);
     }
 
     #[test]
@@ -5328,7 +5685,7 @@ mod tests {
     }
 
     #[test]
-    fn queue_fetch_skips_spotify_without_web_api() {
+    fn queue_fetch_runs_for_spotify_via_mediaremote() {
         let mut island = test_island();
         island.now_playing.title = Some("Track".into());
         island.now_playing.app_name = Some("Spotify".into());
@@ -5337,10 +5694,11 @@ mod tests {
         island.settings.show_media_queue = true;
         island.expanded = true;
         island.tab = Tab::Widgets;
-        assert!(!island.queue_visible());
-        assert!(!island.maybe_start_queue_fetch());
+        assert!(island.queue_visible());
+        assert!(island.maybe_start_queue_fetch());
+        assert!(island.queue_inflight);
         island.queue_open = true;
-        assert!(!island.queue_panel_visible());
+        assert!(island.queue_panel_visible());
     }
 
     #[test]
@@ -5391,6 +5749,7 @@ mod tests {
                 artist: "A".into(),
                 artwork_url: None,
                 artwork_base64: None,
+                duration: None,
                 source: nook_core::models::QueueSource::MusicPlaylist,
                 jump: nook_core::models::QueueJump::MusicTrack { index: 2 },
             }],
@@ -5717,7 +6076,13 @@ mod tests {
 
         island.hovered = true;
         let hovered = island.target_size();
-        assert_eq!(hovered, (185.0 + 88.0, 38.0 + 11.0));
+        assert_eq!(
+            hovered,
+            (
+                185.0 + 88.0,
+                38.0 + theme::COMPACT_MEDIA_HOVER_CHIN
+            )
+        );
         assert!(hovered.0 > compact.0 && hovered.1 > compact.1);
     }
 
@@ -6144,13 +6509,13 @@ mod tests {
         );
 
         island.file_drag = false;
-        island.arm_file_drag("/tmp/shot.png".into());
+        island.arm_file_drag(vec!["/tmp/shot.png".into()]);
         assert!(
             !island.overlay_ignores_mouse(false, false),
             "until the AppKit session starts, mouse moves must reach us"
         );
         island.pending_file_drag = None;
-        nook_core::files::begin_outbound_drag("/tmp/shot.png");
+        nook_core::files::begin_outbound_drag(&["/tmp/shot.png".into()]);
         struct ClearOutbound;
         impl Drop for ClearOutbound {
             fn drop(&mut self) {
@@ -6189,11 +6554,51 @@ mod tests {
     #[test]
     fn file_press_stays_pending_until_moved() {
         let mut island = test_island();
-        island.arm_file_drag("/tmp/shot.png".into());
+        island.arm_file_drag(vec!["/tmp/shot.png".into()]);
         assert!(!island.poll_pending_file_drag(None));
         assert!(island.pending_file_drag.is_some());
         island.finish_file_press();
         assert!(island.pending_file_drag.is_none());
+    }
+
+    #[test]
+    fn multi_path_press_does_not_open() {
+        let mut island = test_island();
+        island.arm_file_drag(vec!["/tmp/a.png".into(), "/tmp/b.png".into()]);
+        assert!(!island.finish_file_press());
+        assert!(island.pending_file_drag.is_none());
+    }
+
+    #[test]
+    fn prune_moved_drops_only_missing_paths() {
+        let keep = "/tmp/nook-prune-moved-keep.bin";
+        let gone = "/tmp/nook-prune-moved-gone.bin";
+        let _ = std::fs::remove_file(keep);
+        let _ = std::fs::remove_file(gone);
+        std::fs::write(keep, b"x").expect("write keep");
+        let mut files = vec![
+            FileTrayItem {
+                name: "keep.bin".into(),
+                size: 1,
+                path: keep.into(),
+                mime_type: "file".into(),
+                last_modified: 0,
+            },
+            FileTrayItem {
+                name: "gone.bin".into(),
+                size: 1,
+                path: gone.into(),
+                mime_type: "file".into(),
+                last_modified: 0,
+            },
+        ];
+        assert!(super::prune_moved(
+            &mut files,
+            &[keep.into(), gone.into()]
+        ));
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].path, keep);
+        let _ = std::fs::remove_file(keep);
     }
 
     #[test]
@@ -6207,7 +6612,7 @@ mod tests {
             mime_type: "file".into(),
             last_modified: 0,
         });
-        island.arm_file_drag(path.into());
+        island.arm_file_drag(vec![path.into()]);
         if let Some(pending) = island.pending_file_drag.as_mut() {
             pending.screen_x -= 100.0;
         }

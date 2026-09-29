@@ -5,6 +5,7 @@ use crate::island::ui::{format_timer, label, nook_pane};
 use crate::island::Island;
 use crate::theme;
 use gpui::{div, prelude::*, px, Context, CursorStyle, MouseButton, MouseDownEvent, SharedString};
+use nook_core::settings::{WidgetModule, WidgetSize};
 use std::cell::RefCell;
 
 const CHIPS: [(&str, Option<u32>); 4] = [
@@ -14,12 +15,16 @@ const CHIPS: [(&str, Option<u32>); 4] = [
     ("On", None),
 ];
 
+/// S only has room for two chips; prefer 30m + On.
+const CHIPS_S: [(&str, Option<u32>); 2] = [("30m", Some(30 * 60)), ("On", None)];
+
 thread_local! {
     /// Duration chip the active session was started with (`None` = "On").
     static ACTIVE_DURATION_SECS: RefCell<Option<Option<u32>>> = const { RefCell::new(None) };
 }
 
 pub(crate) fn high_alert_card(island: &Island, cx: &mut Context<Island>) -> impl IntoElement {
+    let size = resolve_size(island, WidgetModule::HighAlert);
     let active = island.high_alert_active();
     let remaining = if active {
         island
@@ -38,6 +43,16 @@ pub(crate) fn high_alert_card(island: &Island, cx: &mut Context<Island>) -> impl
     } else {
         Some(island.settings.high_alert_default_duration_secs).filter(|s| *s > 0)
     };
+    let chips: &[(&str, Option<u32>)] = if size == WidgetSize::Small {
+        &CHIPS_S
+    } else {
+        &CHIPS
+    };
+    // M (~3 cells) needs compact chips so 15m/30m/1h/On all fit.
+    let (chip_gap, chip_px) = match size {
+        WidgetSize::Medium => (px(3.), px(5.)),
+        _ => (px(6.), px(8.)),
+    };
 
     card_shell("nook-high-alert")
         .w_full()
@@ -45,12 +60,15 @@ pub(crate) fn high_alert_card(island: &Island, cx: &mut Context<Island>) -> impl
             div()
                 .flex_1()
                 .min_h(px(0.))
+                .min_w(px(0.))
                 .flex()
                 .items_center()
                 .justify_between()
                 .gap(px(12.))
                 .child(
                     div()
+                        .flex_1()
+                        .min_w(px(0.))
                         .flex()
                         .flex_col()
                         .gap(px(8.))
@@ -82,11 +100,17 @@ pub(crate) fn high_alert_card(island: &Island, cx: &mut Context<Island>) -> impl
                 .child(toggle_btn(active, cx)),
         )
         .child(
-            div().flex().items_center().gap(px(6.)).children(
-                CHIPS
-                    .iter()
-                    .map(|(name, secs)| chip(name, *secs, selected == *secs, cx)),
-            ),
+            div()
+                .w_full()
+                .flex()
+                .items_center()
+                .gap(chip_gap)
+                .overflow_hidden()
+                .children(
+                    chips
+                        .iter()
+                        .map(|(name, secs)| chip(name, *secs, selected == *secs, chip_px, cx)),
+                ),
         )
 }
 
@@ -108,6 +132,7 @@ fn toggle_btn(active: bool, cx: &mut Context<Island>) -> impl IntoElement {
     div()
         .id("high-alert-toggle")
         .size(px(theme::HIT_MIN))
+        .flex_shrink_0()
         .flex()
         .items_center()
         .justify_center()
@@ -151,13 +176,15 @@ fn chip(
     name: &'static str,
     secs: Option<u32>,
     selected: bool,
+    pad_x: gpui::Pixels,
     cx: &mut Context<Island>,
 ) -> impl IntoElement {
     div()
         .id(SharedString::from(format!("high-alert-chip-{name}")))
         .h(px(24.))
-        .px(px(8.))
+        .px(pad_x)
         .rounded(px(8.))
+        .flex_shrink_0()
         .flex()
         .items_center()
         .justify_center()
@@ -189,4 +216,39 @@ fn chip(
                 cx.notify();
             }),
         )
+}
+
+fn resolve_size(island: &Island, module: WidgetModule) -> WidgetSize {
+    #[cfg(debug_assertions)]
+    {
+        if island.gallery_mode {
+            let sizes = island.settings.distinct_sizes(module);
+            if !sizes.is_empty() {
+                return sizes[gallery_call_idx(module as u8) % sizes.len()];
+            }
+        }
+    }
+    island.settings.size_for(module)
+}
+
+#[cfg(debug_assertions)]
+fn gallery_call_idx(module: u8) -> usize {
+    use std::collections::HashMap;
+    use std::time::{Duration, Instant};
+    thread_local! {
+        static STATE: RefCell<HashMap<u8, (Instant, usize)>> =
+            RefCell::new(HashMap::new());
+    }
+    STATE.with(|state| {
+        let mut map = state.borrow_mut();
+        let now = Instant::now();
+        let entry = map.entry(module).or_insert((now, 0));
+        if now.duration_since(entry.0) > Duration::from_millis(32) {
+            entry.1 = 0;
+        }
+        entry.0 = now;
+        let idx = entry.1;
+        entry.1 = idx + 1;
+        idx
+    })
 }

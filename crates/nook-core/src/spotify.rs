@@ -397,6 +397,7 @@ pub fn parse_queue_json(body: &str, context_uri: Option<String>) -> Result<Playb
             artist,
             artwork_url: artwork,
             artwork_base64: None,
+            duration: None,
             source: QueueSource::Spotify,
             jump: QueueJump::Spotify {
                 skip_count: skip_count_for_index(index),

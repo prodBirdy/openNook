@@ -20,6 +20,25 @@ fi
 git -C "$ADAPTER_DIR" fetch --quiet origin "$ADAPTER_REV" || git -C "$ADAPTER_DIR" fetch --quiet origin
 git -C "$ADAPTER_DIR" checkout --quiet --detach "$ADAPTER_REV"
 
+PATCH_DIR="$ROOT/third_party/patches"
+if [[ -d "$PATCH_DIR" ]]; then
+  shopt -s nullglob
+  for patch in "$PATCH_DIR"/*.patch; do
+    name="$(basename "$patch")"
+    if git -C "$ADAPTER_DIR" apply -R --check "$patch" >/dev/null 2>&1; then
+      echo "already applied $name"
+      continue
+    fi
+    if git -C "$ADAPTER_DIR" apply --check "$patch" >/dev/null 2>&1; then
+      git -C "$ADAPTER_DIR" apply "$patch"
+      echo "applied $name"
+    else
+      echo "failed to apply $name" >&2
+      exit 1
+    fi
+  done
+fi
+
 cmake -S "$ADAPTER_DIR" -B "$ADAPTER_DIR/build"
 cmake --build "$ADAPTER_DIR/build"
 

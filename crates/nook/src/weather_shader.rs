@@ -24,16 +24,23 @@ pub(crate) struct Frame {
 }
 
 /// Render (or reuse) the scene for `mood` (0..=11, the shader's `u_mood`)
-/// at `width` × `height` device pixels. `animate` false renders a single
-/// still at [`STATIC_TIME`] and keeps reusing it.
-pub(crate) fn render(mood: u8, width: u32, height: u32, animate: bool) -> Option<Frame> {
+/// at `width` × `height` device pixels. `night` is `u_night` (same mood,
+/// darker sky / moon / stars). `animate` false renders a single still at
+/// [`STATIC_TIME`] and keeps reusing it.
+pub(crate) fn render(
+    mood: u8,
+    night: bool,
+    width: u32,
+    height: u32,
+    animate: bool,
+) -> Option<Frame> {
     #[cfg(target_os = "macos")]
     {
-        metal::render(mood, width, height, animate)
+        metal::render(mood, night, width, height, animate)
     }
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = (mood, width, height, animate);
+        let _ = (mood, night, width, height, animate);
         None
     }
 }
@@ -58,6 +65,7 @@ struct Uniforms {
   float mood;
   float intensity;
   float dim;
+  float night;
 };
 
 struct VOut {
@@ -176,7 +184,7 @@ fragment float4 weather_fragment(VOut in [[stage_in]], constant Uniforms& u [[bu
   float3 bot = float3(0.36, 0.62, 0.90);
   float sun = 0.0, cloud = 0.0, cloudDark = 0.0, cloudSpeed = 0.02;
   float rainAmt = 0.0, snowAmt = 0.0, fogAmt = 0.0, windAmt = 0.0;
-  float starAmt = 0.0, flashAmt = 0.0, heatAmt = 0.0, frostAmt = 0.0;
+  float starAmt = 0.0, moonAmt = 0.0, flashAmt = 0.0, heatAmt = 0.0, frostAmt = 0.0;
   float3 cloudTint = float3(1.0);
 
   if (m < 0.5) {
@@ -212,11 +220,22 @@ fragment float4 weather_fragment(VOut in [[stage_in]], constant Uniforms& u [[bu
     sun = 0.4; cloud = 0.15; frostAmt = 1.0;
   } else if (m < 10.5) {
     top = float3(0.02, 0.03, 0.10); bot = float3(0.09, 0.11, 0.28);
-    starAmt = 1.0; cloud = 0.15; cloudDark = 0.6; cloudTint = float3(0.35, 0.38, 0.55);
+    starAmt = 1.0; moonAmt = 1.0; cloud = 0.15; cloudDark = 0.6; cloudTint = float3(0.35, 0.38, 0.55);
   } else {
     top = float3(0.60, 0.26, 0.07); bot = float3(0.78, 0.44, 0.15);
     sun = 1.3; heatAmt = 1.0;
   }
+
+  float night = clamp(u.night, 0.0, 1.0);
+  if (night > 0.0) {
+    top = mix(top, top * 0.16 + float3(0.010, 0.018, 0.060), night);
+    bot = mix(bot, bot * 0.26 + float3(0.020, 0.030, 0.090), night);
+    moonAmt = max(moonAmt, min(sun, 1.0) * night);
+    sun *= 1.0 - night;
+    starAmt = max(starAmt, night * clamp(1.0 - cloud * 1.15 - fogAmt * 0.5, 0.0, 1.0));
+    cloudTint = mix(cloudTint, cloudTint * float3(0.46, 0.50, 0.64), night);
+  }
+  float nightFade = 1.0 - 0.4 * night;
 
   if (heatAmt > 0.0) {
     uv.x += sin(uv.y * 38.0 + t * 3.0) * 0.004 * (1.0 - uv.y) * heatAmt;
@@ -239,12 +258,15 @@ fragment float4 weather_fragment(VOut in [[stage_in]], constant Uniforms& u [[bu
 
   if (starAmt > 0.0) {
     col += float3(0.9, 0.93, 1.0) * stars(p, t) * starAmt * ss(0.1, 0.7, uv.y);
+  }
+
+  if (moonAmt > 0.0) {
     float2 mp = float2(0.90 * aspect, 0.90);
     float md = length(p - mp);
     float disc = ss(0.075, 0.066, md);
     float crater = fbm(p * 18.0) * 0.18;
     col = mix(col, float3(0.93, 0.92, 0.86) - crater, disc);
-    col += float3(0.55, 0.60, 0.85) * exp(-md * 5.0) * 0.22;
+    col += float3(0.55, 0.60, 0.85) * exp(-md * 5.0) * 0.22 * moonAmt;
   }
 
   float flash = 0.0;
@@ -271,14 +293,15 @@ fragment float4 weather_fragment(VOut in [[stage_in]], constant Uniforms& u [[bu
     float f2 = fbm(float2(p.x * 2.1 + t * 0.03, p.y * 7.0 + 3.0));
     float bands = ss(0.35, 0.8, f1) * 0.55 + ss(0.4, 0.85, f2) * 0.35;
     float low = 1.0 - ss(0.0, 0.85, uv.y);
-    col = mix(col, float3(0.66, 0.68, 0.72), clamp(bands * (0.4 + low), 0.0, 1.0) * fogAmt * 0.7);
+    col = mix(col, mix(float3(0.66, 0.68, 0.72), float3(0.20, 0.22, 0.29), night),
+              clamp(bands * (0.4 + low), 0.0, 1.0) * fogAmt * 0.7);
   }
 
   if (windAmt > 0.0) {
     float2 q = float2(p.x * 0.7 - t * 0.14, p.y * 5.5);
     float w = fbm(q + float2(fbm(q * 0.6 - t * 0.05) * 1.6, 0.0));
     float wisp = ss(0.45, 0.85, w) * ss(0.05, 0.85, uv.y);
-    col = mix(col, float3(0.90, 0.94, 1.0), wisp * 0.42 * windAmt);
+    col = mix(col, float3(0.90, 0.94, 1.0) * nightFade, wisp * 0.42 * windAmt);
 
     float ry = u.resolution.y;
     float g = 0.0;
@@ -286,7 +309,7 @@ fragment float4 weather_fragment(VOut in [[stage_in]], constant Uniforms& u [[bu
     g += gust(p, t, aspect, 0.56, 0.060, 2.4, 0.27, 1.20, 0.55, ry) * 0.8;
     g += gust(p, t, aspect, 0.30, 0.040, 3.7, 0.40, 0.80, 0.82, ry) * 0.7;
     g += gust(p, t, aspect, 0.12, 0.050, 2.8, 0.31, 1.00, 0.33, ry) * 0.6;
-    col += float3(0.94, 0.97, 1.0) * g * 0.5 * windAmt;
+    col += float3(0.94, 0.97, 1.0) * g * 0.5 * windAmt * nightFade;
 
     float2 dg = float2(p.x * 5.0 - t * 1.9, p.y * 13.0);
     dg.y += sin(p.x * 3.0 + t * 1.3) * 0.6;
@@ -294,17 +317,17 @@ fragment float4 weather_fragment(VOut in [[stage_in]], constant Uniforms& u [[bu
     float2 df = fract(dg) - 0.5;
     float dr = hash(did + 21.0);
     float streak = length(float2(df.x * 0.28, df.y));
-    col += float3(0.95, 0.98, 1.0) * step(0.93, dr) * ss(0.07, 0.0, streak) * 0.5 * windAmt;
+    col += float3(0.95, 0.98, 1.0) * step(0.93, dr) * ss(0.07, 0.0, streak) * 0.5 * windAmt * nightFade;
   }
 
   if (rainAmt > 0.0) {
     float r = rain(p, t, 55.0, 1.6, 1.0) * 0.55 + rain(p * 1.4 + 3.0, t, 80.0, 1.2, 2.0) * 0.3;
-    col += float3(0.75, 0.82, 0.95) * r * 0.8 * rainAmt;
+    col += float3(0.75, 0.82, 0.95) * r * 0.8 * rainAmt * nightFade;
   }
 
   if (snowAmt > 0.0) {
     float s = snow(p, t, 9.0, 0.0) + snow(p, t, 14.0, 1.0) * 0.7 + snow(p, t, 22.0, 2.0) * 0.45;
-    col = mix(col, float3(1.0), clamp(s, 0.0, 1.0) * 0.9 * snowAmt);
+    col = mix(col, float3(1.0) * (1.0 - 0.2 * night), clamp(s, 0.0, 1.0) * 0.9 * snowAmt);
   }
 
   if (frostAmt > 0.0) {
@@ -315,7 +338,7 @@ fragment float4 weather_fragment(VOut in [[stage_in]], constant Uniforms& u [[bu
     float tw = pow(0.5 + 0.5 * sin(t * 2.0 + r * 50.0), 6.0);
     col += float3(0.85, 0.95, 1.0) * step(0.9, r) * ss(0.08, 0.0, d) * tw * frostAmt;
     float edge = 1.0 - ss(0.0, 0.35, min(min(uv.x, 1.0 - uv.x) * aspect, min(uv.y, 1.0 - uv.y)));
-    col = mix(col, float3(0.85, 0.94, 1.0), edge * 0.18 * frostAmt * fbm(p * 6.0));
+    col = mix(col, float3(0.85, 0.94, 1.0) * nightFade, edge * 0.18 * frostAmt * fbm(p * 6.0));
   }
 
   float3 base = float3(0.0);
@@ -360,7 +383,7 @@ mod metal {
     const INTENSITY: f32 = 1.0;
     const DIM: f32 = 0.35;
 
-    /// `constant Uniforms&` in the MSL above (float2 + 4 floats, 24 bytes).
+    /// `constant Uniforms&` in the MSL above (float2 + 5 floats, 28 bytes).
     #[repr(C)]
     struct Uniforms {
         resolution: [f32; 2],
@@ -368,11 +391,13 @@ mod metal {
         mood: f32,
         intensity: f32,
         dim: f32,
+        night: f32,
     }
 
     #[derive(Clone, Copy, PartialEq)]
     struct Key {
         mood: u8,
+        night: bool,
         width: u32,
         height: u32,
     }
@@ -405,7 +430,13 @@ mod metal {
         static STATE: RefCell<State> = const { RefCell::new(State::Pending) };
     }
 
-    pub(super) fn render(mood: u8, width: u32, height: u32, animate: bool) -> Option<Frame> {
+    pub(super) fn render(
+        mood: u8,
+        night: bool,
+        width: u32,
+        height: u32,
+        animate: bool,
+    ) -> Option<Frame> {
         if width == 0 || height == 0 {
             return None;
         }
@@ -425,7 +456,15 @@ mod metal {
             let State::Ready(renderer) = &mut *state else {
                 return None;
             };
-            match renderer.frame(Key { mood, width, height }, animate) {
+            match renderer.frame(
+                Key {
+                    mood,
+                    night,
+                    width,
+                    height,
+                },
+                animate,
+            ) {
                 Ok(frame) => Some(frame),
                 Err(err) => {
                     log::warn!("weather shader frame failed, using the gradient wash: {err}");
@@ -555,6 +594,7 @@ mod metal {
                 mood: key.mood as f32,
                 intensity: INTENSITY,
                 dim: DIM,
+                night: if key.night { 1.0 } else { 0.0 },
             };
             encoder.setRenderPipelineState(&pipeline);
             unsafe {
@@ -601,12 +641,12 @@ mod metal {
     mod tests {
         use super::{Key, Renderer, STATIC_TIME};
 
-        /// Renders all 12 moods through the real Metal path (runtime MSL
-        /// compile, offscreen pass, read-back) at 480×256 device px — the
-        /// 240×128 card at 2x, as Pencil exports it — and writes
-        /// `mood_00.png`..`mood_11.png` into `$WEATHER_SHADER_OUT`.
+        /// Renders all 12 moods (day + night) through the real Metal path at
+        /// 480×256 device px — the 240×128 card at 2x — into `$WEATHER_SHADER_OUT`
+        /// as `mood_00.png`..`mood_11.png` and `mood_00_night.png`..
         ///
-        /// `WEATHER_SHADER_OUT=/tmp/w cargo test -p nook render_moods_to_png -- --ignored`
+        /// `WEATHER_SHADER_OUT=.mockup/weather/out taskpolicy -b ./scripts/with-metal.sh \
+        ///  cargo test -p nook -j 4 render_moods_to_png -- --ignored`
         #[test]
         #[ignore]
         fn render_moods_to_png() {
@@ -621,24 +661,34 @@ mod metal {
                 Renderer::new().unwrap_or_else(|err| panic!("weather shader setup: {err}"));
             let (width, height) = (480u32, 256u32);
             for mood in 0..12u8 {
-                let mut px = renderer
-                    .draw(
-                        Key {
-                            mood,
-                            width,
-                            height,
-                        },
-                        STATIC_TIME,
-                    )
-                    .unwrap_or_else(|err| panic!("mood {mood}: {err}"));
-                for bgra in px.chunks_exact_mut(4) {
-                    bgra.swap(0, 2);
+                for night in [false, true] {
+                    let mut px = renderer
+                        .draw(
+                            Key {
+                                mood,
+                                night,
+                                width,
+                                height,
+                            },
+                            STATIC_TIME,
+                        )
+                        .unwrap_or_else(|err| {
+                            panic!("mood {mood} night={night}: {err}")
+                        });
+                    for bgra in px.chunks_exact_mut(4) {
+                        bgra.swap(0, 2);
+                    }
+                    let name = if night {
+                        format!("mood_{mood:02}_night.png")
+                    } else {
+                        format!("mood_{mood:02}.png")
+                    };
+                    let path = out.join(name);
+                    image::RgbaImage::from_raw(width, height, px)
+                        .expect("frame size")
+                        .save(&path)
+                        .unwrap_or_else(|err| panic!("write {}: {err}", path.display()));
                 }
-                let path = out.join(format!("mood_{mood:02}.png"));
-                image::RgbaImage::from_raw(width, height, px)
-                    .expect("frame size")
-                    .save(&path)
-                    .unwrap_or_else(|err| panic!("write {}: {err}", path.display()));
             }
         }
     }
@@ -669,5 +719,13 @@ mod tests {
             .filter(|n| MSL.contains(&format!("m < {n}.5")))
             .count();
         assert_eq!(branches, 11);
+    }
+
+    #[test]
+    fn msl_ports_night_uniform() {
+        assert!(MSL.contains("float night;"));
+        assert!(MSL.contains("u.night"));
+        assert!(MSL.contains("nightFade"));
+        assert!(MSL.contains("moonAmt"));
     }
 }

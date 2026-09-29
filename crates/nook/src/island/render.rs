@@ -17,9 +17,14 @@ use std::any::Any;
 
 impl gpui::Render for Island {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        #[cfg(debug_assertions)]
+        if self.gallery_mode {
+            return super::gallery::render(self, cx);
+        }
         // Real widget previews stay on screen in customize mode; park marquees
         // so overflowing titles do not keep requesting frames under edit chrome.
         super::marquee::set_animate(!self.widget_edit && !self.reduce_motion);
+        super::media::set_reduce_motion(self.reduce_motion);
         if self.expanded {
             if let Some(focus) = &self.focus {
                 if window.focused(cx).is_none() {
@@ -91,7 +96,8 @@ impl gpui::Render for Island {
             theme::COMPACT_RADIUS.min(compact_h * 0.5)
         };
 
-        let tint = self.settings.island_color.map(|rgb| {
+        let island_color = theme::island_color(&self.settings);
+        let tint = island_color.map(|rgb| {
             let c = theme::rgba_from_u32(rgb, 1.0);
             (c.r, c.g, c.b)
         });
@@ -127,13 +133,13 @@ impl gpui::Render for Island {
             theme::island_glass_veil(chrome_h, glass_open, glass_amount)
         } else if want_glass {
             theme::island_glass_fallback_veil(
-                self.settings.island_color,
+                island_color,
                 chrome_h,
                 glass_open,
                 glass_amount,
             )
         } else {
-            theme::island_fill(self.settings.island_color).into()
+            theme::island_fill(island_color).into()
         };
         // Glass keeps NSGlassEffectView a plain rect (wing 0), so the notch
         // fillets are painted beside it in the colour of the veil's top edge:
@@ -149,7 +155,7 @@ impl gpui::Render for Island {
             let cap = if native_glass {
                 theme::ISLAND
             } else {
-                theme::island_fill(self.settings.island_color)
+                theme::island_fill(island_color)
             };
             Some(theme::with_alpha(cap, top_a * cap.a))
         } else {
@@ -323,15 +329,29 @@ impl gpui::Render for Island {
                                         && self.anim_h.value
                                             > self.notch_height.max(theme::NOTCH_MIN_H) + 0.5,
                                     |d| {
-                                        // Opacity must wrap only the dots. Applying it to
+                                        // Opacity must wrap only the chin chrome. Applying it to
                                         // this parent also faded `content_stack` — and the
                                         // 1px compact overflow alone was enough to leave
                                         // the face at ~9% opacity in normal compact mode.
                                         let base = self.notch_height.max(theme::NOTCH_MIN_H);
-                                        let fade = ((self.anim_h.value - base)
-                                            / theme::COMPACT_HOVER_CHIN)
+                                        let chin = if self.mode() == CompactMode::Media
+                                            && self.has_media()
+                                        {
+                                            theme::COMPACT_MEDIA_HOVER_CHIN
+                                        } else {
+                                            theme::COMPACT_HOVER_CHIN
+                                        };
+                                        let fade = ((self.anim_h.value - base) / chin)
                                             .clamp(0.0, 1.0);
-                                        d.child(div().opacity(fade).child(self.mode_dots(cx)))
+                                        d.child(
+                                            div()
+                                                .absolute()
+                                                .top_0()
+                                                .left_0()
+                                                .size_full()
+                                                .opacity(fade)
+                                                .child(self.compact_media_hover_title(fade)),
+                                        )
                                     },
                                 ),
                         ),
@@ -339,6 +359,7 @@ impl gpui::Render for Island {
             )
         })
         .when(debug_hitbox, |d| d.child(self.hitbox_overlay()))
+        .into_any_element()
     }
 }
 
@@ -627,4 +648,8 @@ pub fn open_island(cx: &mut App) {
         log::error!("failed to open island window: {err}");
         panic!("open island window: {err}");
     });
+    #[cfg(debug_assertions)]
+    if std::env::var_os("NOOK_GALLERY").is_some() {
+        super::gallery::open(cx);
+    }
 }

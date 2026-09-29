@@ -5,7 +5,7 @@ use super::{Island, Tab};
 use crate::icons::{lucide, lucide_color};
 use crate::theme;
 use gpui::{
-    div, img, prelude::*, px, AnyElement, Context, CursorStyle, FontWeight, MouseButton,
+    div, img, point, prelude::*, px, AnyElement, Context, CursorStyle, FontWeight, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, ObjectFit, ScrollWheelEvent, SharedString,
 };
 use nook_core::files::FileTrayItem;
@@ -82,6 +82,19 @@ pub(crate) fn file_tile_height(_tile_w: f32) -> f32 {
 /// One tray row: file chips plus the AirDrop / Local Send column.
 pub(crate) fn files_pane_min_height(_island_w: f32) -> f32 {
     file_tile_height(TRAY_PREVIEW)
+}
+
+/// Horizontal strip offset: `current + delta`, clamped to `[-max, 0]`.
+fn strip_scroll_x(current: f32, delta: f32, max: f32) -> f32 {
+    (current + delta).clamp(-max.max(0.0), 0.0)
+}
+
+fn send_caption(name: &str, count: usize) -> String {
+    if count > 1 {
+        format!("{name} {count}")
+    } else {
+        name.to_string()
+    }
 }
 
 /// Newest files first, then reversed so the oldest of that set paints at the
@@ -172,16 +185,18 @@ pub(super) fn drop_veil() -> impl IntoElement {
 
 fn tray_action(
     id: &'static str,
-    title: &'static str,
+    title: impl Into<SharedString>,
     icon: &'static str,
     cx: &mut Context<Island>,
     on_click: impl Fn(&mut Island, &mut Context<Island>) + 'static,
     on_drop: impl Fn(&mut Island, &gpui::ExternalPaths, &mut Context<Island>) + 'static,
 ) -> impl IntoElement {
+    let title = title.into();
     div()
         .id(id)
         .flex_1()
         .h_full()
+        .min_h(px(theme::HIT_MIN))
         .rounded(px(TRAY_ACTION_RADIUS))
         .bg(theme::FILL)
         .flex()
@@ -220,10 +235,10 @@ fn tray_action(
         )
 }
 
-fn airdrop_target(cx: &mut Context<Island>) -> impl IntoElement {
+fn airdrop_target(count: usize, cx: &mut Context<Island>) -> impl IntoElement {
     tray_action(
         "airdrop-target",
-        "AirDrop",
+        send_caption("AirDrop", count),
         "airdrop",
         cx,
         |this, cx| {
@@ -239,10 +254,10 @@ fn airdrop_target(cx: &mut Context<Island>) -> impl IntoElement {
     )
 }
 
-fn localsend_target(cx: &mut Context<Island>) -> impl IntoElement {
+fn localsend_target(count: usize, cx: &mut Context<Island>) -> impl IntoElement {
     tray_action(
         "localsend-target",
-        "Local Send",
+        send_caption("Local Send", count),
         "share",
         cx,
         |this, cx| {
@@ -279,6 +294,20 @@ fn format_file_size(bytes: i64) -> String {
     }
 }
 
+fn file_is_image(file: &FileTrayItem) -> bool {
+    let mime = file.mime_type.to_ascii_lowercase();
+    let name = file.name.to_ascii_lowercase();
+    let ext = std::path::Path::new(&name)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("");
+    mime.starts_with("image")
+        || matches!(
+            ext,
+            "png" | "jpg" | "jpeg" | "gif" | "webp" | "heic" | "tif" | "tiff"
+        )
+}
+
 fn file_kind(file: &FileTrayItem) -> (&'static str, gpui::Rgba) {
     let mime = file.mime_type.to_ascii_lowercase();
     let name = file.name.to_ascii_lowercase();
@@ -286,12 +315,7 @@ fn file_kind(file: &FileTrayItem) -> (&'static str, gpui::Rgba) {
         .extension()
         .and_then(|e| e.to_str())
         .unwrap_or("");
-    if mime.starts_with("image")
-        || matches!(
-            ext,
-            "png" | "jpg" | "jpeg" | "gif" | "webp" | "heic" | "tif" | "tiff"
-        )
-    {
+    if file_is_image(file) {
         ("files", theme::rgba_from_u32(THUMB_IMAGE, 1.0))
     } else if ext == "pdf" || mime.contains("pdf") {
         ("files", theme::DESTRUCTIVE)
@@ -330,16 +354,28 @@ fn file_preview(file: &FileTrayItem) -> impl IntoElement {
         .flex_shrink_0()
         .rounded(px(FILE_THUMB_RADIUS))
         .overflow_hidden()
-        .bg(fill)
-        .flex()
-        .items_center()
-        .justify_center()
-        .child(lucide_color(glyph, FILE_THUMB_ICON, theme::LABEL))
+        .when(file_is_image(file), |d| {
+            d.child(
+                img(PathBuf::from(&file.path))
+                    .object_fit(ObjectFit::Cover)
+                    .size(px(FILE_THUMB))
+                    .rounded(px(FILE_THUMB_RADIUS)),
+            )
+        })
+        .when(!file_is_image(file), |d| {
+            d.bg(fill)
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(lucide_color(glyph, FILE_THUMB_ICON, theme::LABEL))
+        })
 }
 
 fn file_card(file: &FileTrayItem, cx: &mut Context<Island>) -> impl IntoElement {
     let path = file.path.clone();
-    let path_send = path.clone();
+    let path_menu = path.clone();
+    let path_hover = path.clone();
+    let path_more = path.clone();
     let path_rm = path.clone();
     let name = file.name.clone();
 
@@ -362,12 +398,24 @@ fn file_card(file: &FileTrayItem, cx: &mut Context<Island>) -> impl IntoElement 
         .bg(theme::FILL_TERTIARY)
         .border_1()
         .border_color(theme::FILL_TERTIARY)
+        .hover(|s| s.bg(theme::FILL_SECONDARY))
         .cursor(CursorStyle::PointingHand)
+        .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+            if *hovered {
+                if this.tray_hover.as_deref() != Some(path_hover.as_str()) {
+                    this.tray_hover = Some(path_hover.clone());
+                    cx.notify();
+                }
+            } else if this.tray_hover.as_deref() == Some(path_hover.as_str()) {
+                this.tray_hover = None;
+                cx.notify();
+            }
+        }))
         .on_mouse_down(
             MouseButton::Left,
             cx.listener(move |this, _: &MouseDownEvent, _, cx| {
                 cx.stop_propagation();
-                this.arm_file_drag(path.clone());
+                this.arm_file_drag(vec![path.clone()]);
             }),
         )
         .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
@@ -391,26 +439,50 @@ fn file_card(file: &FileTrayItem, cx: &mut Context<Island>) -> impl IntoElement 
             MouseButton::Right,
             cx.listener(move |this, _: &MouseDownEvent, _, cx| {
                 cx.stop_propagation();
-                let paths = vec![PathBuf::from(path_send.clone())];
-                if share::localsend::app_installed() {
-                    this.start_localsend(paths, cx);
-                } else {
-                    nook_core::haptics::trigger(None);
-                    crate::platform::share_via_airdrop(&paths);
-                    cx.notify();
-                }
+                this.tray_menu = Some(path_menu.clone());
+                cx.notify();
             }),
         )
         .child(file_preview(file))
         .child(
             div()
-                .id(SharedString::from(format!("rm-{}", name)))
+                .id(SharedString::from(format!("more-{}", file.path)))
                 .absolute()
-                .top(px(-4.))
-                .right(px(-4.))
+                .top(px(4.))
+                .left(px(4.))
                 .size(px(theme::HIT_MIN))
-                .rounded_full()
-                .bg(theme::SCRIM)
+                .flex()
+                .items_center()
+                .justify_center()
+                .opacity(0.)
+                .group_hover("file-card", |s| s.opacity(1.0))
+                .cursor(CursorStyle::PointingHand)
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                        cx.stop_propagation();
+                        this.tray_menu = Some(path_more.clone());
+                        cx.notify();
+                    }),
+                )
+                .child(
+                    div()
+                        .size(px(20.))
+                        .rounded_full()
+                        .bg(theme::SCRIM)
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(lucide_color("ellipsis", 12.0, theme::LABEL)),
+                ),
+        )
+        .child(
+            div()
+                .id(SharedString::from(format!("rm-{}", file.path)))
+                .absolute()
+                .top(px(4.))
+                .right(px(4.))
+                .size(px(theme::HIT_MIN))
                 .flex()
                 .items_center()
                 .justify_center()
@@ -424,7 +496,16 @@ fn file_card(file: &FileTrayItem, cx: &mut Context<Island>) -> impl IntoElement 
                         this.remove_file(&path_rm, cx);
                     }),
                 )
-                .child(lucide_color("x", 12.0, theme::LABEL)),
+                .child(
+                    div()
+                        .size(px(20.))
+                        .rounded_full()
+                        .bg(theme::SCRIM)
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(lucide_color("x", 12.0, theme::LABEL)),
+                ),
         )
         .child(
             div()
@@ -454,6 +535,129 @@ fn file_card(file: &FileTrayItem, cx: &mut Context<Island>) -> impl IntoElement 
         )
 }
 
+fn drop_ghost_card() -> impl IntoElement {
+    div()
+        .id("tray-drop-ghost")
+        .w(px(FILE_CARD_W))
+        .h_full()
+        .flex()
+        .flex_col()
+        .flex_shrink_0()
+        .items_center()
+        .justify_center()
+        .gap(px(FILE_CARD_GAP))
+        .px(px(FILE_CARD_PAD_X))
+        .py(px(FILE_CARD_PAD_Y))
+        .rounded(px(FILE_CARD_RADIUS))
+        .bg(theme::with_alpha(theme::ACCENT, 0.1))
+        .border_1()
+        .border_dashed()
+        .border_color(theme::ACCENT)
+        .child(lucide_color("plus", FILE_THUMB_ICON, theme::ACCENT))
+        .child(
+            div()
+                .w_full()
+                .text_size(px(theme::FOOTNOTE.size))
+                .line_height(px(theme::FOOTNOTE.leading))
+                .font_weight(FontWeight::NORMAL)
+                .text_color(theme::ACCENT)
+                .text_center()
+                .child(RELEASE_HINT),
+        )
+}
+
+fn sheet_tile(
+    id: &'static str,
+    title: &'static str,
+    icon: &'static str,
+    icon_color: gpui::Rgba,
+    label_color: gpui::Rgba,
+    cx: &mut Context<Island>,
+    on_click: impl Fn(&mut Island, &mut Context<Island>) + 'static,
+) -> impl IntoElement {
+    div()
+        .id(id)
+        .flex_1()
+        .h_full()
+        .min_h(px(theme::HIT_MIN))
+        .rounded(px(TRAY_ACTION_RADIUS))
+        .bg(theme::FILL)
+        .flex()
+        .flex_col()
+        .items_center()
+        .justify_center()
+        .gap(px(6.))
+        .py(px(10.))
+        .cursor(CursorStyle::PointingHand)
+        .hover(|s| s.opacity(0.92))
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                cx.stop_propagation();
+                this.tray_menu = None;
+                on_click(this, cx);
+                cx.notify();
+            }),
+        )
+        .child(lucide_color(icon, TRAY_ACTION_ICON, icon_color))
+        .child(
+            div()
+                .text_size(px(theme::FOOTNOTE.size))
+                .line_height(px(theme::FOOTNOTE.leading))
+                .font_weight(FontWeight::NORMAL)
+                .text_color(label_color)
+                .text_center()
+                .truncate()
+                .child(title),
+        )
+}
+
+fn drag_all_handle(files: &[FileTrayItem], cx: &mut Context<Island>) -> impl IntoElement {
+    let all_paths: Vec<String> = files.iter().map(|f| f.path.clone()).collect();
+    div()
+        .id("tray-drag-all")
+        .w_full()
+        .h(px(theme::HIT_MIN))
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(8.))
+        .cursor(CursorStyle::OpenHand)
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                cx.stop_propagation();
+                this.arm_file_drag(all_paths.clone());
+            }),
+        )
+        .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
+            if event.dragging() {
+                cx.stop_propagation();
+                if this.poll_pending_file_drag(Some(window)) {
+                    cx.notify();
+                }
+            }
+        }))
+        .on_mouse_up(
+            MouseButton::Left,
+            cx.listener(|this, _: &MouseUpEvent, _, cx| {
+                cx.stop_propagation();
+                if this.finish_file_press() {
+                    cx.notify();
+                }
+            }),
+        )
+        .child(compact_left(files))
+        .child(
+            div()
+                .text_size(px(theme::FOOTNOTE.size))
+                .line_height(px(theme::FOOTNOTE.leading))
+                .font_weight(FontWeight::NORMAL)
+                .text_color(theme::LABEL)
+                .child("Drag All"),
+        )
+}
+
 impl Island {
     pub(super) fn render_files(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let hot = self.file_drag;
@@ -471,8 +675,10 @@ impl Island {
                 .into_any_element();
         }
 
+        let n = self.files.len();
         let mut strip = div()
             .id("files-list")
+            .track_scroll(&self.files_scroll)
             .flex()
             .flex_row()
             .flex_1()
@@ -481,11 +687,31 @@ impl Island {
             .h_full()
             .min_w(px(0.))
             .overflow_x_scroll()
+            .overflow_y_hidden()
             .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _, cx| {
-                this.on_wheel(event, cx);
+                if this.files_scroll.max_offset().width > px(0.) {
+                    cx.stop_propagation();
+                    let delta = event.delta.pixel_delta(px(16.));
+                    let dx: f32 = delta.x.into();
+                    let dy: f32 = delta.y.into();
+                    let along = if dx.abs() >= dy.abs() { dx } else { dy };
+                    let offset = this.files_scroll.offset();
+                    let max: f32 = this.files_scroll.max_offset().width.into();
+                    // overflow_x_scroll already applied x (or y-as-x) this bubble.
+                    let already = if dx != 0.0 { dx } else { dy };
+                    let current: f32 = f32::from(offset.x) - already;
+                    let x = strip_scroll_x(current, along, max);
+                    this.files_scroll.set_offset(point(px(x), offset.y));
+                    cx.notify();
+                } else {
+                    this.on_wheel(event, cx);
+                }
             }));
         for file in &self.files {
             strip = strip.child(file_card(file, cx));
+        }
+        if hot {
+            strip = strip.child(drop_ghost_card());
         }
 
         let send = div()
@@ -494,8 +720,10 @@ impl Island {
             .flex_1()
             .w_full()
             .gap(px(8.))
-            .child(airdrop_target(cx))
-            .child(localsend_target(cx));
+            .child(airdrop_target(n, cx))
+            .when(share::localsend::app_installed(), |d| {
+                d.child(localsend_target(n, cx))
+            });
 
         let actions = div()
             .w(px(TRAY_ACTIONS_W))
@@ -506,12 +734,13 @@ impl Island {
             .items_center()
             .justify_center()
             .gap(px(8.))
+            .when(n > 1, |d| d.child(drag_all_handle(&self.files, cx)))
             .child(send)
             .child(
                 div()
                     .id("tray-clear")
                     .w_full()
-                    .py(px(6.))
+                    .h(px(theme::HIT_MIN))
                     .rounded(px(theme::CONTROL_RADIUS))
                     .flex()
                     .items_center()
@@ -540,11 +769,22 @@ impl Island {
                 }))
             });
 
+        let menu_file = self
+            .tray_menu
+            .as_ref()
+            .and_then(|path| self.files.iter().find(|f| &f.path == path));
+
         div()
+            .relative()
             .flex()
             .items_center()
             .size_full()
             .gap(px(TRAY_ROW_GAP))
+            .when(hot, |d| {
+                d.border_2()
+                    .border_color(theme::ACCENT)
+                    .rounded(px(TRAY_ZONE_RADIUS))
+            })
             .child(strip)
             .child(
                 div()
@@ -554,7 +794,10 @@ impl Island {
                     .bg(theme::SEPARATOR),
             )
             .child(actions)
-            .when(picking, |d| d.relative().child(self.localsend_picker(cx)))
+            .when(picking, |d| d.child(self.localsend_picker(cx)))
+            .when_some(menu_file.cloned(), |d, file| {
+                d.child(self.tray_action_sheet(&file, cx))
+            })
             .into_any_element()
     }
 
@@ -584,6 +827,168 @@ impl Island {
             )
             .child(label(DROP_HINT, theme::SUBHEADLINE, false))
             .when(picking, |d| d.child(self.localsend_picker(cx)))
+    }
+
+    fn tray_action_sheet(&self, file: &FileTrayItem, cx: &mut Context<Self>) -> impl IntoElement {
+        let path = file.path.clone();
+        let name = file.name.clone();
+        let size = format_file_size(file.size);
+        let localsend = share::localsend::app_installed();
+
+        let open_path = path.clone();
+        let look_path = path.clone();
+        let reveal_path = path.clone();
+        let air_path = path.clone();
+        let rm_path = path.clone();
+
+        let mut tiles = div()
+            .id("tray-sheet-actions")
+            .flex()
+            .flex_row()
+            .flex_1()
+            .min_w(px(0.))
+            .h_full()
+            .gap(px(8.))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|_, _: &MouseDownEvent, _, cx| {
+                    cx.stop_propagation();
+                }),
+            )
+            .child(sheet_tile(
+                "tray-sheet-open",
+                "Open",
+                "files",
+                theme::ACCENT,
+                theme::LABEL,
+                cx,
+                move |_, _| {
+                    let _ = nook_core::files::open_file(open_path.clone());
+                },
+            ))
+            .child(sheet_tile(
+                "tray-sheet-look",
+                "Quick Look",
+                "eye",
+                theme::ACCENT,
+                theme::LABEL,
+                cx,
+                move |this, _| {
+                    this.quick_look_file(&look_path);
+                },
+            ))
+            .child(sheet_tile(
+                "tray-sheet-finder",
+                "Show in Finder",
+                "folder",
+                theme::ACCENT,
+                theme::LABEL,
+                cx,
+                move |this, _| {
+                    this.reveal_file(&reveal_path);
+                },
+            ))
+            .child(sheet_tile(
+                "tray-sheet-airdrop",
+                "AirDrop",
+                "airdrop",
+                theme::ACCENT,
+                theme::LABEL,
+                cx,
+                move |_, _| {
+                    nook_core::haptics::trigger(None);
+                    crate::platform::share_via_airdrop(&[PathBuf::from(air_path.clone())]);
+                },
+            ));
+        if localsend {
+            let send_path = path.clone();
+            tiles = tiles.child(sheet_tile(
+                "tray-sheet-localsend",
+                "LocalSend",
+                "share",
+                theme::ACCENT,
+                theme::LABEL,
+                cx,
+                move |this, cx| {
+                    this.start_localsend(vec![PathBuf::from(send_path.clone())], cx);
+                },
+            ));
+        }
+        tiles = tiles.child(sheet_tile(
+            "tray-sheet-remove",
+            "Remove",
+            "trash-2",
+            theme::DESTRUCTIVE,
+            theme::DESTRUCTIVE,
+            cx,
+            move |this, cx| {
+                this.remove_file(&rm_path, cx);
+            },
+        ));
+
+        let preview = div()
+            .id("tray-sheet-file")
+            .flex_shrink_0()
+            .w(px(FILE_CARD_W))
+            .h_full()
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .gap(px(FILES_CAPTION_GAP))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|_, _: &MouseDownEvent, _, cx| {
+                    cx.stop_propagation();
+                }),
+            )
+            .child(file_preview(file))
+            .child(
+                div()
+                    .w_full()
+                    .text_size(px(FILES_NAME))
+                    .line_height(px(theme::SUBHEADLINE.leading))
+                    .text_color(theme::LABEL)
+                    .font_weight(FontWeight::NORMAL)
+                    .text_center()
+                    .truncate()
+                    .child(name),
+            )
+            .child(
+                div()
+                    .text_size(px(theme::FOOTNOTE.size))
+                    .line_height(px(theme::FOOTNOTE.leading))
+                    .text_color(theme::secondary_label())
+                    .child(size),
+            );
+
+        div()
+            .id("tray-action-sheet")
+            .absolute()
+            .inset_0()
+            .rounded(px(TRAY_ZONE_RADIUS))
+            .overflow_hidden()
+            .bg(theme::SCRIM)
+            .flex()
+            .flex_row()
+            .p(px(12.))
+            .gap(px(8.))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                    cx.stop_propagation();
+                    this.tray_menu = None;
+                    cx.notify();
+                }),
+            )
+            .child(preview)
+            .child(tiles)
+            .child(
+                div().flex_shrink_0().child(text_btn("Done", cx, |this, _, cx| {
+                    this.tray_menu = None;
+                    cx.notify();
+                })),
+            )
     }
 
     fn localsend_picker(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -687,11 +1092,26 @@ impl Island {
         }
         // files.rs renders the Undo chip
         self.last_cleared_files = Some((std::mem::take(&mut self.files), Instant::now()));
+        self.tray_menu = None;
+        self.tray_hover = None;
         let _ = nook_core::files::save_file_tray(self.files.clone());
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_secs(5))
+                .await;
+            this.update(cx, |_, cx| cx.notify()).ok();
+        })
+        .detach();
         cx.notify();
     }
 
     pub(crate) fn remove_file(&mut self, path: &str, cx: &mut Context<Self>) {
+        if self.tray_menu.as_deref() == Some(path) {
+            self.tray_menu = None;
+        }
+        if self.tray_hover.as_deref() == Some(path) {
+            self.tray_hover = None;
+        }
         self.files.retain(|f| f.path != path);
         let _ = nook_core::files::save_file_tray(self.files.clone());
         cx.notify();
@@ -977,6 +1397,16 @@ mod tests {
         assert_eq!(format_file_size((2.4 * 1024.0 * 1024.0) as i64), "2.4 MB");
         assert_eq!(format_file_size(18 * 1024 * 1024), "18 MB");
         assert_eq!(format_file_size(800), "800 B");
+    }
+
+    #[test]
+    fn strip_scroll_x_clamps_to_the_scrollable_range() {
+        assert_eq!(strip_scroll_x(0.0, -12.0, 80.0), -12.0);
+        assert_eq!(strip_scroll_x(0.0, 12.0, 80.0), 0.0);
+        assert_eq!(strip_scroll_x(-80.0, -12.0, 80.0), -80.0);
+        assert_eq!(strip_scroll_x(-40.0, 100.0, 80.0), 0.0);
+        assert_eq!(strip_scroll_x(-10.0, -100.0, 80.0), -80.0);
+        assert_eq!(strip_scroll_x(-20.0, -5.0, 0.0), 0.0);
     }
 
     #[test]

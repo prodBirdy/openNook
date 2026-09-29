@@ -1,0 +1,305 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 0563972..12faa12 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -20,6 +20,7 @@ set(ADAPTER_SOURCES
+     src/adapter/globals.m
+     src/adapter/keys.m
+     src/adapter/now_playing.m
++    src/adapter/queue.m
+     src/adapter/repeat.m
+     src/adapter/seek.m
+     src/adapter/send.m
+diff --git a/bin/mediaremote-adapter.pl b/bin/mediaremote-adapter.pl
+index f4c794b..e5a315e 100755
+--- a/bin/mediaremote-adapter.pl
++++ b/bin/mediaremote-adapter.pl
+@@ -32,6 +32,7 @@ FUNCTION:
+   speed    Sets the playback speed
+   test     Tests if the adapter is entitled to use the MediaRemote framework.
+            An exit code other than 0 indicates the adapter is non-functional
++  queue    Prints the now-playing playback queue (title/artist/album, ≤10 items)
+ 
+ PARAMS:
+   send(command)
+@@ -120,7 +121,8 @@ fail "Invalid function name: '$function_name'"
+   || $function_name eq "shuffle"
+   || $function_name eq "repeat"
+   || $function_name eq "speed"
+-  || $function_name eq "test";
++  || $function_name eq "test"
++  || $function_name eq "queue";
+ 
+ sub parse_options {
+   my ($start_index) = @_;
+@@ -262,6 +264,9 @@ elsif ($function_name eq "speed") {
+ elsif ($function_name eq "test") {
+   $symbol_name = "adapter_test";
+ }
++elsif ($function_name eq "queue") {
++  $symbol_name = "adapter_queue";
++}
+ 
+ if (defined shift @ARGV) {
+   fail "Too many arguments";
+diff --git a/include/MediaRemoteAdapter.h b/include/MediaRemoteAdapter.h
+index c90321c..e4811ac 100644
+--- a/include/MediaRemoteAdapter.h
++++ b/include/MediaRemoteAdapter.h
+@@ -119,6 +119,12 @@ extern void adapter_repeat_env();
+ extern void adapter_speed(int speed);
+ extern void adapter_speed_env();
+ 
++// Prints the current now-playing playback queue as JSON:
++// {"items":[{"title":..,"artist":..,"album":..,"duration":..,"identifier":..}], "index":N}
++// At most 10 items. "index" is the now-playing item's queue index, or null.
++extern void adapter_queue();
++extern void adapter_queue_env();
++
+ // Tests whether the process is entitled to use the MediaRemote framework.
+ // Exits with exit code 0, if it is. Any other exit code means it is not.
+ extern void adapter_test();
+diff --git a/src/adapter/queue.h b/src/adapter/queue.h
+new file mode 100644
+index 0000000..6b558ae
+--- /dev/null
++++ b/src/adapter/queue.h
+@@ -0,0 +1,7 @@
++#ifndef MEDIAREMOTEADAPTER_ADAPTER_QUEUE_H
++#define MEDIAREMOTEADAPTER_ADAPTER_QUEUE_H
++
++void adapter_queue(void);
++void adapter_queue_env(void);
++
++#endif
+diff --git a/src/adapter/queue.m b/src/adapter/queue.m
+new file mode 100644
+index 0000000..51132be
+--- /dev/null
++++ b/src/adapter/queue.m
+@@ -0,0 +1,225 @@
++// Copyright (c) 2025 Jonas van den Berg
++// This file is licensed under the BSD 3-Clause License.
++
++#import <Foundation/Foundation.h>
++#import <objc/message.h>
++#import <objc/runtime.h>
++
++#import "MediaRemoteAdapter.h"
++#import "adapter/globals.h"
++#import "adapter/queue.h"
++#import "private/MediaRemote.h"
++#import "utility/helpers.h"
++
++#define QUEUE_TIMEOUT_MILLIS 4000
++#define QUEUE_MAX_ITEMS 10
++
++@interface MRPlaybackQueueRequest : NSObject
+++ (instancetype)defaultPlaybackQueueRequest;
++- (void)setLocation:(NSUInteger)location;
++- (void)setLength:(NSUInteger)length;
++- (void)setIncludeMetadata:(BOOL)include;
++- (void)setIncludeInfo:(BOOL)include;
++@end
++
++@interface MRNowPlayingControllerConfiguration : NSObject
++- (instancetype)initWithOrigin:(id)origin;
++- (void)setPlaybackQueueRequest:(id)request;
++- (void)setRequestPlaybackQueue:(BOOL)value;
++- (void)setSingleShot:(BOOL)value;
++@end
++
++@interface MRNowPlayingController : NSObject
+++ (void)performRequest:(id)configuration withCompletion:(void (^)(id, id))completion;
++@end
++
++@interface MRNowPlayingRequest : NSObject
+++ (id)localNowPlayingPlayerPath;
++@end
++
++@interface MRPlayerPath : NSObject
++- (id)origin;
++@end
++
++@interface MRNowPlayingPlayerResponse : NSObject
++- (id)playbackQueue;
++@end
++
++@interface MRPlaybackQueue : NSObject
++- (NSArray *)contentItems;
++@end
++
++@interface MRContentItem : NSObject
++- (NSDictionary *)nowPlayingInfo;
++- (NSString *)identifier;
++- (id)metadata;
++@end
++
++static id jsonSafe(id value) {
++    if ([value isKindOfClass:[NSString class]] ||
++        [value isKindOfClass:[NSNumber class]] || value == [NSNull null]) {
++        return value;
++    }
++    if ([value respondsToSelector:@selector(stringValue)]) {
++        return [value stringValue];
++    }
++    return value ? [value description] : [NSNull null];
++}
++
++static NSDictionary *itemPayload(id item) {
++    NSMutableDictionary *out = [NSMutableDictionary dictionary];
++    NSDictionary *info = nil;
++    if ([item respondsToSelector:@selector(nowPlayingInfo)]) {
++        info = [item nowPlayingInfo];
++    }
++    id meta = [item respondsToSelector:@selector(metadata)] ? [item metadata] : nil;
++    id (^pick)(NSArray *) = ^id(NSArray *keys) {
++      if ([info isKindOfClass:[NSDictionary class]]) {
++          for (id key in keys) {
++              id v = info[key];
++              if (v)
++                  return v;
++          }
++      }
++      if (meta) {
++          for (id key in keys) {
++              if ([key isKindOfClass:[NSString class]] &&
++                  [meta respondsToSelector:NSSelectorFromString(key)]) {
++#pragma clang diagnostic push
++#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
++                  id v = [meta performSelector:NSSelectorFromString(key)];
++#pragma clang diagnostic pop
++                  if (v)
++                      return v;
++              }
++          }
++      }
++      return nil;
++    };
++    id title = pick(@[
++        kMRMediaRemoteNowPlayingInfoTitle, @"title", @"localizedTitle"
++    ]);
++    id artist = pick(@[ kMRMediaRemoteNowPlayingInfoArtist, @"artist" ]);
++    id album = pick(@[ kMRMediaRemoteNowPlayingInfoAlbum, @"albumName", @"album" ]);
++    id duration = pick(@[ kMRMediaRemoteNowPlayingInfoDuration, @"duration" ]);
++    id identifier = pick(@[
++        kMRMediaRemoteNowPlayingInfoContentItemIdentifier, @"identifier"
++    ]);
++    if (!identifier && [item respondsToSelector:@selector(identifier)]) {
++        identifier = [item identifier];
++    }
++    if (title)
++        out[@"title"] = jsonSafe(title);
++    if (artist)
++        out[@"artist"] = jsonSafe(artist);
++    if (album)
++        out[@"album"] = jsonSafe(album);
++    if ([duration isKindOfClass:[NSNumber class]])
++        out[@"duration"] = duration;
++    else if (duration)
++        out[@"duration"] = jsonSafe(duration);
++    if (identifier)
++        out[@"identifier"] = jsonSafe(identifier);
++    return out;
++}
++
++void adapter_queue() {
++    [[NSBundle bundleWithPath:@"/System/Library/PrivateFrameworks/"
++                              @"MediaRemote.framework"] load];
++
++    Class Req = NSClassFromString(@"MRNowPlayingRequest");
++    Class PQR = NSClassFromString(@"MRPlaybackQueueRequest");
++    Class Cfg = NSClassFromString(@"MRNowPlayingControllerConfiguration");
++    Class NPC = NSClassFromString(@"MRNowPlayingController");
++    if (!Req || !PQR || !Cfg || !NPC) {
++        fail(@"MediaRemote playback-queue classes are unavailable");
++        return;
++    }
++
++    id path = ((id(*)(Class, SEL))objc_msgSend)(
++        Req, @selector(localNowPlayingPlayerPath));
++    id origin = path ? ((id(*)(id, SEL))objc_msgSend)(path, @selector(origin))
++                     : nil;
++    if (!origin) {
++        printOut(@"{\"items\":[],\"index\":null}");
++        return;
++    }
++
++    id qreq = ((id(*)(Class, SEL))objc_msgSend)(
++        PQR, @selector(defaultPlaybackQueueRequest));
++    ((void (*)(id, SEL, NSUInteger))objc_msgSend)(qreq, @selector(setLocation:),
++                                                  0);
++    ((void (*)(id, SEL, NSUInteger))objc_msgSend)(qreq, @selector(setLength:),
++                                                  QUEUE_MAX_ITEMS);
++    ((void (*)(id, SEL, BOOL))objc_msgSend)(qreq, @selector(setIncludeMetadata:),
++                                            YES);
++    ((void (*)(id, SEL, BOOL))objc_msgSend)(qreq, @selector(setIncludeInfo:),
++                                            YES);
++
++    id cfg = ((id(*)(id, SEL, id))objc_msgSend)([Cfg alloc],
++                                                @selector(initWithOrigin:),
++                                                origin);
++    ((void (*)(id, SEL, id))objc_msgSend)(cfg, @selector(setPlaybackQueueRequest:),
++                                          qreq);
++    ((void (*)(id, SEL, BOOL))objc_msgSend)(cfg, @selector(setRequestPlaybackQueue:),
++                                            YES);
++    ((void (*)(id, SEL, BOOL))objc_msgSend)(cfg, @selector(setSingleShot:), YES);
++
++    __block id response = nil;
++    dispatch_semaphore_t sem = dispatch_semaphore_create(0);
++    void (^comp)(id, id) = ^(id a, id b) {
++      (void)b;
++      response = a;
++      dispatch_semaphore_signal(sem);
++    };
++    ((void (*)(Class, SEL, id, id))objc_msgSend)(
++        NPC, @selector(performRequest:withCompletion:), cfg, comp);
++
++    dispatch_time_t timeout =
++        dispatch_time(DISPATCH_TIME_NOW, QUEUE_TIMEOUT_MILLIS * NSEC_PER_MSEC);
++    if (dispatch_semaphore_wait(sem, timeout) != 0) {
++        failf(@"Reading playback queue timed out after %d milliseconds",
++              QUEUE_TIMEOUT_MILLIS);
++        return;
++    }
++
++    __block NSNumber *index = nil;
++    dispatch_semaphore_t infoSem = dispatch_semaphore_create(0);
++    g_mediaRemote.getNowPlayingInfo(g_serialdispatchQueue, ^(NSDictionary *info) {
++      id qidx = info[kMRMediaRemoteNowPlayingInfoQueueIndex];
++      if ([qidx isKindOfClass:[NSNumber class]])
++          index = qidx;
++      dispatch_semaphore_signal(infoSem);
++    });
++    dispatch_semaphore_wait(
++        infoSem, dispatch_time(DISPATCH_TIME_NOW, 1500 * NSEC_PER_MSEC));
++
++    NSMutableArray *items = [NSMutableArray array];
++    id queue = nil;
++    if ([response respondsToSelector:@selector(playbackQueue)]) {
++        queue = [response playbackQueue];
++    }
++    NSArray *content = nil;
++    if ([queue respondsToSelector:@selector(contentItems)]) {
++        content = [queue contentItems];
++    }
++    if ([content isKindOfClass:[NSArray class]]) {
++        NSUInteger n = MIN((NSUInteger)QUEUE_MAX_ITEMS, content.count);
++        for (NSUInteger i = 0; i < n; i++) {
++            [items addObject:itemPayload(content[i])];
++        }
++    }
++
++    NSDictionary *payload = @{
++        @"items" : items,
++        @"index" : index ? index : [NSNull null],
++    };
++    NSString *json = serializeJsonDictionarySafe(payload, NO);
++    if (!json) {
++        fail(@"Failed to serialize playback queue");
++        return;
++    }
++    printOut(json);
++}
++
++void adapter_queue_env() { adapter_queue(); }

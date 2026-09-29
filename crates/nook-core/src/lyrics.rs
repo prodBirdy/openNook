@@ -60,7 +60,12 @@ impl SyncedLyrics {
 
     /// Three-line highlight window: previous, current, next.
     pub fn highlight_window(&self, pos_ms: u64) -> [Option<&str>; 3] {
-        match self.active_index(pos_ms) {
+        self.highlight_at(self.active_index(pos_ms))
+    }
+
+    /// Three-line window around a committed active index.
+    pub fn highlight_at(&self, index: Option<usize>) -> [Option<&str>; 3] {
+        match index {
             None => [
                 None,
                 None,
@@ -72,6 +77,21 @@ impl SyncedLyrics {
                     .map(|line| line.text.as_str()),
                 self.lines.get(i).map(|line| line.text.as_str()),
                 self.lines.get(i + 1).map(|line| line.text.as_str()),
+            ],
+        }
+    }
+
+    /// Five-line window around a committed active index: two past, current, two next.
+    pub fn highlight_at_5(&self, index: Option<usize>) -> [Option<&str>; 5] {
+        let text = |j: usize| self.lines.get(j).map(|line| line.text.as_str());
+        match index {
+            None => [None, None, None, text(0), text(1)],
+            Some(i) => [
+                i.checked_sub(2).and_then(|j| text(j)),
+                i.checked_sub(1).and_then(|j| text(j)),
+                text(i),
+                text(i + 1),
+                text(i + 2),
             ],
         }
     }
@@ -582,6 +602,32 @@ mod tests {
             ..SyncedLyrics::default()
         };
         assert_eq!(late.highlight_window(0), [None, None, Some("A")]);
+    }
+
+    #[test]
+    fn highlight_at_5_keeps_two_lines_of_context() {
+        let lyrics = SyncedLyrics {
+            lines: lrc(
+                "[00:00.00] A\n[00:10.00] B\n[00:20.00] C\n[00:30.00] D\n[00:40.00] E\n",
+            ),
+            ..SyncedLyrics::default()
+        };
+        assert_eq!(
+            lyrics.highlight_at_5(None),
+            [None, None, None, Some("A"), Some("B")]
+        );
+        assert_eq!(
+            lyrics.highlight_at_5(Some(0)),
+            [None, None, Some("A"), Some("B"), Some("C")]
+        );
+        assert_eq!(
+            lyrics.highlight_at_5(Some(2)),
+            [Some("A"), Some("B"), Some("C"), Some("D"), Some("E")]
+        );
+        assert_eq!(
+            lyrics.highlight_at_5(Some(4)),
+            [Some("C"), Some("D"), Some("E"), None, None]
+        );
     }
 
     #[test]

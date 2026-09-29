@@ -11,7 +11,7 @@ use gpui::{
     SharedString, Window,
 };
 use nook_core::high_alert::HighAlertKind;
-use nook_core::settings::{AppSettings, IslandSwatch, WidgetModule, ISLAND_SWATCHES};
+use nook_core::settings::{AppSettings, WidgetModule};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -90,9 +90,9 @@ enum SettingsCategory {
     General = 0,
     Widgets = 1,
     Appearance = 2,
-    Shortcuts = 3,
+    // 3 was Shortcuts — retired; from_u8 maps it to General.
     Privacy = 4,
-    Updates = 5,
+    // 5 was Updates — retired; from_u8 maps it to General.
     About = 6,
 }
 
@@ -101,10 +101,9 @@ impl SettingsCategory {
         match v {
             1 => Self::Widgets,
             2 => Self::Appearance,
-            3 => Self::Shortcuts,
             4 => Self::Privacy,
-            5 => Self::Updates,
             6 => Self::About,
+            // 3 (old Shortcuts) and 5 (old Updates) fall through to General.
             _ => Self::General,
         }
     }
@@ -114,9 +113,7 @@ impl SettingsCategory {
             Self::General => "General",
             Self::Appearance => "Appearance",
             Self::Widgets => "Widgets",
-            Self::Shortcuts => "Shortcuts",
             Self::Privacy => "Privacy",
-            Self::Updates => "Updates",
             Self::About => "About",
         }
     }
@@ -126,9 +123,7 @@ impl SettingsCategory {
             Self::General => "settings",
             Self::Appearance => "sun-moon",
             Self::Widgets => "layout-grid",
-            Self::Shortcuts => "keyboard",
             Self::Privacy => "lock",
-            Self::Updates => "arrow-down-to-line",
             Self::About => "info",
         }
     }
@@ -138,9 +133,7 @@ impl SettingsCategory {
             Self::General | Self::About => theme::rgba_from_u32(0x8E8E93, 1.0),
             Self::Appearance => theme::rgba_from_u32(0x5E5CE6, 1.0),
             Self::Widgets => theme::rgba_from_u32(TILE_BLUE, 1.0),
-            Self::Shortcuts => theme::rgba_from_u32(TILE_ORANGE, 1.0),
             Self::Privacy => theme::SUCCESS,
-            Self::Updates => theme::rgba_from_u32(0x64D2FF, 1.0),
         }
     }
 
@@ -756,11 +749,7 @@ impl gpui::Render for SettingsView {
                 SettingsCategory::Appearance => {
                     self.render_appearance(&settings, cx).into_any_element()
                 }
-                SettingsCategory::Shortcuts => {
-                    self.render_shortcuts(&settings, cx).into_any_element()
-                }
                 SettingsCategory::Privacy => self.render_privacy(cx).into_any_element(),
-                SettingsCategory::Updates => self.render_updates(cx).into_any_element(),
                 SettingsCategory::About => self.render_about(cx).into_any_element(),
                 SettingsCategory::General => self
                     .render_general(&settings, window, alias_focused, pin_focused, cx)
@@ -797,9 +786,6 @@ impl SettingsView {
             .when(show(SettingsCategory::Widgets), |d| {
                 d.child(self.sidebar_item(SettingsCategory::Widgets, cx))
             })
-            .when(show(SettingsCategory::Shortcuts), |d| {
-                d.child(self.sidebar_item(SettingsCategory::Shortcuts, cx))
-            })
             .child(div().h(px(16.)).w_full())
             .child(
                 div().px(px(7.)).pb(px(5.)).child(
@@ -812,9 +798,6 @@ impl SettingsView {
             )
             .when(show(SettingsCategory::Privacy), |d| {
                 d.child(self.sidebar_item(SettingsCategory::Privacy, cx))
-            })
-            .when(show(SettingsCategory::Updates), |d| {
-                d.child(self.sidebar_item(SettingsCategory::Updates, cx))
             })
             .when(show(SettingsCategory::About), |d| {
                 d.child(self.sidebar_item(SettingsCategory::About, cx))
@@ -923,9 +906,6 @@ impl SettingsView {
                 this.pending_destructive = None;
                 this.category = category;
                 this.persist_nav();
-                if category == SettingsCategory::Shortcuts {
-                    this.fetch_shortcuts(cx);
-                }
                 cx.notify();
             }))
             .child(
@@ -1094,14 +1074,8 @@ impl SettingsView {
                             },
                         )
                         .into_any_element(),
-                        action_row("onboard-again", "First-run tips", "Show Again", cx, |_, _, cx| {
-                            if let Err(err) = nook_core::settings::reset_onboarded() {
-                                log::warn!("reset first-run tips: {err}");
-                            }
-                            cx.notify();
-                        }).into_any_element(),
                     ]),
-                    Some("Hover the island to expand. Click the gear on the expanded island to open Settings. Press ⌘Q to quit. First-Run Tips appear again on the next launch."),
+                    Some("Hover the island to expand. Click the gear on the expanded island to open Settings. Press ⌘Q to quit."),
                 ))
                 .child(section(
                     "HUD",
@@ -1252,59 +1226,7 @@ impl SettingsView {
                         self.gradient_row(settings, cx).into_any_element(),
                         self.color_row(settings, cx).into_any_element(),
                     ]),
-                    Some("A custom color replaces the default black island. Compact stays black; the glass gradient fades in when the island expands."),
-                )),
-        )
-    }
-
-    fn render_shortcuts(
-        &mut self,
-        settings: &AppSettings,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let mut rows = vec![
-            action_row(
-                "clock-shortcuts",
-                "Clock Shortcuts",
-                "Install Shortcuts",
-                cx,
-                |_, _, _| {
-                    if let Err(err) = nook_core::shortcuts::import_bundled_shortcuts() {
-                        log::info!("clock shortcuts: {err}");
-                    }
-                },
-            )
-            .into_any_element(),
-            action_row(
-                "lpm-shortcut",
-                "Low Power Mode",
-                "Install Shortcut",
-                cx,
-                |_, _, _| {
-                    if let Err(err) = nook_core::power::install_lpm_shortcut() {
-                        log::warn!("install LPM shortcut: {err}");
-                    }
-                },
-            )
-            .into_any_element(),
-            toggle_row("Apple Clock Timers", settings.sync_clock_timers, cx, |s| {
-                s.sync_clock_timers = !s.sync_clock_timers
-            })
-            .into_any_element(),
-        ];
-        rows.extend(pomodoro_rows(settings, &self.shortcut_catalog, cx));
-        Self::pane(
-            "Shortcuts",
-            Some("Clock, Low Power Mode, and Focus shortcuts the island can run."),
-            div()
-                .id("shortcuts-pane")
-                .flex()
-                .flex_col()
-                .gap(px(16.))
-                .child(section(
-                    "Installed",
-                    settings_group(rows),
-                    Some("Import the bundled Nook Clock shortcuts once to pause, resume, or cancel timers from the island."),
+                    Some("Default keeps the black Live Activity fill. macOS Accent follows System Settings → Appearance. Compact stays black; the glass gradient fades in when the island expands."),
                 )),
         )
     }
@@ -1322,37 +1244,6 @@ impl SettingsView {
                     "Permissions",
                     settings_group(notification_permission_rows(cx)),
                     Some("Captures other apps' banners via Accessibility. Optional usernoted backfill needs a manual Full Disk Access grant."),
-                )),
-        )
-    }
-
-    fn render_updates(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        Self::pane(
-            "Updates",
-            Some("Restore every setting to its default."),
-            div()
-                .id("updates-pane")
-                .flex()
-                .flex_col()
-                .gap(px(16.))
-                .child(section(
-                    "Reset",
-                    settings_group(vec![action_row(
-                        "reset-all",
-                        "All Settings",
-                        self.destructive_caption("reset-all-btn", "Reset to Defaults…"),
-                        cx,
-                        |this, _, cx| {
-                            nook_core::settings::update_app_settings(AppSettings::default());
-                            nook_core::osd::apply(false);
-                            nook_core::weather::invalidate();
-                            *this = SettingsView::new(cx);
-                            this.category = SettingsCategory::Updates;
-                            cx.notify();
-                        },
-                    )
-                    .into_any_element()]),
-                    Some("Returns every setting on every page to its default."),
                 )),
         )
     }
@@ -1392,7 +1283,43 @@ impl SettingsView {
                         .into_any_element(),
                     ]),
                     None::<&str>,
-                )),
+                ))
+                .child(section(
+                    "Reset",
+                    settings_group(vec![action_row(
+                        "reset-all",
+                        "All Settings",
+                        self.destructive_caption("reset-all-btn", "Reset to Defaults…"),
+                        cx,
+                        |this, _, cx| {
+                            nook_core::settings::update_app_settings(AppSettings::default());
+                            nook_core::osd::apply(false);
+                            nook_core::weather::invalidate();
+                            *this = SettingsView::new(cx);
+                            this.category = SettingsCategory::About;
+                            cx.notify();
+                        },
+                    )
+                    .into_any_element()]),
+                    Some("Returns every setting on every page to its default."),
+                ))
+                .when(cfg!(debug_assertions), |d| {
+                    d.child(section(
+                        "Developer",
+                        settings_group(vec![action_row(
+                            "component-gallery",
+                            "Component Gallery",
+                            "Open",
+                            cx,
+                            |_, _, _cx| {
+                                #[cfg(debug_assertions)]
+                                super::gallery::open(_cx);
+                            },
+                        )
+                        .into_any_element()]),
+                        Some("Dev builds only. Opens every island component in one window."),
+                    ))
+                }),
         )
     }
 
@@ -1455,10 +1382,7 @@ impl SettingsView {
     }
 
     fn color_row(&self, settings: &AppSettings, cx: &mut Context<Self>) -> impl IntoElement {
-        let mut swatches = div().flex().items_center().gap(px(6.));
-        for swatch in ISLAND_SWATCHES {
-            swatches = swatches.child(color_swatch(swatch, settings.island_color, cx));
-        }
+        let accent = settings.island_accent;
         settings_row("island-color")
             .child(
                 div()
@@ -1467,12 +1391,26 @@ impl SettingsView {
                     .gap(px(1.))
                     .child(label("Island color", theme::BODY, true))
                     .child(label(
-                        settings.island_swatch_name(),
+                        if accent {
+                            "Follows System Settings → Appearance"
+                        } else {
+                            "Black"
+                        },
                         theme::SUBHEADLINE,
                         false,
                     )),
             )
-            .child(swatches)
+            .child(
+                segmented_group()
+                    .child(segment("Default", !accent, cx, |_, _, cx| {
+                        nook_core::settings::tweak_app_settings(|s| s.island_accent = false);
+                        cx.notify();
+                    }))
+                    .child(segment("macOS Accent", accent, cx, |_, _, cx| {
+                        nook_core::settings::tweak_app_settings(|s| s.island_accent = true);
+                        cx.notify();
+                    })),
+            )
     }
 
     fn gradient_row(&self, settings: &AppSettings, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1619,7 +1557,7 @@ impl SettingsView {
             })
             .unwrap_or((FALLBACK_W, FALLBACK_H));
         let (pill_x, pill_y) = settings.island_origin(cw, ch, PILL_W, PILL_H);
-        let fill = theme::island_fill(settings.island_color);
+        let fill = theme::island_fill(theme::island_color(settings));
         let bounds_cell = self.placement_bounds.clone();
 
         div()
@@ -3856,36 +3794,6 @@ fn module_toggle(
         .child(toggle_knob(on))
 }
 
-fn color_swatch(
-    swatch: IslandSwatch,
-    selected: Option<u32>,
-    cx: &mut Context<SettingsView>,
-) -> impl IntoElement {
-    let on = swatch.rgb == selected;
-    let fill = theme::island_fill(swatch.rgb);
-    let name = swatch.name;
-    div()
-        .id(SharedString::from(format!("swatch-{name}")))
-        .size(px(theme::HIT_MIN))
-        .flex()
-        .items_center()
-        .justify_center()
-        .cursor(CursorStyle::PointingHand)
-        .on_click(cx.listener(move |_, _, _, cx| {
-            cx.stop_propagation();
-            nook_core::settings::tweak_app_settings(|s| s.island_color = swatch.rgb);
-            cx.notify();
-        }))
-        .child(
-            div()
-                .size(px(16.))
-                .rounded_full()
-                .bg(fill)
-                .when(on, |d| d.border_2().border_color(theme::LABEL))
-                .when(!on, |d| d.border_1().border_color(theme::SEPARATOR)),
-        )
-}
-
 fn toggle_knob(on: bool) -> impl IntoElement {
     div()
         .w(px(38.))
@@ -4294,9 +4202,9 @@ mod tests {
         assert_eq!(SettingsCategory::from_u8(0), SettingsCategory::General);
         assert_eq!(SettingsCategory::from_u8(1), SettingsCategory::Widgets);
         assert_eq!(SettingsCategory::from_u8(2), SettingsCategory::Appearance);
-        assert_eq!(SettingsCategory::from_u8(3), SettingsCategory::Shortcuts);
+        assert_eq!(SettingsCategory::from_u8(3), SettingsCategory::General); // old Shortcuts
         assert_eq!(SettingsCategory::from_u8(4), SettingsCategory::Privacy);
-        assert_eq!(SettingsCategory::from_u8(5), SettingsCategory::Updates);
+        assert_eq!(SettingsCategory::from_u8(5), SettingsCategory::General); // old Updates
         assert_eq!(SettingsCategory::from_u8(6), SettingsCategory::About);
         assert_eq!(SettingsCategory::from_u8(255), SettingsCategory::General);
         assert_eq!(SettingsCategory::from_u8(99), SettingsCategory::General);

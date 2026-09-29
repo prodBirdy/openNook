@@ -588,29 +588,34 @@ pub fn activate_app() {
     }
 }
 
-/// Start a real OS drag of `path` so Finder / other apps accept the file.
+/// Start a real OS drag of `paths` so Finder / other apps accept the files.
 /// GPUI 0.2.2 only has in-app `on_drag`; this uses AppKit `NSDraggingSource`
 /// the same way the Tauri `drag` plugin (`beginDraggingSession`) does.
-pub fn start_file_drag(path: &str, window: Option<&Window>) {
+pub fn start_file_drag(paths: &[String], window: Option<&Window>) {
     #[cfg(target_os = "macos")]
     unsafe {
-        if !std::path::Path::new(path).exists() {
-            log::warn!("drag-out skipped; missing {path}");
+        let existing: Vec<String> = paths
+            .iter()
+            .filter(|p| std::path::Path::new(p.as_str()).exists())
+            .cloned()
+            .collect();
+        if existing.is_empty() {
+            log::warn!("drag-out skipped; no existing paths");
             return;
         }
         if let Some(ns_win) = window.and_then(ns_window) {
-            begin_file_drag(ns_win, path);
+            begin_file_drag(ns_win, &existing);
             return;
         }
         for_each_island_window(|ns_win| {
             if window_title_is(ns_win, "openNook-island") {
-                begin_file_drag(ns_win, path);
+                begin_file_drag(ns_win, &existing);
             }
         });
     }
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = (path, window);
+        let _ = (paths, window);
         log::warn!("file drag-out is macOS-only (AppKit NSDraggingSource)");
     }
 }
@@ -688,64 +693,83 @@ fn drag_source_class() -> &'static objc2::runtime::AnyClass {
 }
 
 #[cfg(target_os = "macos")]
-unsafe fn begin_file_drag(ns_win: *mut objc2::runtime::AnyObject, path: &str) {
+unsafe fn begin_file_drag(ns_win: *mut objc2::runtime::AnyObject, paths: &[String]) {
     use nook_core::notch::{CGPoint, CGRect, CGSize};
     use objc2::runtime::AnyObject;
     use objc2::*;
     use std::ffi::CString;
 
-    let Ok(c_path) = CString::new(path) else {
-        return;
-    };
-    let path_ns: *mut AnyObject =
-        msg_send![class!(NSString), stringWithUTF8String: c_path.as_ptr()];
-    if path_ns.is_null() {
-        return;
-    }
-
-    let is_dir = std::path::Path::new(path).is_dir();
-    let url: *mut AnyObject =
-        msg_send![class!(NSURL), fileURLWithPath: path_ns, isDirectory: is_dir];
-    if url.is_null() {
-        log::error!("drag-out: NSURL failed for {path}");
-        return;
-    }
-
-    let item: *mut AnyObject = msg_send![class!(NSDraggingItem), alloc];
-    let item: *mut AnyObject = msg_send![item, initWithPasteboardWriter: url];
-    if item.is_null() {
-        log::error!("drag-out: NSDraggingItem alloc failed");
-        return;
-    }
-
     let loc: CGPoint = msg_send![ns_win, mouseLocationOutsideOfEventStream];
     let icon_size = 32.0;
     let workspace: *mut AnyObject = msg_send![class!(NSWorkspace), sharedWorkspace];
-    let icon: *mut AnyObject = if workspace.is_null() {
-        std::ptr::null_mut()
-    } else {
-        msg_send![workspace, iconForFile: path_ns]
-    };
-    if !icon.is_null() {
-        let size = CGSize {
-            width: icon_size,
-            height: icon_size,
-        };
-        let _: () = msg_send![icon, setSize: size];
+    let items: *mut AnyObject = msg_send![class!(NSMutableArray), array];
+    if items.is_null() {
+        log::error!("drag-out: NSMutableArray alloc failed");
+        return;
     }
-    let frame = CGRect {
-        origin: CGPoint {
-            x: loc.x - icon_size / 2.0,
-            y: loc.y - icon_size / 2.0,
-        },
-        size: CGSize {
-            width: icon_size,
-            height: icon_size,
-        },
-    };
-    let _: () = msg_send![item, setDraggingFrame: frame, contents: icon];
 
-    let items: *mut AnyObject = msg_send![class!(NSArray), arrayWithObject: item];
+    for (i, path) in paths.iter().enumerate() {
+        if !std::path::Path::new(path).exists() {
+            continue;
+        }
+        let Ok(c_path) = CString::new(path.as_str()) else {
+            continue;
+        };
+        let path_ns: *mut AnyObject =
+            msg_send![class!(NSString), stringWithUTF8String: c_path.as_ptr()];
+        if path_ns.is_null() {
+            continue;
+        }
+
+        let is_dir = std::path::Path::new(path).is_dir();
+        let url: *mut AnyObject =
+            msg_send![class!(NSURL), fileURLWithPath: path_ns, isDirectory: is_dir];
+        if url.is_null() {
+            log::error!("drag-out: NSURL failed for {path}");
+            continue;
+        }
+
+        let item: *mut AnyObject = msg_send![class!(NSDraggingItem), alloc];
+        let item: *mut AnyObject = msg_send![item, initWithPasteboardWriter: url];
+        if item.is_null() {
+            log::error!("drag-out: NSDraggingItem alloc failed");
+            continue;
+        }
+
+        let icon: *mut AnyObject = if workspace.is_null() {
+            std::ptr::null_mut()
+        } else {
+            msg_send![workspace, iconForFile: path_ns]
+        };
+        if !icon.is_null() {
+            let size = CGSize {
+                width: icon_size,
+                height: icon_size,
+            };
+            let _: () = msg_send![icon, setSize: size];
+        }
+        // Stack icons a few points apart (cap so a large selection still looks tidy).
+        let offset = 4.0 * (i.min(4) as f64);
+        let frame = CGRect {
+            origin: CGPoint {
+                x: loc.x - icon_size / 2.0 + offset,
+                y: loc.y - icon_size / 2.0 + offset,
+            },
+            size: CGSize {
+                width: icon_size,
+                height: icon_size,
+            },
+        };
+        let _: () = msg_send![item, setDraggingFrame: frame, contents: icon];
+        let _: () = msg_send![items, addObject: item];
+    }
+
+    let count: usize = msg_send![items, count];
+    if count == 0 {
+        log::warn!("drag-out skipped; no drag items");
+        return;
+    }
+
     let content: *mut AnyObject = msg_send![ns_win, contentView];
     if content.is_null() {
         log::error!("drag-out: contentView missing");
@@ -781,7 +805,7 @@ unsafe fn begin_file_drag(ns_win: *mut objc2::runtime::AnyObject, path: &str) {
         return;
     }
 
-    nook_core::files::begin_outbound_drag(path);
+    nook_core::files::begin_outbound_drag(paths);
     let session: *mut AnyObject = msg_send![
         content,
         beginDraggingSessionWithItems: items,
@@ -790,10 +814,10 @@ unsafe fn begin_file_drag(ns_win: *mut objc2::runtime::AnyObject, path: &str) {
     ];
     if session.is_null() {
         nook_core::files::finish_outbound_drag(false);
-        log::error!("drag-out: beginDraggingSession returned nil for {path}");
+        log::error!("drag-out: beginDraggingSession returned nil for {count} path(s)");
         return;
     }
-    log::info!("drag-out started {path}");
+    log::info!("drag-out started {count} path(s)");
     // Only after the session exists — deactivating first would pull the
     // synthesized event's window out from under beginDraggingSession.
     resign_focus();

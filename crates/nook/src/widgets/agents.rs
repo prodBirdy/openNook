@@ -1,7 +1,7 @@
 //! Coding-agent Nook pane + compact island faces.
 
 use crate::dotmatrix;
-use crate::island::ui::{nook_empty, nook_pane, scroll_body, slide_label};
+use crate::island::ui::{label, nook_empty, nook_pane, scroll_body};
 use crate::island::Island;
 use crate::theme;
 use gpui::{
@@ -24,8 +24,6 @@ const ROW_RULE: Rgba = Rgba {
     b: 1.0,
     a: 0x0D as f32 / 255.0,
 };
-const SLIDE_DOT: f32 = 5.0;
-const SLIDE_DOT_GAP: f32 = 4.0;
 /// Working Claude LED opacity in Pencil F1DXkw.
 const FACE_WORKING_OPACITY: f32 = 0.72;
 /// Waiting Codex LED opacity in Pencil F1DXkw.
@@ -75,49 +73,6 @@ pub(crate) fn compact_left(
         .into_any_element()
 }
 
-/// Compact trailing: session title + slide dots (Pencil iZPif / jRPai).
-pub(crate) fn compact_right(agents: &[AgentSession], rotation: usize) -> AnyElement {
-    let Some(agent) = face_agent(agents, rotation) else {
-        return div().into_any_element();
-    };
-    let count = agents.len();
-    let index = rotation % count.max(1);
-    div()
-        .flex()
-        .items_center()
-        .gap(px(8.))
-        .flex_shrink_0()
-        .child(
-            slide_label(agent.title().to_string(), theme::BODY, true)
-                .text_color(theme::LABEL),
-        )
-        .when(count > 1, |d| d.child(slide_dots(count, index)))
-        .into_any_element()
-}
-
-fn slide_dots(count: usize, active: usize) -> impl IntoElement {
-    let mut row = div()
-        .flex()
-        .items_center()
-        .gap(px(SLIDE_DOT_GAP))
-        .h(px(22.))
-        .flex_shrink_0();
-    for i in 0..count.min(6) {
-        row = row.child(
-            div()
-                .size(px(SLIDE_DOT))
-                .rounded(px(3.))
-                .flex_shrink_0()
-                .bg(if i == active {
-                    theme::LABEL
-                } else {
-                    theme::TERTIARY_LABEL
-                }),
-        );
-    }
-    row
-}
-
 pub(crate) fn agents_card(
     agents: &[AgentSession],
     now: f32,
@@ -134,6 +89,7 @@ pub(crate) fn agents_card(
             .w_full()
             .flex_1()
             .min_h(px(0.))
+            .min_w(px(0.))
             .overflow_hidden();
         for agent in agents {
             col = col.child(agent_row(agent, now, on, lite, cx));
@@ -203,13 +159,11 @@ fn agent_row(
                 .overflow_hidden()
                 // Title #FFFFFF 12/15 weight 400; detail #EBEBF599 11/14.
                 .child(
-                    slide_label(agent.title().to_string(), theme::CALLOUT, false)
-                        .w_full()
+                    label(agent.title().to_string(), theme::CALLOUT, false)
                         .text_color(theme::LABEL),
                 )
                 .child(
-                    slide_label(agent_detail_line(agent), theme::SUBHEADLINE, false)
-                        .w_full()
+                    label(agent_detail_line(agent), theme::SUBHEADLINE, false)
                         .text_color(theme::SECONDARY_LABEL),
                 ),
         )
