@@ -10,3 +10,9 @@ sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
   libwayland-dev libvulkan-dev \
   libx11-dev libxrandr-dev libxi-dev libxcursor-dev libxinerama-dev \
   libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev
+# rust-lld looks for libstdc++.so (unversioned). Debian/Ubuntu only ship
+# libstdc++.so.6 in the multiarch dir; gcc's private copy is not searched.
+multiarch="$(dpkg-architecture -qDEB_HOST_MULTIARCH 2>/dev/null || echo x86_64-linux-gnu)"
+if [[ ! -e "/usr/lib/${multiarch}/libstdc++.so" && -e "/usr/lib/${multiarch}/libstdc++.so.6" ]]; then
+  sudo ln -sfn libstdc++.so.6 "/usr/lib/${multiarch}/libstdc++.so"
+fi
