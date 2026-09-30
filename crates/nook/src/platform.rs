@@ -2992,6 +2992,8 @@ unsafe fn hide_motion_art_macos() {
         cap.paused = true;
     }
 }
+
+#[cfg(target_os = "macos")]
 #[allow(dead_code)]
 fn restore_frontmost_macos() {
     use objc2::runtime::AnyObject;
@@ -3109,6 +3111,8 @@ unsafe fn create_motion_art_layer(
     let _: () = msg_send![layer, setMasksToBounds: true];
     Some((layer, player, looper))
 }
+
+#[cfg(target_os = "macos")]
 #[allow(dead_code)]
 fn frontmost_pid() -> std::sync::MutexGuard<'static, Option<i32>> {
     static PID: std::sync::OnceLock<std::sync::Mutex<Option<i32>>> = std::sync::OnceLock::new();
