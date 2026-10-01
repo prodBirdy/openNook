@@ -21,6 +21,8 @@ The first open-source 1.0 release.
 - Observe opens a full-width chart when the card is clicked, with stacked status columns, axis ticks, and a hover crosshair and tooltip. It no longer polls without a token.
 - The voice recorder has a scrubber, pause/resume, ±15 s skips, and Open in QuickTime / Show in Finder.
 - Island animations step at up to 60 fps on a display-synced frame driver.
+- Media view switches between Now Playing, Up Next, Lyrics, and AirPlay animate; lyrics are Apple Music style, with the current line wrapped, past and next lines dimmed, and a scroll on line advance; the compact hover chin shows the track title, and the mode dots are removed.
+- The compact pill widens to fit its trailing text, Agents and Messages show their trailing labels again, and Idle shows weather.
 
 ### Removed
 
@@ -48,6 +50,12 @@ The first open-source 1.0 release.
 - Term tab clipped the last lines of a login-shell TUI: the PTY claimed the
   pane's full height on top of the "login shell" header, and the island stayed
   at the widget-row size.
+- Clipped or overlapping text at small widget sizes (Weather, Meeting, High
+  Alert, SysStats, Obsidian, Messages, Reminders, Agents); the Observe card no
+  longer shows a square hover highlight.
+- The Linux build compiles again: macOS-only focus-restore code is cfg-gated and
+  lyrics build on all targets, and `scripts/linux-deps.sh` exposes an unversioned
+  `libstdc++.so` so rust-lld links on Debian and Ubuntu.
 
 ### Changed
 
