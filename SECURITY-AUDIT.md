@@ -36,7 +36,7 @@ openNook’s GPUI path is a local, highly privileged overlay (Accessibility, App
 
 ### P0
 
-1. **OA-01** — Retire `.github/workflows/release.yml` so `v*` / `main` cannot invoke `tauri-action`. (Draft PR opened from this audit.)
+1. **OA-01** — Retire `.github/workflows/release.yml` so `v*` / `main` cannot invoke `tauri-action`. Draft PR: https://github.com/prodBirdy/openNook/pull/106
 
 ### P1
 
@@ -81,6 +81,6 @@ openNook’s GPUI path is a local, highly privileged overlay (Accessibility, App
 
 | Finding | PR |
 | --- | --- |
-| OA-01 Tauri `Release` workflow | See companion draft PR on `cursor/retire-tauri-release-workflow-ff67` (opened with this audit). |
+| OA-01 Tauri `Release` workflow | https://github.com/prodBirdy/openNook/pull/106 (draft, `cursor/retire-tauri-release-workflow-ff67`) |
 
 No Critical findings. Medium and below are documented here only — no fix PRs.
