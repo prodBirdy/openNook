@@ -1,5 +1,7 @@
-# GPUI 0.3.x Linux binary. Not the Tauri 0.0.2a AppImage / deb line.
+# GPUI Linux binary. Not the Tauri 0.0.2a AppImage / deb line.
 # Does not attach assets to v0.3.0 (macOS dmg). Publishes v<version>-linux.
+# The retired Tauri workflow (.github/workflows/release.yml) is gone;
+# this file and local scripts/bundle.sh are the only publish paths.
 name: linux-release
 
 on:
