@@ -9,10 +9,11 @@ use crate::island::Island;
 use crate::theme;
 use gpui::{
     canvas, deferred, div, point, prelude::*, px, relative, Bounds, Context, CursorStyle,
-    MouseButton, MouseDownEvent, MouseMoveEvent, PathBuilder, Pixels, Rgba, SharedString,
+    MouseButton, MouseDownEvent, MouseMoveEvent, PathBuilder, Pixels, Rgba, ScrollHandle,
+    SharedString,
 };
 use nook_core::observe::{
-    ObserveRange, ObserveSnapshot, ObserveSourceKind, SamplePoint,
+    MetricReading, ObserveRange, ObserveSnapshot, ObserveSourceKind, SamplePoint,
 };
 use nook_core::settings::AppSettings;
 use std::cell::RefCell;
@@ -20,6 +21,14 @@ use std::rc::Rc;
 
 /// Mockup Nook Row while Observe is expanded (`observe.html` height 240).
 pub(crate) const OBSERVE_EXPANDED_BODY: f32 = 240.0;
+
+thread_local! {
+    static METRIC_PICKER_SCROLL: RefCell<ScrollHandle> = RefCell::new(ScrollHandle::default());
+}
+
+fn metric_picker_scroll() -> ScrollHandle {
+    METRIC_PICKER_SCROLL.with_borrow(|h| h.clone())
+}
 
 #[derive(Clone)]
 struct StatusSeries {
@@ -124,8 +133,8 @@ pub(crate) fn observe_big_view(
     cx: &mut Context<Island>,
 ) -> gpui::Stateful<gpui::Div> {
     // Mockup `observe-big` (nNzAv): numeral + unit + range chips, caption,
-    // 30 stacked status columns, legend. No other chrome; the × only shows
-    // on hover. Empty data keeps the layout with a "—" numeral.
+    // metric picker, 30 stacked status columns, legend. No other chrome; the
+    // × only shows on hover. Empty data keeps the layout with a "—" numeral.
     let range = settings.observe.range;
     let mut chips = div().flex().items_center().gap(px(6.)).flex_shrink_0();
     for option in ObserveRange::all() {
@@ -134,84 +143,714 @@ pub(crate) fn observe_big_view(
 
     let statuses = status_series(snap);
     let featured = snap.metrics.first();
-    let buckets = status_buckets(
-        &stacked_samples(&statuses, range.step_seconds() as f64),
-        range,
-        BIG_COLUMNS,
-    );
-    let hovered = hover.and_then(|h| buckets.get(h.bucket));
-    let headline = if let Some(bucket) = hovered {
-        match bucket.values {
-            Some(values) => compact_number(bucket_total(values)),
-            None => "—".into(),
-        }
-    } else if !statuses.is_empty() {
-        let latest: f64 = statuses
-            .iter()
-            .filter_map(|series| series.points.last())
-            .map(|pt| clamp_value(pt.value))
-            .sum();
-        compact_number(latest)
-    } else {
-        featured
-            .and_then(|m| m.last_value())
-            .map(compact_number)
-            .unwrap_or_else(|| "—".into())
-    };
-    let metric_label = if let Some(bucket) = hovered {
-        format_bucket_range(bucket.start, bucket.end, range)
-    } else if !statuses.is_empty() {
-        observe_metric_caption(Some("HTTP status"), settings)
-    } else {
-        observe_metric_caption(featured.map(|m| m.label.as_str()), settings)
-    };
+    let selected = nook_core::observe::effective_chart_metric(&settings.observe)
+        .and_then(|query| snap.metrics.iter().find(|m| m.query == query));
 
-    let header = div()
+    // Picker row under the caption: HTTP status (only with status data) then
+    // one chip per pinned metric. Horizontal scroll, never wraps.
+    let picker = chart_picker(snap, selected.map(|m| m.query.as_str()), !statuses.is_empty(), cx);
+    let show_picker = !statuses.is_empty() || !snap.metrics.is_empty();
+
+    if let Some(reading) = selected {
+        let buckets = single_buckets(reading, range);
+        let hovered = hover.and_then(|h| buckets.get(h.bucket));
+        let has_series = reading
+            .series
+            .first()
+            .is_some_and(|s| s.points.len() >= 2);
+        let headline = if let Some(bucket) = hovered {
+            match bucket.values {
+                Some(values) => compact_number(clamp_value(values[0])),
+                None => "—".into(),
+            }
+        } else if has_series {
+            reading
+                .last_value()
+                .map(compact_number)
+                .unwrap_or_else(|| "—".into())
+        } else {
+            "—".into()
+        };
+        let metric_label = if hovered.is_some() {
+            let bucket = hovered.expect("hovered bucket");
+            format_bucket_range(bucket.start, bucket.end, range)
+        } else {
+            observe_metric_caption(Some(reading.label.as_str()), settings)
+        };
+        let unit = metric_unit(&reading.query);
+        let color = metric_color(&reading.query);
+
+        let header = div()
+            .flex()
+            .items_end()
+            .gap(px(16.))
+            .flex_shrink_0()
+            .w_full()
+            .child(observe_headline(headline))
+            .when(!unit.is_empty(), |d| d.child(observe_unit(unit)))
+            .child(div().flex_1())
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .flex_shrink_0()
+                    .child(crate::island::media::pip_popout_btn_sized(
+                        crate::pip::PipKind::Observe,
+                        24.0,
+                        12.0,
+                        13.0,
+                        cx,
+                    ))
+                    .child(chips),
+            );
+
+        let mut pane = nook_pane("nook-observe-big")
+            .group("nook-observe-big")
+            .relative()
+            .w_full()
+            .bg(theme::ISLAND)
+            .rounded(px(theme::ROW_RADIUS))
+            .border_1()
+            .border_color(theme::FILL_TERTIARY)
+            .p(px(16.))
+            .gap(px(12.))
+            .child(header)
+            .child(
+                label(metric_label, theme::CALLOUT, false)
+                    .text_color(theme::secondary_label())
+                    .w_full()
+                    .flex_shrink_0(),
+            );
+        if show_picker {
+            pane = pane.child(picker);
+        }
+        pane.child(single_chart(&buckets, reading, color, unit, hover, range, cx))
+            .child(single_legend(reading, color, range))
+            .child(observe_close_btn(cx))
+    } else {
+        let buckets = status_buckets(
+            &stacked_samples(&statuses, range.step_seconds() as f64),
+            range,
+            BIG_COLUMNS,
+        );
+        let hovered = hover.and_then(|h| buckets.get(h.bucket));
+        let headline = if let Some(bucket) = hovered {
+            match bucket.values {
+                Some(values) => compact_number(bucket_total(values)),
+                None => "—".into(),
+            }
+        } else if !statuses.is_empty() {
+            let latest: f64 = statuses
+                .iter()
+                .filter_map(|series| series.points.last())
+                .map(|pt| clamp_value(pt.value))
+                .sum();
+            compact_number(latest)
+        } else {
+            featured
+                .and_then(|m| m.last_value())
+                .map(compact_number)
+                .unwrap_or_else(|| "—".into())
+        };
+        let metric_label = if let Some(bucket) = hovered {
+            format_bucket_range(bucket.start, bucket.end, range)
+        } else if !statuses.is_empty() {
+            observe_metric_caption(Some("HTTP status"), settings)
+        } else {
+            observe_metric_caption(featured.map(|m| m.label.as_str()), settings)
+        };
+
+        let header = div()
+            .flex()
+            .items_end()
+            .gap(px(16.))
+            .flex_shrink_0()
+            .w_full()
+            .child(observe_headline(headline))
+            .child(observe_unit("req/s"))
+            .child(div().flex_1())
+            .child(
+                // Pop Out left of the range chips (8 pt gap), not near the × corner.
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .flex_shrink_0()
+                    .child(crate::island::media::pip_popout_btn_sized(
+                        crate::pip::PipKind::Observe,
+                        24.0,
+                        12.0,
+                        13.0,
+                        cx,
+                    ))
+                    .child(chips),
+            );
+
+        let mut pane = nook_pane("nook-observe-big")
+            .group("nook-observe-big")
+            .relative()
+            .w_full()
+            .bg(theme::ISLAND)
+            .rounded(px(theme::ROW_RADIUS))
+            .border_1()
+            .border_color(theme::FILL_TERTIARY)
+            .p(px(16.))
+            .gap(px(12.))
+            .child(header)
+            .child(
+                label(metric_label, theme::CALLOUT, false)
+                    .text_color(theme::secondary_label())
+                    .w_full()
+                    .flex_shrink_0(),
+            );
+        if show_picker {
+            pane = pane.child(picker);
+        }
+        pane.child(status_chart(&buckets, hover, range, cx))
+            .child(status_legend(status_totals(snap), range))
+            .child(observe_close_btn(cx))
+    }
+}
+
+fn truncate_metric_label(label: &str) -> String {
+    const LIMIT: usize = 18;
+    if label.chars().count() > LIMIT {
+        let short: String = label.chars().take(LIMIT).collect();
+        format!("{short}…")
+    } else {
+        label.to_string()
+    }
+}
+
+fn metric_chip(query: Option<String>, text: String, active: bool, cx: &mut Context<Island>) -> impl IntoElement {
+    let id = match &query {
+        Some(q) => format!("observe-metric-{q}"),
+        None => "observe-metric-status".to_string(),
+    };
+    div()
+        .id(SharedString::from(id))
         .flex()
-        .items_end()
-        .gap(px(16.))
         .flex_shrink_0()
-        .w_full()
-        .child(observe_headline(headline))
-        .child(observe_unit("req/s"))
-        .child(div().flex_1())
+        .items_center()
+        .justify_center()
+        .px(px(10.))
+        .py(px(4.))
+        .rounded(px(8.))
+        .bg(if active {
+            theme::FILL_SECONDARY
+        } else {
+            theme::with_alpha(theme::ISLAND, 0.0)
+        })
+        .cursor(CursorStyle::PointingHand)
+        .hover(|s| s.opacity(0.85))
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                cx.stop_propagation();
+                if this.observe_hover.take().is_some() {
+                    cx.notify();
+                }
+                let next = query.clone();
+                nook_core::settings::tweak_app_settings(|s| {
+                    nook_core::observe::set_chart_metric(&mut s.observe, next.as_deref());
+                });
+                this.settings = nook_core::settings::get_app_settings();
+                cx.notify();
+            }),
+        )
         .child(
-            // Pop Out left of the range chips (8 pt gap), not near the × corner.
+            label(text, theme::SUBHEADLINE, active)
+                .whitespace_nowrap()
+                .text_color(if active {
+                    theme::LABEL
+                } else {
+                    theme::TERTIARY_LABEL
+                }),
+        )
+}
+
+fn chart_picker(
+    snap: &ObserveSnapshot,
+    selected: Option<&str>,
+    has_status: bool,
+    cx: &mut Context<Island>,
+) -> impl IntoElement {
+    let slug = selected.unwrap_or("status");
+    let mut row = div()
+        .id(SharedString::from(format!("observe-metric-picker-{slug}")))
+        .track_scroll(&metric_picker_scroll())
+        .flex()
+        .items_center()
+        .gap(px(6.))
+        .w_full()
+        .flex_shrink_0()
+        .overflow_x_scroll()
+        .overflow_y_hidden();
+    if has_status {
+        row = row.child(metric_chip(None, "HTTP status".to_string(), selected.is_none(), cx));
+    }
+    for reading in &snap.metrics {
+        let active = selected == Some(reading.query.as_str());
+        row = row.child(metric_chip(
+            Some(reading.query.clone()),
+            truncate_metric_label(&reading.label),
+            active,
+            cx,
+        ));
+    }
+    row
+}
+
+fn is_latency_query(query: &str) -> bool {
+    let query = query.trim();
+    matches!(query, "avg_ms" | "max_ms")
+        || query.starts_with("route_avg_ms:")
+        || query.starts_with("route_max_ms:")
+}
+
+fn is_error_query(query: &str) -> bool {
+    let query = query.trim();
+    matches!(query, "5xx" | "errors") || query.starts_with("route_errors:")
+}
+
+fn is_counter_like_query(query: &str) -> bool {
+    let query = query.trim();
+    matches!(
+        query,
+        "total_requests" | "requests" | "1xx" | "2xx" | "3xx" | "4xx" | "5xx" | "slow" | "errors"
+    ) || query.starts_with("route:")
+        || query.starts_with("route_errors:")
+        || query.ends_with("_total")
+        || query.ends_with("_count")
+}
+
+fn metric_unit(query: &str) -> &'static str {
+    if is_latency_query(query) {
+        "ms"
+    } else if is_counter_like_query(query) {
+        "req/s"
+    } else {
+        ""
+    }
+}
+
+fn metric_color(query: &str) -> Rgba {
+    if is_latency_query(query) {
+        theme::accent()
+    } else if is_error_query(query) {
+        theme::DESTRUCTIVE
+    } else {
+        theme::LABEL
+    }
+}
+
+/// Bucket a single reading with the same wall-clock geometry as the stacked
+/// chart: wrap its points as one [`StatusSeries`] and reuse
+/// [`stacked_samples`]/[`status_buckets`], keeping counter rate semantics.
+fn single_buckets(reading: &MetricReading, range: ObserveRange) -> Vec<ChartBucket> {
+    let series: Vec<StatusSeries> = reading
+        .series
+        .first()
+        .filter(|s| s.points.len() >= 2)
+        .map(|s| {
+            vec![StatusSeries {
+                group: 0,
+                points: s.points.clone(),
+            }]
+        })
+        .unwrap_or_default();
+    status_buckets(&stacked_samples(&series, range.step_seconds() as f64), range, BIG_COLUMNS)
+}
+
+fn single_legend(reading: &MetricReading, color: Rgba, range: ObserveRange) -> impl IntoElement {
+    let total = reading.window_total.or_else(|| reading.last_value()).unwrap_or(0.0);
+    div()
+        .flex()
+        .items_center()
+        .gap(px(16.))
+        .w_full()
+        .flex_shrink_0()
+        .child(
             div()
                 .flex()
                 .items_center()
-                .gap(px(8.))
-                .flex_shrink_0()
-                .child(crate::island::media::pip_popout_btn_sized(
-                    crate::pip::PipKind::Observe,
-                    24.0,
-                    12.0,
-                    13.0,
-                    cx,
-                ))
-                .child(chips),
+                .gap(px(5.))
+                .child(div().size(px(5.)).rounded_full().bg(color))
+                .child(
+                    label(
+                        format!("{} {}", reading.label, compact_number(total)),
+                        theme::SUBHEADLINE,
+                        false,
+                    )
+                    .text_color(theme::tertiary_label()),
+                ),
+        )
+        .child(div().flex_1())
+        .child(
+            label(
+                format!("last {} · {} step", range.label(), bucket_step(range)),
+                theme::SUBHEADLINE,
+                false,
+            )
+            .text_color(theme::tertiary_label()),
+        )
+}
+
+fn single_chart(
+    buckets: &[ChartBucket],
+    reading: &MetricReading,
+    color: Rgba,
+    unit: &str,
+    hover: Option<&ObserveHover>,
+    range: ObserveRange,
+    cx: &mut Context<Island>,
+) -> impl IntoElement {
+    let data_max = buckets
+        .iter()
+        .filter_map(|bucket| bucket.values)
+        .map(|values| clamp_value(values[0]))
+        .fold(0.0, f64::max);
+    let (nice_max, ticks) = nice_ticks(data_max);
+    let hover_idx = hover.map(|h| h.bucket);
+    let bounds_cell = Rc::new(RefCell::new(None::<Bounds<Pixels>>));
+    let count = buckets.len();
+
+    let mut gutter = div()
+        .w(px(Y_GUTTER))
+        .flex_shrink_0()
+        .relative()
+        .h_full();
+    if nice_max > 0.0 {
+        for tick in &ticks {
+            let t = (tick / nice_max) as f32;
+            gutter = gutter.child(
+                div()
+                    .absolute()
+                    .left(px(0.))
+                    .right(px(4.))
+                    .top(relative((1.0 - t).clamp(0.0, 1.0)))
+                    .mt(px(-theme::FOOTNOTE.leading * 0.5))
+                    .child(
+                        label(compact_number(*tick), theme::FOOTNOTE, false)
+                            .w_full()
+                            .text_right()
+                            .text_color(theme::tertiary_label()),
+                    ),
+            );
+        }
+    }
+
+    let mut x_row = div()
+        .flex_1()
+        .min_w(px(0.))
+        .relative()
+        .h(px(X_AXIS_H));
+    if count > 0 {
+        let with_seconds = range.seconds() < 3600;
+        let last = X_TICKS.saturating_sub(1).max(1);
+        for i in 0..X_TICKS {
+            let boundary = i * count / last;
+            let t = boundary as f32 / count as f32;
+            let ts = if boundary >= count {
+                buckets.last().map(|b| b.end)
+            } else {
+                buckets.get(boundary).map(|b| b.start)
+            };
+            let Some(ts) = ts else {
+                continue;
+            };
+            let text = format_chart_time(ts, with_seconds);
+            let mut tick = div().absolute().top(px(0.)).child(
+                label(text, theme::FOOTNOTE, false).text_color(theme::tertiary_label()),
+            );
+            tick = if i == X_TICKS - 1 {
+                tick.right(px(0.))
+            } else if i == 0 {
+                tick.left(px(0.))
+            } else {
+                tick.left(relative(t.clamp(0.0, 1.0)))
+            };
+            x_row = x_row.child(tick);
+        }
+    }
+
+    let painted = buckets.to_vec();
+    let tooltip_bucket = hover_idx.and_then(|i| buckets.get(i).cloned());
+    let mut plot = div()
+        .id("observe-plot")
+        .relative()
+        .flex_1()
+        .min_w(px(0.))
+        .h_full()
+        .cursor(CursorStyle::Crosshair)
+        .on_mouse_move({
+            let bounds_cell = bounds_cell.clone();
+            cx.listener(move |this, event: &MouseMoveEvent, _, cx| {
+                let Some(bounds) = *bounds_cell.borrow() else {
+                    return;
+                };
+                let width: f32 = bounds.size.width.into();
+                if width < 1.0 || count == 0 {
+                    return;
+                }
+                let x: f32 = event.position.x.into();
+                let origin: f32 = bounds.origin.x.into();
+                let t = ((x - origin) / width).clamp(0.0, 1.0);
+                let idx = bucket_index_at(t, count);
+                if this.observe_hover.as_ref().map(|h| h.bucket) != Some(idx) {
+                    this.observe_hover = Some(ObserveHover { bucket: idx });
+                    cx.notify();
+                }
+            })
+        })
+        .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+            if !*hovered && this.observe_hover.is_some() {
+                this.observe_hover = None;
+                cx.notify();
+            }
+        }))
+        .child(
+            canvas(
+                {
+                    let bounds_cell = bounds_cell.clone();
+                    move |bounds, _, _| {
+                        *bounds_cell.borrow_mut() = Some(bounds);
+                        bounds
+                    }
+                },
+                {
+                    let painted = painted.clone();
+                    let ticks = ticks.clone();
+                    move |bounds, _, window, _| {
+                        paint_single_chart(window, bounds, &painted, hover_idx, nice_max, &ticks, color);
+                    }
+                },
+            )
+            .w_full()
+            .h_full(),
         );
 
-    nook_pane("nook-observe-big")
-        .group("nook-observe-big")
-        .relative()
+    if let Some(bucket) = tooltip_bucket {
+        if let Some(idx) = hover_idx {
+            plot = plot.child(single_tooltip(&bucket, reading, color, unit, idx, count, range));
+        }
+    }
+
+    div()
+        .flex()
+        .flex_col()
+        .flex_1()
+        .min_h(px(0.))
         .w_full()
-        .bg(theme::ISLAND)
-        .rounded(px(theme::ROW_RADIUS))
-        .border_1()
-        .border_color(theme::FILL_TERTIARY)
-        .p(px(16.))
-        .gap(px(12.))
-        .child(header)
+        .gap(px(2.))
         .child(
-            label(metric_label, theme::CALLOUT, false)
-                .text_color(theme::secondary_label())
+            div()
+                .flex()
+                .flex_1()
+                .min_h(px(0.))
                 .w_full()
-                .flex_shrink_0(),
+                .child(gutter)
+                .child(plot),
         )
-        .child(status_chart(&buckets, hover, range, cx))
-        .child(status_legend(status_totals(snap), range))
-        .child(observe_close_btn(cx))
+        .child(
+            div()
+                .flex()
+                .flex_shrink_0()
+                .w_full()
+                .child(div().w(px(Y_GUTTER)).flex_shrink_0())
+                .child(x_row),
+        )
+}
+
+fn single_tooltip(
+    bucket: &ChartBucket,
+    reading: &MetricReading,
+    color: Rgba,
+    unit: &str,
+    index: usize,
+    count: usize,
+    range: ObserveRange,
+) -> impl IntoElement {
+    let flip = tooltip_flips_left(index, count);
+    let header = format_bucket_range(bucket.start, bucket.end, range);
+    let mut body = div()
+        .flex()
+        .flex_col()
+        .gap(px(4.))
+        .w_full()
+        .child(
+            label(header, theme::FOOTNOTE, false)
+                .flex_shrink_0()
+                .whitespace_nowrap()
+                .text_color(theme::secondary_label()),
+        );
+    if let Some(values) = bucket.values {
+        let value = clamp_value(values[0]);
+        let dim = value <= 0.0;
+        let dot = if dim {
+            with_alpha(color, color.a * HOVER_DIM)
+        } else {
+            color
+        };
+        let text = if unit.is_empty() {
+            compact_number(value)
+        } else {
+            format!("{} {unit}", compact_number(value))
+        };
+        body = body.child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(12.))
+                .w_full()
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(6.))
+                        .flex_shrink_0()
+                        .child(div().size(px(6.)).rounded_full().flex_shrink_0().bg(dot))
+                        .child(
+                            label(reading.label.clone(), theme::FOOTNOTE, false).text_color(if dim {
+                                theme::tertiary_label()
+                            } else {
+                                theme::LABEL
+                            }),
+                        ),
+                )
+                .child(div().flex_1())
+                .child(
+                    label(text, theme::FOOTNOTE, false)
+                        .flex_shrink_0()
+                        .whitespace_nowrap()
+                        .text_color(if dim {
+                            theme::tertiary_label()
+                        } else {
+                            theme::LABEL
+                        }),
+                ),
+        );
+    } else {
+        body = body.child(
+            label("No data", theme::FOOTNOTE, false).text_color(theme::tertiary_label()),
+        );
+    }
+
+    let left_t = if count == 0 {
+        0.0
+    } else {
+        (index as f32 + 1.0) / count as f32
+    };
+    let right_t = if count == 0 {
+        0.0
+    } else {
+        1.0 - index as f32 / count as f32
+    };
+
+    deferred(
+        div()
+            .absolute()
+            .top(px(4.))
+            .when(flip, |d| d.right(relative(right_t.clamp(0.0, 1.0))))
+            .when(!flip, |d| d.left(relative(left_t.clamp(0.0, 1.0))))
+            .when(flip, |d| d.mr(px(4.)))
+            .when(!flip, |d| d.ml(px(4.)))
+            .w(px(TOOLTIP_W))
+            .rounded(px(theme::CONTROL_RADIUS))
+            .bg(theme::GROUPED_BG)
+            .border_1()
+            .border_color(theme::FILL_SECONDARY)
+            .shadow_sm()
+            .px(px(8.))
+            .py(px(6.))
+            .child(body),
+    )
+}
+
+fn paint_single_chart(
+    window: &mut gpui::Window,
+    bounds: Bounds<Pixels>,
+    buckets: &[ChartBucket],
+    hover: Option<usize>,
+    nice_max: f64,
+    ticks: &[f64],
+    color: Rgba,
+) {
+    let x0: f32 = bounds.origin.x.into();
+    let y0: f32 = bounds.origin.y.into();
+    let w: f32 = bounds.size.width.into();
+    let h: f32 = bounds.size.height.into();
+    if w < 8.0 || h < 8.0 || buckets.is_empty() {
+        return;
+    }
+    let p = |x: f32, y: f32| point(px(x), px(y));
+    let count = buckets.len();
+    let gaps = COLUMN_GAP * count.saturating_sub(1) as f32;
+    let col_w = ((w - gaps) / count as f32).max(0.0);
+    let stride = col_w + COLUMN_GAP;
+    let y_at = |tick: f64| {
+        if nice_max <= 0.0 {
+            y0 + h
+        } else {
+            y0 + h * (1.0 - (tick / nice_max) as f32).clamp(0.0, 1.0)
+        }
+    };
+
+    for tick in ticks {
+        let y = y_at(*tick);
+        let mut grid = PathBuilder::stroke(px(1.0));
+        grid.move_to(p(x0, y));
+        grid.line_to(p(x0 + w, y));
+        if let Ok(built) = grid.build() {
+            window.paint_path(built, with_alpha(theme::LABEL, 0.06));
+        }
+    }
+
+    if let Some(idx) = hover {
+        if idx < count && col_w > 0.0 {
+            let left = x0 + idx as f32 * stride;
+            fill_rect(window, &p, left, y0, col_w, h, with_alpha(theme::LABEL, 0.08));
+        }
+    }
+
+    if nice_max > 0.0 && col_w > 0.0 {
+        for (i, bucket) in buckets.iter().enumerate() {
+            let Some(values) = bucket.values else {
+                continue;
+            };
+            let value = clamp_value(values[0]);
+            if value <= 0.0 {
+                continue;
+            }
+            let dim = hover.is_some_and(|idx| idx != i);
+            let left = x0 + i as f32 * stride;
+            let seg_h = (h as f64 * (value / nice_max)).clamp(0.0, h as f64) as f32;
+            let top = (y0 + h - seg_h).max(y0);
+            let mut bar = color;
+            if dim {
+                bar.a *= HOVER_DIM;
+            }
+            let radius = COLUMN_RADIUS.min(col_w * 0.5).min(((y0 + h - top) * 0.5).max(0.0));
+            let mut path = PathBuilder::fill();
+            rounded_top_rect(&mut path, &p, left, top, col_w, y0 + h, radius);
+            if let Ok(built) = path.build() {
+                window.paint_path(built, bar);
+            }
+        }
+    }
+
+    if let Some(idx) = hover {
+        if idx < count && col_w > 0.0 {
+            let cx = x0 + idx as f32 * stride + col_w * 0.5;
+            let mut guide = PathBuilder::stroke(px(1.0));
+            guide.move_to(p(cx, y0));
+            guide.line_to(p(cx, y0 + h));
+            if let Ok(built) = guide.build() {
+                window.paint_path(built, with_alpha(theme::LABEL, 0.45));
+            }
+        }
+    }
 }
 
 /// Columns in the big status chart (mockup: always 30).

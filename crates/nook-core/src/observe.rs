@@ -216,6 +216,8 @@ pub struct ObserveConfig {
     pub range: ObserveRange,
     #[serde(default = "default_metrics")]
     pub metrics: Vec<ObserveMetric>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chart_metric: Option<String>,
 }
 
 impl Default for ObserveConfig {
@@ -227,6 +229,7 @@ impl Default for ObserveConfig {
             window: ObserveWindow::ThirtyMinutes,
             range: ObserveRange::default(),
             metrics: default_metrics(),
+            chart_metric: None,
         }
     }
 }
@@ -510,6 +513,25 @@ pub fn pin_metric(config: &mut ObserveConfig, label: &str, query: &str) -> Resul
 
 pub fn unpin_metric(config: &mut ObserveConfig, query: &str) {
     config.metrics.retain(|m| m.query != query);
+    if config.chart_metric.as_deref() == Some(query) {
+        config.chart_metric = None;
+    }
+}
+
+pub fn set_chart_metric(config: &mut ObserveConfig, query: Option<&str>) {
+    match query.map(str::trim).filter(|q| !q.is_empty()) {
+        Some(q) => config.chart_metric = Some(q.to_string()),
+        None => config.chart_metric = None,
+    }
+}
+
+/// Pinned query selected for the big chart, if it is still pinned.
+/// Stale selections fall back to the stacked HTTP-status view.
+pub fn effective_chart_metric(config: &ObserveConfig) -> Option<&str> {
+    config
+        .chart_metric
+        .as_deref()
+        .filter(|q| config.metrics.iter().any(|m| m.query == **q))
 }
 
 pub fn cycle_metric_chart(config: &mut ObserveConfig, query: &str) {
@@ -2297,5 +2319,46 @@ mod tests {
         apply_user_alerts(&config, &mut snap);
         assert_eq!(snap.alerts.len(), 1);
         assert_eq!(snap.alerts[0].name, "Errors");
+    }
+
+    #[test]
+    fn chart_metric_sets_clears_and_falls_back() {
+        let mut config = ObserveConfig::default();
+        assert_eq!(effective_chart_metric(&config), None);
+        set_chart_metric(&mut config, Some("avg_ms"));
+        assert_eq!(config.chart_metric.as_deref(), Some("avg_ms"));
+        assert_eq!(
+            effective_chart_metric(&config),
+            None,
+            "unpinned stored query falls back to HTTP status"
+        );
+        pin_metric(&mut config, "Avg ms", "avg_ms").unwrap();
+        set_chart_metric(&mut config, Some("avg_ms"));
+        assert_eq!(effective_chart_metric(&config), Some("avg_ms"));
+        set_chart_metric(&mut config, None);
+        assert_eq!(config.chart_metric, None);
+        set_chart_metric(&mut config, Some("avg_ms"));
+        unpin_metric(&mut config, "avg_ms");
+        assert_eq!(
+            config.chart_metric, None,
+            "unpinning the chart metric clears it"
+        );
+        unpin_metric(&mut config, "total_requests");
+        assert_eq!(config.chart_metric, None);
+    }
+
+    #[test]
+    fn chart_metric_serde_defaults_to_none() {
+        let parsed: ObserveConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(parsed.chart_metric, None);
+        let with_metric: ObserveConfig =
+            serde_json::from_str(r#"{"chart_metric":"avg_ms"}"#).unwrap();
+        assert_eq!(with_metric.chart_metric.as_deref(), Some("avg_ms"));
+        let bare = ObserveConfig::default();
+        let json = serde_json::to_string(&bare).unwrap();
+        assert!(
+            !json.contains("chart_metric"),
+            "None chart_metric stays out of saved settings"
+        );
     }
 }

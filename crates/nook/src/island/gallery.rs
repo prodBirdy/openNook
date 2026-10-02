@@ -924,19 +924,42 @@ fn files_section(island: &mut Island, cx: &mut Context<Island>) -> impl IntoElem
                 ),
             ),
         ])))
-        .child(island_panel(labelled(
-            "Observe · big view",
-            nook_cell_h(
-                observe_w,
-                widgets::OBSERVE_EXPANDED_BODY,
-                widgets::observe_big_view(
-                    &island.observe,
-                    &island.settings,
-                    island.observe_hover.as_ref(),
-                    cx,
-                ),
-            ),
-        )))
+        .child(island_panel({
+            let mut avg_settings = island.settings.clone();
+            nook_core::observe::set_chart_metric(&mut avg_settings.observe, Some("avg_ms"));
+            div()
+                .flex()
+                .flex_col()
+                .flex_shrink_0()
+                .items_start()
+                .gap(px(20.))
+                .child(labelled(
+                    "Observe · big view",
+                    nook_cell_h(
+                        observe_w,
+                        widgets::OBSERVE_EXPANDED_BODY,
+                        widgets::observe_big_view(
+                            &island.observe,
+                            &island.settings,
+                            island.observe_hover.as_ref(),
+                            cx,
+                        ),
+                    ),
+                ))
+                .child(labelled(
+                    "Observe · big view · Avg ms",
+                    nook_cell_h(
+                        observe_w,
+                        widgets::OBSERVE_EXPANDED_BODY,
+                        widgets::observe_big_view(
+                            &island.observe,
+                            &avg_settings,
+                            island.observe_hover.as_ref(),
+                            cx,
+                        ),
+                    ),
+                ))
+        }))
 }
 
 fn module_cells_w(module: WidgetModule, cell_w: f32, island: &Island) -> f32 {
@@ -1433,6 +1456,28 @@ fn fill_fixtures(island: &mut Island) {
                 history: Vec::new(),
                 window_total: Some(12.0),
             },
+            MetricReading {
+                label: "Avg ms".into(),
+                query: "avg_ms".into(),
+                chart: ObserveChartKind::Bars,
+                values: vec![SeriesValue {
+                    name: "avg_ms".into(),
+                    value: 42.0,
+                }],
+                series: vec![RangeSeries {
+                    name: "avg_ms".into(),
+                    points: points
+                        .iter()
+                        .map(|p| SamplePoint {
+                            ts: p.ts,
+                            value: 20.0 + (p.value * 0.5) % 30.0,
+                        })
+                        .collect(),
+                }],
+                error: None,
+                history: Vec::new(),
+                window_total: None,
+            },
         ],
         alerts: vec![FiringAlert {
             name: "5xx".into(),
@@ -1440,6 +1485,10 @@ fn fill_fixtures(island: &mut Island) {
             summary: "2 > 0".into(),
         }],
     };
+
+    if !nook_core::observe::is_pinned(&island.settings.observe, "avg_ms") {
+        let _ = nook_core::observe::pin_metric(&mut island.settings.observe, "Avg ms", "avg_ms");
+    }
 
     island.weather = Some(WeatherSnapshot {
         location_name: "Cupertino".into(),
