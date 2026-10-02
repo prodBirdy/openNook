@@ -55,49 +55,63 @@ pub fn is_open(kind: PipKind) -> bool {
 }
 
 pub fn open(kind: PipKind, island: WeakEntity<crate::island::Island>, cx: &mut App) {
-    let gallery = island
-        .upgrade()
-        .is_some_and(|entity| entity.read(cx).gallery_mode);
-    let (corner, mini, keep_on_top) = if gallery {
-        // Distinct corners so both windows are visible in gallery shots.
-        let corner = match kind {
-            PipKind::Lyrics => PipCorner::BottomRight,
-            PipKind::Observe => PipCorner::BottomLeft,
+    // The Pop Out control runs inside `Context<Island>::listener`, i.e. while
+    // the Island is leased for update; reading it here (or opening a window
+    // whose first render reads it) panics as a re-entrant read. Defer past
+    // the current effect cycle, when the Island is no longer leased.
+    cx.defer(move |cx| {
+        let gallery = island
+            .upgrade()
+            .is_some_and(|entity| entity.read(cx).gallery_mode);
+        let (corner, mini, keep_on_top) = if gallery {
+            // Distinct corners so both windows are visible in gallery shots.
+            let corner = match kind {
+                PipKind::Lyrics => PipCorner::BottomRight,
+                PipKind::Observe => PipCorner::BottomLeft,
+            };
+            (corner, false, true)
+        } else {
+            persisted_state(kind)
         };
-        (corner, false, true)
-    } else {
-        persisted_state(kind)
-    };
-    open_with_state(kind, island, corner, mini, keep_on_top, gallery, cx);
+        open_with_state(kind, island, corner, mini, keep_on_top, gallery, cx);
+    });
 }
 
 pub fn restore(island: WeakEntity<crate::island::Island>, cx: &mut App) {
-    // Gallery never calls restore (and must not: open_island holds an Island
-    // update lock when it invokes us). Skip any already-open kinds.
-    for state in nook_core::settings::get_app_settings().pip_windows {
-        if is_open(state.kind) {
-            continue;
+    // Same lease as `open`: callers may hold an Island update lock, so defer
+    // past the current effect cycle before reading the Island to size windows.
+    cx.defer(move |cx| {
+        // Gallery never calls restore (and must not: open_island holds an Island
+        // update lock when it invokes us). Skip any already-open kinds.
+        for state in nook_core::settings::get_app_settings().pip_windows {
+            if is_open(state.kind) {
+                continue;
+            }
+            let mini = state.mini && state.kind == PipKind::Lyrics;
+            open_with_state(
+                state.kind,
+                island.clone(),
+                state.corner,
+                mini,
+                state.keep_on_top,
+                false,
+                cx,
+            );
         }
-        let mini = state.mini && state.kind == PipKind::Lyrics;
-        open_with_state(
-            state.kind,
-            island.clone(),
-            state.corner,
-            mini,
-            state.keep_on_top,
-            false,
-            cx,
-        );
-    }
+    });
 }
 
 pub fn close(kind: PipKind, cx: &mut App) {
-    let handle = OPEN.with(|open| open.borrow().get(&kind).map(|(handle, _)| *handle));
-    if let Some(handle) = handle {
-        handle
-            .update(cx, |view, window, cx| view.close_window(window, cx))
-            .ok();
-    }
+    // Deferred like `open`: settings off-switches call this from Island
+    // context while the Island is leased, so never touch entities synchronously.
+    cx.defer(move |cx| {
+        let handle = OPEN.with(|open| open.borrow().get(&kind).map(|(handle, _)| *handle));
+        if let Some(handle) = handle {
+            handle
+                .update(cx, |view, window, cx| view.close_window(window, cx))
+                .ok();
+        }
+    });
 }
 
 impl PipView {
