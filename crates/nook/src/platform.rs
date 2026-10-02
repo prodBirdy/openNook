@@ -21,6 +21,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 #[cfg(target_os = "macos")]
 use std::sync::Once;
 #[cfg(target_os = "macos")]
+use std::collections::HashMap;
+#[cfg(target_os = "macos")]
 use std::sync::{Condvar, Mutex, OnceLock};
 use std::time::Duration;
 
@@ -543,13 +545,170 @@ fn is_pip_ns_window(ns_win: *mut objc2::runtime::AnyObject) -> bool {
         .contains(&number)
 }
 
+// PiP frame/style calls must never run inside a GPUI window/entity update:
+// NSWindow `setFrame:` synchronously fires AppKit's resize/move callback,
+// which re-enters GPUI's `update_window` on the same leased window and
+// panics as `RefCell already borrowed` (logged, resize dropped → clipped
+// content). Every mutating PiP call below therefore only records the
+// latest request and flushes it with `dispatch_async_f` on the main queue,
+// outside any GPUI lease. Coalesced per windowNumber: drags fire faster
+// than the runloop. The registry lock is never held while calling AppKit.
+
+
+#[cfg(target_os = "macos")]
+struct PipFrameReq {
+    x: f64,
+    y: f64,
+    w: f64,
+    h: f64,
+    animate: bool,
+    shadow: bool,
+}
+
+#[cfg(target_os = "macos")]
+fn pip_pending_frames() -> &'static Mutex<HashMap<i64, PipFrameReq>> {
+    static PENDING: OnceLock<Mutex<HashMap<i64, PipFrameReq>>> = OnceLock::new();
+    PENDING.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+#[cfg(target_os = "macos")]
+fn pip_pending_styles() -> &'static Mutex<HashMap<i64, bool>> {
+    static PENDING: OnceLock<Mutex<HashMap<i64, bool>>> = OnceLock::new();
+    PENDING.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+#[cfg(target_os = "macos")]
+static PIP_FLUSH_SCHEDULED: AtomicBool = AtomicBool::new(false);
+
+/// Run `f` on the main queue, outside any GPUI lease. `dispatch2` reaches
+/// the main queue through the exported `_dispatch_main_q` object instead of
+/// the `dispatch_get_main_queue()` SDK inline, which has no exported symbol
+/// and fails to link.
+#[cfg(target_os = "macos")]
+fn dispatch_on_main(f: impl FnOnce() + Send + 'static) {
+    dispatch2::DispatchQueue::main().exec_async(f);
+}
+
+#[cfg(target_os = "macos")]
+fn schedule_pip_flush() {
+    if PIP_FLUSH_SCHEDULED.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    dispatch_on_main(flush_pip_pending);
+}
+
+#[cfg(target_os = "macos")]
+fn enqueue_pip_frame(number: i64, x: f64, y: f64, w: f64, h: f64, animate: bool, shadow: bool) {
+    if number < 0 {
+        return;
+    }
+    if let Ok(mut pending) = pip_pending_frames().lock() {
+        pending.insert(number, PipFrameReq { x, y, w, h, animate, shadow });
+    }
+    schedule_pip_flush();
+}
+
+#[cfg(target_os = "macos")]
+fn enqueue_pip_style(number: i64, keep_on_top: bool) {
+    if number < 0 {
+        return;
+    }
+    if let Ok(mut pending) = pip_pending_styles().lock() {
+        pending.insert(number, keep_on_top);
+    }
+    schedule_pip_flush();
+}
+
+/// Drain both pending maps without holding any lock across AppKit calls,
+/// then apply styles first and frames second. Runs on the main queue,
+/// outside any GPUI lease, so AppKit's resize/move callback re-enters a
+/// window that is not leased and GPUI lays out at the real size.
+#[cfg(target_os = "macos")]
+fn flush_pip_pending() {
+    loop {
+        let styles: Vec<(i64, bool)> = pip_pending_styles()
+            .lock()
+            .map(|mut guard| guard.drain().collect())
+            .unwrap_or_default();
+        let frames: Vec<(i64, PipFrameReq)> = pip_pending_frames()
+            .lock()
+            .map(|mut guard| guard.drain().collect())
+            .unwrap_or_default();
+        if styles.is_empty() && frames.is_empty() {
+            PIP_FLUSH_SCHEDULED.store(false, Ordering::Release);
+            // Lost-wakeup check: an enqueue that landed between the drain
+            // and the store saw `true` and skipped scheduling.
+            let more = pip_pending_styles()
+                .lock()
+                .map(|guard| !guard.is_empty())
+                .unwrap_or(false)
+                || pip_pending_frames()
+                    .lock()
+                    .map(|guard| !guard.is_empty())
+                    .unwrap_or(false);
+            if !more {
+                return;
+            }
+            if PIP_FLUSH_SCHEDULED.swap(true, Ordering::AcqRel) {
+                return;
+            }
+            continue;
+        }
+        for (number, keep_on_top) in styles {
+            unsafe { apply_pip_style_by_number(number, keep_on_top) };
+        }
+        for (number, req) in frames {
+            unsafe { apply_pip_frame_by_number(number, req) };
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn pip_ns_window_by_number(number: i64) -> *mut objc2::runtime::AnyObject {
+    use objc2::runtime::AnyObject;
+    use objc2::*;
+    let ns_app: *mut AnyObject = msg_send![class!(NSApplication), sharedApplication];
+    if ns_app.is_null() {
+        return std::ptr::null_mut();
+    }
+    msg_send![ns_app, windowWithWindowNumber: number]
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn apply_pip_style_by_number(number: i64, keep_on_top: bool) {
+    let ns_win = pip_ns_window_by_number(number);
+    if !ns_win.is_null() {
+        style_pip_ns_window(ns_win, keep_on_top);
+    }
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn apply_pip_frame_by_number(number: i64, req: PipFrameReq) {
+    use objc2::*;
+    let ns_win = pip_ns_window_by_number(number);
+    if ns_win.is_null() {
+        return;
+    }
+    let rect = CGRect {
+        origin: CGPoint { x: req.x, y: req.y },
+        size: CGSize { width: req.w, height: req.h },
+    };
+    if req.animate {
+        let _: () = msg_send![ns_win, setFrame: rect, display: true, animate: true];
+    } else {
+        let _: () = msg_send![ns_win, setFrame: rect, display: true];
+    }
+    if req.shadow {
+        let _: () = msg_send![ns_win, invalidateShadow];
+    }
+}
+
 /// Remember a PiP window by its AppKit windowNumber so island styling skips
-/// it. Call right after `cx.open_window` for the PiP view.
-pub fn register_pip_window(window: &Window) {
+/// it. Number-only so the post-`open_window` path never touches GPUI state
+/// from inside a `handle.update` lease.
+pub fn register_pip_window_number(number: i64) {
     #[cfg(target_os = "macos")]
-    if let Some(ns_win) = ns_window(window) {
-        use objc2::*;
-        let number: i64 = unsafe { msg_send![ns_win, windowNumber] };
+    {
         let mut guard = pip_window_numbers()
             .lock()
             .unwrap_or_else(|e| e.into_inner());
@@ -558,7 +717,7 @@ pub fn register_pip_window(window: &Window) {
         }
     }
     #[cfg(not(target_os = "macos"))]
-    let _ = window;
+    let _ = number;
 }
 
 pub fn unregister_pip_window(number: i64) {
@@ -591,11 +750,20 @@ pub fn pip_window_number(window: &Window) -> Option<i64> {
 /// FullScreenAuxiliary so it is reachable from full-screen apps.
 pub fn style_pip_window_for(window: &Window, keep_on_top: bool) {
     #[cfg(target_os = "macos")]
-    if let Some(ns_win) = ns_window(window) {
-        unsafe { style_pip_ns_window(ns_win, keep_on_top) };
+    if let Some(number) = pip_window_number(window) {
+        enqueue_pip_style(number, keep_on_top);
     }
     #[cfg(not(target_os = "macos"))]
     let _ = (window, keep_on_top);
+}
+
+/// Number-based style setup for the post-`open_window` path. Enqueued on
+/// the main queue, never inside a GPUI lease.
+pub fn style_pip_by_number(number: i64, keep_on_top: bool) {
+    #[cfg(target_os = "macos")]
+    enqueue_pip_style(number, keep_on_top);
+    #[cfg(not(target_os = "macos"))]
+    let _ = (number, keep_on_top);
 }
 
 #[cfg(target_os = "macos")]
@@ -622,21 +790,11 @@ unsafe fn style_pip_ns_window(ns_win: *mut objc2::runtime::AnyObject, keep_on_to
 
 /// Animated frame move for a PiP window. `setFrame:display:animate:` eases the
 /// ~220 ms corner snap; AppKit ignores `animate` under Reduce Motion.
+/// Enqueued on the main queue so it lands outside any GPUI lease.
 pub fn snap_pip_window_to(window: &Window, x: f64, y: f64, w: f64, h: f64, animate: bool) {
     #[cfg(target_os = "macos")]
-    if let Some(ns_win) = ns_window(window) {
-        use objc2::*;
-        let rect = CGRect {
-            origin: CGPoint { x, y },
-            size: CGSize {
-                width: w,
-                height: h,
-            },
-        };
-        unsafe {
-            let _: () = msg_send![ns_win, setFrame: rect, display: true, animate: animate];
-            let _: () = msg_send![ns_win, invalidateShadow];
-        }
+    if let Some(number) = pip_window_number(window) {
+        enqueue_pip_frame(number, x, y, w, h, animate, true);
     }
     #[cfg(not(target_os = "macos"))]
     let _ = (window, x, y, w, h, animate);
@@ -697,6 +855,7 @@ pub fn pip_visible_frame_for(window: &Window) -> Option<(f64, f64, f64, f64)> {
 }
 
 /// Drop point for the open animation: screen top centre, just below the notch.
+#[allow(dead_code)]
 pub fn pip_notch_drop_origin(w: f64, h: f64) -> Option<(f64, f64)> {
     #[cfg(target_os = "macos")]
     {
@@ -760,18 +919,8 @@ pub fn pip_screen_frames() -> Vec<(f64, f64, f64, f64)> {
 /// shadow re-render on every mouse-move.
 pub fn move_pip_frame(window: &Window, x: f64, y: f64, w: f64, h: f64) {
     #[cfg(target_os = "macos")]
-    if let Some(ns_win) = ns_window(window) {
-        use objc2::*;
-        let rect = CGRect {
-            origin: CGPoint { x, y },
-            size: CGSize {
-                width: w,
-                height: h,
-            },
-        };
-        unsafe {
-            let _: () = msg_send![ns_win, setFrame: rect, display: true];
-        }
+    if let Some(number) = pip_window_number(window) {
+        enqueue_pip_frame(number, x, y, w, h, false, false);
     }
     #[cfg(not(target_os = "macos"))]
     let _ = (window, x, y, w, h);
@@ -869,21 +1018,7 @@ pub fn pip_visible_frame_by_number(number: i64) -> Option<(f64, f64, f64, f64)> 
 /// AppKit ignores `animate` under Reduce Motion. Main thread only.
 pub fn snap_pip_frame_by_number(number: i64, x: f64, y: f64, w: f64, h: f64, animate: bool) {
     #[cfg(target_os = "macos")]
-    unsafe {
-        use objc2::runtime::AnyObject;
-        use objc2::*;
-        let ns_app: *mut AnyObject = msg_send![class!(NSApplication), sharedApplication];
-        let ns_win: *mut AnyObject = msg_send![ns_app, windowWithWindowNumber: number];
-        if ns_win.is_null() {
-            return;
-        }
-        let rect = CGRect {
-            origin: CGPoint { x, y },
-            size: CGSize { width: w, height: h },
-        };
-        let _: () = msg_send![ns_win, setFrame: rect, display: true, animate: animate];
-        let _: () = msg_send![ns_win, invalidateShadow];
-    }
+    enqueue_pip_frame(number, x, y, w, h, animate, true);
     #[cfg(not(target_os = "macos"))]
     let _ = (number, x, y, w, h, animate);
 }
@@ -893,23 +1028,7 @@ pub fn snap_pip_frame_by_number(number: i64, x: f64, y: f64, w: f64, h: f64, ani
 /// routes every tick through `AsyncApp::update` for exactly this reason.
 pub fn set_pip_frame_by_number(number: i64, x: f64, y: f64, w: f64, h: f64) {
     #[cfg(target_os = "macos")]
-    unsafe {
-        use objc2::runtime::AnyObject;
-        use objc2::*;
-        let ns_app: *mut AnyObject = msg_send![class!(NSApplication), sharedApplication];
-        let ns_win: *mut AnyObject = msg_send![ns_app, windowWithWindowNumber: number];
-        if ns_win.is_null() {
-            return;
-        }
-        let rect = CGRect {
-            origin: CGPoint { x, y },
-            size: CGSize {
-                width: w,
-                height: h,
-            },
-        };
-        let _: () = msg_send![ns_win, setFrame: rect, display: true];
-    }
+    enqueue_pip_frame(number, x, y, w, h, false, false);
     #[cfg(not(target_os = "macos"))]
     let _ = (number, x, y, w, h);
 }

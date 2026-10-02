@@ -37,6 +37,10 @@ pub struct PipView {
     keep_on_top: bool,
     content_height: f32,
     window_number: i64,
+    /// Last frame we asked AppKit for. Frame setters are async (a main-queue
+    /// flush outside any GPUI lease), so a read right after a set would see
+    /// the stale frame; velocity samples and settle origins use this instead.
+    requested_frame: Option<(f64, f64, f64, f64)>,
     hover_gen: u64,
     /// Stored so the Island observe callback is not dropped.
     #[allow(dead_code)]
@@ -201,14 +205,30 @@ impl PipView {
             .unwrap_or_else(crate::platform::reduce_motion)
     }
 
+    /// Frame to reason about: the last requested origin/size when one is
+    /// pending, else the live AppKit frame. Never read-after-set directly.
+    fn current_frame(&self, window: &mut Window) -> Option<(f64, f64, f64, f64)> {
+        self.requested_frame.or_else(|| crate::platform::pip_window_frame(window))
+    }
+
+    fn current_frame_by_number(&self) -> Option<(f64, f64, f64, f64)> {
+        self.requested_frame
+            .or_else(|| crate::platform::pip_frame_by_number(self.window_number))
+    }
+
+    fn note_requested(&mut self, x: f64, y: f64, w: f64, h: f64) {
+        self.requested_frame = Some((x, y, w, h));
+    }
+
     fn apply_size(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let (width, height) = self.window_size(cx);
         self.content_height = height;
         let animate = !self.reduce_motion(cx);
-        if let Some((x, y, old_w, old_h)) = crate::platform::pip_window_frame(window) {
+        if let Some((x, y, old_w, old_h)) = self.current_frame(window) {
             let (nx, ny) =
                 anchored_origin(self.corner, (x, y, old_w, old_h), (width as f64, height as f64));
             crate::platform::snap_pip_window_to(window, nx, ny, width as f64, height as f64, animate);
+            self.note_requested(nx, ny, width as f64, height as f64);
         }
         self.persist(|_| {});
     }
@@ -226,7 +246,7 @@ impl PipView {
         // is unavailable (non-macOS).
         self.drag_grab = match (
             crate::platform::mouse_screen_location(),
-            crate::platform::pip_window_frame(window),
+            self.current_frame(window),
         ) {
             (Some((mx, my)), Some((x, y, _, _))) => Some((mx - x, my - y)),
             _ => None,
@@ -254,13 +274,15 @@ impl PipView {
         if dx == 0.0 && dy == 0.0 {
             return;
         }
-        let Some((x, y, w, h)) = crate::platform::pip_window_frame(window) else {
+        let Some((x, y, w, h)) = self.current_frame(window) else {
             return;
         };
         // GPUI pointer space is top-left origin; Cocoa frames are bottom-left.
-        crate::platform::move_pip_frame(window, x + dx as f64, y - dy as f64, w, h);
+        let (nx, ny) = (x + dx as f64, y - dy as f64);
+        crate::platform::move_pip_frame(window, nx, ny, w, h);
+        self.note_requested(nx, ny, w, h);
         self.drag_moved = true;
-        self.push_drag_sample(window);
+        self.push_drag_sample_at(nx as f32, ny as f32);
     }
 
     /// Absolute screen-space placement: `origin = mouse_screen - grab`.
@@ -273,12 +295,14 @@ impl PipView {
         let Some((mx, my)) = crate::platform::mouse_screen_location() else {
             return false;
         };
-        let Some((_, _, w, h)) = crate::platform::pip_window_frame(window) else {
+        let Some((_, _, w, h)) = self.current_frame(window) else {
             return false;
         };
-        crate::platform::move_pip_frame(window, mx - gx, my - gy, w, h);
+        let (nx, ny) = (mx - gx, my - gy);
+        crate::platform::move_pip_frame(window, nx, ny, w, h);
+        self.note_requested(nx, ny, w, h);
         self.drag_moved = true;
-        self.push_drag_sample(window);
+        self.push_drag_sample_at(nx as f32, ny as f32);
         true
     }
 
@@ -293,11 +317,12 @@ impl PipView {
         let Some((mx, my)) = crate::platform::mouse_screen_location() else {
             return false;
         };
-        let Some((_, _, w, h)) = crate::platform::pip_frame_by_number(self.window_number) else {
+        let Some((_, _, w, h)) = self.current_frame_by_number() else {
             return false;
         };
         let (nx, ny) = (mx - gx, my - gy);
         crate::platform::set_pip_frame_by_number(self.window_number, nx, ny, w, h);
+        self.note_requested(nx, ny, w, h);
         self.drag_moved = true;
         self.push_drag_sample_at(nx as f32, ny as f32);
         true
@@ -364,7 +389,7 @@ impl PipView {
             .map(|(at, x, y)| (-(now.duration_since(*at)).as_secs_f64(), *x, *y))
             .collect();
         let (vx, vy) = sampled_velocity(&samples);
-        let Some((x, y, w, h)) = crate::platform::pip_frame_by_number(self.window_number) else {
+        let Some((x, y, w, h)) = self.current_frame_by_number() else {
             return;
         };
         let from = (x as f32, y as f32);
@@ -388,12 +413,14 @@ impl PipView {
         self.persist(|state| state.corner = corner);
         let (tx, ty) = corner_origin(corner, (w as f32, h as f32), screen, PIP_MARGIN);
         crate::platform::snap_pip_frame_by_number(self.window_number, tx as f64, ty as f64, w, h, true);
+        self.note_requested(tx as f64, ty as f64, w, h);
         cx.notify();
     }
 
     fn push_drag_sample(&mut self, window: &mut Window) {
         let now = Instant::now();
-        if let Some((x, y, _, _)) = crate::platform::pip_window_frame(window) {
+        // Prefer the just-requested origin: the async set lands a tick later.
+        if let Some((x, y, _, _)) = self.current_frame(window) {
             self.drag_samples.push((now, x as f32, y as f32));
         }
         let cutoff = Duration::from_millis(DRAG_SAMPLE_WINDOW_MS + 20);
@@ -420,7 +447,7 @@ impl PipView {
             .map(|(at, x, y)| (-(now.duration_since(*at)).as_secs_f64(), *x, *y))
             .collect();
         let (vx, vy) = sampled_velocity(&samples);
-        let Some((x, y, w, h)) = crate::platform::pip_window_frame(window) else {
+        let Some((x, y, w, h)) = self.current_frame(window) else {
             return;
         };
         let from = (x as f32, y as f32);
@@ -445,6 +472,7 @@ impl PipView {
         let (tx, ty) = corner_origin(corner, (w as f32, h as f32), screen, PIP_MARGIN);
         if self.reduce_motion(cx) {
             crate::platform::snap_pip_window_to(window, tx as f64, ty as f64, w, h, false);
+            self.note_requested(tx as f64, ty as f64, w, h);
             cx.notify();
             return;
         }
@@ -490,6 +518,7 @@ impl PipView {
                         crate::platform::set_pip_frame_by_number(
                             number, px as f64, py as f64, w, h,
                         );
+                        view.note_requested(px as f64, py as f64, w, h);
                         true
                     })
                     .unwrap_or(false);
@@ -526,6 +555,7 @@ impl PipView {
         let (ox, oy) = corner_origin(self.corner, (w as f32, h as f32), area, PIP_MARGIN);
         let animate = !self.reduce_motion(cx);
         crate::platform::snap_pip_window_to(window, ox as f64, oy as f64, w, h, animate);
+        self.note_requested(ox as f64, oy as f64, w, h);
     }
 
     fn arm_hover(&mut self, entering: bool, cx: &mut Context<Self>) {
@@ -640,6 +670,7 @@ fn open_with_state(
         keep_on_top,
         content_height: 240.0,
         window_number: -1,
+        requested_frame: None,
         hover_gen: 0,
         island_subscription: None,
         dragging: false,
@@ -694,6 +725,7 @@ fn open_with_state(
                     keep_on_top,
                     content_height,
                     window_number: -1,
+                    requested_frame: None,
                     hover_gen: 0,
                     island_subscription: Some(subscription),
                     dragging: false,
@@ -711,17 +743,31 @@ fn open_with_state(
         log::error!("pip: failed to open {kind:?} window");
         return;
     };
+    // Read-only number lookup inside the lease; every mutating AppKit call
+    // (style + placement) runs after, via the main-queue flush in
+    // platform.rs, so AppKit's resize/move callback never fires while this
+    // window is leased. `window_bounds` above already carries the final
+    // width x content_height, so no resize is needed before first paint.
     let number = handle
-        .update(cx, |view, window, cx| {
-            crate::platform::register_pip_window(window);
-            crate::platform::style_pip_window_for(window, keep_on_top);
+        .update(cx, |view, window, _| {
             let number = crate::platform::pip_window_number(window).unwrap_or(-1);
             view.window_number = number;
-            place_new_window(view, window, width as f64, content_height as f64, reduce_motion);
-            let _ = cx;
             number
         })
         .unwrap_or(-1);
+    crate::platform::register_pip_window_number(number);
+    crate::platform::style_pip_by_number(number, keep_on_top);
+    if let Some((tx, ty, w, h)) =
+        place_new_window(corner, gallery, number, width as f64, content_height as f64, reduce_motion)
+    {
+        // Seed the requested frame so the first drag/resize reasons from
+        // the target, not the pre-flush centered bounds.
+        handle
+            .update(cx, |view, _, _| {
+                view.note_requested(tx, ty, w, h);
+            })
+            .ok();
+    }
     OPEN.with(|open| {
         open.borrow_mut().insert(kind, (handle, number));
     });
@@ -736,28 +782,31 @@ fn open_with_state(
 }
 
 fn place_new_window(
-    view: &PipView,
-    window: &mut Window,
+    corner: PipCorner,
+    gallery: bool,
+    number: i64,
     width: f64,
     height: f64,
     reduce_motion: bool,
-) {
-    let visible = crate::platform::pip_visible_frame_for(window);
+) -> Option<(f64, f64, f64, f64)> {
+    // Async placement by windowNumber: lands on the main queue after
+    // `open_window` returns, outside any GPUI lease.
+    let visible = crate::platform::pip_visible_frame_by_number(number);
     let Some(visible) = visible else {
-        return;
+        return None;
     };
     let area = (visible.0 as f32, visible.1 as f32, visible.2 as f32, visible.3 as f32);
-    let (tx, ty) = corner_origin(view.corner, (width as f32, height as f32), area, PIP_MARGIN);
+    let (tx, ty) = corner_origin(corner, (width as f32, height as f32), area, PIP_MARGIN);
     // Gallery shots and reduce-motion: land on the target corner immediately
-    // (no notch drop animation).
-    if view.gallery || reduce_motion {
-        crate::platform::snap_pip_window_to(window, tx as f64, ty as f64, width, height, false);
-        return;
+    // (no notch drop animation). The coalescing flush keeps only the latest
+    // frame per window, so the open path enqueues exactly one move; AppKit
+    // animates it from the centered `open_window` bounds.
+    if gallery || reduce_motion {
+        crate::platform::snap_pip_frame_by_number(number, tx as f64, ty as f64, width, height, false);
+        return Some((tx as f64, ty as f64, width, height));
     }
-    if let Some((nx, ny)) = crate::platform::pip_notch_drop_origin(width, height) {
-        crate::platform::snap_pip_window_to(window, nx, ny, width, height, false);
-    }
-    crate::platform::snap_pip_window_to(window, tx as f64, ty as f64, width, height, true);
+    crate::platform::snap_pip_frame_by_number(number, tx as f64, ty as f64, width, height, true);
+    Some((tx as f64, ty as f64, width, height))
 }
 
 pub fn nearest_corner(
