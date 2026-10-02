@@ -6,7 +6,7 @@ use crate::theme;
 use crate::CloseWindow;
 use gpui::{
     canvas, div, linear_color_stop, linear_gradient, prelude::*, px, relative, AnyElement, Bounds,
-    Context, CursorStyle, ElementId, FocusHandle, FontWeight, KeyDownEvent, MouseButton,
+    ClipboardItem, Context, CursorStyle, ElementId, FocusHandle, FontWeight, KeyDownEvent, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Rgba, ScrollHandle, ScrollWheelEvent,
     SharedString, Window,
 };
@@ -394,6 +394,10 @@ pub(super) struct SettingsView {
     catalog_filter: String,
     catalog_filter_focus: FocusHandle,
     pin_error: Option<String>,
+    dashboard_errors: Vec<String>,
+    dashboard_reloaded_at: Option<Instant>,
+    dashboard_file_mtime: Option<std::time::SystemTime>,
+    dashboard_watch_started: bool,
     placement_drag: bool,
     placement_bounds: Rc<RefCell<Option<Bounds<Pixels>>>>,
     gradient_drag: bool,
@@ -450,6 +454,10 @@ impl SettingsView {
             catalog_filter: String::new(),
             catalog_filter_focus: cx.focus_handle(),
             pin_error: None,
+            dashboard_errors: Vec::new(),
+            dashboard_reloaded_at: None,
+            dashboard_file_mtime: None,
+            dashboard_watch_started: false,
             placement_drag: false,
             placement_bounds: Rc::new(RefCell::new(None)),
             gradient_drag: false,
@@ -610,6 +618,65 @@ impl SettingsView {
         })
         .detach();
     }
+
+    fn ensure_dashboard_watch(&mut self, cx: &mut Context<Self>) {
+        if self.dashboard_watch_started {
+            return;
+        }
+        self.dashboard_watch_started = true;
+        self.dashboard_file_mtime = dashboard_file_mtime_now();
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(Duration::from_secs(2))
+                    .await;
+                let alive = this
+                    .update(cx, |this, cx| {
+                        this.poll_dashboard_file();
+                        cx.notify();
+                    })
+                    .ok()
+                    .is_some();
+                if !alive {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
+    fn poll_dashboard_file(&mut self) {
+        let mtime = dashboard_file_mtime_now();
+        if mtime == self.dashboard_file_mtime {
+            return;
+        }
+        self.dashboard_file_mtime = mtime;
+        match nook_core::observe::read_dashboard_file() {
+            None => {}
+            Some(Ok(dashboard)) => {
+                if nook_core::settings::get_app_settings()
+                    .observe
+                    .dashboard
+                    != dashboard
+                {
+                    SettingsView::persist_observe(|s| {
+                        s.observe.dashboard = dashboard;
+                    });
+                    self.dashboard_errors.clear();
+                    self.dashboard_reloaded_at = Some(Instant::now());
+                }
+            }
+            Some(Err(errors)) => {
+                self.dashboard_errors = errors;
+            }
+        }
+    }
+}
+
+fn dashboard_file_mtime_now() -> Option<std::time::SystemTime> {
+    std::fs::metadata(nook_core::observe::dashboard_file_path())
+        .and_then(|meta| meta.modified())
+        .ok()
 }
 
 impl gpui::Render for SettingsView {
@@ -1589,6 +1656,9 @@ impl SettingsView {
         city_focused: bool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        if self.module == WidgetModule::Observe {
+            self.ensure_dashboard_watch(cx);
+        }
         let mut on_nook = Vec::new();
         let mut available = Vec::new();
         let mut blocked_available = false;
@@ -2414,6 +2484,177 @@ impl SettingsView {
         )
     }
 
+    fn dashboard_section(
+        &self,
+        settings: &AppSettings,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let effective = nook_core::observe::effective_dashboard(&settings.observe);
+        let is_default = settings.observe.dashboard.is_empty();
+        let mut rows = vec![
+            settings_row("observe-dash-config")
+                .child(label("Config", theme::BODY, true))
+                .child(caption_text(if is_default {
+                    SharedString::from("Default (pinned metrics)")
+                } else {
+                    SharedString::from(format!("{} panels", effective.panels.len()))
+                }))
+                .into_any_element(),
+        ];
+        for (index, panel) in effective.panels.iter().enumerate() {
+            let kind = match panel.kind {
+                nook_core::observe::PanelKind::Bars => "bars",
+                nook_core::observe::PanelKind::Stacked => "stacked",
+                nook_core::observe::PanelKind::Line => "line",
+                nook_core::observe::PanelKind::Stat => "stat",
+            };
+            let mut caption = format!("{} \u{b7} {} targets", kind, panel.targets.len());
+            if let Some(unit) = panel.unit.as_deref() {
+                caption.push_str(&format!(" \u{b7} {unit}"));
+            }
+            let mut dots = div().flex().items_center().gap(px(4.));
+            for target in &panel.targets {
+                dots = dots.child(
+                    div()
+                        .size(px(7.))
+                        .rounded_full()
+                        .bg(dashboard_dot_color(target.color.as_deref())),
+                );
+            }
+            rows.push(
+                settings_row(SharedString::from(format!("observe-dash-panel-{index}")))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.))
+                            .flex()
+                            .flex_col()
+                            .gap(px(1.))
+                            .child(label(panel.title.clone(), theme::BODY, true))
+                            .child(label(caption, theme::SUBHEADLINE, false)),
+                    )
+                    .child(dots)
+                    .into_any_element(),
+            );
+        }
+        rows.push(
+            settings_row("observe-dash-buttons")
+                .child(
+                    div()
+                        .flex()
+                        .flex_wrap()
+                        .gap(px(6.))
+                        .child(push_button(
+                            "observe-dash-copy",
+                            "Copy Config",
+                            cx,
+                            |_, _, cx| {
+                                let json = nook_core::observe::dashboard_to_json(
+                                    &nook_core::observe::effective_dashboard(
+                                        &nook_core::settings::get_app_settings().observe,
+                                    ),
+                                );
+                                cx.write_to_clipboard(ClipboardItem::new_string(json));
+                            },
+                        ))
+                        .child(push_button(
+                            "observe-dash-paste",
+                            "Paste Config",
+                            cx,
+                            |this, _, cx| {
+                                if let Some(text) =
+                                    cx.read_from_clipboard().and_then(|item| item.text())
+                                {
+                                    match nook_core::observe::parse_dashboard(&text) {
+                                        Ok(dashboard) => {
+                                            SettingsView::persist_observe(|s| {
+                                                s.observe.dashboard = dashboard;
+                                            });
+                                            this.dashboard_errors.clear();
+                                            this.dashboard_reloaded_at = None;
+                                        }
+                                        Err(errors) => {
+                                            this.dashboard_errors = errors;
+                                        }
+                                    }
+                                    cx.notify();
+                                }
+                            },
+                        ))
+                        .child(push_button(
+                            "observe-dash-edit",
+                            "Edit as File",
+                            cx,
+                            |this, _, cx| {
+                                let effective = nook_core::observe::effective_dashboard(
+                                    &nook_core::settings::get_app_settings().observe,
+                                );
+                                let path = nook_core::observe::dashboard_file_path();
+                                if !path.exists() {
+                                    let _ =
+                                        nook_core::observe::write_dashboard_file(&effective);
+                                }
+                                this.dashboard_file_mtime = dashboard_file_mtime_now();
+                                let _ = nook_core::files::open_file(
+                                    path.to_string_lossy().into_owned(),
+                                );
+                                cx.notify();
+                            },
+                        ))
+                        .child(push_button(
+                            "observe-dash-starter",
+                            "warmUP Starter",
+                            cx,
+                            |this, _, cx| {
+                                SettingsView::persist_observe(|s| {
+                                    s.observe.dashboard =
+                                        nook_core::observe::warmup_starter_dashboard();
+                                });
+                                this.dashboard_errors.clear();
+                                this.dashboard_reloaded_at = None;
+                                cx.notify();
+                            },
+                        ))
+                        .child(push_button(
+                            "observe-dash-reset-btn",
+                            self.destructive_caption("observe-dash-reset-btn", "Reset"),
+                            cx,
+                            |this, _, cx| {
+                                SettingsView::persist_observe(|s| {
+                                    s.observe.dashboard = Default::default();
+                                });
+                                this.dashboard_errors.clear();
+                                this.dashboard_reloaded_at = None;
+                                cx.notify();
+                            },
+                        )),
+                )
+                .into_any_element(),
+        );
+        if self
+            .dashboard_reloaded_at
+            .is_some_and(|at| at.elapsed() < Duration::from_secs(3))
+        {
+            rows.push(
+                settings_row("observe-dash-reloaded")
+                    .child(caption_text("Reloaded from file"))
+                    .into_any_element(),
+            );
+        }
+        for (index, error) in self.dashboard_errors.iter().enumerate() {
+            rows.push(
+                settings_row(SharedString::from(format!("observe-dash-error-{index}")))
+                    .child(dashboard_error_text(error.clone()))
+                    .into_any_element(),
+            );
+        }
+        section(
+            "Dashboard",
+            settings_group(rows),
+            Some("Grafana-style JSON: panels with title, type (bars, stacked, line, stat), unit and targets (expr, legend, color). expr is a metric key from Available Metrics or PromQL."),
+        )
+    }
+
     fn render_observe_settings(
         &self,
         settings: &AppSettings,
@@ -2809,6 +3050,7 @@ impl SettingsView {
                 settings_group(metric_rows),
                 Some("Pulled from the endpoint. Click to pin or unpin."),
             ))
+            .child(self.dashboard_section(settings, cx))
             .child(section(
                 "Pin Query",
                 settings_group(vec![
@@ -2946,6 +3188,32 @@ fn caption_text(text: impl Into<SharedString>) -> impl IntoElement {
         .line_height(px(theme::SUBHEADLINE.leading))
         .text_color(theme::SECONDARY_LABEL)
         .child(text.into())
+}
+
+fn dashboard_error_text(text: impl Into<SharedString>) -> impl IntoElement {
+    div()
+        .text_size(px(theme::SUBHEADLINE.size))
+        .line_height(px(theme::SUBHEADLINE.leading))
+        .text_color(theme::DESTRUCTIVE)
+        .child(text.into())
+}
+
+fn dashboard_dot_color(color: Option<&str>) -> Rgba {
+    match color {
+        Some("green") => theme::SUCCESS,
+        Some("blue") => theme::rgba_from_u32(0x0A84FF, 1.0),
+        Some("orange") => theme::rgba_from_u32(0xFF9F0A, 1.0),
+        Some("red") => theme::DESTRUCTIVE,
+        Some("purple") => theme::rgba_from_u32(0xBF5AF2, 1.0),
+        Some("gray") | Some("grey") => theme::TERTIARY_LABEL,
+        Some("accent") | None => theme::accent(),
+        Some(hex) => hex
+            .strip_prefix('#')
+            .filter(|digits| digits.len() == 6)
+            .and_then(|digits| u32::from_str_radix(digits, 16).ok())
+            .map(|rgb| theme::rgba_from_u32(rgb, 1.0))
+            .unwrap_or(theme::SECONDARY_LABEL),
+    }
 }
 
 fn pomodoro_rows(
@@ -3487,6 +3755,7 @@ fn push_button(
         || id.as_ref() == "reset-all-btn"
         || id.as_ref() == "term-clear-history-btn"
         || id.as_ref() == "quit-btn"
+        || id.as_ref() == "observe-dash-reset-btn"
         || id.starts_with("unpin-");
     let caption = caption.into();
     let pressed_id = id.clone();

@@ -1,19 +1,20 @@
 //! Observe Nook pane: warmUP `/admin/metrics` plus Prometheus `/api/v1/query_range`.
 //!
 //! The 128pt gallery card is two status rows. Clicking it opens the full-width
-//! Nightwatch chart (range chips, stacked bars, legend).
+//! chart view: one dashboard panel per picker chip (stacked, bars, line, stat).
 
 use crate::icons::lucide_color;
 use crate::island::ui::{label, nook_pane, text_btn};
 use crate::island::Island;
 use crate::theme;
 use gpui::{
-    canvas, deferred, div, point, prelude::*, px, relative, Bounds, Context, CursorStyle,
+    canvas, deferred, div, point, prelude::*, px, relative, AnyElement, Bounds, Context, CursorStyle,
     MouseButton, MouseDownEvent, MouseMoveEvent, PathBuilder, Pixels, Rgba, ScrollHandle,
     SharedString,
 };
 use nook_core::observe::{
-    MetricReading, ObserveRange, ObserveSnapshot, ObserveSourceKind, SamplePoint,
+    MetricReading, ObserveDashboard, ObservePanel, ObserveRange, ObserveSnapshot,
+    ObserveSourceKind, PanelKind, SamplePoint,
 };
 use nook_core::settings::AppSettings;
 use std::cell::RefCell;
@@ -23,30 +24,35 @@ use std::rc::Rc;
 pub(crate) const OBSERVE_EXPANDED_BODY: f32 = 240.0;
 
 thread_local! {
-    static METRIC_PICKER_SCROLL: RefCell<ScrollHandle> = RefCell::new(ScrollHandle::default());
+    static PANEL_PICKER_SCROLL: RefCell<ScrollHandle> = RefCell::new(ScrollHandle::default());
 }
 
-fn metric_picker_scroll() -> ScrollHandle {
-    METRIC_PICKER_SCROLL.with_borrow(|h| h.clone())
+fn panel_picker_scroll() -> ScrollHandle {
+    PANEL_PICKER_SCROLL.with_borrow(|h| h.clone())
 }
 
+/// One panel target resolved to chart data: display label/colour plus the
+/// reading's range points (empty when the snapshot has no such reading).
 #[derive(Clone)]
-struct StatusSeries {
-    group: usize,
+struct PanelSeries {
+    label: String,
+    expr: String,
+    color: Rgba,
     points: Vec<SamplePoint>,
+    total: Option<f64>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
-struct StackedSample {
+struct PanelSample {
     ts: f64,
-    values: [f64; 3],
+    values: Vec<f64>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
-struct ChartBucket {
+struct PanelBucket {
     start: f64,
     end: f64,
-    values: Option<[f64; 3]>,
+    values: Option<Vec<f64>>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -132,204 +138,291 @@ pub(crate) fn observe_big_view(
     hover: Option<&ObserveHover>,
     cx: &mut Context<Island>,
 ) -> gpui::Stateful<gpui::Div> {
-    // Mockup `observe-big` (nNzAv): numeral + unit + range chips, caption,
-    // metric picker, 30 stacked status columns, legend. No other chrome; the
-    // × only shows on hover. Empty data keeps the layout with a "—" numeral.
+    // Mockup `observe-big`: numeral + unit + range chips, caption, panel
+    // picker, chart, legend. Panels come from `effective_dashboard`; the
+    // selection persists in `chart_panel`. Empty data keeps the layout.
     let range = settings.observe.range;
     let mut chips = div().flex().items_center().gap(px(6.)).flex_shrink_0();
     for option in ObserveRange::all() {
         chips = chips.child(range_chip(option, option == range, cx));
     }
 
-    let statuses = status_series(snap);
-    let featured = snap.metrics.first();
-    let selected = nook_core::observe::effective_chart_metric(&settings.observe)
-        .and_then(|query| snap.metrics.iter().find(|m| m.query == query));
-
-    // Picker row under the caption: HTTP status (only with status data) then
-    // one chip per pinned metric. Horizontal scroll, never wraps.
-    let picker = chart_picker(snap, selected.map(|m| m.query.as_str()), !statuses.is_empty(), cx);
-    let show_picker = !statuses.is_empty() || !snap.metrics.is_empty();
-
-    if let Some(reading) = selected {
-        let buckets = single_buckets(reading, range);
-        let hovered = hover.and_then(|h| buckets.get(h.bucket));
-        let has_series = reading
-            .series
-            .first()
-            .is_some_and(|s| s.points.len() >= 2);
-        let headline = if let Some(bucket) = hovered {
-            match bucket.values {
-                Some(values) => compact_number(clamp_value(values[0])),
-                None => "—".into(),
-            }
-        } else if has_series {
-            reading
-                .last_value()
-                .map(compact_number)
-                .unwrap_or_else(|| "—".into())
-        } else {
-            "—".into()
-        };
-        let metric_label = if hovered.is_some() {
-            let bucket = hovered.expect("hovered bucket");
-            format_bucket_range(bucket.start, bucket.end, range)
-        } else {
-            observe_metric_caption(Some(reading.label.as_str()), settings)
-        };
-        let unit = metric_unit(&reading.query);
-        let color = metric_color(&reading.query);
-
-        let header = div()
-            .flex()
-            .items_end()
-            .gap(px(16.))
-            .flex_shrink_0()
-            .w_full()
-            .child(observe_headline(headline))
-            .when(!unit.is_empty(), |d| d.child(observe_unit(unit)))
-            .child(div().flex_1())
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(8.))
-                    .flex_shrink_0()
-                    .child(crate::island::media::pip_popout_btn_sized(
-                        crate::pip::PipKind::Observe,
-                        24.0,
-                        12.0,
-                        13.0,
-                        cx,
-                    ))
-                    .child(chips),
-            );
-
-        let mut pane = nook_pane("nook-observe-big")
-            .group("nook-observe-big")
-            .relative()
-            .w_full()
-            .bg(theme::ISLAND)
-            .rounded(px(theme::ROW_RADIUS))
-            .border_1()
-            .border_color(theme::FILL_TERTIARY)
-            .p(px(16.))
-            .gap(px(12.))
-            .child(header)
-            .child(
-                label(metric_label, theme::CALLOUT, false)
-                    .text_color(theme::secondary_label())
-                    .w_full()
-                    .flex_shrink_0(),
-            );
-        if show_picker {
-            pane = pane.child(picker);
-        }
-        pane.child(single_chart(&buckets, reading, color, unit, hover, range, cx))
-            .child(single_legend(reading, color, range))
-            .child(observe_close_btn(cx))
-    } else {
-        let buckets = status_buckets(
-            &stacked_samples(&statuses, range.step_seconds() as f64),
-            range,
-            BIG_COLUMNS,
+    let dashboard = nook_core::observe::effective_dashboard(&settings.observe);
+    let title = nook_core::observe::effective_chart_panel(&settings.observe);
+    let panel = title
+        .as_deref()
+        .and_then(|t| dashboard.panels.iter().find(|p| p.title == t))
+        .or_else(|| dashboard.panels.first());
+    let Some(panel) = panel else {
+        return big_pane(
+            "—".into(),
+            None,
+            "No panels".into(),
+            None,
+            None,
+            div().flex_1().min_h(px(0.)).into_any_element(),
+            None,
+            chips,
+            cx,
         );
-        let hovered = hover.and_then(|h| buckets.get(h.bucket));
-        let headline = if let Some(bucket) = hovered {
-            match bucket.values {
-                Some(values) => compact_number(bucket_total(values)),
-                None => "—".into(),
-            }
-        } else if !statuses.is_empty() {
-            let latest: f64 = statuses
-                .iter()
-                .filter_map(|series| series.points.last())
-                .map(|pt| clamp_value(pt.value))
-                .sum();
-            compact_number(latest)
-        } else {
-            featured
-                .and_then(|m| m.last_value())
-                .map(compact_number)
-                .unwrap_or_else(|| "—".into())
-        };
-        let metric_label = if let Some(bucket) = hovered {
-            format_bucket_range(bucket.start, bucket.end, range)
-        } else if !statuses.is_empty() {
-            observe_metric_caption(Some("HTTP status"), settings)
-        } else {
-            observe_metric_caption(featured.map(|m| m.label.as_str()), settings)
-        };
-
-        let header = div()
-            .flex()
-            .items_end()
-            .gap(px(16.))
-            .flex_shrink_0()
-            .w_full()
-            .child(observe_headline(headline))
-            .child(observe_unit("req/s"))
-            .child(div().flex_1())
-            .child(
-                // Pop Out left of the range chips (8 pt gap), not near the × corner.
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(8.))
-                    .flex_shrink_0()
-                    .child(crate::island::media::pip_popout_btn_sized(
-                        crate::pip::PipKind::Observe,
-                        24.0,
-                        12.0,
-                        13.0,
-                        cx,
-                    ))
-                    .child(chips),
-            );
-
-        let mut pane = nook_pane("nook-observe-big")
-            .group("nook-observe-big")
-            .relative()
-            .w_full()
-            .bg(theme::ISLAND)
-            .rounded(px(theme::ROW_RADIUS))
-            .border_1()
-            .border_color(theme::FILL_TERTIARY)
-            .p(px(16.))
-            .gap(px(12.))
-            .child(header)
-            .child(
-                label(metric_label, theme::CALLOUT, false)
-                    .text_color(theme::secondary_label())
-                    .w_full()
-                    .flex_shrink_0(),
-            );
-        if show_picker {
-            pane = pane.child(picker);
-        }
-        pane.child(status_chart(&buckets, hover, range, cx))
-            .child(status_legend(status_totals(snap), range))
-            .child(observe_close_btn(cx))
-    }
-}
-
-fn truncate_metric_label(label: &str) -> String {
-    const LIMIT: usize = 18;
-    if label.chars().count() > LIMIT {
-        let short: String = label.chars().take(LIMIT).collect();
-        format!("{short}…")
-    } else {
-        label.to_string()
-    }
-}
-
-fn metric_chip(query: Option<String>, text: String, active: bool, cx: &mut Context<Island>) -> impl IntoElement {
-    let id = match &query {
-        Some(q) => format!("observe-metric-{q}"),
-        None => "observe-metric-status".to_string(),
     };
+
+    let unit = panel
+        .unit
+        .as_deref()
+        .map(str::trim)
+        .filter(|u| !u.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            let expr = panel
+                .targets
+                .first()
+                .map(|t| t.expr.as_str())
+                .unwrap_or("");
+            let derived = metric_unit(expr);
+            (!derived.is_empty()).then(|| derived.to_string())
+        });
+    let unit_str = unit.as_deref().unwrap_or("");
+    let caption = observe_metric_caption(Some(&panel.title), settings);
+    let picker = panel_picker(&dashboard, &panel.title, cx).into_any_element();
+    let series = panel_series(snap, panel);
+
+    let (headline, delta, body, legend) = match panel.kind {
+        PanelKind::Stacked => {
+            let samples = panel_samples(&series, range.step_seconds() as f64);
+            let buckets = panel_buckets(&samples, series.len(), range, BIG_COLUMNS);
+            let hover_idx = hover.map(|h| h.bucket);
+            let headline = match hovered_values(&buckets, hover_idx) {
+                Some(values) => compact_number(panel_total(values)),
+                None => {
+                    let latest: f64 = series
+                        .iter()
+                        .filter_map(|s| s.points.last())
+                        .map(|p| clamp_value(p.value))
+                        .sum();
+                    if latest > 0.0 {
+                        compact_number(latest)
+                    } else {
+                        "—".into()
+                    }
+                }
+            };
+            (
+                headline,
+                None,
+                time_chart(
+                    ChartPaint::Stacked,
+                    &buckets,
+                    &series,
+                    unit_str,
+                    hover_idx,
+                    range,
+                    cx,
+                )
+                .into_any_element(),
+                Some(panel_legend(&series, unit_str, range).into_any_element()),
+            )
+        }
+        PanelKind::Bars => {
+            let samples = panel_samples(&series, range.step_seconds() as f64);
+            let buckets = panel_buckets(&samples, series.len(), range, BIG_COLUMNS);
+            let hover_idx = hover.map(|h| h.bucket);
+            let headline = match hovered_values(&buckets, hover_idx) {
+                Some(values) => {
+                    compact_number(clamp_value(values.first().copied().unwrap_or(0.0)))
+                }
+                None => series
+                    .first()
+                    .and_then(|s| s.points.last())
+                    .map(|p| compact_number(clamp_value(p.value)))
+                    .unwrap_or_else(|| "—".into()),
+            };
+            (
+                headline,
+                None,
+                time_chart(
+                    ChartPaint::Bars,
+                    &buckets,
+                    &series,
+                    unit_str,
+                    hover_idx,
+                    range,
+                    cx,
+                )
+                .into_any_element(),
+                Some(panel_legend(&series, unit_str, range).into_any_element()),
+            )
+        }
+        PanelKind::Line => {
+            let samples = panel_samples(&series, range.step_seconds() as f64);
+            let buckets = panel_buckets(&samples, series.len(), range, BIG_COLUMNS);
+            let hover_idx = hover.map(|h| h.bucket);
+            let headline = match hovered_values(&buckets, hover_idx) {
+                Some(values) => {
+                    compact_number(clamp_value(values.first().copied().unwrap_or(0.0)))
+                }
+                None => series
+                    .first()
+                    .and_then(|s| s.points.last())
+                    .map(|p| compact_number(clamp_value(p.value)))
+                    .unwrap_or_else(|| "—".into()),
+            };
+            (
+                headline,
+                None,
+                time_chart(
+                    ChartPaint::Line,
+                    &buckets,
+                    &series,
+                    unit_str,
+                    hover_idx,
+                    range,
+                    cx,
+                )
+                .into_any_element(),
+                Some(panel_legend(&series, unit_str, range).into_any_element()),
+            )
+        }
+        PanelKind::Stat => {
+            let primary = series.first();
+            let expr = primary.map(|s| s.expr.as_str()).unwrap_or("");
+            let reading = nook_core::observe::reading_for(snap, expr);
+            let headline = reading
+                .and_then(|r| r.last_value())
+                .map(compact_number)
+                .unwrap_or_else(|| "—".into());
+            (
+                headline,
+                stat_delta(reading, expr, range),
+                stat_body(primary, cx).into_any_element(),
+                Some(panel_legend(&series, unit_str, range).into_any_element()),
+            )
+        }
+    };
+    big_pane(
+        headline,
+        unit,
+        caption,
+        Some(picker),
+        delta,
+        body,
+        legend,
+        chips,
+        cx,
+    )
+}
+
+fn hovered_values(buckets: &[PanelBucket], hover: Option<usize>) -> Option<&Vec<f64>> {
+    hover
+        .and_then(|i| buckets.get(i))
+        .and_then(|b| b.values.as_ref())
+}
+
+fn big_pane(
+    headline: String,
+    unit: Option<String>,
+    caption: String,
+    picker: Option<AnyElement>,
+    delta: Option<(String, Rgba)>,
+    body: AnyElement,
+    legend: Option<AnyElement>,
+    chips: gpui::Div,
+    cx: &mut Context<Island>,
+) -> gpui::Stateful<gpui::Div> {
+    let mut number = div()
+        .flex()
+        .items_end()
+        .gap(px(8.))
+        .child(observe_headline(headline));
+    if let Some(unit) = unit.filter(|u| !u.is_empty()) {
+        number = number.child(observe_unit(&unit));
+    }
+    let mut left = div()
+        .flex()
+        .flex_col()
+        .items_start()
+        .gap(px(2.))
+        .child(number);
+    if let Some((text, color)) = delta {
+        left = left.child(label(text, theme::FOOTNOTE, false).text_color(color));
+    }
+    let mut pane = nook_pane("nook-observe-big")
+        .group("nook-observe-big")
+        .relative()
+        .w_full()
+        .bg(theme::ISLAND)
+        .rounded(px(theme::ROW_RADIUS))
+        .border_1()
+        .border_color(theme::FILL_TERTIARY)
+        .p(px(16.))
+        .gap(px(12.))
+        .child(
+            div()
+                .flex()
+                .items_end()
+                .gap(px(16.))
+                .flex_shrink_0()
+                .w_full()
+                .child(left)
+                .child(div().flex_1())
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(8.))
+                        .flex_shrink_0()
+                        .child(crate::island::media::pip_popout_btn_sized(
+                            crate::pip::PipKind::Observe,
+                            24.0,
+                            12.0,
+                            13.0,
+                            cx,
+                        ))
+                        .child(chips),
+                ),
+        )
+        .child(
+            label(caption, theme::CALLOUT, false)
+                .text_color(theme::secondary_label())
+                .w_full()
+                .flex_shrink_0(),
+        );
+    if let Some(picker) = picker {
+        pane = pane.child(picker);
+    }
+    pane = pane.child(body);
+    if let Some(legend) = legend {
+        pane = pane.child(legend);
+    }
+    pane.child(observe_close_btn(cx))
+}
+
+fn panel_picker(
+    dashboard: &ObserveDashboard,
+    selected: &str,
+    cx: &mut Context<Island>,
+) -> impl IntoElement {
+    let mut row = div()
+        .id("observe-panel-picker")
+        .track_scroll(&panel_picker_scroll())
+        .flex()
+        .items_center()
+        .gap(px(6.))
+        .w_full()
+        .flex_shrink_0()
+        .overflow_x_scroll()
+        .overflow_y_hidden();
+    for panel in &dashboard.panels {
+        row = row.child(panel_chip(&panel.title, panel.title == selected, cx));
+    }
+    row
+}
+
+fn panel_chip(title: &str, active: bool, cx: &mut Context<Island>) -> impl IntoElement {
+    let title = title.to_string();
+    let select = title.clone();
     div()
-        .id(SharedString::from(id))
+        .id(SharedString::from(format!("observe-panel-{title}")))
         .flex()
         .flex_shrink_0()
         .items_center()
@@ -351,16 +444,15 @@ fn metric_chip(query: Option<String>, text: String, active: bool, cx: &mut Conte
                 if this.observe_hover.take().is_some() {
                     cx.notify();
                 }
-                let next = query.clone();
                 nook_core::settings::tweak_app_settings(|s| {
-                    nook_core::observe::set_chart_metric(&mut s.observe, next.as_deref());
+                    nook_core::observe::set_chart_panel(&mut s.observe, Some(&select));
                 });
                 this.settings = nook_core::settings::get_app_settings();
                 cx.notify();
             }),
         )
         .child(
-            label(text, theme::SUBHEADLINE, active)
+            label(truncate_metric_label(&title), theme::SUBHEADLINE, active)
                 .whitespace_nowrap()
                 .text_color(if active {
                     theme::LABEL
@@ -370,37 +462,87 @@ fn metric_chip(query: Option<String>, text: String, active: bool, cx: &mut Conte
         )
 }
 
-fn chart_picker(
-    snap: &ObserveSnapshot,
-    selected: Option<&str>,
-    has_status: bool,
-    cx: &mut Context<Island>,
-) -> impl IntoElement {
-    let slug = selected.unwrap_or("status");
-    let mut row = div()
-        .id(SharedString::from(format!("observe-metric-picker-{slug}")))
-        .track_scroll(&metric_picker_scroll())
+/// Legend row below the chart: per-target dot + label + window total, with
+/// the window/step caption pinned right. Headline and legend use the unit.
+fn panel_legend(series: &[PanelSeries], unit: &str, range: ObserveRange) -> impl IntoElement {
+    let mut legend = div()
         .flex()
         .items_center()
-        .gap(px(6.))
+        .gap(px(16.))
         .w_full()
-        .flex_shrink_0()
-        .overflow_x_scroll()
-        .overflow_y_hidden();
-    if has_status {
-        row = row.child(metric_chip(None, "HTTP status".to_string(), selected.is_none(), cx));
+        .flex_shrink_0();
+    for s in series {
+        let value = s.total.map(compact_number).unwrap_or_else(|| "—".into());
+        let text = if unit.is_empty() || value == "—" {
+            format!("{} {value}", s.label)
+        } else {
+            format!("{} {value} {unit}", s.label)
+        };
+        legend = legend.child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(5.))
+                .child(div().size(px(5.)).rounded_full().bg(s.color))
+                .child(
+                    label(text, theme::SUBHEADLINE, false).text_color(theme::tertiary_label()),
+                ),
+        );
     }
-    for reading in &snap.metrics {
-        let active = selected == Some(reading.query.as_str());
-        row = row.child(metric_chip(
-            Some(reading.query.clone()),
-            truncate_metric_label(&reading.label),
-            active,
-            cx,
-        ));
-    }
-    row
+    legend
+        .child(div().flex_1())
+        .child(
+            label(
+                format!("last {} · {} step", range.label(), bucket_step(range)),
+                theme::SUBHEADLINE,
+                false,
+            )
+            .text_color(theme::tertiary_label()),
+        )
 }
+
+/// Sparkline strip for stat panels: the primary target's range points as a
+/// thin line with a last-point dot.
+fn stat_body(primary: Option<&PanelSeries>, cx: &mut Context<Island>) -> impl IntoElement {
+    let _ = cx;
+    let (points, color) = primary
+        .map(|s| (s.points.clone(), s.color))
+        .unwrap_or_else(|| (Vec::new(), theme::tertiary_label()));
+    div()
+        .flex()
+        .flex_col()
+        .flex_1()
+        .min_h(px(0.))
+        .w_full()
+        .justify_center()
+        .child(
+            div()
+                .w_full()
+                .h(px(48.))
+                .flex_shrink_0()
+                .child(
+                    canvas(
+                        |bounds, _, _| bounds,
+                        move |bounds, _, window, _| {
+                            paint_stat_sparkline(window, bounds, &points, color);
+                        },
+                    )
+                    .w_full()
+                    .h_full(),
+                ),
+        )
+}
+
+fn truncate_metric_label(label: &str) -> String {
+    const LIMIT: usize = 18;
+    if label.chars().count() > LIMIT {
+        let short: String = label.chars().take(LIMIT).collect();
+        format!("{short}…")
+    } else {
+        label.to_string()
+    }
+}
+
 
 fn is_latency_query(query: &str) -> bool {
     let query = query.trim();
@@ -445,74 +587,297 @@ fn metric_color(query: &str) -> Rgba {
     }
 }
 
-/// Bucket a single reading with the same wall-clock geometry as the stacked
-/// chart: wrap its points as one [`StatusSeries`] and reuse
-/// [`stacked_samples`]/[`status_buckets`], keeping counter rate semantics.
-fn single_buckets(reading: &MetricReading, range: ObserveRange) -> Vec<ChartBucket> {
-    let series: Vec<StatusSeries> = reading
-        .series
-        .first()
-        .filter(|s| s.points.len() >= 2)
-        .map(|s| {
-            vec![StatusSeries {
-                group: 0,
-                points: s.points.clone(),
-            }]
+/// Dark systemPurple / systemGray reference values for dashboard target
+/// colours that have no theme constant.
+const PANEL_PURPLE: Rgba = Rgba {
+    r: 0.749,
+    g: 0.353,
+    b: 0.949,
+    a: 1.0,
+};
+const PANEL_GRAY: Rgba = Rgba {
+    r: 0.557,
+    g: 0.557,
+    b: 0.576,
+    a: 1.0,
+};
+
+fn panel_palette() -> [Rgba; 6] {
+    [
+        theme::accent(),
+        theme::SUCCESS,
+        theme::WARNING,
+        theme::DESTRUCTIVE,
+        PANEL_PURPLE,
+        PANEL_GRAY,
+    ]
+}
+
+/// One [`PanelSeries`] per panel target, aligned with `panel.targets`.
+fn panel_series(snap: &ObserveSnapshot, panel: &ObservePanel) -> Vec<PanelSeries> {
+    let n = panel.targets.len();
+    let palette = panel_palette();
+    panel
+        .targets
+        .iter()
+        .enumerate()
+        .map(|(i, target)| {
+            let expr = target.expr.trim();
+            let reading = if expr.is_empty() {
+                None
+            } else {
+                nook_core::observe::reading_for(snap, expr)
+            };
+            let label = target
+                .legend
+                .as_deref()
+                .map(str::trim)
+                .filter(|l| !l.is_empty())
+                .map(str::to_string)
+                .or_else(|| reading.map(|r| r.label.clone()))
+                .unwrap_or_else(|| expr.to_string());
+            let points = reading
+                .and_then(|r| r.series.first())
+                .map(|s| s.points.clone())
+                .unwrap_or_default();
+            let total = reading.and_then(|r| r.window_total.or_else(|| r.last_value()));
+            PanelSeries {
+                label,
+                expr: expr.to_string(),
+                color: panel_target_color(target.color.as_deref(), i, n, expr, &palette),
+                points,
+                total,
+            }
         })
-        .unwrap_or_default();
-    status_buckets(&stacked_samples(&series, range.step_seconds() as f64), range, BIG_COLUMNS)
+        .collect()
 }
 
-fn single_legend(reading: &MetricReading, color: Rgba, range: ObserveRange) -> impl IntoElement {
-    let total = reading.window_total.or_else(|| reading.last_value()).unwrap_or(0.0);
-    div()
-        .flex()
-        .items_center()
-        .gap(px(16.))
-        .w_full()
-        .flex_shrink_0()
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .gap(px(5.))
-                .child(div().size(px(5.)).rounded_full().bg(color))
-                .child(
-                    label(
-                        format!("{} {}", reading.label, compact_number(total)),
-                        theme::SUBHEADLINE,
-                        false,
-                    )
-                    .text_color(theme::tertiary_label()),
-                ),
-        )
-        .child(div().flex_1())
-        .child(
-            label(
-                format!("last {} · {} step", range.label(), bucket_step(range)),
-                theme::SUBHEADLINE,
-                false,
-            )
-            .text_color(theme::tertiary_label()),
-        )
+fn panel_target_color(
+    raw: Option<&str>,
+    index: usize,
+    targets: usize,
+    expr: &str,
+    palette: &[Rgba; 6],
+) -> Rgba {
+    if let Some(name) = raw.map(str::trim).filter(|s| !s.is_empty()) {
+        let lower = name.to_ascii_lowercase();
+        if let Some(hex) = lower.strip_prefix('#') {
+            if let Some(rgb) = parse_hex_rgb(hex) {
+                return rgb;
+            }
+        } else {
+            return match lower.as_str() {
+                "green" => theme::SUCCESS,
+                "blue" => theme::ACCENT,
+                "orange" => theme::WARNING,
+                "red" => theme::DESTRUCTIVE,
+                "purple" => PANEL_PURPLE,
+                "gray" | "grey" => PANEL_GRAY,
+                "accent" => theme::accent(),
+                _ => panel_color_fallback(index, targets, expr, palette),
+            };
+        }
+    }
+    panel_color_fallback(index, targets, expr, palette)
 }
 
-fn single_chart(
-    buckets: &[ChartBucket],
-    reading: &MetricReading,
-    color: Rgba,
+/// One series keeps the pinned-metric expression colour; several unnamed
+/// targets step through the palette so they stay distinguishable.
+fn panel_color_fallback(index: usize, targets: usize, expr: &str, palette: &[Rgba; 6]) -> Rgba {
+    if targets == 1 {
+        metric_color(expr)
+    } else {
+        palette[index % palette.len()]
+    }
+}
+
+fn parse_hex_rgb(hex: &str) -> Option<Rgba> {
+    if hex.len() != 6 {
+        return None;
+    }
+    let byte = |i: usize| u8::from_str_radix(&hex[i..i + 2], 16).ok();
+    Some(Rgba {
+        r: byte(0)? as f32 / 255.0,
+        g: byte(2)? as f32 / 255.0,
+        b: byte(4)? as f32 / 255.0,
+        a: 1.0,
+    })
+}
+
+/// Align every target's points onto shared slots (same nearest-neighbour
+/// rule as the old stacked chart), one value per target.
+fn panel_samples(series: &[PanelSeries], step: f64) -> Vec<PanelSample> {
+    let tol = (step * 0.5).max(1e-9);
+    let mut times: Vec<f64> = series
+        .iter()
+        .flat_map(|s| s.points.iter().map(|point| point.ts))
+        .filter(|ts| ts.is_finite())
+        .collect();
+    if times.is_empty() {
+        return Vec::new();
+    }
+    times.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let mut slots = Vec::new();
+    for ts in times {
+        match slots.last() {
+            Some(&prev) if ts - prev < tol => {}
+            _ => slots.push(ts),
+        }
+    }
+    let n = series.len();
+    slots
+        .into_iter()
+        .map(|ts| {
+            let mut values = vec![0.0; n];
+            for (s, value) in series.iter().zip(values.iter_mut()) {
+                if let Some(sample) = nook_core::observe::point_at_ts(&s.points, ts) {
+                    if (sample.ts - ts).abs() <= tol {
+                        *value += clamp_value(sample.value);
+                    }
+                }
+            }
+            PanelSample { ts, values }
+        })
+        .collect()
+}
+
+/// Bucket samples into `count` wall-clock slices of the selected range,
+/// ending at the bucket that contains the newest sample. Each bucket is the
+/// per-target mean of samples in `[start, end)`; empty buckets stay `None`
+/// except a one-poll carry-forward after the first real sample.
+fn panel_buckets(
+    samples: &[PanelSample],
+    groups: usize,
+    range: ObserveRange,
+    count: usize,
+) -> Vec<PanelBucket> {
+    if count == 0 || groups == 0 {
+        return vec![
+            PanelBucket {
+                start: 0.0,
+                end: 0.0,
+                values: None,
+            };
+            count
+        ];
+    }
+    let width = (range.seconds() as f64 / count as f64).max(1e-9);
+    let newest = samples
+        .iter()
+        .map(|sample| sample.ts)
+        .filter(|ts| ts.is_finite())
+        .fold(f64::NAN, f64::max);
+    let newest = if newest.is_finite() {
+        newest
+    } else {
+        now_secs()
+    };
+    let last_start = (newest / width).floor() * width;
+    let first_start = last_start - (count as f64 - 1.0) * width;
+
+    let mut sums = vec![vec![0.0f64; groups]; count];
+    let mut hits = vec![0usize; count];
+    let mut last_hit_ts = vec![None::<f64>; count];
+    for sample in samples {
+        if !sample.ts.is_finite() {
+            continue;
+        }
+        let idx_f = (sample.ts - first_start) / width;
+        if idx_f < 0.0 {
+            continue;
+        }
+        let idx = idx_f.floor() as i64;
+        if idx < 0 || idx >= count as i64 {
+            continue;
+        }
+        let i = idx as usize;
+        for (sum, value) in sums[i].iter_mut().zip(&sample.values) {
+            *sum += clamp_value(*value);
+        }
+        hits[i] += 1;
+        last_hit_ts[i] = Some(last_hit_ts[i].map_or(sample.ts, |ts| ts.max(sample.ts)));
+    }
+
+    let mut buckets: Vec<PanelBucket> = (0..count)
+        .map(|i| {
+            let start = first_start + i as f64 * width;
+            PanelBucket {
+                start,
+                end: start + width,
+                values: (hits[i] > 0).then(|| {
+                    sums[i]
+                        .iter()
+                        .map(|v| clamp_value(v / hits[i] as f64))
+                        .collect()
+                }),
+            }
+        })
+        .collect();
+
+    let mut times: Vec<f64> = samples
+        .iter()
+        .map(|sample| sample.ts)
+        .filter(|ts| ts.is_finite())
+        .collect();
+    times.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let max_gap = carry_gap(&times, range);
+    let mut last_real: Option<(f64, Vec<f64>)> = None;
+    for (bucket, hit_ts) in buckets.iter_mut().zip(last_hit_ts) {
+        if let Some(values) = bucket.values.clone() {
+            last_real = Some((hit_ts.unwrap_or(bucket.start), values));
+        } else if let Some((ts, values)) = last_real.as_ref() {
+            if bucket.start - *ts <= max_gap {
+                bucket.values = Some(values.clone());
+            }
+        }
+    }
+    buckets
+}
+
+fn carry_gap(times: &[f64], range: ObserveRange) -> f64 {
+    let step = (range.step_seconds() as f64).max(1.0);
+    let mut deltas: Vec<f64> = times
+        .windows(2)
+        .map(|pair| pair[1] - pair[0])
+        .filter(|d| *d > 0.0)
+        .collect();
+    if deltas.is_empty() {
+        return step.max(POLL_SECS);
+    }
+    deltas.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    deltas[deltas.len() / 2].max(step)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ChartPaint {
+    Stacked,
+    Bars,
+    Line,
+}
+
+/// Shared chart chrome (y-gutter ticks, x-axis, hover column + tooltip) for
+/// the time-series panel kinds; only the canvas paint differs.
+fn time_chart(
+    paint: ChartPaint,
+    buckets: &[PanelBucket],
+    series: &[PanelSeries],
     unit: &str,
-    hover: Option<&ObserveHover>,
+    hover_idx: Option<usize>,
     range: ObserveRange,
     cx: &mut Context<Island>,
 ) -> impl IntoElement {
     let data_max = buckets
         .iter()
-        .filter_map(|bucket| bucket.values)
-        .map(|values| clamp_value(values[0]))
+        .filter_map(|bucket| bucket.values.as_ref())
+        .map(|values| match paint {
+            ChartPaint::Stacked => panel_total(values),
+            _ => values
+                .iter()
+                .map(|v| clamp_value(*v))
+                .fold(0.0, f64::max),
+        })
         .fold(0.0, f64::max);
     let (nice_max, ticks) = nice_ticks(data_max);
-    let hover_idx = hover.map(|h| h.bucket);
     let bounds_cell = Rc::new(RefCell::new(None::<Bounds<Pixels>>));
     let count = buckets.len();
 
@@ -576,7 +941,7 @@ fn single_chart(
     }
 
     let painted = buckets.to_vec();
-    let tooltip_bucket = hover_idx.and_then(|i| buckets.get(i).cloned());
+    let tooltip_bucket = hover_idx.and_then(|i| buckets.get(i)).cloned();
     let mut plot = div()
         .id("observe-plot")
         .relative()
@@ -621,9 +986,18 @@ fn single_chart(
                 },
                 {
                     let painted = painted.clone();
+                    let colors: Vec<Rgba> = series.iter().map(|s| s.color).collect();
                     let ticks = ticks.clone();
-                    move |bounds, _, window, _| {
-                        paint_single_chart(window, bounds, &painted, hover_idx, nice_max, &ticks, color);
+                    move |bounds, _, window, _| match paint {
+                        ChartPaint::Stacked => paint_stacked_panel(
+                            window, bounds, &painted, hover_idx, nice_max, &ticks, &colors,
+                        ),
+                        ChartPaint::Bars => paint_grouped_bars(
+                            window, bounds, &painted, hover_idx, nice_max, &ticks, &colors,
+                        ),
+                        ChartPaint::Line => paint_line_panel(
+                            window, bounds, &painted, hover_idx, nice_max, &ticks, &colors,
+                        ),
                     }
                 },
             )
@@ -631,10 +1005,16 @@ fn single_chart(
             .h_full(),
         );
 
-    if let Some(bucket) = tooltip_bucket {
-        if let Some(idx) = hover_idx {
-            plot = plot.child(single_tooltip(&bucket, reading, color, unit, idx, count, range));
-        }
+    if let (Some(bucket), Some(idx)) = (tooltip_bucket, hover_idx) {
+        plot = plot.child(panel_tooltip(
+            &bucket,
+            series,
+            unit,
+            idx,
+            count,
+            range,
+            paint == ChartPaint::Stacked,
+        ));
     }
 
     div()
@@ -663,14 +1043,67 @@ fn single_chart(
         )
 }
 
-fn single_tooltip(
-    bucket: &ChartBucket,
-    reading: &MetricReading,
-    color: Rgba,
+fn tooltip_row(dot: Rgba, name: String, text: String, dim: bool) -> impl IntoElement {
+    div()
+        .flex()
+        .items_center()
+        .gap(px(12.))
+        .w_full()
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(6.))
+                .flex_shrink_0()
+                .child(div().size(px(6.)).rounded_full().flex_shrink_0().bg(dot))
+                .child(label(name, theme::FOOTNOTE, false).text_color(if dim {
+                    theme::tertiary_label()
+                } else {
+                    theme::LABEL
+                })),
+        )
+        .child(div().flex_1())
+        .child(
+            label(text, theme::FOOTNOTE, false)
+                .flex_shrink_0()
+                .whitespace_nowrap()
+                .text_color(if dim {
+                    theme::tertiary_label()
+                } else {
+                    theme::LABEL
+                }),
+        )
+}
+
+fn tooltip_total_row(text: String) -> impl IntoElement {
+    div()
+        .flex()
+        .items_center()
+        .gap(px(12.))
+        .w_full()
+        .child(
+            label("Total", theme::SUBHEADLINE, true)
+                .flex_shrink_0()
+                .whitespace_nowrap()
+                .text_color(theme::LABEL),
+        )
+        .child(div().flex_1())
+        .child(
+            label(text, theme::SUBHEADLINE, true)
+                .flex_shrink_0()
+                .whitespace_nowrap()
+                .text_color(theme::LABEL),
+        )
+}
+
+fn panel_tooltip(
+    bucket: &PanelBucket,
+    series: &[PanelSeries],
     unit: &str,
     index: usize,
     count: usize,
     range: ObserveRange,
+    show_total: bool,
 ) -> impl IntoElement {
     let flip = tooltip_flips_left(index, count);
     let header = format_bucket_range(bucket.start, bucket.end, range);
@@ -685,52 +1118,38 @@ fn single_tooltip(
                 .whitespace_nowrap()
                 .text_color(theme::secondary_label()),
         );
-    if let Some(values) = bucket.values {
-        let value = clamp_value(values[0]);
-        let dim = value <= 0.0;
-        let dot = if dim {
-            with_alpha(color, color.a * HOVER_DIM)
-        } else {
-            color
-        };
-        let text = if unit.is_empty() {
-            compact_number(value)
-        } else {
-            format!("{} {unit}", compact_number(value))
-        };
-        body = body.child(
-            div()
-                .flex()
-                .items_center()
-                .gap(px(12.))
-                .w_full()
+    if let Some(values) = &bucket.values {
+        for (i, s) in series.iter().enumerate() {
+            let value = clamp_value(values.get(i).copied().unwrap_or(0.0));
+            let dim = value <= 0.0;
+            let dot = if dim {
+                with_alpha(s.color, s.color.a * HOVER_DIM)
+            } else {
+                s.color
+            };
+            let text = if unit.is_empty() {
+                compact_number(value)
+            } else {
+                format!("{} {unit}", compact_number(value))
+            };
+            body = body.child(tooltip_row(dot, s.label.clone(), text, dim));
+        }
+        if show_total {
+            let total = if unit.is_empty() {
+                compact_number(panel_total(values))
+            } else {
+                format!("{} {unit}", compact_number(panel_total(values)))
+            };
+            body = body
                 .child(
                     div()
-                        .flex()
-                        .items_center()
-                        .gap(px(6.))
-                        .flex_shrink_0()
-                        .child(div().size(px(6.)).rounded_full().flex_shrink_0().bg(dot))
-                        .child(
-                            label(reading.label.clone(), theme::FOOTNOTE, false).text_color(if dim {
-                                theme::tertiary_label()
-                            } else {
-                                theme::LABEL
-                            }),
-                        ),
+                        .w_full()
+                        .h(px(1.))
+                        .bg(theme::FILL_SECONDARY)
+                        .flex_shrink_0(),
                 )
-                .child(div().flex_1())
-                .child(
-                    label(text, theme::FOOTNOTE, false)
-                        .flex_shrink_0()
-                        .whitespace_nowrap()
-                        .text_color(if dim {
-                            theme::tertiary_label()
-                        } else {
-                            theme::LABEL
-                        }),
-                ),
-        );
+                .child(tooltip_total_row(total));
+        }
     } else {
         body = body.child(
             label("No data", theme::FOOTNOTE, false).text_color(theme::tertiary_label()),
@@ -768,14 +1187,14 @@ fn single_tooltip(
     )
 }
 
-fn paint_single_chart(
+fn paint_stacked_panel(
     window: &mut gpui::Window,
     bounds: Bounds<Pixels>,
-    buckets: &[ChartBucket],
+    buckets: &[PanelBucket],
     hover: Option<usize>,
     nice_max: f64,
     ticks: &[f64],
-    color: Rgba,
+    colors: &[Rgba],
 ) {
     let x0: f32 = bounds.origin.x.into();
     let y0: f32 = bounds.origin.y.into();
@@ -816,26 +1235,38 @@ fn paint_single_chart(
 
     if nice_max > 0.0 && col_w > 0.0 {
         for (i, bucket) in buckets.iter().enumerate() {
-            let Some(values) = bucket.values else {
+            let Some(values) = &bucket.values else {
                 continue;
             };
-            let value = clamp_value(values[0]);
-            if value <= 0.0 {
+            if panel_total(values) <= 0.0 {
                 continue;
             }
             let dim = hover.is_some_and(|idx| idx != i);
             let left = x0 + i as f32 * stride;
-            let seg_h = (h as f64 * (value / nice_max)).clamp(0.0, h as f64) as f32;
-            let top = (y0 + h - seg_h).max(y0);
-            let mut bar = color;
-            if dim {
-                bar.a *= HOVER_DIM;
-            }
-            let radius = COLUMN_RADIUS.min(col_w * 0.5).min(((y0 + h - top) * 0.5).max(0.0));
-            let mut path = PathBuilder::fill();
-            rounded_top_rect(&mut path, &p, left, top, col_w, y0 + h, radius);
-            if let Ok(built) = path.build() {
-                window.paint_path(built, bar);
+            let topmost = values.iter().rposition(|v| clamp_value(*v) > 0.0);
+            let mut y = y0 + h;
+            for (group, raw) in values.iter().enumerate() {
+                let value = clamp_value(*raw);
+                if value <= 0.0 {
+                    continue;
+                }
+                let seg_h = (h as f64 * (value / nice_max)).clamp(0.0, h as f64) as f32;
+                let top = (y - seg_h).max(y0);
+                let mut color = colors.get(group).copied().unwrap_or(theme::LABEL);
+                if dim {
+                    color.a *= HOVER_DIM;
+                }
+                let radius = if topmost == Some(group) {
+                    COLUMN_RADIUS.min(col_w * 0.5).min(((y - top) * 0.5).max(0.0))
+                } else {
+                    0.0
+                };
+                let mut bar = PathBuilder::fill();
+                rounded_top_rect(&mut bar, &p, left, top, col_w, y, radius);
+                if let Ok(built) = bar.build() {
+                    window.paint_path(built, color);
+                }
+                y = top;
             }
         }
     }
@@ -853,6 +1284,309 @@ fn paint_single_chart(
     }
 }
 
+fn paint_grouped_bars(
+    window: &mut gpui::Window,
+    bounds: Bounds<Pixels>,
+    buckets: &[PanelBucket],
+    hover: Option<usize>,
+    nice_max: f64,
+    ticks: &[f64],
+    colors: &[Rgba],
+) {
+    let x0: f32 = bounds.origin.x.into();
+    let y0: f32 = bounds.origin.y.into();
+    let w: f32 = bounds.size.width.into();
+    let h: f32 = bounds.size.height.into();
+    if w < 8.0 || h < 8.0 || buckets.is_empty() {
+        return;
+    }
+    let p = |x: f32, y: f32| point(px(x), px(y));
+    let count = buckets.len();
+    let gaps = COLUMN_GAP * count.saturating_sub(1) as f32;
+    let col_w = ((w - gaps) / count as f32).max(0.0);
+    let stride = col_w + COLUMN_GAP;
+    let y_at = |tick: f64| {
+        if nice_max <= 0.0 {
+            y0 + h
+        } else {
+            y0 + h * (1.0 - (tick / nice_max) as f32).clamp(0.0, 1.0)
+        }
+    };
+
+    for tick in ticks {
+        let y = y_at(*tick);
+        let mut grid = PathBuilder::stroke(px(1.0));
+        grid.move_to(p(x0, y));
+        grid.line_to(p(x0 + w, y));
+        if let Ok(built) = grid.build() {
+            window.paint_path(built, with_alpha(theme::LABEL, 0.06));
+        }
+    }
+
+    if let Some(idx) = hover {
+        if idx < count && col_w > 0.0 {
+            let left = x0 + idx as f32 * stride;
+            fill_rect(window, &p, left, y0, col_w, h, with_alpha(theme::LABEL, 0.08));
+        }
+    }
+
+    if nice_max > 0.0 && col_w > 0.0 {
+        for (i, bucket) in buckets.iter().enumerate() {
+            let Some(values) = &bucket.values else {
+                continue;
+            };
+            let n = values.len().max(1);
+            let inner_gap = if n > 1 {
+                (col_w * 0.06).min(2.0)
+            } else {
+                0.0
+            };
+            let sub_w = ((col_w - inner_gap * (n - 1) as f32) / n as f32).max(0.0);
+            if sub_w <= 0.0 {
+                continue;
+            }
+            let dim = hover.is_some_and(|idx| idx != i);
+            for (s, raw) in values.iter().enumerate() {
+                let value = clamp_value(*raw);
+                if value <= 0.0 {
+                    continue;
+                }
+                let x = x0 + i as f32 * stride + s as f32 * (sub_w + inner_gap);
+                let seg_h = (h as f64 * (value / nice_max)).clamp(0.0, h as f64) as f32;
+                let top = (y0 + h - seg_h).max(y0);
+                let mut color = colors.get(s).copied().unwrap_or(theme::LABEL);
+                if dim {
+                    color.a *= HOVER_DIM;
+                }
+                let radius = 2.0f32.min(sub_w * 0.5).min(((y0 + h - top) * 0.5).max(0.0));
+                let mut bar = PathBuilder::fill();
+                rounded_top_rect(&mut bar, &p, x, top, sub_w, y0 + h, radius);
+                if let Ok(built) = bar.build() {
+                    window.paint_path(built, color);
+                }
+            }
+        }
+    }
+
+    if let Some(idx) = hover {
+        if idx < count && col_w > 0.0 {
+            let cx = x0 + idx as f32 * stride + col_w * 0.5;
+            let mut guide = PathBuilder::stroke(px(1.0));
+            guide.move_to(p(cx, y0));
+            guide.line_to(p(cx, y0 + h));
+            if let Ok(built) = guide.build() {
+                window.paint_path(built, with_alpha(theme::LABEL, 0.45));
+            }
+        }
+    }
+}
+
+fn paint_line_panel(
+    window: &mut gpui::Window,
+    bounds: Bounds<Pixels>,
+    buckets: &[PanelBucket],
+    hover: Option<usize>,
+    nice_max: f64,
+    ticks: &[f64],
+    colors: &[Rgba],
+) {
+    let x0: f32 = bounds.origin.x.into();
+    let y0: f32 = bounds.origin.y.into();
+    let w: f32 = bounds.size.width.into();
+    let h: f32 = bounds.size.height.into();
+    if w < 8.0 || h < 8.0 || buckets.is_empty() {
+        return;
+    }
+    let p = |x: f32, y: f32| point(px(x), px(y));
+    let count = buckets.len();
+    let gaps = COLUMN_GAP * count.saturating_sub(1) as f32;
+    let col_w = ((w - gaps) / count as f32).max(0.0);
+    let stride = col_w + COLUMN_GAP;
+    let y_at = |value: f64| {
+        if nice_max <= 0.0 {
+            y0 + h
+        } else {
+            y0 + h * (1.0 - (value / nice_max) as f32).clamp(0.0, 1.0)
+        }
+    };
+
+    for tick in ticks {
+        let y = y_at(*tick);
+        let mut grid = PathBuilder::stroke(px(1.0));
+        grid.move_to(p(x0, y));
+        grid.line_to(p(x0 + w, y));
+        if let Ok(built) = grid.build() {
+            window.paint_path(built, with_alpha(theme::LABEL, 0.06));
+        }
+    }
+
+    if let Some(idx) = hover {
+        if idx < count && col_w > 0.0 {
+            let left = x0 + idx as f32 * stride;
+            fill_rect(window, &p, left, y0, col_w, h, with_alpha(theme::LABEL, 0.08));
+        }
+    }
+
+    if nice_max > 0.0 && col_w > 0.0 {
+        let centers: Vec<f32> = (0..count)
+            .map(|i| x0 + i as f32 * stride + col_w * 0.5)
+            .collect();
+        for (s, color) in colors.iter().enumerate() {
+            let mut path = PathBuilder::stroke(px(1.5));
+            let mut pen_up = true;
+            let mut last_pt: Option<(f32, f32)> = None;
+            for (i, bucket) in buckets.iter().enumerate() {
+                let Some(value) = bucket.values.as_ref().and_then(|v| v.get(s)) else {
+                    pen_up = true;
+                    continue;
+                };
+                let y = y_at(clamp_value(*value));
+                if pen_up {
+                    path.move_to(p(centers[i], y));
+                    pen_up = false;
+                } else {
+                    path.line_to(p(centers[i], y));
+                }
+                last_pt = Some((centers[i], y));
+            }
+            if let Ok(built) = path.build() {
+                window.paint_path(built, *color);
+            }
+            if let Some((lx, ly)) = last_pt {
+                let mut dot = PathBuilder::fill();
+                fill_circle(&mut dot, &p, lx, ly, 2.5);
+                if let Ok(built) = dot.build() {
+                    window.paint_path(built, *color);
+                }
+            }
+        }
+    }
+
+    if let Some(idx) = hover {
+        if idx < count && col_w > 0.0 {
+            let cx = x0 + idx as f32 * stride + col_w * 0.5;
+            let mut guide = PathBuilder::stroke(px(1.0));
+            guide.move_to(p(cx, y0));
+            guide.line_to(p(cx, y0 + h));
+            if let Ok(built) = guide.build() {
+                window.paint_path(built, with_alpha(theme::LABEL, 0.45));
+            }
+        }
+    }
+}
+
+fn fill_circle(
+    path: &mut PathBuilder,
+    p: &impl Fn(f32, f32) -> gpui::Point<gpui::Pixels>,
+    cx: f32,
+    cy: f32,
+    r: f32,
+) {
+    let k = 0.552_284_8 * r;
+    path.move_to(p(cx + r, cy));
+    path.cubic_bezier_to(p(cx + r, cy + k), p(cx + k, cy + r), p(cx, cy + r));
+    path.cubic_bezier_to(p(cx - k, cy + r), p(cx - r, cy + k), p(cx - r, cy));
+    path.cubic_bezier_to(p(cx - r, cy - k), p(cx - k, cy - r), p(cx, cy - r));
+    path.cubic_bezier_to(p(cx + k, cy - r), p(cx + r, cy - k), p(cx + r, cy));
+    path.close();
+}
+
+/// Delta vs the start of the range for stat panels. Counters report the
+/// window increase; gauges compare the last sample against the first one.
+fn stat_delta(
+    reading: Option<&MetricReading>,
+    expr: &str,
+    range: ObserveRange,
+) -> Option<(String, Rgba)> {
+    let reading = reading?;
+    reading.last_value()?;
+    let bad_on_rise = is_error_query(expr) || is_latency_query(expr);
+    let (delta, pct) = if let Some(total) = reading.window_total {
+        (total, None)
+    } else if let (Some(first), Some(now)) = (reading.history.first(), reading.last_value()) {
+        let delta = now - first.value;
+        let pct = if first.value.abs() > 1e-9 {
+            Some(delta / first.value * 100.0)
+        } else {
+            None
+        };
+        (delta, pct)
+    } else {
+        return None;
+    };
+    if delta.abs() < 1e-9 {
+        return Some((
+            "no change vs range start".into(),
+            theme::tertiary_label(),
+        ));
+    }
+    let up = delta > 0.0;
+    let color = if up == !bad_on_rise {
+        theme::SUCCESS
+    } else {
+        theme::DESTRUCTIVE
+    };
+    let signed = format!("{}{}", if up { "+" } else { "-" }, compact_number(delta.abs()));
+    let text = if reading.window_total.is_some() {
+        format!("{signed} in last {}", range.label())
+    } else if let Some(pct) = pct {
+        format!("{signed} ({pct:+.0}%) vs range start")
+    } else {
+        format!("{signed} vs range start")
+    };
+    Some((text, color))
+}
+
+fn paint_stat_sparkline(
+    window: &mut gpui::Window,
+    bounds: Bounds<Pixels>,
+    points: &[SamplePoint],
+    color: Rgba,
+) {
+    let w: f32 = bounds.size.width.into();
+    let h: f32 = bounds.size.height.into();
+    if w < 8.0 || h < 8.0 || points.len() < 2 {
+        return;
+    }
+    let x0: f32 = bounds.origin.x.into();
+    let y0: f32 = bounds.origin.y.into();
+    let p = |x: f32, y: f32| point(px(x), px(y));
+    let t0 = points.first().map(|s| s.ts).unwrap_or(0.0);
+    let t1 = points.last().map(|s| s.ts).unwrap_or(t0);
+    let span = (t1 - t0).max(1e-9);
+    let mut lo = f64::INFINITY;
+    let mut hi = f64::NEG_INFINITY;
+    for s in points {
+        let v = clamp_value(s.value);
+        lo = lo.min(v);
+        hi = hi.max(v);
+    }
+    let vspan = (hi - lo).max(1e-9);
+    let pad = 5.0f32;
+    let mut path = PathBuilder::stroke(px(1.5));
+    for (i, s) in points.iter().enumerate() {
+        let x = x0 + ((s.ts - t0) / span) as f32 * w;
+        let y = y0 + h - pad - ((clamp_value(s.value) - lo) / vspan) as f32 * (h - pad * 2.0);
+        if i == 0 {
+            path.move_to(p(x, y));
+        } else {
+            path.line_to(p(x, y));
+        }
+    }
+    if let Ok(built) = path.build() {
+        window.paint_path(built, color);
+    }
+    if let Some(last) = points.last() {
+        let y = y0 + h - pad - ((clamp_value(last.value) - lo) / vspan) as f32 * (h - pad * 2.0);
+        let mut dot = PathBuilder::fill();
+        fill_circle(&mut dot, &p, (x0 + w - 2.0).max(x0), y, 2.5);
+        if let Ok(built) = dot.build() {
+            window.paint_path(built, color);
+        }
+    }
+}
+
+/// Columns in the big status chart
 /// Columns in the big status chart (mockup: always 30).
 const BIG_COLUMNS: usize = 30;
 const COLUMN_GAP: f32 = 3.0;
@@ -899,8 +1633,8 @@ fn clamp_value(value: f64) -> f64 {
     }
 }
 
-fn bucket_total(values: [f64; 3]) -> f64 {
-    values.into_iter().map(clamp_value).sum()
+fn panel_total(values: &[f64]) -> f64 {
+    values.iter().map(|v| clamp_value(*v)).sum()
 }
 
 fn now_secs() -> f64 {
@@ -910,99 +1644,6 @@ fn now_secs() -> f64 {
         .unwrap_or(0.0)
 }
 
-/// Bucket stacked samples into `count` wall-clock slices of the selected range,
-/// ending at the bucket that contains the newest sample. Each bucket is the
-/// per-group mean of samples in `[start, end)`; empty buckets stay `None`
-/// except a one-poll carry-forward after the first real sample.
-fn status_buckets(
-    samples: &[StackedSample],
-    range: ObserveRange,
-    count: usize,
-) -> Vec<ChartBucket> {
-    if count == 0 {
-        return Vec::new();
-    }
-    let width = (range.seconds() as f64 / count as f64).max(1e-9);
-    let newest = samples
-        .iter()
-        .map(|sample| sample.ts)
-        .filter(|ts| ts.is_finite())
-        .fold(f64::NAN, f64::max);
-    let newest = if newest.is_finite() {
-        newest
-    } else {
-        now_secs()
-    };
-    let last_start = (newest / width).floor() * width;
-    let first_start = last_start - (count as f64 - 1.0) * width;
-
-    let mut sums = vec![[0.0f64; 3]; count];
-    let mut hits = vec![0usize; count];
-    let mut last_hit_ts = vec![None::<f64>; count];
-    for sample in samples {
-        if !sample.ts.is_finite() {
-            continue;
-        }
-        let idx_f = (sample.ts - first_start) / width;
-        if idx_f < 0.0 {
-            continue;
-        }
-        let idx = idx_f.floor() as i64;
-        if idx < 0 || idx >= count as i64 {
-            continue;
-        }
-        let i = idx as usize;
-        for (sum, value) in sums[i].iter_mut().zip(sample.values) {
-            *sum += clamp_value(value);
-        }
-        hits[i] += 1;
-        last_hit_ts[i] = Some(last_hit_ts[i].map_or(sample.ts, |ts| ts.max(sample.ts)));
-    }
-
-    let mut buckets: Vec<ChartBucket> = (0..count)
-        .map(|i| {
-            let start = first_start + i as f64 * width;
-            ChartBucket {
-                start,
-                end: start + width,
-                values: (hits[i] > 0).then(|| sums[i].map(|v| clamp_value(v / hits[i] as f64))),
-            }
-        })
-        .collect();
-
-    let max_gap = carry_gap(samples, range);
-    let mut last_real: Option<(f64, [f64; 3])> = None;
-    for (bucket, hit_ts) in buckets.iter_mut().zip(last_hit_ts) {
-        if let Some(values) = bucket.values {
-            last_real = Some((hit_ts.unwrap_or(bucket.start), values));
-        } else if let Some((ts, values)) = last_real {
-            if bucket.start - ts <= max_gap {
-                bucket.values = Some(values);
-            }
-        }
-    }
-    buckets
-}
-
-fn carry_gap(samples: &[StackedSample], range: ObserveRange) -> f64 {
-    let step = (range.step_seconds() as f64).max(1.0);
-    let mut times: Vec<f64> = samples
-        .iter()
-        .map(|sample| sample.ts)
-        .filter(|ts| ts.is_finite())
-        .collect();
-    times.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    let mut deltas: Vec<f64> = times
-        .windows(2)
-        .map(|pair| pair[1] - pair[0])
-        .filter(|d| *d > 0.0)
-        .collect();
-    if deltas.is_empty() {
-        return step.max(POLL_SECS);
-    }
-    deltas.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    deltas[deltas.len() / 2].max(step)
-}
 
 fn bucket_index_at(ratio: f32, count: usize) -> usize {
     if count == 0 {
@@ -1078,408 +1719,6 @@ fn nice_num(x: f64, round: bool) -> f64 {
     nf * base
 }
 
-fn status_chart(
-    buckets: &[ChartBucket],
-    hover: Option<&ObserveHover>,
-    range: ObserveRange,
-    cx: &mut Context<Island>,
-) -> impl IntoElement {
-    let data_max = buckets
-        .iter()
-        .filter_map(|bucket| bucket.values)
-        .map(bucket_total)
-        .fold(0.0, f64::max);
-    let (nice_max, ticks) = nice_ticks(data_max);
-    let hover_idx = hover.map(|h| h.bucket);
-    let bounds_cell = Rc::new(RefCell::new(None::<Bounds<Pixels>>));
-    let count = buckets.len();
-
-    let mut gutter = div()
-        .w(px(Y_GUTTER))
-        .flex_shrink_0()
-        .relative()
-        .h_full();
-    if nice_max > 0.0 {
-        for tick in &ticks {
-            let t = (tick / nice_max) as f32;
-            gutter = gutter.child(
-                div()
-                    .absolute()
-                    .left(px(0.))
-                    .right(px(4.))
-                    .top(relative((1.0 - t).clamp(0.0, 1.0)))
-                    .mt(px(-theme::FOOTNOTE.leading * 0.5))
-                    .child(
-                        label(compact_number(*tick), theme::FOOTNOTE, false)
-                            .w_full()
-                            .text_right()
-                            .text_color(theme::tertiary_label()),
-                    ),
-            );
-        }
-    }
-
-    let mut x_row = div()
-        .flex_1()
-        .min_w(px(0.))
-        .relative()
-        .h(px(X_AXIS_H));
-    if count > 0 {
-        let with_seconds = range.seconds() < 3600;
-        let last = X_TICKS.saturating_sub(1).max(1);
-        for i in 0..X_TICKS {
-            let boundary = i * count / last;
-            let t = boundary as f32 / count as f32;
-            let ts = if boundary >= count {
-                buckets.last().map(|b| b.end)
-            } else {
-                buckets.get(boundary).map(|b| b.start)
-            };
-            let Some(ts) = ts else {
-                continue;
-            };
-            let text = format_chart_time(ts, with_seconds);
-            let mut tick = div().absolute().top(px(0.)).child(
-                label(text, theme::FOOTNOTE, false).text_color(theme::tertiary_label()),
-            );
-            tick = if i == X_TICKS - 1 {
-                tick.right(px(0.))
-            } else if i == 0 {
-                tick.left(px(0.))
-            } else {
-                tick.left(relative(t.clamp(0.0, 1.0)))
-            };
-            x_row = x_row.child(tick);
-        }
-    }
-
-    let painted = buckets.to_vec();
-    let tooltip_bucket = hover_idx.and_then(|i| buckets.get(i).cloned());
-    let mut plot = div()
-        .id("observe-plot")
-        .relative()
-        .flex_1()
-        .min_w(px(0.))
-        .h_full()
-        .cursor(CursorStyle::Crosshair)
-        .on_mouse_move({
-            let bounds_cell = bounds_cell.clone();
-            cx.listener(move |this, event: &MouseMoveEvent, _, cx| {
-                let Some(bounds) = *bounds_cell.borrow() else {
-                    return;
-                };
-                let width: f32 = bounds.size.width.into();
-                if width < 1.0 || count == 0 {
-                    return;
-                }
-                let x: f32 = event.position.x.into();
-                let origin: f32 = bounds.origin.x.into();
-                let t = ((x - origin) / width).clamp(0.0, 1.0);
-                let idx = bucket_index_at(t, count);
-                if this.observe_hover.as_ref().map(|h| h.bucket) != Some(idx) {
-                    this.observe_hover = Some(ObserveHover { bucket: idx });
-                    cx.notify();
-                }
-            })
-        })
-        .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
-            if !*hovered && this.observe_hover.is_some() {
-                this.observe_hover = None;
-                cx.notify();
-            }
-        }))
-        .child(
-            canvas(
-                {
-                    let bounds_cell = bounds_cell.clone();
-                    move |bounds, _, _| {
-                        *bounds_cell.borrow_mut() = Some(bounds);
-                        bounds
-                    }
-                },
-                {
-                    let painted = painted.clone();
-                    let ticks = ticks.clone();
-                    move |bounds, _, window, _| {
-                        paint_status_chart(
-                            window,
-                            bounds,
-                            &painted,
-                            hover_idx,
-                            nice_max,
-                            &ticks,
-                        );
-                    }
-                },
-            )
-            .w_full()
-            .h_full(),
-        );
-
-    if let Some(bucket) = tooltip_bucket {
-        if let Some(idx) = hover_idx {
-            plot = plot.child(chart_tooltip(&bucket, idx, count, range));
-        }
-    }
-
-    div()
-        .flex()
-        .flex_col()
-        .flex_1()
-        .min_h(px(0.))
-        .w_full()
-        .gap(px(2.))
-        .child(
-            div()
-                .flex()
-                .flex_1()
-                .min_h(px(0.))
-                .w_full()
-                .child(gutter)
-                .child(plot),
-        )
-        .child(
-            div()
-                .flex()
-                .flex_shrink_0()
-                .w_full()
-                .child(div().w(px(Y_GUTTER)).flex_shrink_0())
-                .child(x_row),
-        )
-}
-
-fn chart_tooltip(
-    bucket: &ChartBucket,
-    index: usize,
-    count: usize,
-    range: ObserveRange,
-) -> impl IntoElement {
-    let flip = tooltip_flips_left(index, count);
-    let header = format_bucket_range(bucket.start, bucket.end, range);
-    let mut body = div()
-        .flex()
-        .flex_col()
-        .gap(px(4.))
-        .w_full()
-        .child(
-            label(header, theme::FOOTNOTE, false)
-                .flex_shrink_0()
-                .whitespace_nowrap()
-                .text_color(theme::secondary_label()),
-        );
-    if let Some(values) = bucket.values {
-        for group in [2usize, 1, 0] {
-            let value = clamp_value(values[group]);
-            let dim = value <= 0.0;
-            let color = if dim {
-                with_alpha(status_color(group), status_color(group).a * HOVER_DIM)
-            } else {
-                status_color(group)
-            };
-            let name = ["1–3xx", "4xx", "5xx"][group];
-            body = body.child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(12.))
-                    .w_full()
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(6.))
-                            .flex_shrink_0()
-                            .child(div().size(px(6.)).rounded_full().flex_shrink_0().bg(color))
-                            .child(
-                                label(name, theme::FOOTNOTE, false).text_color(if dim {
-                                    theme::tertiary_label()
-                                } else {
-                                    theme::LABEL
-                                }),
-                            ),
-                    )
-                    .child(div().flex_1())
-                    .child(
-                        label(
-                            format!("{} req/s", compact_number(value)),
-                            theme::FOOTNOTE,
-                            false,
-                        )
-                        .flex_shrink_0()
-                        .whitespace_nowrap()
-                        .text_color(if dim {
-                            theme::tertiary_label()
-                        } else {
-                            theme::LABEL
-                        }),
-                    ),
-            );
-        }
-        body = body
-            .child(
-                div()
-                    .w_full()
-                    .h(px(1.))
-                    .bg(theme::FILL_SECONDARY)
-                    .flex_shrink_0(),
-            )
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(12.))
-                    .w_full()
-                    .child(
-                        label("Total", theme::SUBHEADLINE, true)
-                            .flex_shrink_0()
-                            .whitespace_nowrap()
-                            .text_color(theme::LABEL),
-                    )
-                    .child(div().flex_1())
-                    .child(
-                        label(
-                            format!("{} req/s", compact_number(bucket_total(values))),
-                            theme::SUBHEADLINE,
-                            true,
-                        )
-                        .flex_shrink_0()
-                        .whitespace_nowrap()
-                        .text_color(theme::LABEL),
-                    ),
-            );
-    } else {
-        body = body.child(
-            label("No data", theme::FOOTNOTE, false).text_color(theme::tertiary_label()),
-        );
-    }
-
-    let left_t = if count == 0 {
-        0.0
-    } else {
-        (index as f32 + 1.0) / count as f32
-    };
-    let right_t = if count == 0 {
-        0.0
-    } else {
-        1.0 - index as f32 / count as f32
-    };
-
-    deferred(
-        div()
-            .absolute()
-            .top(px(4.))
-            .when(flip, |d| d.right(relative(right_t.clamp(0.0, 1.0))))
-            .when(!flip, |d| d.left(relative(left_t.clamp(0.0, 1.0))))
-            .when(flip, |d| d.mr(px(4.)))
-            .when(!flip, |d| d.ml(px(4.)))
-            .w(px(TOOLTIP_W))
-            .rounded(px(theme::CONTROL_RADIUS))
-            .bg(theme::GROUPED_BG)
-            .border_1()
-            .border_color(theme::FILL_SECONDARY)
-            .shadow_sm()
-            .px(px(8.))
-            .py(px(6.))
-            .child(body),
-    )
-}
-
-fn paint_status_chart(
-    window: &mut gpui::Window,
-    bounds: Bounds<Pixels>,
-    buckets: &[ChartBucket],
-    hover: Option<usize>,
-    nice_max: f64,
-    ticks: &[f64],
-) {
-    let x0: f32 = bounds.origin.x.into();
-    let y0: f32 = bounds.origin.y.into();
-    let w: f32 = bounds.size.width.into();
-    let h: f32 = bounds.size.height.into();
-    if w < 8.0 || h < 8.0 || buckets.is_empty() {
-        return;
-    }
-    let p = |x: f32, y: f32| point(px(x), px(y));
-    let count = buckets.len();
-    let gaps = COLUMN_GAP * count.saturating_sub(1) as f32;
-    let col_w = ((w - gaps) / count as f32).max(0.0);
-    let stride = col_w + COLUMN_GAP;
-    let y_at = |tick: f64| {
-        if nice_max <= 0.0 {
-            y0 + h
-        } else {
-            y0 + h * (1.0 - (tick / nice_max) as f32).clamp(0.0, 1.0)
-        }
-    };
-
-    for tick in ticks {
-        let y = y_at(*tick);
-        let mut grid = PathBuilder::stroke(px(1.0));
-        grid.move_to(p(x0, y));
-        grid.line_to(p(x0 + w, y));
-        if let Ok(built) = grid.build() {
-            window.paint_path(built, with_alpha(theme::LABEL, 0.06));
-        }
-    }
-
-    if let Some(idx) = hover {
-        if idx < count && col_w > 0.0 {
-            let left = x0 + idx as f32 * stride;
-            fill_rect(window, &p, left, y0, col_w, h, with_alpha(theme::LABEL, 0.08));
-        }
-    }
-
-    if nice_max > 0.0 && col_w > 0.0 {
-        for (i, bucket) in buckets.iter().enumerate() {
-            let Some(values) = bucket.values else {
-                continue;
-            };
-            let total = bucket_total(values);
-            if total <= 0.0 {
-                continue;
-            }
-            let dim = hover.is_some_and(|idx| idx != i);
-            let left = x0 + i as f32 * stride;
-            let topmost = values.iter().rposition(|v| clamp_value(*v) > 0.0);
-            let mut y = y0 + h;
-            for (group, raw) in values.iter().enumerate() {
-                let value = clamp_value(*raw);
-                if value <= 0.0 {
-                    continue;
-                }
-                let seg_h = (h as f64 * (value / nice_max)).clamp(0.0, h as f64) as f32;
-                let top = (y - seg_h).max(y0);
-                let mut color = status_color(group);
-                if dim {
-                    color.a *= HOVER_DIM;
-                }
-                let radius = if topmost == Some(group) {
-                    COLUMN_RADIUS.min(col_w * 0.5).min(((y - top) * 0.5).max(0.0))
-                } else {
-                    0.0
-                };
-                let mut bar = PathBuilder::fill();
-                rounded_top_rect(&mut bar, &p, left, top, col_w, y, radius);
-                if let Ok(built) = bar.build() {
-                    window.paint_path(built, color);
-                }
-                y = top;
-            }
-        }
-    }
-
-    if let Some(idx) = hover {
-        if idx < count && col_w > 0.0 {
-            let cx = x0 + idx as f32 * stride + col_w * 0.5;
-            let mut guide = PathBuilder::stroke(px(1.0));
-            guide.move_to(p(cx, y0));
-            guide.line_to(p(cx, y0 + h));
-            if let Ok(built) = guide.build() {
-                window.paint_path(built, with_alpha(theme::LABEL, 0.45));
-            }
-        }
-    }
-}
 
 fn fill_rect(
     window: &mut gpui::Window,
@@ -1720,96 +1959,6 @@ fn observe_error_row(err: &str, cx: &mut Context<Island>) -> impl IntoElement {
         }))
 }
 
-fn chart_color(query: &str) -> Rgba {
-    match query.trim() {
-        "5xx" | "errors" => theme::DESTRUCTIVE,
-        "4xx" => theme::WARNING,
-        "slow" => theme::SUCCESS,
-        _ => theme::accent(),
-    }
-}
-
-fn status_group(query: &str) -> Option<usize> {
-    match query.trim() {
-        "1xx" | "2xx" | "3xx" => Some(0),
-        "4xx" => Some(1),
-        "5xx" => Some(2),
-        _ => None,
-    }
-}
-
-fn status_color(group: usize) -> Rgba {
-    match group {
-        0 => with_alpha(theme::LABEL, 0x5C as f32 / 255.0),
-        1 => chart_color("4xx"),
-        _ => chart_color("5xx"),
-    }
-}
-
-fn status_series(snap: &ObserveSnapshot) -> Vec<StatusSeries> {
-    snap.metrics
-        .iter()
-        .filter_map(|reading| {
-            Some(StatusSeries {
-                group: status_group(&reading.query)?,
-                points: reading.series.first()?.points.clone(),
-            })
-        })
-        .filter(|series| series.points.len() >= 2)
-        .collect()
-}
-
-fn status_totals(snap: &ObserveSnapshot) -> [f64; 3] {
-    let mut totals = [0.0; 3];
-    for reading in &snap.metrics {
-        if let Some(group) = status_group(&reading.query) {
-            totals[group] += reading
-                .window_total
-                .or_else(|| reading.last_value())
-                .unwrap_or(0.0);
-        }
-    }
-    totals
-}
-
-fn status_legend(totals: [f64; 3], range: ObserveRange) -> impl IntoElement {
-    // Mockup legend row: 5px dots, 11px tertiary labels, gap 16, with the
-    // window (`last 15m · 30s step`) pinned right.
-    let mut legend = div()
-        .flex()
-        .items_center()
-        .gap(px(16.))
-        .w_full()
-        .flex_shrink_0();
-    for (group, name) in ["1–3xx", "4xx", "5xx"].into_iter().enumerate() {
-        legend = legend.child(
-            div()
-                .flex()
-                .items_center()
-                .gap(px(5.))
-                .child(div().size(px(5.)).rounded_full().bg(status_color(group)))
-                .child(
-                    label(
-                        format!("{name} {}", compact_number(totals[group])),
-                        theme::SUBHEADLINE,
-                        false,
-                    )
-                    .text_color(theme::tertiary_label()),
-                ),
-        );
-    }
-    legend
-        .child(div().flex_1())
-        .child(
-            label(
-                format!("last {} · {} step", range.label(), bucket_step(range)),
-                theme::SUBHEADLINE,
-                false,
-            )
-            .text_color(theme::tertiary_label()),
-        )
-}
-
 /// Width of one chart column: the range split into [`BIG_COLUMNS`] (`30s` at 15m).
 fn bucket_step(range: ObserveRange) -> String {
     let secs = range.seconds() / BIG_COLUMNS as i64;
@@ -1820,39 +1969,6 @@ fn bucket_step(range: ObserveRange) -> String {
     }
 }
 
-fn stacked_samples(series: &[StatusSeries], step: f64) -> Vec<StackedSample> {
-    let tol = (step * 0.5).max(1e-9);
-    let mut times: Vec<f64> = series
-        .iter()
-        .flat_map(|status| status.points.iter().map(|point| point.ts))
-        .filter(|ts| ts.is_finite())
-        .collect();
-    if times.is_empty() {
-        return Vec::new();
-    }
-    times.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    let mut slots = Vec::new();
-    for ts in times {
-        match slots.last() {
-            Some(&prev) if ts - prev < tol => {}
-            _ => slots.push(ts),
-        }
-    }
-    slots
-        .into_iter()
-        .map(|ts| {
-            let mut values = [0.0; 3];
-            for status in series {
-                if let Some(sample) = nook_core::observe::point_at_ts(&status.points, ts) {
-                    if (sample.ts - ts).abs() <= tol {
-                        values[status.group] += clamp_value(sample.value);
-                    }
-                }
-            }
-            StackedSample { ts, values }
-        })
-        .collect()
-}
 
 fn with_alpha(color: Rgba, a: f32) -> Rgba {
     Rgba { a, ..color }
@@ -1916,100 +2032,93 @@ fn rounded_top_rect(
 #[cfg(test)]
 mod tests {
     use super::{
-        bucket_index_at, bucket_step, compact_number, nice_ticks, stacked_samples, status_buckets,
-        tooltip_flips_left, StackedSample, StatusSeries, BIG_COLUMNS,
+        bucket_index_at, bucket_step, carry_gap, compact_number, nice_ticks, panel_buckets,
+        panel_samples, panel_series, stat_delta, tooltip_flips_left, PanelBucket, PanelSample,
+        PanelSeries, BIG_COLUMNS,
     };
-    use nook_core::observe::ObserveRange;
-    use nook_core::observe::SamplePoint;
+    use crate::theme;
+    use nook_core::observe::{
+        ChartPoint, MetricReading, ObserveChartKind, ObservePanel, ObserveRange, PanelKind,
+        PanelTarget, RangeSeries, SamplePoint, SeriesValue,
+    };
 
-    #[test]
-    fn status_samples_stack_success_and_errors() {
-        let points = |a, b| {
-            vec![
-                SamplePoint { ts: 1.0, value: a },
-                SamplePoint { ts: 2.0, value: b },
-            ]
-        };
-        let samples = stacked_samples(
-            &[
-                StatusSeries {
-                    group: 0,
-                    points: points(10.0, 20.0),
-                },
-                StatusSeries {
-                    group: 0,
-                    points: points(1.0, 2.0),
-                },
-                StatusSeries {
-                    group: 2,
-                    points: points(3.0, 4.0),
-                },
-            ],
-            1.0,
-        );
-        assert_eq!(samples[1].values, [22.0, 0.0, 4.0]);
+    fn series(label: &str, points: Vec<(f64, f64)>) -> PanelSeries {
+        PanelSeries {
+            label: label.into(),
+            expr: label.into(),
+            color: theme::SUCCESS,
+            points: points
+                .into_iter()
+                .map(|(ts, value)| SamplePoint { ts, value })
+                .collect(),
+            total: None,
+        }
     }
 
     #[test]
-    fn stacked_samples_ignore_far_series() {
-        let samples = stacked_samples(
+    fn panel_samples_align_series_to_slots() {
+        let points = |a, b| vec![(1.0, a), (2.0, b)];
+        let samples = panel_samples(
             &[
-                StatusSeries {
-                    group: 0,
-                    points: vec![
-                        SamplePoint {
-                            ts: 10.0,
-                            value: 4.0,
-                        },
-                        SamplePoint {
-                            ts: 20.0,
-                            value: 5.0,
-                        },
-                    ],
-                },
-                StatusSeries {
-                    group: 1,
-                    points: vec![
-                        SamplePoint {
-                            ts: 1_000.0,
-                            value: 99.0,
-                        },
-                        SamplePoint {
-                            ts: 1_010.0,
-                            value: 98.0,
-                        },
-                    ],
-                },
+                series("a", points(10.0, 20.0)),
+                series("b", points(1.0, 2.0)),
+                series("c", points(3.0, 4.0)),
+            ],
+            1.0,
+        );
+        assert_eq!(samples.len(), 2);
+        assert_eq!(
+            samples[0],
+            PanelSample {
+                ts: 1.0,
+                values: vec![10.0, 1.0, 3.0],
+            }
+        );
+        assert_eq!(
+            samples[1],
+            PanelSample {
+                ts: 2.0,
+                values: vec![20.0, 2.0, 4.0],
+            }
+        );
+    }
+
+    #[test]
+    fn panel_samples_drops_misaligned_series() {
+        let samples = panel_samples(
+            &[
+                series("a", vec![(10.0, 4.0), (20.0, 5.0)]),
+                series("b", vec![(1_000.0, 99.0), (1_010.0, 98.0)]),
             ],
             10.0,
         );
         assert_eq!(samples.len(), 4);
         assert_eq!(
             samples[0],
-            StackedSample {
+            PanelSample {
                 ts: 10.0,
-                values: [4.0, 0.0, 0.0],
+                values: vec![4.0, 0.0],
             }
         );
         assert_eq!(
             samples[1],
-            StackedSample {
+            PanelSample {
                 ts: 20.0,
-                values: [5.0, 0.0, 0.0],
+                values: vec![5.0, 0.0],
             }
         );
         assert_eq!(
             samples[2],
-            StackedSample {
+            PanelSample {
                 ts: 1_000.0,
-                values: [0.0, 99.0, 0.0],
+                values: vec![0.0, 99.0],
             }
         );
         assert_eq!(
             samples[3],
-            StackedSample {
+            PanelSample {
                 ts: 1_010.0,
-                values: [0.0, 98.0, 0.0],
+                values: vec![0.0, 98.0],
             }
         );
     }
@@ -2029,7 +2138,7 @@ mod tests {
         assert_eq!(bucket_step(range), "30s");
         assert_eq!(bucket_step(ObserveRange::OneHour), "2m");
         assert_eq!(bucket_step(ObserveRange::FiveMinutes), "10s");
-        let empty = status_buckets(&[], range, BIG_COLUMNS);
+        let empty: Vec<PanelBucket> = panel_buckets(&[], 3, range, BIG_COLUMNS);
         assert_eq!(empty.len(), BIG_COLUMNS);
         assert!(empty.iter().all(|b| b.values.is_none()));
     }
@@ -2045,13 +2154,13 @@ mod tests {
             let mut samples = Vec::new();
             let mut ts = first_start;
             while ts < last_start + width - 1e-9 {
-                samples.push(StackedSample {
+                samples.push(PanelSample {
                     ts,
-                    values: [1.0, 0.0, 0.0],
+                    values: vec![1.0, 0.0],
                 });
                 ts += step;
             }
-            let buckets = status_buckets(&samples, range, BIG_COLUMNS);
+            let buckets = panel_buckets(&samples, 2, range, BIG_COLUMNS);
             let first = buckets.iter().position(|b| b.values.is_some());
             let last = buckets.iter().rposition(|b| b.values.is_some());
             let (first, last) = (first.expect("expected samples"), last.expect("expected samples"));
@@ -2067,11 +2176,12 @@ mod tests {
         let range = ObserveRange::FifteenMinutes;
         let newest = 10_000.0;
         let width = range.seconds() as f64 / BIG_COLUMNS as f64;
-        let buckets = status_buckets(
-            &[StackedSample {
+        let buckets = panel_buckets(
+            &[PanelSample {
                 ts: newest,
-                values: [1.0, 0.0, 0.0],
+                values: vec![1.0, 0.0],
             }],
+            2,
             range,
             BIG_COLUMNS,
         );
@@ -2089,35 +2199,44 @@ mod tests {
             );
         }
         let first_start = last_start - (BIG_COLUMNS as f64 - 1.0) * width;
-        let edge = status_buckets(
+        let edge = panel_buckets(
             &[
-                StackedSample {
+                PanelSample {
                     ts: first_start - 1e-6,
-                    values: [9.0, 0.0, 0.0],
+                    values: vec![9.0, 0.0],
                 },
-                StackedSample {
+                PanelSample {
                     ts: first_start,
-                    values: [2.0, 0.0, 0.0],
+                    values: vec![2.0, 0.0],
                 },
-                StackedSample {
+                PanelSample {
                     ts: first_start + width,
-                    values: [8.0, 0.0, 0.0],
+                    values: vec![8.0, 0.0],
                 },
-                StackedSample {
+                PanelSample {
                     ts: last_start,
-                    values: [4.0, 0.0, 0.0],
+                    values: vec![4.0, 0.0],
                 },
-                StackedSample {
+                PanelSample {
                     ts: newest,
-                    values: [4.0, 0.0, 0.0],
+                    values: vec![4.0, 0.0],
                 },
             ],
+            2,
             range,
             BIG_COLUMNS,
         );
-        assert_eq!(edge[0].values, Some([2.0, 0.0, 0.0]));
-        assert_eq!(edge[1].values, Some([8.0, 0.0, 0.0]));
-        assert_eq!(edge[BIG_COLUMNS - 1].values, Some([4.0, 0.0, 0.0]));
+        assert_eq!(edge[0].values, Some(vec![2.0, 0.0]));
+        assert_eq!(edge[1].values, Some(vec![8.0, 0.0]));
+        assert_eq!(edge[BIG_COLUMNS - 1].values, Some(vec![4.0, 0.0]));
+    }
+
+    #[test]
+    fn carry_gap_defaults_to_poll_interval() {
+        let range = ObserveRange::FifteenMinutes;
+        assert_eq!(carry_gap(&[], range), 30.0);
+        let times: Vec<f64> = (0..15).map(|i| i as f64 * 30.0).collect();
+        assert_eq!(carry_gap(&times, range), 30.0);
     }
 
     #[test]
@@ -2141,6 +2260,102 @@ mod tests {
         assert!(!tooltip_flips_left(17, BIG_COLUMNS));
         assert!(tooltip_flips_left(18, BIG_COLUMNS));
         assert!(tooltip_flips_left(29, BIG_COLUMNS));
+    }
+
+    fn reading(query: &str, points: Vec<(f64, f64)>, total: Option<f64>) -> MetricReading {
+        MetricReading {
+            label: query.into(),
+            query: query.into(),
+            chart: ObserveChartKind::Bars,
+            values: vec![SeriesValue {
+                name: String::new(),
+                value: points.last().map(|(_, v)| *v).unwrap_or(0.0),
+            }],
+            series: vec![RangeSeries {
+                name: String::new(),
+                points: points
+                    .into_iter()
+                    .map(|(ts, value)| SamplePoint { ts, value })
+                    .collect(),
+            }],
+            error: None,
+            history: Vec::new(),
+            window_total: total,
+        }
+    }
+
+    #[test]
+    fn panel_series_resolves_targets_and_colors() {
+        let snap = nook_core::observe::ObserveSnapshot {
+            metrics: vec![reading("5xx", vec![(1.0, 2.0), (2.0, 3.0)], Some(5.0))],
+            ..Default::default()
+        };
+        let panel = ObservePanel {
+            title: "Errors".into(),
+            kind: PanelKind::Bars,
+            unit: Some("req/s".into()),
+            targets: vec![
+                PanelTarget {
+                    expr: " 5xx ".into(),
+                    legend: Some("server".into()),
+                    color: Some("red".into()),
+                },
+                PanelTarget {
+                    expr: "missing".into(),
+                    legend: None,
+                    color: Some("#ff8800".into()),
+                },
+            ],
+        };
+        let resolved = panel_series(&snap, &panel);
+        assert_eq!(resolved.len(), 2);
+        assert_eq!(resolved[0].label, "server");
+        assert_eq!(resolved[0].expr, "5xx");
+        assert_eq!(resolved[0].points.len(), 2);
+        assert_eq!(resolved[0].total, Some(5.0));
+        assert_eq!(resolved[0].color, theme::DESTRUCTIVE);
+        assert_eq!(resolved[1].label, "missing");
+        assert!(resolved[1].points.is_empty());
+        assert_eq!(resolved[1].total, None);
+        let orange = resolved[1].color;
+        assert!((orange.r - 1.0).abs() < 1e-6);
+        assert!((orange.g - 0x88 as f32 / 255.0).abs() < 1e-6);
+        assert_eq!(orange.b, 0.0);
+    }
+
+    #[test]
+    fn stat_delta_reports_window_increase_for_counters() {
+        let mut with_total = reading("total_requests", vec![(1.0, 47_800.0)], None);
+        with_total.values[0].value = 49_000.0;
+        with_total.window_total = Some(1_200.0);
+        let (text, color) = stat_delta(
+            Some(&with_total),
+            "total_requests",
+            ObserveRange::FifteenMinutes,
+        )
+        .unwrap();
+        assert!(text.contains("1.2k"), "{text}");
+        assert!(text.contains("15m"), "{text}");
+        assert_eq!(color, theme::SUCCESS);
+    }
+
+    #[test]
+    fn stat_delta_compares_gauges_against_range_start() {
+        let mut gauge = reading("avg_ms", vec![(1.0, 20.0), (2.0, 42.0)], None);
+        gauge.values[0].value = 42.0;
+        gauge.history = vec![
+            ChartPoint { t: 0.0, value: 20.0 },
+            ChartPoint {
+                t: 1.0,
+                value: 42.0,
+            },
+        ];
+        let (text, color) =
+            stat_delta(Some(&gauge), "avg_ms", ObserveRange::FifteenMinutes).unwrap();
+        assert!(text.contains("22"), "{text}");
+        assert!(text.contains("+110%"), "{text}");
+        assert_eq!(color, theme::DESTRUCTIVE);
+        assert!(stat_delta(None, "avg_ms", ObserveRange::FifteenMinutes).is_none());
     }
 
     #[test]

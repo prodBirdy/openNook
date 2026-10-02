@@ -925,43 +925,41 @@ fn files_section(island: &mut Island, cx: &mut Context<Island>) -> impl IntoElem
             ),
         ])))
         .child(island_panel({
-            let mut avg_settings = island.settings.clone();
-            nook_core::observe::set_chart_metric(&mut avg_settings.observe, Some("avg_ms"));
-            div()
+            // One big-view entry per panel kind, all on the starter dashboard.
+            let kinds = [
+                ("stacked", "HTTP status"),
+                ("bars", "Errors"),
+                ("line", "Avg latency"),
+                ("stat", "Requests"),
+            ];
+            let mut col = div()
                 .flex()
                 .flex_col()
                 .flex_shrink_0()
                 .items_start()
-                .gap(px(20.))
-                .child(labelled(
-                    "Observe · big view",
+                .gap(px(20.));
+            for (kind, panel) in kinds {
+                let mut settings = island.settings.clone();
+                settings.observe.dashboard =
+                    nook_core::observe::warmup_starter_dashboard();
+                nook_core::observe::set_chart_panel(&mut settings.observe, Some(panel));
+                col = col.child(labelled(
+                    format!("Observe · big view · {kind}"),
                     nook_cell_h(
                         observe_w,
                         widgets::OBSERVE_EXPANDED_BODY,
                         widgets::observe_big_view(
                             &island.observe,
-                            &island.settings,
+                            &settings,
                             island.observe_hover.as_ref(),
                             cx,
                         ),
                     ),
-                ))
-                .child(labelled(
-                    "Observe · big view · Avg ms",
-                    nook_cell_h(
-                        observe_w,
-                        widgets::OBSERVE_EXPANDED_BODY,
-                        widgets::observe_big_view(
-                            &island.observe,
-                            &avg_settings,
-                            island.observe_hover.as_ref(),
-                            cx,
-                        ),
-                    ),
-                ))
+                ));
+            }
+            col
         }))
 }
-
 fn module_cells_w(module: WidgetModule, cell_w: f32, island: &Island) -> f32 {
     island.settings.max_cells_for(module).max(module.default_cells()) as f32 * cell_w
 }
@@ -1477,6 +1475,117 @@ fn fill_fixtures(island: &mut Island) {
                 error: None,
                 history: Vec::new(),
                 window_total: None,
+            },
+            MetricReading {
+                label: "3xx".into(),
+                query: "3xx".into(),
+                chart: ObserveChartKind::Bars,
+                values: vec![SeriesValue {
+                    name: "3xx".into(),
+                    value: 8.0,
+                }],
+                series: vec![RangeSeries {
+                    name: "3xx".into(),
+                    points: points
+                        .iter()
+                        .map(|p| SamplePoint {
+                            ts: p.ts,
+                            value: (p.value * 0.08).max(0.0),
+                        })
+                        .collect(),
+                }],
+                error: None,
+                history: Vec::new(),
+                window_total: Some(40.0),
+            },
+            MetricReading {
+                label: "4xx".into(),
+                query: "4xx".into(),
+                chart: ObserveChartKind::Bars,
+                values: vec![SeriesValue {
+                    name: "4xx".into(),
+                    value: 12.0,
+                }],
+                series: vec![RangeSeries {
+                    name: "4xx".into(),
+                    points: points
+                        .iter()
+                        .map(|p| SamplePoint {
+                            ts: p.ts,
+                            value: (p.value * 0.1).max(0.0),
+                        })
+                        .collect(),
+                }],
+                error: None,
+                history: Vec::new(),
+                window_total: Some(58.0),
+            },
+            MetricReading {
+                label: "Max ms".into(),
+                query: "max_ms".into(),
+                chart: ObserveChartKind::Bars,
+                values: vec![SeriesValue {
+                    name: "max_ms".into(),
+                    value: 380.0,
+                }],
+                series: vec![RangeSeries {
+                    name: "max_ms".into(),
+                    points: points
+                        .iter()
+                        .map(|p| SamplePoint {
+                            ts: p.ts,
+                            value: 60.0 + (p.value * 3.0) % 120.0,
+                        })
+                        .collect(),
+                }],
+                error: None,
+                history: Vec::new(),
+                window_total: None,
+            },
+            MetricReading {
+                label: "Errors".into(),
+                query: "errors".into(),
+                chart: ObserveChartKind::Bars,
+                values: vec![SeriesValue {
+                    name: "errors".into(),
+                    value: 5.0,
+                }],
+                series: vec![RangeSeries {
+                    name: "errors".into(),
+                    points: points
+                        .iter()
+                        .map(|p| SamplePoint {
+                            ts: p.ts,
+                            value: (p.value * 0.05).max(0.0),
+                        })
+                        .collect(),
+                }],
+                error: None,
+                history: Vec::new(),
+                window_total: Some(2.0),
+            },
+            MetricReading {
+                label: "Requests".into(),
+                query: "total_requests".into(),
+                chart: ObserveChartKind::Bars,
+                values: vec![SeriesValue {
+                    name: "total_requests".into(),
+                    value: 48210.0,
+                }],
+                series: vec![RangeSeries {
+                    name: "total_requests".into(),
+                    points: points
+                        .iter()
+                        .enumerate()
+                        .map(|(i, p)| SamplePoint {
+                            ts: p.ts,
+                            value: 90.0 + i as f64 * 3.5,
+                        })
+                        .collect(),
+                }],
+                error: None,
+                history: Vec::new(),
+                window_total: Some(720.0),
             },
         ],
         alerts: vec![FiringAlert {

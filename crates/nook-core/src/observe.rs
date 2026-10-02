@@ -7,11 +7,16 @@
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::time::Duration;
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(8);
 const MAX_METRICS_BODY_BYTES: usize = 1024 * 1024;
 pub const MAX_PINNED: usize = 6;
+pub const MAX_PANELS: usize = 12;
+pub const MAX_PANEL_TARGETS: usize = 6;
+/// poll() fetches at most this many distinct queries.
+pub const MAX_DASHBOARD_QUERIES: usize = 24;
 const MAX_ALERTS: usize = 8;
 const MAX_SERIES: usize = 3;
 const MAX_POINTS: usize = 48;
@@ -216,8 +221,13 @@ pub struct ObserveConfig {
     pub range: ObserveRange,
     #[serde(default = "default_metrics")]
     pub metrics: Vec<ObserveMetric>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub chart_metric: Option<String>,
+    #[serde(default, skip_serializing_if = "ObserveDashboard::is_empty")]
+    pub dashboard: ObserveDashboard,
+    /// Selected panel title for the big view. Pre-dashboard settings stored
+    /// `chart_metric` (a pinned query); the alias loads it harmlessly and
+    /// [`effective_chart_panel`] falls back to the first panel.
+    #[serde(default, alias = "chart_metric", skip_serializing_if = "Option::is_none")]
+    pub chart_panel: Option<String>,
 }
 
 impl Default for ObserveConfig {
@@ -229,7 +239,8 @@ impl Default for ObserveConfig {
             window: ObserveWindow::ThirtyMinutes,
             range: ObserveRange::default(),
             metrics: default_metrics(),
-            chart_metric: None,
+            dashboard: ObserveDashboard::default(),
+            chart_panel: None,
         }
     }
 }
@@ -248,6 +259,383 @@ fn default_warmup_metrics() -> Vec<ObserveMetric> {
         ObserveMetric::new("5xx", "5xx"),
         ObserveMetric::new("Slow", "slow"),
     ]
+}
+
+/// Grafana-style dashboard deciding which charts the Observe big view shows.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct ObserveDashboard {
+    #[serde(default)]
+    pub panels: Vec<ObservePanel>,
+}
+
+impl ObserveDashboard {
+    pub fn is_empty(&self) -> bool {
+        self.panels.is_empty()
+    }
+}
+
+/// One panel (chart) of an [`ObserveDashboard`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ObservePanel {
+    pub title: String,
+    #[serde(default, rename = "type")]
+    pub kind: PanelKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unit: Option<String>,
+    pub targets: Vec<PanelTarget>,
+}
+
+/// One query feeding a panel.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PanelTarget {
+    /// warmUP key or PromQL expression.
+    pub expr: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub legend: Option<String>,
+    /// "green|blue|orange|red|purple|gray|accent" or "#RRGGBB".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum PanelKind {
+    #[default]
+    Bars,
+    Stacked,
+    Line,
+    Stat,
+}
+
+/// Shipped "warmUP starter" preset (also the parse example in CONTRACT).
+pub fn warmup_starter_dashboard() -> ObserveDashboard {
+    ObserveDashboard {
+        panels: vec![
+            ObservePanel {
+                title: "HTTP status".into(),
+                kind: PanelKind::Stacked,
+                unit: Some("req/s".into()),
+                targets: vec![
+                    PanelTarget {
+                        expr: "2xx".into(),
+                        legend: Some("2xx".into()),
+                        color: Some("green".into()),
+                    },
+                    PanelTarget {
+                        expr: "3xx".into(),
+                        legend: Some("3xx".into()),
+                        color: Some("blue".into()),
+                    },
+                    PanelTarget {
+                        expr: "4xx".into(),
+                        legend: Some("4xx".into()),
+                        color: Some("orange".into()),
+                    },
+                    PanelTarget {
+                        expr: "5xx".into(),
+                        legend: Some("5xx".into()),
+                        color: Some("red".into()),
+                    },
+                ],
+            },
+            ObservePanel {
+                title: "Avg latency".into(),
+                kind: PanelKind::Line,
+                unit: Some("ms".into()),
+                targets: vec![
+                    PanelTarget {
+                        expr: "avg_ms".into(),
+                        legend: Some("avg".into()),
+                        color: None,
+                    },
+                    PanelTarget {
+                        expr: "max_ms".into(),
+                        legend: Some("max".into()),
+                        color: Some("orange".into()),
+                    },
+                ],
+            },
+            ObservePanel {
+                title: "Errors".into(),
+                kind: PanelKind::Bars,
+                unit: Some("req/s".into()),
+                targets: vec![PanelTarget {
+                    expr: "errors".into(),
+                    legend: None,
+                    color: Some("red".into()),
+                }],
+            },
+            ObservePanel {
+                title: "Requests".into(),
+                kind: PanelKind::Stat,
+                unit: Some("req/s".into()),
+                targets: vec![PanelTarget {
+                    expr: "total_requests".into(),
+                    legend: None,
+                    color: None,
+                }],
+            },
+        ],
+    }
+}
+
+/// Strict validation with human messages. JSON syntax errors carry line/col.
+pub fn parse_dashboard(json: &str) -> Result<ObserveDashboard, Vec<String>> {
+    let raw: RawDashboard =
+        serde_json::from_str(json).map_err(|err| vec![format!("invalid dashboard JSON: {err}")])?;
+    let mut errors: Vec<String> = Vec::new();
+    if raw.panels.len() > MAX_PANELS {
+        errors.push(format!("at most {MAX_PANELS} panels"));
+    }
+    let mut seen: Vec<&str> = Vec::new();
+    let mut panels: Vec<ObservePanel> = Vec::with_capacity(raw.panels.len());
+    for (i, panel) in raw.panels.iter().enumerate() {
+        let n = i + 1;
+        if panel.title.trim().is_empty() {
+            errors.push(format!("panel {n}: title is empty"));
+        }
+        if seen.contains(&panel.title.as_str()) {
+            errors.push(format!("duplicate panel title {:?}", panel.title));
+        }
+        seen.push(panel.title.as_str());
+        let kind_key = panel
+            .kind
+            .as_deref()
+            .map(|s| s.trim().to_ascii_lowercase());
+        let kind = match kind_key.as_deref() {
+            None | Some("") | Some("bars") => PanelKind::Bars,
+            Some("stacked") => PanelKind::Stacked,
+            Some("line") => PanelKind::Line,
+            Some("stat") => PanelKind::Stat,
+            Some(_) => {
+                errors.push(format!(
+                    "panel {n}: unknown type {:?}",
+                    panel.kind.as_deref().unwrap_or("")
+                ));
+                continue;
+            }
+        };
+        if panel.targets.is_empty() || panel.targets.len() > MAX_PANEL_TARGETS {
+            errors.push(format!(
+                "panel {n} {:?}: targets must have 1–{MAX_PANEL_TARGETS} entries",
+                panel.title
+            ));
+        }
+        let mut targets = Vec::with_capacity(panel.targets.len());
+        for (j, target) in panel.targets.iter().enumerate() {
+            let t = j + 1;
+            if target.expr.trim().is_empty() {
+                errors.push(format!("panel {n} target {t}: expr is empty"));
+            }
+            let color = match target
+                .color
+                .as_deref()
+                .map(str::trim)
+                .filter(|c| !c.is_empty())
+            {
+                None => None,
+                Some(c) => {
+                    let lower = c.to_ascii_lowercase();
+                    let known = matches!(
+                        lower.as_str(),
+                        "green"
+                            | "blue"
+                            | "orange"
+                            | "red"
+                            | "purple"
+                            | "gray"
+                            | "grey"
+                            | "accent"
+                    );
+                    if !known && !is_hex_color(&lower) {
+                        errors.push(format!("panel {n}: unknown color {c:?}"));
+                    }
+                    Some(c.to_string())
+                }
+            };
+            targets.push(PanelTarget {
+                expr: target.expr.trim().to_string(),
+                legend: target
+                    .legend
+                    .as_deref()
+                    .map(|l| l.trim().to_string())
+                    .filter(|l| !l.is_empty()),
+                color,
+            });
+        }
+        panels.push(ObservePanel {
+            title: panel.title.clone(),
+            kind,
+            unit: panel
+                .unit
+                .as_deref()
+                .map(|u| u.trim().to_string())
+                .filter(|u| !u.is_empty()),
+            targets,
+        });
+    }
+    if errors.is_empty() {
+        Ok(ObserveDashboard { panels })
+    } else {
+        Err(errors)
+    }
+}
+
+fn is_hex_color(value: &str) -> bool {
+    let hex = value.strip_prefix('#').unwrap_or("");
+    hex.len() == 6 && hex.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// Raw shape kept separate so an unknown `type` string becomes a per-panel
+/// message instead of serde's generic variant error.
+#[derive(Deserialize)]
+struct RawDashboard {
+    #[serde(default)]
+    panels: Vec<RawPanel>,
+}
+
+#[derive(Deserialize)]
+struct RawPanel {
+    #[serde(default)]
+    title: String,
+    #[serde(default, rename = "type")]
+    kind: Option<String>,
+    #[serde(default)]
+    unit: Option<String>,
+    #[serde(default)]
+    targets: Vec<RawTarget>,
+}
+
+#[derive(Deserialize)]
+struct RawTarget {
+    #[serde(default)]
+    expr: String,
+    #[serde(default)]
+    legend: Option<String>,
+    #[serde(default)]
+    color: Option<String>,
+}
+
+/// Pretty (2-space) JSON for copy/paste and sharing.
+pub fn dashboard_to_json(dashboard: &ObserveDashboard) -> String {
+    serde_json::to_string_pretty(dashboard).unwrap_or_else(|_| "{}".into())
+}
+
+/// The configured dashboard, or the implicit default matching today's chips:
+/// an "HTTP status" stacked panel (warmUP sources have status buckets) plus
+/// one Bars panel per pinned metric.
+pub fn effective_dashboard(config: &ObserveConfig) -> ObserveDashboard {
+    if !config.dashboard.panels.is_empty() {
+        return config.dashboard.clone();
+    }
+    let mut panels = Vec::new();
+    if uses_warmup(config) {
+        panels.push(ObservePanel {
+            title: "HTTP status".into(),
+            kind: PanelKind::Stacked,
+            unit: Some("req/s".into()),
+            targets: ["2xx", "3xx", "4xx", "5xx"]
+                .into_iter()
+                .map(|expr| {
+                    let color = match expr {
+                        "2xx" => "green",
+                        "3xx" => "blue",
+                        "4xx" => "orange",
+                        _ => "red",
+                    };
+                    PanelTarget {
+                        expr: expr.into(),
+                        legend: Some(expr.into()),
+                        color: Some(color.into()),
+                    }
+                })
+                .collect(),
+        });
+    }
+    for metric in &config.metrics {
+        panels.push(ObservePanel {
+            title: metric.label.clone(),
+            kind: PanelKind::Bars,
+            unit: None,
+            targets: vec![PanelTarget {
+                expr: metric.query.clone(),
+                legend: None,
+                color: None,
+            }],
+        });
+    }
+    ObserveDashboard { panels }
+}
+
+pub fn set_chart_panel(config: &mut ObserveConfig, title: Option<&str>) {
+    match title.map(str::trim).filter(|t| !t.is_empty()) {
+        Some(t) => config.chart_panel = Some(t.to_string()),
+        None => config.chart_panel = None,
+    }
+}
+
+/// Selected panel title for the big view, validated against the effective
+/// dashboard. Stale selections fall back to the first panel.
+pub fn effective_chart_panel(config: &ObserveConfig) -> Option<String> {
+    let dashboard = effective_dashboard(config);
+    if dashboard.panels.is_empty() {
+        return None;
+    }
+    config
+        .chart_panel
+        .as_deref()
+        .filter(|title| dashboard.panels.iter().any(|p| &p.title == title))
+        .map(str::to_string)
+        .or_else(|| dashboard.panels.first().map(|p| p.title.clone()))
+}
+
+/// Dedup union of pinned queries and every panel target expr, capped.
+/// Pinned queries come first so they keep their existing roles.
+pub fn dashboard_queries(config: &ObserveConfig) -> Vec<String> {
+    let mut queries: Vec<String> = Vec::new();
+    for metric in &config.metrics {
+        let query = metric.query.trim();
+        if !query.is_empty() && !queries.iter().any(|q| q == query) {
+            queries.push(query.to_string());
+        }
+    }
+    for panel in &effective_dashboard(config).panels {
+        for target in &panel.targets {
+            let expr = target.expr.trim();
+            if !expr.is_empty() && !queries.iter().any(|q| q == expr) {
+                queries.push(expr.to_string());
+            }
+        }
+    }
+    queries.truncate(MAX_DASHBOARD_QUERIES);
+    queries
+}
+
+pub fn dashboard_file_path() -> PathBuf {
+    crate::app_data_dir().join("observe-dashboard.json")
+}
+
+pub fn write_dashboard_file(dashboard: &ObserveDashboard) -> Result<(), String> {
+    let path = dashboard_file_path();
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|err| err.to_string())?;
+    }
+    std::fs::write(&path, dashboard_to_json(dashboard)).map_err(|err| err.to_string())
+}
+
+/// None when the file does not exist; Some(Err) when it fails to parse.
+pub fn read_dashboard_file() -> Option<Result<ObserveDashboard, Vec<String>>> {
+    let body = std::fs::read_to_string(dashboard_file_path()).ok()?;
+    Some(parse_dashboard(&body))
+}
+
+/// Snapshot reading for one panel target expr.
+pub fn reading_for<'a>(snap: &'a ObserveSnapshot, expr: &str) -> Option<&'a MetricReading> {
+    let expr = expr.trim();
+    if expr.is_empty() {
+        return None;
+    }
+    snap.metrics.iter().find(|m| m.query.trim() == expr)
 }
 
 /// One pin the active endpoint can offer, as listed by [`list_metric_catalog`].
@@ -512,26 +900,17 @@ pub fn pin_metric(config: &mut ObserveConfig, label: &str, query: &str) -> Resul
 }
 
 pub fn unpin_metric(config: &mut ObserveConfig, query: &str) {
+    let label = config
+        .metrics
+        .iter()
+        .find(|m| m.query == query)
+        .map(|m| m.label.clone());
     config.metrics.retain(|m| m.query != query);
-    if config.chart_metric.as_deref() == Some(query) {
-        config.chart_metric = None;
+    // The implicit default lists one panel per pinned metric; drop the
+    // selection when its panel disappears.
+    if label.as_deref() == config.chart_panel.as_deref() {
+        config.chart_panel = None;
     }
-}
-
-pub fn set_chart_metric(config: &mut ObserveConfig, query: Option<&str>) {
-    match query.map(str::trim).filter(|q| !q.is_empty()) {
-        Some(q) => config.chart_metric = Some(q.to_string()),
-        None => config.chart_metric = None,
-    }
-}
-
-/// Pinned query selected for the big chart, if it is still pinned.
-/// Stale selections fall back to the stacked HTTP-status view.
-pub fn effective_chart_metric(config: &ObserveConfig) -> Option<&str> {
-    config
-        .chart_metric
-        .as_deref()
-        .filter(|q| config.metrics.iter().any(|m| m.query == **q))
 }
 
 pub fn cycle_metric_chart(config: &mut ObserveConfig, query: &str) {
@@ -982,6 +1361,27 @@ async fn poll_prometheus(config: &ObserveConfig) -> ObserveSnapshot {
     for metric in config.metrics.iter().take(MAX_PINNED) {
         metrics.push(fetch_metric(&client, &base, metric, config.range).await);
     }
+    // Panel target exprs the pins don't already cover.
+    let pinned: Vec<&str> = config
+        .metrics
+        .iter()
+        .take(MAX_PINNED)
+        .map(|m| m.query.trim())
+        .collect();
+    for query in dashboard_queries(config)
+        .into_iter()
+        .filter(|q| !pinned.iter().any(|p| *p == q))
+    {
+        metrics.push(
+            fetch_metric(
+                &client,
+                &base,
+                &ObserveMetric::new(query.clone(), query),
+                config.range,
+            )
+            .await,
+        );
+    }
 
     let connected = metrics.iter().any(|m| m.error.is_none());
     let error = if connected {
@@ -1330,6 +1730,13 @@ fn warmup_metrics_for(config: &ObserveConfig) -> Vec<ObserveMetric> {
     for query in ["1xx", "2xx", "3xx", "4xx", "5xx"] {
         if !pinned.iter().any(|metric| metric.query == query) {
             pinned.push(ObserveMetric::new(query, query).with_chart(ObserveChartKind::Bars));
+        }
+    }
+    // Panel target exprs the pins (and status buckets) don't already cover,
+    // so dashboards can reference keys nobody pinned.
+    for query in dashboard_queries(config) {
+        if is_warmup_query(&query) && !pinned.iter().any(|m| m.query == query) {
+            pinned.push(ObserveMetric::new(query.clone(), query).with_chart(ObserveChartKind::Off));
         }
     }
     pinned
@@ -2322,43 +2729,275 @@ mod tests {
     }
 
     #[test]
-    fn chart_metric_sets_clears_and_falls_back() {
+    fn chart_panel_sets_clears_and_falls_back() {
         let mut config = ObserveConfig::default();
-        assert_eq!(effective_chart_metric(&config), None);
-        set_chart_metric(&mut config, Some("avg_ms"));
-        assert_eq!(config.chart_metric.as_deref(), Some("avg_ms"));
         assert_eq!(
-            effective_chart_metric(&config),
-            None,
-            "unpinned stored query falls back to HTTP status"
+            effective_chart_panel(&config).as_deref(),
+            Some("HTTP status")
         );
-        pin_metric(&mut config, "Avg ms", "avg_ms").unwrap();
-        set_chart_metric(&mut config, Some("avg_ms"));
-        assert_eq!(effective_chart_metric(&config), Some("avg_ms"));
-        set_chart_metric(&mut config, None);
-        assert_eq!(config.chart_metric, None);
-        set_chart_metric(&mut config, Some("avg_ms"));
-        unpin_metric(&mut config, "avg_ms");
+        set_chart_panel(&mut config, Some("5xx"));
+        assert_eq!(config.chart_panel.as_deref(), Some("5xx"));
+        assert_eq!(effective_chart_panel(&config).as_deref(), Some("5xx"));
+        set_chart_panel(&mut config, Some("missing panel"));
         assert_eq!(
-            config.chart_metric, None,
-            "unpinning the chart metric clears it"
+            effective_chart_panel(&config).as_deref(),
+            Some("HTTP status"),
+            "stale selection falls back to the first panel"
         );
-        unpin_metric(&mut config, "total_requests");
-        assert_eq!(config.chart_metric, None);
+        set_chart_panel(&mut config, None);
+        assert_eq!(config.chart_panel, None);
+        set_chart_panel(&mut config, Some("5xx"));
+        unpin_metric(&mut config, "5xx");
+        assert_eq!(
+            config.chart_panel, None,
+            "unpinning the selected panel clears it"
+        );
     }
 
     #[test]
-    fn chart_metric_serde_defaults_to_none() {
+    fn old_settings_with_chart_metric_still_load() {
         let parsed: ObserveConfig = serde_json::from_str("{}").unwrap();
-        assert_eq!(parsed.chart_metric, None);
-        let with_metric: ObserveConfig =
+        assert_eq!(parsed.chart_panel, None);
+        assert!(parsed.dashboard.is_empty());
+        let legacy: ObserveConfig =
             serde_json::from_str(r#"{"chart_metric":"avg_ms"}"#).unwrap();
-        assert_eq!(with_metric.chart_metric.as_deref(), Some("avg_ms"));
+        assert_eq!(legacy.chart_panel.as_deref(), Some("avg_ms"));
+        assert_eq!(
+            effective_chart_panel(&legacy).as_deref(),
+            Some("HTTP status"),
+            "a legacy query is not a panel title, so the big view falls back"
+        );
         let bare = ObserveConfig::default();
         let json = serde_json::to_string(&bare).unwrap();
         assert!(
-            !json.contains("chart_metric"),
-            "None chart_metric stays out of saved settings"
+            !json.contains("chart_panel"),
+            "None chart_panel stays out of saved settings"
         );
+        assert!(
+            !json.contains("dashboard"),
+            "empty dashboard stays out of saved settings"
+        );
+    }
+
+    const STARTER_JSON: &str = r#"{ "panels": [
+  { "title": "HTTP status", "type": "stacked", "unit": "req/s", "targets": [
+      { "expr": "2xx", "legend": "2xx", "color": "green" }, { "expr": "3xx", "legend": "3xx", "color": "blue" },
+      { "expr": "4xx", "legend": "4xx", "color": "orange" }, { "expr": "5xx", "legend": "5xx", "color": "red" } ] },
+  { "title": "Avg latency", "type": "line", "unit": "ms", "targets": [ { "expr": "avg_ms", "legend": "avg" }, { "expr": "max_ms", "legend": "max", "color": "orange" } ] },
+  { "title": "Errors", "type": "bars", "unit": "req/s", "targets": [ { "expr": "errors", "color": "red" } ] },
+  { "title": "Requests", "type": "stat", "unit": "req/s", "targets": [ { "expr": "total_requests" } ] }
+] }"#;
+
+    #[test]
+    fn parse_dashboard_accepts_the_starter_example() {
+        let parsed = parse_dashboard(STARTER_JSON).expect("starter parses");
+        assert_eq!(parsed, warmup_starter_dashboard());
+        let round = dashboard_to_json(&parsed);
+        assert_eq!(
+            parse_dashboard(&round).expect("pretty JSON reparses"),
+            warmup_starter_dashboard()
+        );
+        assert!(parse_dashboard("{}").unwrap().panels.is_empty());
+        // Missing type defaults to bars.
+        let bare = parse_dashboard(
+            r#"{"panels":[{"title":"A","targets":[{"expr":"x"}]}]}"#,
+        )
+        .unwrap();
+        assert_eq!(bare.panels[0].kind, PanelKind::Bars);
+    }
+
+    #[test]
+    fn parse_dashboard_rejects_invalid_cases() {
+        let one = |json: &str| parse_dashboard(json).unwrap_err();
+        assert_eq!(
+            one(r#"{"panels":[{"title":"A","type":"pie","targets":[{"expr":"x"}]}]}"#),
+            vec![r#"panel 1: unknown type "pie""#.to_string()]
+        );
+        assert_eq!(
+            one(r#"{"panels":[{"title":"A","targets":[]}]}"#),
+            vec!["panel 1 \"A\": targets must have 1–6 entries".to_string()]
+        );
+        let seven: Vec<String> = (0..7)
+            .map(|i| format!(r#"{{"expr":"m{i}"}}"#))
+            .collect();
+        assert_eq!(
+            one(&format!(
+                "{{\"panels\":[{{\"title\":\"A\",\"targets\":[{}]}}]}}",
+                seven.join(",")
+            )),
+            vec!["panel 1 \"A\": targets must have 1–6 entries".to_string()]
+        );
+        assert_eq!(
+            one(r#"{"panels":[{"title":"A","targets":[{"expr":"  "}]}]}"#),
+            vec!["panel 1 target 1: expr is empty".to_string()]
+        );
+        assert_eq!(
+            one(r#"{"panels":[{"title":"A","targets":[{"expr":"x","color":"pinkish"}]}]}"#),
+            vec![r#"panel 1: unknown color "pinkish""#.to_string()]
+        );
+        assert_eq!(
+            one(r#"{"panels":[{"title":"A","targets":[{"expr":"x"}]},{"title":"A","targets":[{"expr":"y"}]}]}"#),
+            vec![r#"duplicate panel title "A""#.to_string()]
+        );
+        let many: Vec<String> = (0..13)
+            .map(|i| format!(r#"{{"title":"p{i}","targets":[{{"expr":"q{i}"}}]}}"#))
+            .collect();
+        assert_eq!(
+            one(&format!("{{\"panels\":[{}]}}", many.join(","))),
+            vec!["at most 12 panels".to_string()]
+        );
+        let syntax = one(r#"{"panels": ["#);
+        assert_eq!(syntax.len(), 1);
+        assert!(
+            syntax[0].contains("line 1") && syntax[0].contains("column"),
+            "syntax errors carry line/col: {syntax:?}"
+        );
+        for color in [
+            "green",
+            "blue",
+            "orange",
+            "red",
+            "purple",
+            "gray",
+            "accent",
+            "#0A84FF",
+            "#a1b2c3",
+        ] {
+            let json = format!(
+                "{{\"panels\":[{{\"title\":\"A\",\"targets\":[{{\"expr\":\"x\",\"color\":\"{color}\"}}]}}]}}"
+            );
+            assert!(parse_dashboard(&json).is_ok(), "{color}");
+        }
+    }
+
+    #[test]
+    fn effective_dashboard_default_matches_todays_chips() {
+        let config = ObserveConfig::default();
+        let dash = effective_dashboard(&config);
+        assert_eq!(dash.panels.len(), 1 + config.metrics.len());
+        let http = &dash.panels[0];
+        assert_eq!(http.title, "HTTP status");
+        assert_eq!(http.kind, PanelKind::Stacked);
+        let exprs: Vec<&str> = http.targets.iter().map(|t| t.expr.as_str()).collect();
+        assert_eq!(exprs, vec!["2xx", "3xx", "4xx", "5xx"]);
+        for (metric, panel) in config.metrics.iter().zip(dash.panels.iter().skip(1)) {
+            assert_eq!(panel.title, metric.label);
+            assert_eq!(panel.kind, PanelKind::Bars);
+            assert_eq!(panel.targets.len(), 1);
+            assert_eq!(panel.targets[0].expr, metric.query);
+        }
+        // A configured dashboard is used as-is.
+        let configured = ObserveConfig {
+            dashboard: warmup_starter_dashboard(),
+            ..ObserveConfig::default()
+        };
+        assert_eq!(effective_dashboard(&configured), warmup_starter_dashboard());
+        // A non-warmUP source has no status buckets, so no HTTP status panel.
+        let prom = ObserveConfig {
+            source: ObserveSourceKind::Prometheus,
+            prometheus_url: "https://metrics.example.com".into(),
+            ..ObserveConfig::default()
+        };
+        let dash = effective_dashboard(&prom);
+        assert_eq!(dash.panels.len(), 3);
+        assert!(dash.panels.iter().all(|p| p.title != "HTTP status"));
+    }
+
+    #[test]
+    fn dashboard_queries_dedup_and_cap() {
+        let tgt = |expr: &str| PanelTarget {
+            expr: expr.into(),
+            legend: None,
+            color: None,
+        };
+        let mut config = ObserveConfig {
+            metrics: Vec::new(),
+            ..ObserveConfig::default()
+        };
+        pin_metric(&mut config, "Requests", "total_requests").unwrap();
+        pin_metric(&mut config, "5xx", "5xx").unwrap();
+        config.dashboard = ObserveDashboard {
+            panels: vec![
+                ObservePanel {
+                    title: "A".into(),
+                    kind: PanelKind::Bars,
+                    unit: None,
+                    targets: vec![tgt("total_requests"), tgt("avg_ms")],
+                },
+                ObservePanel {
+                    title: "B".into(),
+                    kind: PanelKind::Line,
+                    unit: None,
+                    targets: vec![tgt("avg_ms"), tgt("max_ms")],
+                },
+            ],
+        };
+        assert_eq!(
+            dashboard_queries(&config),
+            vec!["total_requests", "5xx", "avg_ms", "max_ms"]
+        );
+        // Implicit default covers pins plus status targets, deduped.
+        let implicit = dashboard_queries(&ObserveConfig::default());
+        assert_eq!(
+            implicit,
+            vec!["total_requests", "5xx", "slow", "2xx", "3xx", "4xx"]
+        );
+        // Cap: 12 panels x 3 unique exprs plus pins truncates at 24.
+        let mut capped = ObserveConfig {
+            metrics: Vec::new(),
+            ..ObserveConfig::default()
+        };
+        capped.dashboard = ObserveDashboard {
+            panels: (0..12)
+                .map(|i| ObservePanel {
+                    title: format!("p{i}"),
+                    kind: PanelKind::Bars,
+                    unit: None,
+                    targets: (0..3).map(|j| tgt(&format!("e{i}_{j}"))).collect(),
+                })
+                .collect(),
+        };
+        let queries = dashboard_queries(&capped);
+        assert_eq!(queries.len(), MAX_DASHBOARD_QUERIES);
+        assert_eq!(queries[0], "e0_0");
+    }
+
+    #[test]
+    fn reading_for_looks_up_by_query() {
+        let reading = MetricReading::from_metric(
+            &ObserveMetric::new("two", " 2xx "),
+            Vec::new(),
+            None,
+        );
+        let snap = ObserveSnapshot {
+            metrics: vec![reading],
+            ..ObserveSnapshot::default()
+        };
+        assert_eq!(reading_for(&snap, "2xx").unwrap().label, "two");
+        assert!(reading_for(&snap, "  2xx  ").is_some());
+        assert!(reading_for(&snap, "4xx").is_none());
+        assert!(reading_for(&snap, "   ").is_none());
+    }
+
+    #[test]
+    fn dashboard_file_roundtrip() {
+        let path = dashboard_file_path();
+        assert_eq!(
+            path.file_name().and_then(|n| n.to_str()),
+            Some("observe-dashboard.json")
+        );
+        if path.exists() {
+            // Don't clobber a real dashboard; parsing must still not panic.
+            let _ = read_dashboard_file();
+            return;
+        }
+        assert!(read_dashboard_file().is_none());
+        let starter = warmup_starter_dashboard();
+        write_dashboard_file(&starter).expect("write dashboard file");
+        let back = read_dashboard_file()
+            .expect("file now exists")
+            .expect("starter parses");
+        assert_eq!(back, starter);
+        std::fs::remove_file(&path).ok();
     }
 }
