@@ -29,38 +29,11 @@ const BATTERY_NUB_W: f32 = 1.5;
 const BATTERY_NUB_H: f32 = 4.5;
 const BATTERY_RING_ALPHA: f32 = 0.36;
 const BATTERY_LEVEL_RUN: f32 = 21.0;
-/// Mockup High Alert orange `#FF9F0A` (systemOrange dark).
-const ALERT_ORANGE: gpui::Rgba = gpui::Rgba {
-    r: 1.0,
-    g: 0.624,
-    b: 0.039,
-    a: 1.0,
-};
 
 /// BODY 13pt semibold width estimate, capped for ellipsising flank labels.
 fn approx_label_w(text: &str) -> f32 {
     (text.chars().count() as f32 * theme::COMPACT_BODY_CHAR_W + theme::COMPACT_LABEL_SLACK)
         .min(theme::COMPACT_LABEL_MAX)
-}
-
-/// Compact face VPN trailing string: timer only while connected (name+timer
-/// overflows the narrow flank and clips on the left under `justify_end`).
-fn vpn_face_text(vpn: &nook_core::vpn::VpnSnapshot, show_timer: bool) -> String {
-    let now = std::time::SystemTime::now();
-    if !vpn.connected {
-        let name = vpn.display_name();
-        return if name.is_empty() {
-            "Disconnected".into()
-        } else {
-            format!("{name} · off")
-        };
-    }
-    if show_timer {
-        if let Some(elapsed) = vpn.elapsed_label(now) {
-            return elapsed;
-        }
-    }
-    vpn.display_name()
 }
 
 /// Trailing/leading compact label. Width/`min_w(0)` live on a flex_col
@@ -88,7 +61,7 @@ fn flank_label(text: impl Into<gpui::SharedString>, color: Option<gpui::Rgba>) -
         .child(leaf)
 }
 
-/// Long flank title in a flex ROW: fill the flank and ellipsize (vpn.rs S).
+/// Long flank title in a flex ROW: fill the flank and ellipsize.
 fn flank_title(text: impl Into<gpui::SharedString>) -> gpui::Div {
     label(text, theme::BODY, true).flex_1().min_w(px(0.))
 }
@@ -161,13 +134,6 @@ impl Island {
         let mode = self.mode();
         let (lead, trail) = match mode {
             CompactMode::Idle if self.mirror_on => (LEADING_SLOT, MIRROR_LIVE_DOT),
-            CompactMode::Idle if self.high_alert_active() => {
-                let text = self
-                    .high_alert_remaining_secs()
-                    .map(super::ui::format_timer_compact)
-                    .unwrap_or_else(|| "On".into());
-                (LEADING_SLOT, approx_label_w(&text))
-            }
             CompactMode::Idle => {
                 if let Some(snap) = self.weather_compact_snap() {
                     let temp = nook_core::weather::format_temp(snap.temperature);
@@ -200,24 +166,6 @@ impl Island {
                 BATTERY_SHELL_W + BATTERY_NUB_W,
                 approx_label_w(&nook_core::power::format_percent(self.power.percent)),
             ),
-            CompactMode::Vpn => {
-                let text = vpn_face_text(&self.vpn, self.settings.vpn_show_timer);
-                (LEADING_SLOT, approx_label_w(&text).max(40.0))
-            }
-            CompactMode::Notifications => {
-                let text = if self.notification_unread > 0 {
-                    format!("{} new", self.notification_unread)
-                } else if let Some(event) = self.notifications.first() {
-                    if event.title.is_empty() {
-                        event.app_name.clone()
-                    } else {
-                        event.title.clone()
-                    }
-                } else {
-                    String::new()
-                };
-                (LEADING_SLOT, approx_label_w(&text))
-            }
             CompactMode::Onboard => {
                 // Dismiss + github hit targets.
                 let right = theme::HIT_MIN * 2.0 + 2.0;
@@ -236,7 +184,7 @@ impl Island {
                 let text = self.share.compact_label();
                 (LEADING_SLOT, approx_label_w(&text))
             }
-            CompactMode::Recording | CompactMode::Meeting => (0.0, 0.0),
+            CompactMode::Recording => (0.0, 0.0),
         };
         lead.max(trail)
     }
@@ -289,14 +237,7 @@ impl Island {
                         .flex()
                         .items_center()
                         .justify_start()
-                        .child(self.compact_left(mode, cx))
-                        .when(mode != CompactMode::Idle && self.high_alert_active(), |d| {
-                            d.child(div().ml(px(4.)).flex_shrink_0().child(lucide_color(
-                                "sun",
-                                theme::COMPACT_BADGE,
-                                ALERT_ORANGE,
-                            )))
-                        }),
+                        .child(self.compact_left(mode, cx)),
                 )
                 .child(
                     div()
@@ -347,23 +288,7 @@ impl Island {
             CompactMode::Battery => {
                 battery_glyph(self.power.percent, widgets::battery_tint(self.power))
             }
-            CompactMode::Vpn => leading_icon(
-                if self.vpn.connected {
-                    "shield-check"
-                } else {
-                    "shield-off"
-                },
-                if self.vpn.connected {
-                    theme::SUCCESS
-                } else {
-                    theme::tertiary_label()
-                },
-            ),
             CompactMode::Recording => widgets::recorder_compact_left(self),
-            CompactMode::Meeting => widgets::meeting_compact_left(&self.meeting),
-            CompactMode::Notifications => {
-                widgets::notifications_compact_left(self.notifications.first())
-            }
             CompactMode::Onboard => flank_text("openNook").into_any_element(),
             CompactMode::Messages => self
                 .messages
@@ -376,8 +301,6 @@ impl Island {
             CompactMode::Idle => {
                 if self.mirror_on {
                     leading_icon("webcam", theme::LABEL)
-                } else if self.high_alert_active() {
-                    leading_icon("sun", ALERT_ORANGE)
                 } else if let Some(snap) = self.weather_compact_snap() {
                     // Icon left, temperature on the right flank so both fit.
                     let tint = if snap.is_day && matches!(snap.wmo_code, 0 | 1 | 2) {
@@ -406,7 +329,7 @@ impl Island {
             CompactMode::Media => {
                 visualizer(self.now_playing.is_playing, self.visualizer_color).into_any_element()
             }
-            // Title fills the right flank and ellipsizes (vpn.rs S row pattern).
+            // Title fills the right flank and ellipsizes.
             CompactMode::Agents => match self.agent_face_title() {
                 Some(title) => flank_title(title).into_any_element(),
                 None => div().into_any_element(),
@@ -442,18 +365,6 @@ impl Island {
                 .flex_shrink_0()
                 .bg(theme::SUCCESS)
                 .into_any_element(),
-            // High Alert compact (mockup): orange sun leading, orange value
-            // trailing — here the keep-awake time left, or "On" when open-ended.
-            CompactMode::Idle if self.high_alert_active() => {
-                let text = self
-                    .high_alert_remaining_secs()
-                    .map(super::ui::format_timer_compact)
-                    .unwrap_or_else(|| "On".into());
-                timer_text(text, theme::BODY)
-                    .flex_shrink_0()
-                    .text_color(ALERT_ORANGE)
-                    .into_any_element()
-            }
             CompactMode::Idle => {
                 if let Some(snap) = self.weather_compact_snap() {
                     flank_text(nook_core::weather::format_temp(snap.temperature)).into_any_element()
@@ -466,38 +377,7 @@ impl Island {
                 None => div().into_any_element(),
             },
             CompactMode::Share => flank_text(self.share.compact_label()).into_any_element(),
-            CompactMode::Vpn => {
-                let text = vpn_face_text(&self.vpn, self.settings.vpn_show_timer);
-                let color = if self.vpn.connected {
-                    theme::SUCCESS
-                } else {
-                    theme::tertiary_label()
-                };
-                flank_label(text, Some(color))
-                    .text_right()
-                    .into_any_element()
-            }
             CompactMode::Recording => widgets::recorder_compact_right(self, cx),
-            CompactMode::Meeting => {
-                widgets::meeting_compact_right(&self.meeting, self.overlay_fade.value)
-            }
-            CompactMode::Notifications => {
-                let text = if self.notification_unread > 0 {
-                    Some(format!("{} new", self.notification_unread))
-                } else {
-                    self.notifications.first().map(|event| {
-                        if event.title.is_empty() {
-                            event.app_name.clone()
-                        } else {
-                            event.title.clone()
-                        }
-                    })
-                };
-                match text {
-                    Some(t) => flank_text(t).into_any_element(),
-                    None => div().into_any_element(),
-                }
-            }
             CompactMode::Onboard => div()
                 .flex()
                 .items_center()

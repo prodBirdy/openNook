@@ -11,7 +11,7 @@ use std::time::Duration;
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(8);
 const MAX_METRICS_BODY_BYTES: usize = 1024 * 1024;
-const MAX_PINNED: usize = 6;
+pub const MAX_PINNED: usize = 6;
 const MAX_ALERTS: usize = 8;
 const MAX_SERIES: usize = 3;
 const MAX_POINTS: usize = 48;
@@ -245,6 +245,19 @@ fn default_warmup_metrics() -> Vec<ObserveMetric> {
         ObserveMetric::new("5xx", "5xx"),
         ObserveMetric::new("Slow", "slow"),
     ]
+}
+
+/// One pin the active endpoint can offer, as listed by [`list_metric_catalog`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct CatalogEntry {
+    /// What gets pinned (`ObserveMetric.query`).
+    pub query: String,
+    /// Human label, stored as `ObserveMetric.label` when pinned.
+    pub label: String,
+    /// Section heading in the picker, e.g. "Totals".
+    pub group: String,
+    /// Current value if the endpoint returned one.
+    pub value: Option<f64>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -887,72 +900,37 @@ pub async fn poll(config: &ObserveConfig) -> ObserveSnapshot {
     }
 }
 
-async fn poll_warmup(config: &ObserveConfig) -> ObserveSnapshot {
+async fn fetch_warmup_snapshot(config: &ObserveConfig) -> Result<WarmupMetricsSnapshot, String> {
     if missing_warmup_token(config) {
-        return ObserveSnapshot {
-            error: Some(WARMUP_TOKEN_NEEDED.into()),
-            ..ObserveSnapshot::default()
-        };
+        return Err(WARMUP_TOKEN_NEEDED.into());
     }
-    let base = match normalize_base_url(&config.prometheus_url) {
-        Ok(url) => url,
-        Err(err) => {
-            return ObserveSnapshot {
-                error: Some(err),
-                ..ObserveSnapshot::default()
-            };
-        }
-    };
-    let client = match client() {
-        Ok(c) => c,
-        Err(err) => {
-            return ObserveSnapshot {
-                error: Some(err),
-                ..ObserveSnapshot::default()
-            };
-        }
-    };
-
+    let base = normalize_base_url(&config.prometheus_url)?;
+    let client = client()?;
     let url = format!("{base}{WARMUP_METRICS_PATH}");
     let mut request = client.get(&url);
     if let Some(token) = warmup_bearer(config) {
         request = request.bearer_auth(token);
     }
-    match request.send().await {
-        Ok(response) => {
-            let status = response.status();
-            match response_text(response).await {
-                Ok(body) => {
-                    if status.as_u16() == 401 {
-                        return ObserveSnapshot {
-                            error: Some(WARMUP_TOKEN_NEEDED.into()),
-                            ..ObserveSnapshot::default()
-                        };
-                    }
-                    if !status.is_success() {
-                        return ObserveSnapshot {
-                            error: Some(format!(
-                                "warmUP {WARMUP_METRICS_PATH} returned HTTP {status}"
-                            )),
-                            ..ObserveSnapshot::default()
-                        };
-                    }
-                    match parse_warmup_metrics(&body, &warmup_metrics_for(config)) {
-                        Ok(snap) => snap,
-                        Err(err) => ObserveSnapshot {
-                            error: Some(err),
-                            ..ObserveSnapshot::default()
-                        },
-                    }
-                }
-                Err(err) => ObserveSnapshot {
-                    error: Some(err.to_string()),
-                    ..ObserveSnapshot::default()
-                },
-            }
-        }
+    let response = request
+        .send()
+        .await
+        .map_err(|err| format_http_error(err, "warmUP"))?;
+    let status = response.status();
+    let body = response_text(response).await?;
+    if status.as_u16() == 401 {
+        return Err(WARMUP_TOKEN_NEEDED.into());
+    }
+    if !status.is_success() {
+        return Err(format!("warmUP {WARMUP_METRICS_PATH} returned HTTP {status}"));
+    }
+    serde_json::from_str(&body).map_err(|e| format!("Unexpected warmUP metrics response: {e}"))
+}
+
+async fn poll_warmup(config: &ObserveConfig) -> ObserveSnapshot {
+    match fetch_warmup_snapshot(config).await {
+        Ok(parsed) => snapshot_from_warmup(parsed, &warmup_metrics_for(config)),
         Err(err) => ObserveSnapshot {
-            error: Some(format_http_error(err, "warmUP")),
+            error: Some(err),
             ..ObserveSnapshot::default()
         },
     }
@@ -1059,10 +1037,11 @@ async fn fetch_metric(
     }
 }
 
-/// Metric names from the active source, used by Settings to pick pins.
-pub async fn list_metric_names(config: &ObserveConfig) -> Result<Vec<String>, String> {
+/// Everything the active source can provide, in display order, for Settings to pick pins.
+pub async fn list_metric_catalog(config: &ObserveConfig) -> Result<Vec<CatalogEntry>, String> {
     if uses_warmup(config) {
-        return Ok(warmup_metric_names());
+        let snapshot = fetch_warmup_snapshot(config).await?;
+        return Ok(warmup_catalog(&snapshot));
     }
     if config.source != ObserveSourceKind::Prometheus {
         return Err("Metric browse is Prometheus-only for now".into());
@@ -1080,7 +1059,15 @@ pub async fn list_metric_names(config: &ObserveConfig) -> Result<Vec<String>, St
     if !status.is_success() {
         return Err(format!("Prometheus label values returned HTTP {status}"));
     }
-    parse_label_values(&body)
+    Ok(parse_label_values(&body)?
+        .into_iter()
+        .map(|name| CatalogEntry {
+            query: name.clone(),
+            label: name,
+            group: "Prometheus".into(),
+            value: None,
+        })
+        .collect())
 }
 
 fn format_http_error(err: reqwest::Error, source: &str) -> String {
@@ -1093,24 +1080,219 @@ fn format_http_error(err: reqwest::Error, source: &str) -> String {
     }
 }
 
-fn warmup_metric_names() -> Vec<String> {
-    vec![
-        "total_requests".into(),
-        "1xx".into(),
-        "2xx".into(),
-        "3xx".into(),
-        "5xx".into(),
-        "4xx".into(),
-        "slow".into(),
-        "errors".into(),
-    ]
+fn warmup_catalog(parsed: &WarmupMetricsSnapshot) -> Vec<CatalogEntry> {
+    let mut entries = Vec::new();
+
+    entries.push(catalog_entry(
+        "total_requests",
+        "Requests",
+        "Totals",
+        parsed.total_requests as f64,
+    ));
+    for bucket in ["2xx", "3xx", "4xx", "5xx"] {
+        entries.push(catalog_entry(
+            bucket,
+            bucket,
+            "Totals",
+            bucket_count(&parsed.counters, bucket),
+        ));
+    }
+    entries.push(catalog_entry(
+        "errors",
+        "Errors",
+        "Totals",
+        parsed.recent_error_requests.len() as f64,
+    ));
+    entries.push(catalog_entry(
+        "slow",
+        "Slow",
+        "Totals",
+        parsed.recent_slow_requests.len() as f64,
+    ));
+
+    entries.push(catalog_entry(
+        "avg_ms",
+        "Avg ms",
+        "Latency",
+        counters_avg_ms(parsed.counters.iter()),
+    ));
+    entries.push(catalog_entry(
+        "max_ms",
+        "Max ms",
+        "Latency",
+        counters_max_ms(parsed.counters.iter()),
+    ));
+
+    let routes = routes_by_count(&parsed.counters);
+    for route in &routes {
+        entries.push(catalog_entry(
+            &format!("route:{route}"),
+            route,
+            "Routes",
+            route_count(&parsed.counters, route),
+        ));
+    }
+    for route in &routes {
+        let errors = route_bucket_count(&parsed.counters, route, &["4xx", "5xx"]);
+        if errors > 0.0 {
+            entries.push(catalog_entry(
+                &format!("route_errors:{route}"),
+                &format!("Errors · {route}"),
+                "Route Errors",
+                errors,
+            ));
+        }
+    }
+    for route in &routes {
+        entries.push(catalog_entry(
+            &format!("route_avg_ms:{route}"),
+            &format!("Avg ms · {route}"),
+            "Route Latency",
+            route_avg_ms(&parsed.counters, route),
+        ));
+        entries.push(catalog_entry(
+            &format!("route_max_ms:{route}"),
+            &format!("Max ms · {route}"),
+            "Route Latency",
+            route_max_ms(&parsed.counters, route),
+        ));
+    }
+
+    let mut keys: Vec<&String> = parsed.rate_limits.keys().collect();
+    keys.sort();
+    for key in keys {
+        entries.push(catalog_entry(
+            &format!("rate_limit:{key}"),
+            key,
+            "Rate Limits",
+            parsed.rate_limits[key],
+        ));
+    }
+
+    entries
+}
+
+fn catalog_entry(
+    query: impl Into<String>,
+    label: impl Into<String>,
+    group: &str,
+    value: f64,
+) -> CatalogEntry {
+    CatalogEntry {
+        query: query.into(),
+        label: label.into(),
+        group: group.into(),
+        value: Some(value),
+    }
+}
+
+fn counter_route(counter: &WarmupCounter) -> String {
+    format!("{} {}", counter.method, counter.path)
+}
+
+fn route_matches(counter: &WarmupCounter, route: &str) -> bool {
+    counter_route(counter) == route
+}
+
+fn route_count(counters: &[WarmupCounter], route: &str) -> f64 {
+    counters
+        .iter()
+        .filter(|c| route_matches(c, route))
+        .map(|c| c.count)
+        .sum()
+}
+
+fn route_bucket_count(counters: &[WarmupCounter], route: &str, buckets: &[&str]) -> f64 {
+    counters
+        .iter()
+        .filter(|c| {
+            route_matches(c, route)
+                && buckets
+                    .iter()
+                    .any(|b| c.status_bucket.eq_ignore_ascii_case(b))
+        })
+        .map(|c| c.count)
+        .sum()
+}
+
+fn route_avg_ms(counters: &[WarmupCounter], route: &str) -> f64 {
+    counters_avg_ms(counters.iter().filter(|c| route_matches(c, route)))
+}
+
+fn route_max_ms(counters: &[WarmupCounter], route: &str) -> f64 {
+    counters_max_ms(counters.iter().filter(|c| route_matches(c, route)))
+}
+
+fn counters_avg_ms<'a>(counters: impl Iterator<Item = &'a WarmupCounter>) -> f64 {
+    let mut total = 0.0;
+    let mut count = 0.0;
+    for counter in counters {
+        total += counter.total_duration_ms;
+        count += counter.count;
+    }
+    if count > 0.0 {
+        total / count
+    } else {
+        0.0
+    }
+}
+
+fn counters_max_ms<'a>(counters: impl Iterator<Item = &'a WarmupCounter>) -> f64 {
+    counters.map(|c| c.max_duration_ms).fold(0.0, f64::max)
+}
+
+/// Distinct routes, most total requests first.
+fn routes_by_count(counters: &[WarmupCounter]) -> Vec<String> {
+    let mut totals: Vec<(String, f64)> = Vec::new();
+    for counter in counters {
+        let route = counter_route(counter);
+        match totals.iter_mut().find(|(known, _)| *known == route) {
+            Some((_, total)) => *total += counter.count,
+            None => totals.push((route, counter.count)),
+        }
+    }
+    totals.sort_by(|a, b| {
+        b.1.partial_cmp(&a.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.0.cmp(&b.0))
+    });
+    totals.into_iter().map(|(route, _)| route).collect()
+}
+
+pub fn is_pinned(config: &ObserveConfig, query: &str) -> bool {
+    config.metrics.iter().any(|m| m.query == query)
+}
+
+/// Pin if not pinned, unpin if pinned. `Ok(true)` = now pinned, `Ok(false)` = now unpinned.
+pub fn toggle_pin(config: &mut ObserveConfig, label: &str, query: &str) -> Result<bool, String> {
+    if is_pinned(config, query) {
+        unpin_metric(config, query);
+        return Ok(false);
+    }
+    pin_metric(config, label, query)?;
+    Ok(true)
 }
 
 fn is_warmup_query(query: &str) -> bool {
+    let query = query.trim();
     matches!(
-        query.trim(),
-        "total_requests" | "requests" | "5xx" | "4xx" | "3xx" | "2xx" | "1xx" | "slow" | "errors"
-    )
+        query,
+        "total_requests"
+            | "requests"
+            | "5xx"
+            | "4xx"
+            | "3xx"
+            | "2xx"
+            | "1xx"
+            | "slow"
+            | "errors"
+            | "avg_ms"
+            | "max_ms"
+    ) || query.starts_with("route:")
+        || query.starts_with("route_errors:")
+        || query.starts_with("route_avg_ms:")
+        || query.starts_with("route_max_ms:")
+        || query.starts_with("rate_limit:")
 }
 
 fn warmup_metrics_for(config: &ObserveConfig) -> Vec<ObserveMetric> {
@@ -1131,6 +1313,7 @@ fn warmup_metrics_for(config: &ObserveConfig) -> Vec<ObserveMetric> {
     pinned
 }
 
+#[cfg(test)]
 fn parse_warmup_metrics(body: &str, metrics: &[ObserveMetric]) -> Result<ObserveSnapshot, String> {
     let parsed: WarmupMetricsSnapshot = serde_json::from_str(body)
         .map_err(|e| format!("Unexpected warmUP metrics response: {e}"))?;
@@ -1154,15 +1337,7 @@ fn snapshot_from_warmup(
 }
 
 fn warmup_reading(parsed: &WarmupMetricsSnapshot, metric: &ObserveMetric) -> MetricReading {
-    let query = metric.query.trim();
-    let value = match query {
-        "total_requests" | "requests" => Some(parsed.total_requests as f64),
-        "5xx" | "4xx" | "3xx" | "2xx" | "1xx" => Some(bucket_count(&parsed.counters, query)),
-        "slow" => Some(parsed.recent_slow_requests.len() as f64),
-        "errors" => Some(parsed.recent_error_requests.len() as f64),
-        _ => None,
-    };
-    match value {
+    match warmup_query_value(parsed, metric.query.trim()) {
         Some(value) => MetricReading::from_metric(
             metric,
             vec![SeriesValue {
@@ -1173,6 +1348,42 @@ fn warmup_reading(parsed: &WarmupMetricsSnapshot, metric: &ObserveMetric) -> Met
         ),
         None => {
             MetricReading::from_metric(metric, Vec::new(), Some("Not a warmUP metric key".into()))
+        }
+    }
+}
+
+/// A route or rate-limit key the payload has never seen reads 0: it simply had
+/// no traffic since restart, which is not an error.
+fn warmup_query_value(parsed: &WarmupMetricsSnapshot, query: &str) -> Option<f64> {
+    let query = query.trim();
+    match query {
+        "total_requests" | "requests" => Some(parsed.total_requests as f64),
+        "5xx" | "4xx" | "3xx" | "2xx" | "1xx" => Some(bucket_count(&parsed.counters, query)),
+        "slow" => Some(parsed.recent_slow_requests.len() as f64),
+        "errors" => Some(parsed.recent_error_requests.len() as f64),
+        "avg_ms" => Some(counters_avg_ms(parsed.counters.iter())),
+        "max_ms" => Some(counters_max_ms(parsed.counters.iter())),
+        _ => {
+            if let Some(route) = query.strip_prefix("route:") {
+                return Some(route_count(&parsed.counters, route.trim()));
+            }
+            if let Some(route) = query.strip_prefix("route_errors:") {
+                return Some(route_bucket_count(
+                    &parsed.counters,
+                    route.trim(),
+                    &["4xx", "5xx"],
+                ));
+            }
+            if let Some(route) = query.strip_prefix("route_avg_ms:") {
+                return Some(route_avg_ms(&parsed.counters, route.trim()));
+            }
+            if let Some(route) = query.strip_prefix("route_max_ms:") {
+                return Some(route_max_ms(&parsed.counters, route.trim()));
+            }
+            if let Some(key) = query.strip_prefix("rate_limit:") {
+                return Some(parsed.rate_limits.get(key.trim()).copied().unwrap_or(0.0));
+            }
+            None
         }
     }
 }
@@ -1224,20 +1435,33 @@ fn parse_label_values(body: &str) -> Result<Vec<String>, String> {
 struct WarmupMetricsSnapshot {
     #[serde(default, rename = "totalRequests")]
     total_requests: u64,
+    #[serde(default, rename = "slowThresholdMs")]
+    #[allow(dead_code)]
+    slow_threshold_ms: f64,
     #[serde(default)]
     counters: Vec<WarmupCounter>,
     #[serde(default, rename = "recentSlowRequests")]
     recent_slow_requests: Vec<serde_json::Value>,
     #[serde(default, rename = "recentErrorRequests")]
     recent_error_requests: Vec<serde_json::Value>,
+    #[serde(default, rename = "rateLimits")]
+    rate_limits: HashMap<String, f64>,
 }
 
 #[derive(Debug, Deserialize)]
 struct WarmupCounter {
+    #[serde(default)]
+    method: String,
+    #[serde(default)]
+    path: String,
     #[serde(default, rename = "statusBucket")]
     status_bucket: String,
     #[serde(default)]
     count: f64,
+    #[serde(default, rename = "totalDurationMs")]
+    total_duration_ms: f64,
+    #[serde(default, rename = "maxDurationMs")]
+    max_duration_ms: f64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1693,6 +1917,142 @@ mod tests {
         for query in ["1xx", "2xx", "3xx", "4xx", "5xx"] {
             assert!(metrics.iter().any(|metric| metric.query == query));
         }
+    }
+
+    fn warmup_fixture() -> WarmupMetricsSnapshot {
+        serde_json::from_str(
+            r#"{
+                "totalRequests": 42,
+                "slowThresholdMs": 10000,
+                "counters": [
+                    {"method":"GET","path":"/v1/x","statusBucket":"2xx","count":10,"totalDurationMs":100,"maxDurationMs":20},
+                    {"method":"GET","path":"/v1/x","statusBucket":"5xx","count":2,"totalDurationMs":40,"maxDurationMs":30},
+                    {"method":"GET","path":"/health","statusBucket":"2xx","count":30,"totalDurationMs":30,"maxDurationMs":5}
+                ],
+                "recentSlowRequests": [{"method":"GET","path":"/v1/x","status":200}],
+                "recentErrorRequests": [{"method":"GET","path":"/v1/x","status":500}],
+                "rateLimits": {"global": 3}
+            }"#,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn warmup_catalog_groups_labels_and_values() {
+        let entries = warmup_catalog(&warmup_fixture());
+        let find = |query: &str| entries.iter().find(|e| e.query == query).unwrap();
+
+        let mut groups: Vec<&str> = Vec::new();
+        for entry in &entries {
+            if groups.last() != Some(&entry.group.as_str()) {
+                groups.push(entry.group.as_str());
+            }
+        }
+        assert_eq!(
+            groups,
+            [
+                "Totals",
+                "Latency",
+                "Routes",
+                "Route Errors",
+                "Route Latency",
+                "Rate Limits"
+            ],
+            "groups stay contiguous and in display order"
+        );
+
+        assert_eq!(find("total_requests").group, "Totals");
+        assert_eq!(find("total_requests").label, "Requests");
+        assert_eq!(find("total_requests").value, Some(42.0));
+        assert_eq!(find("2xx").value, Some(40.0));
+        assert_eq!(find("3xx").value, Some(0.0));
+        assert_eq!(find("4xx").value, Some(0.0));
+        assert_eq!(find("5xx").value, Some(2.0));
+        assert_eq!(find("errors").value, Some(1.0));
+        assert_eq!(find("slow").value, Some(1.0));
+        assert_eq!(find("avg_ms").group, "Latency");
+        assert!((find("avg_ms").value.unwrap() - 170.0 / 42.0).abs() < 1e-9);
+        assert_eq!(find("max_ms").value, Some(30.0));
+
+        let routes: Vec<&str> = entries
+            .iter()
+            .filter(|e| e.group == "Routes")
+            .map(|e| e.label.as_str())
+            .collect();
+        assert_eq!(
+            routes,
+            ["GET /health", "GET /v1/x"],
+            "routes sort by total count desc"
+        );
+        assert_eq!(find("route:GET /health").value, Some(30.0));
+        assert_eq!(find("route:GET /v1/x").value, Some(12.0));
+
+        let route_errors: Vec<&CatalogEntry> = entries
+            .iter()
+            .filter(|e| e.group == "Route Errors")
+            .collect();
+        assert_eq!(route_errors.len(), 1);
+        assert_eq!(route_errors[0].label, "Errors · GET /v1/x");
+        assert_eq!(route_errors[0].value, Some(2.0));
+
+        assert_eq!(find("route_avg_ms:GET /health").label, "Avg ms · GET /health");
+        assert_eq!(find("route_avg_ms:GET /health").value, Some(1.0));
+        assert_eq!(find("route_max_ms:GET /health").value, Some(5.0));
+        assert_eq!(find("route_max_ms:GET /v1/x").value, Some(30.0));
+        let route_avg = find("route_avg_ms:GET /v1/x").value.unwrap();
+        assert!((route_avg - 140.0 / 12.0).abs() < 1e-9);
+
+        assert_eq!(find("rate_limit:global").group, "Rate Limits");
+        assert_eq!(find("rate_limit:global").label, "global");
+        assert_eq!(find("rate_limit:global").value, Some(3.0));
+    }
+
+    #[test]
+    fn warmup_route_and_latency_readings() {
+        let parsed = warmup_fixture();
+        let read = |query: &str| {
+            let metric = ObserveMetric::new(query, query);
+            warmup_reading(&parsed, &metric).values[0].value
+        };
+        assert_eq!(read("route:GET /v1/x"), 12.0);
+        assert_eq!(read("route_errors:GET /v1/x"), 2.0);
+        assert_eq!(read("route_errors:GET /health"), 0.0);
+        assert!((read("route_avg_ms:GET /v1/x") - 140.0 / 12.0).abs() < 1e-9);
+        assert_eq!(read("route_max_ms:GET /v1/x"), 30.0);
+        assert!((read("avg_ms") - 170.0 / 42.0).abs() < 1e-9);
+        assert_eq!(read("max_ms"), 30.0);
+        assert_eq!(read("rate_limit:global"), 3.0);
+        assert_eq!(
+            read("route:GET /missing"),
+            0.0,
+            "a route with no traffic reads 0, not an error"
+        );
+        assert_eq!(read("rate_limit:missing"), 0.0);
+    }
+
+    #[test]
+    fn toggle_pin_pins_unpins_and_caps() {
+        let mut config = ObserveConfig {
+            metrics: Vec::new(),
+            ..ObserveConfig::default()
+        };
+        assert!(!is_pinned(&config, "up"));
+        assert!(toggle_pin(&mut config, "Up", "up").unwrap());
+        assert!(is_pinned(&config, "up"));
+        assert_eq!(config.metrics.len(), 1);
+        assert!(!toggle_pin(&mut config, "Up", "up").unwrap());
+        assert!(!is_pinned(&config, "up"));
+        assert!(config.metrics.is_empty());
+
+        for i in 0..MAX_PINNED {
+            toggle_pin(&mut config, &format!("m{i}"), &format!("q{i}")).unwrap();
+        }
+        assert_eq!(config.metrics.len(), MAX_PINNED);
+        assert_eq!(
+            toggle_pin(&mut config, "overflow", "overflow").unwrap_err(),
+            format!("Pin at most {MAX_PINNED} metrics")
+        );
+        assert!(!is_pinned(&config, "overflow"));
     }
 
     #[tokio::test]

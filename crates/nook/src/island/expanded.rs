@@ -9,11 +9,9 @@ use super::{CompactMode, Island, Tab};
 use crate::icons::lucide_color;
 use crate::theme;
 use crate::widgets::{
-    agents_card, battery_card, calendar_card, high_alert_card, meeting_card, messages_card,
-    notes_card, notifications_card, observe_big_view, observe_card, obsidian_card, recorder_card,
-    reminders_card,
-    speed_card, sysstats_card, terminal_card, timer_card, vpn_card, weather_card,
-    OBSERVE_EXPANDED_BODY,
+    agents_card, battery_card, calendar_card, messages_card, notes_card, observe_big_view,
+    observe_card, recorder_card, reminders_card, speed_card, sysstats_card, terminal_card,
+    timer_card, weather_card, OBSERVE_EXPANDED_BODY,
 };
 use gpui::{
     div, img, prelude::*, px, AnyElement, Context, CursorStyle, DragMoveEvent, FontWeight,
@@ -36,13 +34,10 @@ const TAB_RADIUS: f32 = 12.0;
 const TAB_ICON: f32 = 12.0;
 const TAB_GAP: f32 = 6.0;
 const SETTINGS_GLYPH: f32 = 15.0;
-/// Live Mirror face is 64pt; off state fills the cell inside its 16pt insets.
-const MIRROR_PAD: f32 = 16.0;
-const MIRROR_FACE: f32 = 64.0;
+/// Pencil pad 6 border-box (1 px cell border eats into it).
+const MIRROR_PAD: f32 = 5.0;
+const MIRROR_RADIUS: f32 = 14.0;
 const MIRROR_ICON: f32 = 22.0;
-const MIRROR_OFF_FACE: f32 = theme::NOOK_BODY - 2.0 * MIRROR_PAD;
-const MIRROR_OFF_ICON: f32 = 32.0;
-const MIRROR_GAP: f32 = 8.0;
 
 impl Island {
     /// Effective Nook cell width for the current expanded island width.
@@ -255,12 +250,6 @@ impl Island {
                     )
                     .into_any_element(),
                 ),
-                WidgetModule::Meeting => push(
-                    &mut panes,
-                    module,
-                    cells,
-                    meeting_card(&self.meeting, cx).into_any_element(),
-                ),
                 WidgetModule::Observe => push(
                     &mut panes,
                     module,
@@ -291,18 +280,18 @@ impl Island {
                     cells,
                     notes_card(self, cx).into_any_element(),
                 ),
-                WidgetModule::Obsidian => push(
-                    &mut panes,
-                    module,
-                    cells,
-                    obsidian_card(self, cx).into_any_element(),
-                ),
                 WidgetModule::Speed => push(
                     &mut panes,
                     module,
                     cells,
-                    speed_card(self.speed_mbps, self.speed_progress, self.speed_running, cx)
-                        .into_any_element(),
+                    speed_card(
+                        self.speed_mbps,
+                        self.speed_up_mbps,
+                        self.speed_progress,
+                        self.speed_running,
+                        cx,
+                    )
+                    .into_any_element(),
                 ),
                 WidgetModule::Battery => push(
                     &mut panes,
@@ -322,18 +311,6 @@ impl Island {
                     cells,
                     weather_card(self, cx).into_any_element(),
                 ),
-                WidgetModule::Vpn => push(
-                    &mut panes,
-                    module,
-                    cells,
-                    vpn_card(&self.vpn).into_any_element(),
-                ),
-                WidgetModule::HighAlert => push(
-                    &mut panes,
-                    module,
-                    cells,
-                    high_alert_card(self, cx).into_any_element(),
-                ),
                 WidgetModule::SysStats => push(
                     &mut panes,
                     module,
@@ -345,12 +322,6 @@ impl Island {
                     module,
                     cells,
                     recorder_card(self, cx).into_any_element(),
-                ),
-                WidgetModule::Notifications => push(
-                    &mut panes,
-                    module,
-                    cells,
-                    notifications_card(&self.notifications, cx).into_any_element(),
                 ),
                 WidgetModule::Files => {}
             }
@@ -741,6 +712,8 @@ fn labeled_tab(
 pub(super) fn mirror_pane(island: &Island, cx: &mut Context<Island>) -> impl IntoElement {
     let live = island.mirror_on;
     let frame = island.mirror_frame.clone();
+    // Pencil: pad 6 (5 after cell border), face fills body, r14, FILL_SECONDARY
+    // + SEPARATOR ring; idle shows a centred 22 px webcam glyph.
     div()
         .id("mirror-pane")
         .flex_1()
@@ -748,23 +721,28 @@ pub(super) fn mirror_pane(island: &Island, cx: &mut Context<Island>) -> impl Int
         .p(px(MIRROR_PAD))
         .flex()
         .flex_col()
-        .items_center()
-        .justify_center()
-        .gap(px(MIRROR_GAP))
         .child(
             div()
                 .id("mirror-btn")
                 .relative()
-                .size(px(if live { MIRROR_FACE } else { MIRROR_OFF_FACE }))
-                .flex_shrink_0()
-                .rounded_full()
+                .flex_1()
+                .w_full()
+                .min_w(px(0.))
+                .min_h(px(0.))
+                .rounded(px(MIRROR_RADIUS))
                 .overflow_hidden()
                 .bg(theme::FILL_SECONDARY)
                 .flex()
                 .items_center()
                 .justify_center()
                 .cursor(CursorStyle::PointingHand)
-                .hover(|s| if live { s } else { s.bg(theme::with_alpha(theme::LABEL, 0.22)) })
+                .hover(|s| {
+                    if live {
+                        s
+                    } else {
+                        s.bg(theme::with_alpha(theme::LABEL, 0.22))
+                    }
+                })
                 .active(|s| s.opacity(0.9))
                 .on_mouse_down(
                     MouseButton::Left,
@@ -775,42 +753,18 @@ pub(super) fn mirror_pane(island: &Island, cx: &mut Context<Island>) -> impl Int
                 )
                 .when(live, |d| d.child(mirror_frame_el(frame)))
                 .when(!live, |d| {
-                    d.flex_col()
-                        .gap(px(4.))
-                        .child(lucide_color("webcam", MIRROR_OFF_ICON, theme::LABEL))
-                        .child(
-                            div()
-                                .text_size(px(theme::SUBHEADLINE.size))
-                                .line_height(px(theme::SUBHEADLINE.leading))
-                                .font_weight(FontWeight::NORMAL)
-                                .text_color(theme::secondary_label())
-                                .whitespace_nowrap()
-                                .child("Tap to start"),
-                        )
+                    d.child(lucide_color("webcam", MIRROR_ICON, theme::LABEL))
                 })
                 // Ring above the video — a border on this box paints under it.
                 .child(
                     div()
                         .absolute()
                         .inset_0()
-                        .rounded_full()
+                        .rounded(px(MIRROR_RADIUS))
                         .border_1()
                         .border_color(theme::SEPARATOR),
                 ),
         )
-        // The capture API exposes no device name or format, so the status
-        // line states what a tap does instead of the gallery's camera spec.
-        .when(live, |d| {
-            d.child(
-                div()
-                    .text_size(px(theme::SUBHEADLINE.size))
-                    .line_height(px(theme::SUBHEADLINE.leading))
-                    .font_weight(FontWeight::NORMAL)
-                    .text_color(theme::secondary_label())
-                    .whitespace_nowrap()
-                    .child("Live"),
-            )
-        })
 }
 
 fn mirror_frame_el(frame: Option<std::sync::Arc<RenderImage>>) -> AnyElement {
@@ -822,14 +776,13 @@ fn mirror_frame_el(frame: Option<std::sync::Arc<RenderImage>>) -> AnyElement {
             // placeholder on every camera tick, which looks like a reinit.
             img(image)
                 .id("mirror-video")
-                .size(px(MIRROR_FACE))
-                .rounded_full()
+                .size_full()
+                .rounded(px(MIRROR_RADIUS))
                 .object_fit(ObjectFit::Fill)
                 .into_any_element()
         }
         None => div()
-            .size(px(MIRROR_FACE))
-            .rounded_full()
+            .size_full()
             .flex()
             .items_center()
             .justify_center()
@@ -855,12 +808,9 @@ mod tests {
     }
 
     #[test]
-    fn mirror_face_is_the_expanded_circle() {
-        assert_eq!(MIRROR_PAD, 16.0);
-        assert_eq!(MIRROR_FACE, 64.0);
+    fn mirror_face_fills_the_padded_cell() {
+        assert_eq!(MIRROR_PAD, 5.0);
+        assert_eq!(MIRROR_RADIUS, 14.0);
         assert_eq!(MIRROR_ICON, 22.0);
-        assert_eq!(MIRROR_GAP, 8.0);
-        assert!(MIRROR_FACE < theme::NOOK_BODY);
-        assert!(MIRROR_FACE <= theme::MIRROR_FACE);
     }
 }

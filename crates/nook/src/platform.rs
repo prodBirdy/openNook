@@ -514,10 +514,418 @@ unsafe fn for_each_island_window(mut f: impl FnMut(*mut objc2::runtime::AnyObjec
     for i in 0..count {
         let w: *mut AnyObject = msg_send![windows, objectAtIndex: i];
         let is_panel: bool = msg_send![w, isKindOfClass: panel_cls];
-        if is_panel {
+        // PiP windows are also GPUIPanel (WindowKind::PopUp). Without this
+        // guard the island pin below would restyle them click-through and
+        // drag them to the notch on every tick.
+        if is_panel && !is_pip_ns_window(w) {
             f(w);
         }
     }
+}
+
+#[cfg(target_os = "macos")]
+fn pip_window_numbers() -> &'static std::sync::Mutex<Vec<i64>> {
+    static NUMBERS: std::sync::OnceLock<std::sync::Mutex<Vec<i64>>> =
+        std::sync::OnceLock::new();
+    NUMBERS.get_or_init(|| std::sync::Mutex::new(Vec::new()))
+}
+
+#[cfg(target_os = "macos")]
+fn is_pip_ns_window(ns_win: *mut objc2::runtime::AnyObject) -> bool {
+    use objc2::*;
+    if ns_win.is_null() {
+        return false;
+    }
+    let number: i64 = unsafe { msg_send![ns_win, windowNumber] };
+    pip_window_numbers()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .contains(&number)
+}
+
+/// Remember a PiP window by its AppKit windowNumber so island styling skips
+/// it. Call right after `cx.open_window` for the PiP view.
+pub fn register_pip_window(window: &Window) {
+    #[cfg(target_os = "macos")]
+    if let Some(ns_win) = ns_window(window) {
+        use objc2::*;
+        let number: i64 = unsafe { msg_send![ns_win, windowNumber] };
+        let mut guard = pip_window_numbers()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if !guard.contains(&number) {
+            guard.push(number);
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = window;
+}
+
+pub fn unregister_pip_window(number: i64) {
+    #[cfg(target_os = "macos")]
+    if let Ok(mut guard) = pip_window_numbers().lock() {
+        guard.retain(|n| *n != number);
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = number;
+}
+
+pub fn pip_window_number(window: &Window) -> Option<i64> {
+    #[cfg(target_os = "macos")]
+    {
+        ns_window(window).map(|ns_win| {
+            use objc2::*;
+            unsafe { msg_send![ns_win, windowNumber] }
+        })
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = window;
+        None
+    }
+}
+
+/// Borderless nonactivating panel for a PiP window. Level 3
+/// (NSFloatingWindowLevel) when keep-on-top is on, else a normal level so the
+/// window sits in the regular ordering. Joins all Spaces and works as a
+/// FullScreenAuxiliary so it is reachable from full-screen apps.
+pub fn style_pip_window_for(window: &Window, keep_on_top: bool) {
+    #[cfg(target_os = "macos")]
+    if let Some(ns_win) = ns_window(window) {
+        unsafe { style_pip_ns_window(ns_win, keep_on_top) };
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = (window, keep_on_top);
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn style_pip_ns_window(ns_win: *mut objc2::runtime::AnyObject, keep_on_top: bool) {
+    use objc2::runtime::AnyObject;
+    use objc2::*;
+    // Do not object_setClass — GPUI looks up a windowState ivar on GPUIPanel.
+    const NONACTIVATING_PANEL: u64 = 1 << 7;
+    const FULL_SIZE_CONTENT: u64 = 1 << 15;
+    let _: () = msg_send![ns_win, setStyleMask: NONACTIVATING_PANEL | FULL_SIZE_CONTENT];
+    let _: () = msg_send![ns_win, setLevel: if keep_on_top { 3_i64 } else { 0_i64 }];
+    let _: () = msg_send![ns_win, setCollectionBehavior: (1u64 | (1u64 << 8))];
+    let _: () = msg_send![ns_win, setOpaque: false];
+    let clear: *mut AnyObject = msg_send![class!(NSColor), clearColor];
+    let _: () = msg_send![ns_win, setBackgroundColor: clear];
+    let _: () = msg_send![ns_win, setHasShadow: true];
+    let _: () = msg_send![ns_win, setMovable: true];
+    let _: () = msg_send![ns_win, setHidesOnDeactivate: false];
+    let _: () = msg_send![ns_win, setIgnoresMouseEvents: false];
+    let title: *mut AnyObject =
+        msg_send![class!(NSString), stringWithUTF8String: c"openNook-pip".as_ptr()];
+    let _: () = msg_send![ns_win, setTitle: title];
+}
+
+/// Animated frame move for a PiP window. `setFrame:display:animate:` eases the
+/// ~220 ms corner snap; AppKit ignores `animate` under Reduce Motion.
+pub fn snap_pip_window_to(window: &Window, x: f64, y: f64, w: f64, h: f64, animate: bool) {
+    #[cfg(target_os = "macos")]
+    if let Some(ns_win) = ns_window(window) {
+        use objc2::*;
+        let rect = CGRect {
+            origin: CGPoint { x, y },
+            size: CGSize {
+                width: w,
+                height: h,
+            },
+        };
+        unsafe {
+            let _: () = msg_send![ns_win, setFrame: rect, display: true, animate: animate];
+            let _: () = msg_send![ns_win, invalidateShadow];
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = (window, x, y, w, h, animate);
+}
+
+/// Current AppKit frame (Cocoa bottom-left coordinates) of a PiP window.
+pub fn pip_window_frame(window: &Window) -> Option<(f64, f64, f64, f64)> {
+    #[cfg(target_os = "macos")]
+    {
+        ns_window(window).map(|ns_win| {
+            use objc2::*;
+            let rect: CGRect = unsafe { msg_send![ns_win, frame] };
+            (rect.origin.x, rect.origin.y, rect.size.width, rect.size.height)
+        })
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = window;
+        None
+    }
+}
+
+/// `visibleFrame` of the screen holding the PiP window (below the menu bar /
+/// notch, above the Dock), in Cocoa coordinates.
+pub fn pip_visible_frame_for(window: &Window) -> Option<(f64, f64, f64, f64)> {
+    #[cfg(target_os = "macos")]
+    {
+        ns_window(window).map(|ns_win| {
+            use objc2::runtime::AnyObject;
+            use objc2::*;
+            unsafe {
+                let screen: *mut AnyObject = {
+                    let s: *mut AnyObject = msg_send![ns_win, screen];
+                    if s.is_null() {
+                        msg_send![class!(NSScreen), mainScreen]
+                    } else {
+                        s
+                    }
+                };
+                if screen.is_null() {
+                    return (0.0, 0.0, 0.0, 0.0);
+                }
+                let visible: CGRect = msg_send![screen, visibleFrame];
+                (
+                    visible.origin.x,
+                    visible.origin.y,
+                    visible.size.width,
+                    visible.size.height,
+                )
+            }
+        })
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = window;
+        None
+    }
+}
+
+/// Drop point for the open animation: screen top centre, just below the notch.
+pub fn pip_notch_drop_origin(w: f64, h: f64) -> Option<(f64, f64)> {
+    #[cfg(target_os = "macos")]
+    {
+        use objc2::runtime::AnyObject;
+        use objc2::*;
+        unsafe {
+            let screen: *mut AnyObject = msg_send![class!(NSScreen), mainScreen];
+            if screen.is_null() {
+                return None;
+            }
+            let frame: CGRect = msg_send![screen, frame];
+            let notch = nook_core::notch::get_notch_info().notch_height.max(32.0);
+            Some((
+                frame.origin.x + (frame.size.width - w) / 2.0,
+                frame.origin.y + frame.size.height - notch - h,
+            ))
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (w, h);
+        None
+    }
+}
+
+/// Visible frames of all screens in Cocoa coordinates, primary first.
+/// A throw can carry the window across displays, so the settle target is
+/// picked from these rather than a single screen.
+pub fn pip_screen_frames() -> Vec<(f64, f64, f64, f64)> {
+    #[cfg(target_os = "macos")]
+    unsafe {
+        use objc2::runtime::AnyObject;
+        use objc2::*;
+        let mut out = Vec::new();
+        let screens: *mut AnyObject = msg_send![class!(NSScreen), screens];
+        if screens.is_null() {
+            return out;
+        }
+        let count: usize = msg_send![screens, count];
+        for i in 0..count {
+            let screen: *mut AnyObject = msg_send![screens, objectAtIndex: i];
+            if screen.is_null() {
+                continue;
+            }
+            let visible: CGRect = msg_send![screen, visibleFrame];
+            out.push((
+                visible.origin.x,
+                visible.origin.y,
+                visible.size.width,
+                visible.size.height,
+            ));
+        }
+        out
+    }
+    #[cfg(not(target_os = "macos"))]
+    Vec::new()
+}
+
+/// Unanimated frame set for the manual drag path. No `invalidateShadow`: a
+/// pure move leaves the shadow valid, and per-event invalidation would cost a
+/// shadow re-render on every mouse-move.
+pub fn move_pip_frame(window: &Window, x: f64, y: f64, w: f64, h: f64) {
+    #[cfg(target_os = "macos")]
+    if let Some(ns_win) = ns_window(window) {
+        use objc2::*;
+        let rect = CGRect {
+            origin: CGPoint { x, y },
+            size: CGSize {
+                width: w,
+                height: h,
+            },
+        };
+        unsafe {
+            let _: () = msg_send![ns_win, setFrame: rect, display: true];
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = (window, x, y, w, h);
+}
+
+/// Global mouse position in Cocoa screen coordinates (bottom-left origin).
+/// Screen-space PiP dragging reads this so the window follows the cursor 1:1
+/// instead of accumulating window-relative deltas. Non-macOS: None (callers
+/// fall back to window-relative deltas).
+pub fn mouse_screen_location() -> Option<(f64, f64)> {
+    #[cfg(target_os = "macos")]
+    unsafe {
+        use objc2::*;
+        let loc: CGPoint = msg_send![class!(NSEvent), mouseLocation];
+        Some((loc.x, loc.y))
+    }
+    #[cfg(not(target_os = "macos"))]
+    None
+}
+
+/// Whether the left mouse button is currently held (`[NSEvent
+/// pressedMouseButtons]` bit 0). The drag poll timer uses this as the
+/// drag-end signal, which also covers the three-finger drag lock that holds
+/// ~0.5 s after the fingers lift. Non-macOS: true so a poll timer never
+/// ends the drag spuriously (the timer only runs when `mouse_screen_location`
+/// is `Some` anyway).
+pub fn pip_left_mouse_pressed() -> bool {
+    #[cfg(target_os = "macos")]
+    unsafe {
+        use objc2::*;
+        let buttons: usize = msg_send![class!(NSEvent), pressedMouseButtons];
+        (buttons & 1) != 0
+    }
+    #[cfg(not(target_os = "macos"))]
+    true
+}
+
+/// Current AppKit frame looked up by windowNumber, for the drag poll task
+/// and poll-driven snap, which have no GPUI `Window`. Main thread only.
+pub fn pip_frame_by_number(number: i64) -> Option<(f64, f64, f64, f64)> {
+    #[cfg(target_os = "macos")]
+    unsafe {
+        use objc2::runtime::AnyObject;
+        use objc2::*;
+        let ns_app: *mut AnyObject = msg_send![class!(NSApplication), sharedApplication];
+        let ns_win: *mut AnyObject = msg_send![ns_app, windowWithWindowNumber: number];
+        if ns_win.is_null() {
+            return None;
+        }
+        let rect: CGRect = msg_send![ns_win, frame];
+        Some((rect.origin.x, rect.origin.y, rect.size.width, rect.size.height))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = number;
+        None
+    }
+}
+
+/// `visibleFrame` of the screen holding the window identified by
+/// windowNumber. Poll-task counterpart of [`pip_visible_frame_for`].
+pub fn pip_visible_frame_by_number(number: i64) -> Option<(f64, f64, f64, f64)> {
+    #[cfg(target_os = "macos")]
+    unsafe {
+        use objc2::runtime::AnyObject;
+        use objc2::*;
+        let ns_app: *mut AnyObject = msg_send![class!(NSApplication), sharedApplication];
+        let ns_win: *mut AnyObject = msg_send![ns_app, windowWithWindowNumber: number];
+        if ns_win.is_null() {
+            return None;
+        }
+        let screen: *mut AnyObject = {
+            let s: *mut AnyObject = msg_send![ns_win, screen];
+            if s.is_null() {
+                msg_send![class!(NSScreen), mainScreen]
+            } else {
+                s
+            }
+        };
+        if screen.is_null() {
+            return None;
+        }
+        let visible: CGRect = msg_send![screen, visibleFrame];
+        Some((visible.origin.x, visible.origin.y, visible.size.width, visible.size.height))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = number;
+        None
+    }
+}
+
+/// Animated frame move by windowNumber. Poll-task counterpart of
+/// [`snap_pip_window_to`]: `setFrame:display:animate:` eases the corner snap;
+/// AppKit ignores `animate` under Reduce Motion. Main thread only.
+pub fn snap_pip_frame_by_number(number: i64, x: f64, y: f64, w: f64, h: f64, animate: bool) {
+    #[cfg(target_os = "macos")]
+    unsafe {
+        use objc2::runtime::AnyObject;
+        use objc2::*;
+        let ns_app: *mut AnyObject = msg_send![class!(NSApplication), sharedApplication];
+        let ns_win: *mut AnyObject = msg_send![ns_app, windowWithWindowNumber: number];
+        if ns_win.is_null() {
+            return;
+        }
+        let rect = CGRect {
+            origin: CGPoint { x, y },
+            size: CGSize { width: w, height: h },
+        };
+        let _: () = msg_send![ns_win, setFrame: rect, display: true, animate: animate];
+        let _: () = msg_send![ns_win, invalidateShadow];
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = (number, x, y, w, h, animate);
+}
+
+/// Unanimated frame set by AppKit windowNumber for the spring settle task,
+/// which has no GPUI `Window` handle. Must run on the main thread — the task
+/// routes every tick through `AsyncApp::update` for exactly this reason.
+pub fn set_pip_frame_by_number(number: i64, x: f64, y: f64, w: f64, h: f64) {
+    #[cfg(target_os = "macos")]
+    unsafe {
+        use objc2::runtime::AnyObject;
+        use objc2::*;
+        let ns_app: *mut AnyObject = msg_send![class!(NSApplication), sharedApplication];
+        let ns_win: *mut AnyObject = msg_send![ns_app, windowWithWindowNumber: number];
+        if ns_win.is_null() {
+            return;
+        }
+        let rect = CGRect {
+            origin: CGPoint { x, y },
+            size: CGSize {
+                width: w,
+                height: h,
+            },
+        };
+        let _: () = msg_send![ns_win, setFrame: rect, display: true];
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = (number, x, y, w, h);
+}
+
+/// Bring a PiP window forward without making it key: the panel stays
+/// nonactivating so typing in other apps keeps working.
+pub fn order_pip_front(window: &Window) {
+    #[cfg(target_os = "macos")]
+    if let Some(ns_win) = ns_window(window) {
+        use objc2::*;
+        unsafe {
+            let _: () = msg_send![ns_win, orderFront: std::ptr::null_mut::<objc2::runtime::AnyObject>()];
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = window;
 }
 
 /// Re-register Finder drop types on the overlay. `setStyleMask` and
@@ -1505,61 +1913,6 @@ unsafe fn app_icon_png_macos(bundle_id: Option<&str>, app_name: Option<&str>) ->
     })
 }
 
-/// Directory picker for the Obsidian vault. Blocks on the main thread via
-/// `NSOpenPanel.runModal`. `None` when cancelled or off macOS.
-pub fn choose_directory() -> Option<std::path::PathBuf> {
-    #[cfg(target_os = "macos")]
-    {
-        choose_directory_macos()
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        None
-    }
-}
-
-#[cfg(target_os = "macos")]
-fn choose_directory_macos() -> Option<std::path::PathBuf> {
-    use objc2::runtime::AnyObject;
-    use objc2::*;
-    use std::ffi::CStr;
-    use std::path::PathBuf;
-
-    unsafe {
-        let panel: *mut AnyObject = msg_send![class!(NSOpenPanel), openPanel];
-        if panel.is_null() {
-            return None;
-        }
-        let _: () = msg_send![panel, setCanChooseFiles: false];
-        let _: () = msg_send![panel, setCanChooseDirectories: true];
-        let _: () = msg_send![panel, setAllowsMultipleSelection: false];
-        let _: () = msg_send![panel, setCanCreateDirectories: true];
-        let message: *mut AnyObject =
-            msg_send![class!(NSString), stringWithUTF8String: c"Choose Obsidian Vault".as_ptr()];
-        let _: () = msg_send![panel, setMessage: message];
-        let response: i64 = msg_send![panel, runModal];
-        // NSModalResponseOK == 1
-        if response != 1 {
-            return None;
-        }
-        let url: *mut AnyObject = msg_send![panel, URL];
-        if url.is_null() {
-            return None;
-        }
-        let path_ns: *mut AnyObject = msg_send![url, path];
-        if path_ns.is_null() {
-            return None;
-        }
-        let cstr: *const i8 = msg_send![path_ns, UTF8String];
-        if cstr.is_null() {
-            return None;
-        }
-        Some(PathBuf::from(
-            CStr::from_ptr(cstr).to_string_lossy().into_owned(),
-        ))
-    }
-}
-
 /// Open the system Calendar app. No-op off macOS.
 pub fn open_calendar() {
     #[cfg(target_os = "macos")]
@@ -1587,12 +1940,7 @@ fn invalidate_accent_color() {
 /// Accessibility TCC via `AXIsProcessTrustedWithOptions`. `prompt` shows the
 /// system dialog (and deep-links if the user agrees).
 pub fn ax_process_trusted(prompt: bool) -> bool {
-    nook_core::notifications::ax_trusted(prompt)
-}
-
-/// Probe Full Disk Access by trying a readonly open of the usernoted store.
-pub fn full_disk_access() -> nook_core::notifications::PermissionState {
-    nook_core::notifications::fda_status()
+    nook_core::eventtap::ax_trusted(prompt)
 }
 
 pub fn open_privacy_accessibility() {
@@ -1848,34 +2196,6 @@ unsafe fn workspace_note_bundle_id(note: *mut objc2::runtime::AnyObject) -> Opti
 /// battery cost that matters. Safari/YouTube posts nothing and rides the slow
 /// poll. Blocks only flip an atomic, so the posting thread is fine. Observer
 /// tokens are intentionally leaked — they live for the process.
-/// Accessibility (kTCCServiceAccessibility). Required for AX menu clicks and
-/// `CGEventPostToPid`. Off-macOS this is always false.
-#[allow(dead_code)]
-pub fn ax_is_process_trusted() -> bool {
-    nook_core::meetings::accessibility_trusted()
-}
-
-/// Prompt via `AXIsProcessTrustedWithOptions` + `kAXTrustedCheckOptionPrompt`.
-#[allow(dead_code)]
-pub fn ax_prompt_accessibility() -> bool {
-    nook_core::meetings::prompt_accessibility()
-}
-
-/// Focus-free keystrokes to another process. Needs Accessibility.
-#[allow(dead_code)]
-pub fn post_keys_to_pid(pid: i32, keycode: u16, flags: u64) {
-    nook_core::meetings::post_keys_to_pid(pid, keycode, flags);
-}
-
-pub fn open_accessibility_settings() {
-    nook_core::meetings::open_accessibility_settings();
-}
-
-/// NSWorkspace launch/terminate + CoreAudio mic listeners for WP19.
-pub fn install_meeting_observers() {
-    nook_core::meetings::start();
-}
-
 pub fn install_media_observers() {
     #[cfg(target_os = "macos")]
     unsafe {

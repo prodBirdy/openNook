@@ -19,14 +19,8 @@ use std::time::Duration;
 /// Hover must leave the island this long before an expanded pane collapses.
 pub const HOVER_EXIT_DWELL: Duration = Duration::from_millis(200);
 
-/// Compact VPN connect/disconnect face takeover.
-pub const VPN_REVEAL: Duration = Duration::from_secs(4);
-
 /// Output-device / tray HUD toast lifetime.
 pub const OUTPUT_HUD_TTL: Duration = Duration::from_millis(1500);
-
-/// Meeting mute glyph flash.
-pub const MUTE_FLASH: Duration = Duration::from_millis(450);
 
 /// Two-finger swipe must accumulate this many points before a horizontal
 /// mode/tab change or an expanded collapse.

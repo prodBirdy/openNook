@@ -627,26 +627,30 @@ pub fn open_island(cx: &mut App) {
     let (w, h) = notch::overlay_window_size();
     let bounds = Bounds::from_corners(point(px(0.), px(0.)), point(px(w as f32), px(h as f32)));
 
-    cx.open_window(
-        WindowOptions {
-            window_bounds: Some(WindowBounds::Windowed(bounds)),
-            titlebar: None,
-            focus: false,
-            show: true,
-            kind: WindowKind::PopUp,
-            is_movable: false,
-            is_resizable: false,
-            is_minimizable: false,
-            window_background: WindowBackgroundAppearance::Transparent,
-            window_decorations: Some(WindowDecorations::Client),
-            app_id: Some("com.jonasvogel.opennook-gpui".into()),
-            ..Default::default()
-        },
-        |window, cx| cx.new(|cx| Island::new(window, cx)),
-    )
-    .unwrap_or_else(|err| {
-        log::error!("failed to open island window: {err}");
-        panic!("open island window: {err}");
+    let handle = cx
+        .open_window(
+            WindowOptions {
+                window_bounds: Some(WindowBounds::Windowed(bounds)),
+                titlebar: None,
+                focus: false,
+                show: true,
+                kind: WindowKind::PopUp,
+                is_movable: false,
+                is_resizable: false,
+                is_minimizable: false,
+                window_background: WindowBackgroundAppearance::Transparent,
+                window_decorations: Some(WindowDecorations::Client),
+                app_id: Some("com.jonasvogel.opennook-gpui".into()),
+                ..Default::default()
+            },
+            |window, cx| cx.new(|cx| Island::new(window, cx)),
+        )
+        .unwrap_or_else(|err| {
+            log::error!("failed to open island window: {err}");
+            panic!("open island window: {err}");
+        });
+    let _ = handle.update(cx, |_island, _window, cx| {
+        crate::pip::restore(cx.entity().downgrade(), cx);
     });
     #[cfg(debug_assertions)]
     if std::env::var_os("NOOK_GALLERY").is_some() {

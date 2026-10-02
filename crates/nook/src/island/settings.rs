@@ -10,7 +10,6 @@ use gpui::{
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Rgba, ScrollHandle, ScrollWheelEvent,
     SharedString, Window,
 };
-use nook_core::high_alert::HighAlertKind;
 use nook_core::settings::{AppSettings, WidgetModule};
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -200,14 +199,9 @@ impl WidgetModuleExt for WidgetModule {
             Self::Mirror => "Mirror",
             Self::Battery => "Battery",
             Self::Messages => "Messages",
-            Self::Obsidian => "Obsidian",
             Self::Weather => "Weather",
-            Self::Vpn => "VPN",
-            Self::HighAlert => "Alert",
             Self::SysStats => "Stats",
             Self::Recorder => "Voice",
-            Self::Meeting => "Meetings",
-            Self::Notifications => "Notify",
         }
     }
 
@@ -225,14 +219,9 @@ impl WidgetModuleExt for WidgetModule {
             Self::Mirror => "webcam",
             Self::Battery => "battery-medium",
             Self::Messages => "message-square",
-            Self::Obsidian => "gem",
             Self::Weather => "cloud-sun",
-            Self::Vpn => "shield",
-            Self::HighAlert => "triangle-alert",
             Self::SysStats => "chart-column",
             Self::Recorder => "mic",
-            Self::Meeting => "video",
-            Self::Notifications => "bell-ring",
         }
     }
 
@@ -250,14 +239,9 @@ impl WidgetModuleExt for WidgetModule {
             Self::Mirror => "Camera preview",
             Self::Battery => "Charge level",
             Self::Messages => "Unread threads",
-            Self::Obsidian => "Daily note",
             Self::Weather => "Current conditions",
-            Self::Vpn => "Tunnel status",
-            Self::HighAlert => "System alerts",
             Self::SysStats => "CPU and memory",
             Self::Recorder => "Dictation",
-            Self::Meeting => "Next call",
-            Self::Notifications => "Notification relay",
         }
     }
 
@@ -291,15 +275,7 @@ impl WidgetModuleExt for WidgetModule {
             )
             .into(),
             Self::Messages => "Incoming reply".into(),
-            Self::Obsidian => settings
-                .obsidian_vault
-                .as_ref()
-                .and_then(|path| path.file_name())
-                .map(|name| SharedString::from(name.to_string_lossy().into_owned()))
-                .unwrap_or_else(|| "No vault".into()),
             Self::Weather => weather_subtitle(settings),
-            Self::Vpn => vpn_subtitle(settings.vpn_show_timer),
-            Self::HighAlert => "Keep Awake".into(),
             Self::SysStats => sysstats_subtitle(settings),
             Self::Recorder => {
                 if settings.recorder_transcribe {
@@ -308,8 +284,6 @@ impl WidgetModuleExt for WidgetModule {
                     "Record only".into()
                 }
             }
-            Self::Meeting => "Zoom / Teams / Meet".into(),
-            Self::Notifications => notify_subtitle(settings),
         }
     }
 
@@ -334,15 +308,6 @@ fn weather_subtitle(settings: &AppSettings) -> SharedString {
 }
 
 #[allow(dead_code)]
-fn vpn_subtitle(show_timer: bool) -> SharedString {
-    if show_timer {
-        "Session timer".into()
-    } else {
-        "Status".into()
-    }
-}
-
-#[allow(dead_code)]
 fn sysstats_subtitle(settings: &AppSettings) -> SharedString {
     let n = [
         settings.sysstats.show_cpu,
@@ -360,18 +325,18 @@ fn sysstats_subtitle(settings: &AppSettings) -> SharedString {
     }
 }
 
-fn notification_permission_rows(cx: &mut Context<SettingsView>) -> Vec<AnyElement> {
+fn privacy_permission_rows(cx: &mut Context<SettingsView>) -> Vec<AnyElement> {
     use nook_core::eventtap::PermissionStatus;
-    use nook_core::notifications::PermissionState;
+    use nook_core::messages::FdaStatus;
     let ax = nook_core::eventtap::accessibility_status();
-    let fda = match crate::platform::full_disk_access() {
-        PermissionState::Granted => PermissionStatus::Granted,
-        PermissionState::Denied => PermissionStatus::Denied,
-        PermissionState::Unavailable => PermissionStatus::Unsupported,
+    let fda = match nook_core::messages::fda_status() {
+        FdaStatus::Granted => PermissionStatus::Granted,
+        FdaStatus::Denied => PermissionStatus::Denied,
+        FdaStatus::Unavailable => PermissionStatus::Unsupported,
     };
     vec![
         permission_action_row(
-            "notify-ax",
+            "privacy-ax",
             "Accessibility",
             ax,
             cx,
@@ -381,7 +346,7 @@ fn notification_permission_rows(cx: &mut Context<SettingsView>) -> Vec<AnyElemen
         )
         .into_any_element(),
         permission_action_row(
-            "notify-fda",
+            "privacy-fda",
             "Full Disk Access",
             fda,
             cx,
@@ -391,18 +356,6 @@ fn notification_permission_rows(cx: &mut Context<SettingsView>) -> Vec<AnyElemen
         )
         .into_any_element(),
     ]
-}
-
-#[allow(dead_code)]
-fn notify_subtitle(settings: &AppSettings) -> SharedString {
-    if !settings.show_notifications {
-        return "Off".into();
-    }
-    if crate::platform::ax_process_trusted(false) {
-        "Accessibility".into()
-    } else {
-        "Needs Accessibility".into()
-    }
 }
 
 #[allow(dead_code)]
@@ -420,7 +373,6 @@ pub(super) struct SettingsView {
     url_focus: FocusHandle,
     token_focus: FocusHandle,
     query_focus: FocusHandle,
-    heading_focus: FocusHandle,
     alias_focus: FocusHandle,
     pin_focus: FocusHandle,
     city_focus: FocusHandle,
@@ -428,20 +380,20 @@ pub(super) struct SettingsView {
     token_draft: String,
     alias_draft: String,
     pin_draft: String,
-    ignore_focus: FocusHandle,
     shell_focus: FocusHandle,
     font_draft: String,
     font_focus: FocusHandle,
     font_size_draft: String,
     font_size_focus: FocusHandle,
-    ignore_draft: String,
     token_revealed: bool,
     query_draft: String,
-    heading_draft: String,
     shell_draft: String,
-    catalog: Vec<String>,
+    catalog: Vec<nook_core::observe::CatalogEntry>,
     catalog_error: Option<String>,
     catalog_loading: bool,
+    catalog_filter: String,
+    catalog_filter_focus: FocusHandle,
+    pin_error: Option<String>,
     placement_drag: bool,
     placement_bounds: Rc<RefCell<Option<Bounds<Pixels>>>>,
     gradient_drag: bool,
@@ -477,13 +429,11 @@ impl SettingsView {
             url_focus: cx.focus_handle(),
             token_focus: cx.focus_handle(),
             query_focus: cx.focus_handle(),
-            heading_focus: cx.focus_handle(),
             alias_focus: cx.focus_handle(),
             pin_focus: cx.focus_handle(),
             alias_draft: settings.share.device_alias.clone(),
             pin_draft: settings.share.localsend_pin.clone(),
             city_focus: cx.focus_handle(),
-            ignore_focus: cx.focus_handle(),
             shell_focus: cx.focus_handle(),
             font_draft: settings.terminal_font.clone(),
             font_focus: cx.focus_handle(),
@@ -491,17 +441,15 @@ impl SettingsView {
             font_size_focus: cx.focus_handle(),
             url_draft: settings.observe.prometheus_url,
             token_draft: settings.observe.metrics_token,
-            ignore_draft: nook_core::vpn::format_ignore_list(&settings.vpn_ignore_interfaces),
             token_revealed: false,
             query_draft: String::new(),
-            heading_draft: settings
-                .obsidian_capture_heading
-                .clone()
-                .unwrap_or_default(),
             shell_draft: settings.terminal_shell.clone(),
             catalog: Vec::new(),
             catalog_error: None,
             catalog_loading: false,
+            catalog_filter: String::new(),
+            catalog_filter_focus: cx.focus_handle(),
+            pin_error: None,
             placement_drag: false,
             placement_bounds: Rc::new(RefCell::new(None)),
             gradient_drag: false,
@@ -582,15 +530,6 @@ impl SettingsView {
         nook_core::settings::tweak_app_settings(tweak);
     }
 
-    fn persist_ignore(&self) {
-        let names = nook_core::vpn::parse_ignore_list(&self.ignore_draft);
-        nook_core::settings::tweak_app_settings(|s| {
-            if s.vpn_ignore_interfaces != names {
-                s.vpn_ignore_interfaces = names;
-            }
-        });
-    }
-
     fn apply_key(draft: &mut String, event: &KeyDownEvent, cx: &Context<Self>) -> bool {
         let ks = &event.keystroke;
         if ks.modifiers.secondary() && ks.key == "v" {
@@ -633,7 +572,7 @@ impl SettingsView {
             let result = cx
                 .background_executor()
                 .spawn(async move {
-                    nook_core::runtime().block_on(nook_core::observe::list_metric_names(&config))
+                    nook_core::runtime().block_on(nook_core::observe::list_metric_catalog(&config))
                 })
                 .await;
             this.update(cx, |this, cx| {
@@ -679,11 +618,10 @@ impl gpui::Render for SettingsView {
         let url_focused = self.url_focus.is_focused(window);
         let token_focused = self.token_focus.is_focused(window);
         let query_focused = self.query_focus.is_focused(window);
-        let heading_focused = self.heading_focus.is_focused(window);
+        let catalog_filter_focused = self.catalog_filter_focus.is_focused(window);
         let alias_focused = self.alias_focus.is_focused(window);
         let pin_focused = self.pin_focus.is_focused(window);
         let city_focused = self.city_focus.is_focused(window);
-        let ignore_focused = self.ignore_focus.is_focused(window);
 
         div()
             .id("settings-root")
@@ -740,9 +678,8 @@ impl gpui::Render for SettingsView {
                         url_focused,
                         token_focused,
                         query_focused,
-                        heading_focused,
+                        catalog_filter_focused,
                         city_focused,
-                        ignore_focused,
                         cx,
                     )
                     .into_any_element(),
@@ -1242,8 +1179,8 @@ impl SettingsView {
                 .gap(px(16.))
                 .child(section(
                     "Permissions",
-                    settings_group(notification_permission_rows(cx)),
-                    Some("Captures other apps' banners via Accessibility. Optional usernoted backfill needs a manual Full Disk Access grant."),
+                    settings_group(privacy_permission_rows(cx)),
+                    Some("Accessibility is used for media-key and HUD interception. Full Disk Access is required by the experimental Messages widget."),
                 )),
         )
     }
@@ -1648,9 +1585,8 @@ impl SettingsView {
         url_focused: bool,
         token_focused: bool,
         query_focused: bool,
-        heading_focused: bool,
+        catalog_filter_focused: bool,
         city_focused: bool,
-        ignore_focused: bool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let mut on_nook = Vec::new();
@@ -1733,9 +1669,8 @@ impl SettingsView {
                                 url_focused,
                                 token_focused,
                                 query_focused,
-                                heading_focused,
+                                catalog_filter_focused,
                                 city_focused,
-                                ignore_focused,
                                 cx,
                             ))
                         })
@@ -1765,7 +1700,7 @@ impl SettingsView {
                             )
                             .into_any_element()]),
                             Some(
-                                "Reveals in-progress widgets (Observe, Obsidian, VPN, Meetings, Messages, and more). They are unfinished and off by default.",
+                                "Reveals in-progress widgets (Observe, Stats, Voice, Messages, and more). They are unfinished and off by default.",
                             ),
                         )),
                 )
@@ -1827,11 +1762,6 @@ impl SettingsView {
             .cursor(CursorStyle::PointingHand)
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.module = module;
-                if module == WidgetModule::Vpn {
-                    this.ignore_draft = nook_core::vpn::format_ignore_list(
-                        &nook_core::settings::get_app_settings().vpn_ignore_interfaces,
-                    );
-                }
                 this.persist_nav();
                 if module == WidgetModule::Timers {
                     this.fetch_shortcuts(cx);
@@ -1879,15 +1809,8 @@ impl SettingsView {
                             return;
                         }
                         let mut s = s;
-                        let was_enabled = s.show_notifications;
                         module.set_enabled(&mut s);
-                        let request_notifications = module == WidgetModule::Notifications
-                            && !was_enabled
-                            && s.show_notifications;
                         nook_core::settings::update_app_settings(s);
-                        if request_notifications {
-                            nook_core::notifications::ax_trusted(true);
-                        }
                         cx.notify();
                     }))
                     .child(lucide_color(action_icon, 11.0, action_color))
@@ -2101,9 +2024,8 @@ impl SettingsView {
         url_focused: bool,
         token_focused: bool,
         query_focused: bool,
-        heading_focused: bool,
+        catalog_filter_focused: bool,
         city_focused: bool,
-        ignore_focused: bool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let name = self.module.name();
@@ -2180,20 +2102,6 @@ impl SettingsView {
                     .into_any_element(),
                 );
             }
-            WidgetModule::Observe => {
-                rows.push(
-                    action_row(
-                        "observe-browse",
-                        "Metric Names",
-                        "Browse Metrics",
-                        cx,
-                        |this, _, cx| {
-                            this.browse_metrics(cx);
-                        },
-                    )
-                    .into_any_element(),
-                );
-            }
             WidgetModule::Battery => {
                 rows.push(threshold_row(settings.battery_alert_threshold, cx).into_any_element());
                 rows.push(
@@ -2250,62 +2158,6 @@ impl SettingsView {
                     .into_any_element(),
                 );
             }
-            WidgetModule::Obsidian => {
-                let vault_label = settings
-                    .obsidian_vault
-                    .as_ref()
-                    .map(|path| path.display().to_string())
-                    .unwrap_or_else(|| "None".into());
-                rows.push(
-                    settings_row("obsidian-path")
-                        .child(label("Vault", theme::BODY, true))
-                        .child(label(vault_label, theme::SUBHEADLINE, false))
-                        .into_any_element(),
-                );
-                rows.push(
-                    action_row(
-                        "obsidian-folder",
-                        "Vault Folder",
-                        "Choose Folder…",
-                        cx,
-                        |_, _, cx| {
-                            if let Some(path) = crate::platform::choose_directory() {
-                                nook_core::settings::tweak_app_settings(|s| {
-                                    s.obsidian_vault = Some(path);
-                                });
-                                cx.notify();
-                            }
-                        },
-                    )
-                    .into_any_element(),
-                );
-                if settings.obsidian_vault.is_some() {
-                    rows.push(
-                        action_row(
-                            "obsidian-clear",
-                            "Remove Vault",
-                            self.destructive_caption("obsidian-clear-btn", "Clear"),
-                            cx,
-                            |_, _, cx| {
-                                nook_core::settings::tweak_app_settings(|s| {
-                                    s.obsidian_vault = None;
-                                });
-                                cx.notify();
-                            },
-                        )
-                        .into_any_element(),
-                    );
-                }
-                rows.push(
-                    toggle_row(
-                        "Capture via Obsidian URI",
-                        settings.obsidian_uri_capture,
-                        cx,
-                        |s| s.obsidian_uri_capture = !s.obsidian_uri_capture,
-                    )
-                    .into_any_element(),
-                );
-            }
             WidgetModule::Timers => {
                 rows.push(
                     toggle_row("Apple Clock Timers", settings.sync_clock_timers, cx, |s| {
@@ -2329,105 +2181,6 @@ impl SettingsView {
                 );
                 rows.extend(pomodoro_rows(settings, &self.shortcut_catalog, cx));
             }
-            WidgetModule::Vpn => {
-                rows.push(
-                    toggle_row(
-                        "Timer on Compact Island",
-                        settings.vpn_show_timer,
-                        cx,
-                        |s| {
-                            s.vpn_show_timer = !s.vpn_show_timer;
-                        },
-                    )
-                    .into_any_element(),
-                );
-                let ignore_placeholder = self.ignore_draft.is_empty();
-                let ignore_text = if ignore_placeholder {
-                    "utun3, ipsec0"
-                } else {
-                    self.ignore_draft.as_str()
-                };
-                rows.push(
-                    field_row(
-                        "vpn-ignore",
-                        "Ignore",
-                        ignore_text,
-                        ignore_placeholder,
-                        ignore_focused,
-                        &self.ignore_focus,
-                        cx,
-                        |this, event, cx| {
-                            let persist =
-                                SettingsView::apply_key(&mut this.ignore_draft, event, cx)
-                                    || event.keystroke.key == "enter";
-                            if persist {
-                                this.persist_ignore();
-                                cx.notify();
-                            }
-                        },
-                    )
-                    .into_any_element(),
-                );
-            }
-            WidgetModule::Meeting => {
-                rows.push(
-                    toggle_row("Zoom", settings.meetings.zoom, cx, |s| {
-                        s.meetings.zoom = !s.meetings.zoom;
-                    })
-                    .into_any_element(),
-                );
-                rows.push(
-                    toggle_row("Microsoft Teams", settings.meetings.teams, cx, |s| {
-                        s.meetings.teams = !s.meetings.teams;
-                    })
-                    .into_any_element(),
-                );
-                rows.push(
-                    toggle_row("Google Meet", settings.meetings.meet, cx, |s| {
-                        s.meetings.meet = !s.meetings.meet;
-                    })
-                    .into_any_element(),
-                );
-                let mut modes = segmented_group();
-                for (caption, mode) in [
-                    ("Focus Tab", nook_core::settings::MeetControlMode::FocusTab),
-                    (
-                        "Apple Events JS",
-                        nook_core::settings::MeetControlMode::AppleEventsJs,
-                    ),
-                ] {
-                    modes = modes.child(segment(
-                        caption,
-                        settings.meetings.meet_mode == mode,
-                        cx,
-                        move |_, _, cx| {
-                            nook_core::settings::tweak_app_settings(|s| {
-                                s.meetings.meet_mode = mode
-                            });
-                            cx.notify();
-                        },
-                    ));
-                }
-                rows.push(
-                    settings_row("meet-mode")
-                        .child(label("Meet Control", theme::BODY, true))
-                        .child(modes)
-                        .into_any_element(),
-                );
-                rows.push(
-                    permission_action_row(
-                        "ax-status",
-                        "Accessibility",
-                        nook_core::eventtap::accessibility_status(),
-                        cx,
-                        |_, _, _| crate::platform::open_accessibility_settings(),
-                    )
-                    .into_any_element(),
-                );
-            }
-            WidgetModule::HighAlert => {
-                rows.extend(high_alert_rows(settings, cx));
-            }
             WidgetModule::Recorder => {
                 rows.push(
                     toggle_row(
@@ -2438,9 +2191,6 @@ impl SettingsView {
                     )
                     .into_any_element(),
                 );
-            }
-            WidgetModule::Notifications => {
-                rows.extend(notification_permission_rows(cx));
             }
             _ => {}
         }
@@ -2467,11 +2217,9 @@ impl SettingsView {
                     url_focused,
                     token_focused,
                     query_focused,
+                    catalog_filter_focused,
                     cx,
                 ))
-            })
-            .when(self.module == WidgetModule::Obsidian, |d| {
-                d.child(self.render_obsidian_settings(settings, heading_focused, cx))
             })
             .when(self.module == WidgetModule::Weather, |d| {
                 d.child(self.render_weather_settings(settings, city_focused, cx))
@@ -2492,9 +2240,6 @@ impl SettingsView {
                     ))
                     .into_any_element()]))
                     .child(self.render_music_settings(settings, cx))
-            })
-            .when(self.module == WidgetModule::Notifications, |d| {
-                d.child(self.render_notification_settings(settings, cx))
             })
     }
 
@@ -2669,84 +2414,13 @@ impl SettingsView {
         )
     }
 
-    fn render_notification_settings(
-        &self,
-        settings: &AppSettings,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let mut filter_rows = Vec::new();
-        let apps = nook_core::notifications::known_apps();
-        if apps.is_empty() {
-            filter_rows.push(
-                settings_row("notify-apps-empty")
-                    .child(caption_text(
-                        "Apps appear here after a notification is captured.",
-                    ))
-                    .into_any_element(),
-            );
-        } else {
-            for (id, name) in apps {
-                let blocked = settings.notification_app_blocked(&id);
-                let toggle_id = id.clone();
-                filter_rows.push(
-                    settings_row(SharedString::from(format!("notify-app-{id}")))
-                        .cursor(CursorStyle::PointingHand)
-                        .on_click(cx.listener(move |_, _, _, cx| {
-                            cx.stop_propagation();
-                            nook_core::settings::tweak_app_settings(|s| {
-                                s.toggle_notification_app(&toggle_id);
-                            });
-                            cx.notify();
-                        }))
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w(px(0.))
-                                .flex()
-                                .flex_col()
-                                .gap(px(1.))
-                                .child(label(name, theme::BODY, true))
-                                .child(label(id, theme::SUBHEADLINE, false)),
-                        )
-                        .child(label(
-                            if blocked { "Hidden" } else { "Shown" },
-                            theme::SUBHEADLINE,
-                            false,
-                        ))
-                        .child(toggle_knob(!blocked))
-                        .into_any_element(),
-                );
-            }
-        }
-
-        div()
-            .flex()
-            .flex_col()
-            .gap(px(16.))
-            .child(section(
-                "Full Disk Access",
-                settings_group(vec![toggle_row(
-                    "Read Notification History",
-                    settings.notification_fda_opt_in,
-                    cx,
-                    |s| s.notification_fda_opt_in = !s.notification_fda_opt_in,
-                )
-                .into_any_element()]),
-                Some("Backfills banners the Accessibility scrape missed. You must add openNook in System Settings › Privacy & Security › Full Disk Access — there is no prompt."),
-            ))
-            .child(section(
-                "Per-App Filter",
-                settings_group(filter_rows),
-                Some("Hidden apps never enter the shelf."),
-            ))
-    }
-
     fn render_observe_settings(
         &self,
         settings: &AppSettings,
         url_focused: bool,
         token_focused: bool,
         query_focused: bool,
+        catalog_filter_focused: bool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let mut pinned_rows = Vec::new();
@@ -2858,43 +2532,155 @@ impl SettingsView {
             }
         }
 
-        let mut catalog_rows = Vec::new();
+        let pinned_count = settings.observe.metrics.len();
+        let filter = self.catalog_filter.trim().to_ascii_lowercase();
+        let mut metric_rows: Vec<AnyElement> = Vec::new();
+        metric_rows.push(
+            field_row(
+                "observe-filter",
+                "Filter",
+                if self.catalog_filter.is_empty() {
+                    "Filter by name or route"
+                } else {
+                    self.catalog_filter.as_str()
+                },
+                self.catalog_filter.is_empty(),
+                catalog_filter_focused,
+                &self.catalog_filter_focus,
+                cx,
+                |this, event, cx| {
+                    if SettingsView::apply_key(&mut this.catalog_filter, event, cx) {
+                        cx.notify();
+                    }
+                },
+            )
+            .into_any_element(),
+        );
+        metric_rows.push(
+            settings_row("observe-catalog-count")
+                .child(caption_text(format!(
+                    "{pinned_count} of {} pinned",
+                    nook_core::observe::MAX_PINNED
+                )))
+                .child(push_button(
+                    "observe-refresh",
+                    if self.catalog.is_empty() {
+                        "Load Metrics"
+                    } else {
+                        "Refresh"
+                    },
+                    cx,
+                    |this, _, cx| this.browse_metrics(cx),
+                ))
+                .into_any_element(),
+        );
         if self.catalog_loading {
-            catalog_rows.push(
+            metric_rows.push(
                 settings_row("cat-loading")
-                    .child(label("Loading metric names…", theme::BODY, false))
+                    .child(label("Loading metrics…", theme::BODY, false))
                     .into_any_element(),
             );
         } else if let Some(err) = &self.catalog_error {
-            catalog_rows.push(
+            metric_rows.push(
                 settings_row("cat-error")
                     .child(caption_text(err.clone()))
                     .into_any_element(),
             );
         }
-        for name in self.catalog.iter().take(12) {
-            let query = name.clone();
-            let label_text = name.clone();
-            catalog_rows.push(
+        if let Some(err) = &self.pin_error {
+            metric_rows.push(
+                settings_row("observe-pin-error")
+                    .child(caption_text(err.clone()))
+                    .into_any_element(),
+            );
+        }
+
+        let matching: Vec<&nook_core::observe::CatalogEntry> = self
+            .catalog
+            .iter()
+            .filter(|entry| {
+                filter.is_empty()
+                    || entry.label.to_ascii_lowercase().contains(&filter)
+                    || entry.query.to_ascii_lowercase().contains(&filter)
+                    || entry.group.to_ascii_lowercase().contains(&filter)
+            })
+            .collect();
+        let mut last_group: Option<&str> = None;
+        for entry in matching.iter().take(40) {
+            if last_group != Some(entry.group.as_str()) {
+                last_group = Some(entry.group.as_str());
+                metric_rows.push(
+                    div()
+                        .px(px(GROUP_PAD))
+                        .pt(px(8.))
+                        .pb(px(2.))
+                        .text_size(px(theme::SUBHEADLINE.size))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(theme::secondary_label())
+                        .child(entry.group.clone())
+                        .into_any_element(),
+                );
+            }
+            let query = entry.query.clone();
+            let label_text = entry.label.clone();
+            let pinned = nook_core::observe::is_pinned(&settings.observe, &query);
+            let value = entry.value.map(|value| {
+                if value.fract() == 0.0 {
+                    format!("{}", value as i64)
+                } else {
+                    format!("{value:.1}")
+                }
+            });
+            metric_rows.push(
                 div()
-                    .id(SharedString::from(format!("cat-{name}")))
+                    .id(SharedString::from(format!("cat-{query}")))
                     .px(px(GROUP_PAD))
                     .min_h(px(ROW_H))
                     .flex()
                     .items_center()
+                    .justify_between()
+                    .gap(px(8.))
                     .hover(|s| s.bg(theme::FILL_TERTIARY))
                     .cursor(CursorStyle::PointingHand)
-                    .on_click(cx.listener(move |_, _, _, cx| {
+                    .on_click(cx.listener(move |this, _, _, cx| {
                         cx.stop_propagation();
-                        let query = query.clone();
-                        let label_text = label_text.clone();
+                        let mut result = Ok(false);
                         SettingsView::persist_observe(|s| {
-                            let _ =
-                                nook_core::observe::pin_metric(&mut s.observe, &label_text, &query);
+                            result =
+                                nook_core::observe::toggle_pin(&mut s.observe, &label_text, &query);
                         });
+                        this.pin_error = result.err();
                         cx.notify();
                     }))
-                    .child(label(name.clone(), theme::BODY, true))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.))
+                            .flex()
+                            .flex_col()
+                            .gap(px(1.))
+                            .child(label(entry.label.clone(), theme::BODY, true))
+                            .when(entry.query != entry.label, |d| {
+                                d.child(label(entry.query.clone(), theme::SUBHEADLINE, false))
+                            }),
+                    )
+                    .when_some(value, |d, value| d.child(label(value, theme::BODY, false)))
+                    .when(pinned, |d| {
+                        d.child(
+                            div()
+                                .text_color(theme::accent())
+                                .text_size(px(theme::BODY.size))
+                                .child("✓"),
+                        )
+                    })
+                    .into_any_element(),
+            );
+        }
+        let rest = matching.len().saturating_sub(40);
+        if rest > 0 {
+            metric_rows.push(
+                settings_row("observe-more")
+                    .child(caption_text(format!("{rest} more — type to filter")))
                     .into_any_element(),
             );
         }
@@ -3019,6 +2805,11 @@ impl SettingsView {
                 Some("The compact island shows Observe only while a threshold you set is firing."),
             ))
             .child(section(
+                "Available Metrics",
+                settings_group(metric_rows),
+                Some("Pulled from the endpoint. Click to pin or unpin."),
+            ))
+            .child(section(
                 "Pin Query",
                 settings_group(vec![
                     field_row(
@@ -3033,13 +2824,15 @@ impl SettingsView {
                             if event.keystroke.key == "enter" {
                                 let query = this.query_draft.trim().to_string();
                                 if !query.is_empty() {
+                                    let mut result = Ok(());
                                     SettingsView::persist_observe(|s| {
-                                        let _ = nook_core::observe::pin_metric(
+                                        result = nook_core::observe::pin_metric(
                                             &mut s.observe,
                                             &query,
                                             &query,
                                         );
                                     });
+                                    this.pin_error = result.err();
                                     this.query_draft.clear();
                                     cx.notify();
                                 }
@@ -3056,132 +2849,17 @@ impl SettingsView {
                             if query.is_empty() {
                                 return;
                             }
+                            let mut result = Ok(());
                             SettingsView::persist_observe(|s| {
-                                let _ = nook_core::observe::pin_metric(&mut s.observe, &query, &query);
+                                result = nook_core::observe::pin_metric(&mut s.observe, &query, &query);
                             });
+                            this.pin_error = result.err();
                             this.query_draft.clear();
                             cx.notify();
                         }))
                         .into_any_element(),
                 ]),
                 None::<SharedString>,
-            ))
-            .when(!catalog_rows.is_empty(), |d| {
-                d.child(section(
-                    "Catalog",
-                    settings_group(catalog_rows),
-                    Some("Choose a name to pin it."),
-                ))
-            })
-    }
-
-    fn persist_heading(&self) {
-        let draft = self.heading_draft.trim().to_string();
-        let heading = if draft.is_empty() { None } else { Some(draft) };
-        nook_core::settings::tweak_app_settings(|s| {
-            s.obsidian_capture_heading = heading;
-        });
-    }
-
-    fn render_obsidian_settings(
-        &self,
-        settings: &AppSettings,
-        heading_focused: bool,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let known = nook_core::obsidian::discover_vaults();
-        let mut vault_rows = Vec::new();
-        if known.is_empty() {
-            vault_rows.push(
-                settings_row("obs-known-empty")
-                    .child(label("No vaults in Obsidian yet", theme::BODY, false))
-                    .into_any_element(),
-            );
-        } else {
-            for vault in &known {
-                let path = vault.path.clone();
-                let selected = settings.obsidian_vault.as_ref() == Some(&vault.path);
-                let name = vault.name.clone();
-                let open = vault.open;
-                vault_rows.push(
-                    div()
-                        .id(SharedString::from(format!("obs-vault-{}", vault.id)))
-                        .px(px(GROUP_PAD))
-                        .min_h(px(ROW_H))
-                        .flex()
-                        .items_center()
-                        .justify_between()
-                        .gap(px(8.))
-                        .when(selected, |d| d.bg(theme::FILL_TERTIARY))
-                        .hover(|s| s.bg(theme::FILL_TERTIARY))
-                        .cursor(CursorStyle::PointingHand)
-                        .on_click(cx.listener(move |_, _, _, cx| {
-                            cx.stop_propagation();
-                            let path = path.clone();
-                            nook_core::settings::tweak_app_settings(|s| {
-                                s.obsidian_vault = Some(path);
-                            });
-                            cx.notify();
-                        }))
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w(px(0.))
-                                .flex()
-                                .flex_col()
-                                .child(label(name, theme::BODY, true))
-                                .child(label(
-                                    if open {
-                                        "Open in Obsidian"
-                                    } else {
-                                        "Registered"
-                                    },
-                                    theme::SUBHEADLINE,
-                                    false,
-                                )),
-                        )
-                        .into_any_element(),
-                );
-            }
-        }
-
-        let heading_placeholder = self.heading_draft.is_empty();
-        let heading_text = if heading_placeholder {
-            "Inbox (optional)"
-        } else {
-            self.heading_draft.as_str()
-        };
-
-        div()
-            .flex()
-            .flex_col()
-            .gap(px(16.))
-            .child(section(
-                "Known Vaults",
-                settings_group(vault_rows),
-                Some("Read from Obsidian’s vault registry. Choose Folder if yours is not listed."),
-            ))
-            .child(section(
-                "Capture",
-                settings_group(vec![field_row(
-                    "obs-heading",
-                    "Heading",
-                    heading_text,
-                    heading_placeholder,
-                    heading_focused,
-                    &self.heading_focus,
-                    cx,
-                    |this, event, cx| {
-                        let persist = SettingsView::apply_key(&mut this.heading_draft, event, cx)
-                            || event.keystroke.key == "enter";
-                        if persist {
-                            this.persist_heading();
-                            cx.notify();
-                        }
-                    },
-                )
-                .into_any_element()]),
-                Some("Daily-note capture appends under this heading, or at the end of the file if empty."),
             ))
     }
 }
@@ -3225,29 +2903,14 @@ fn module_blurb(module: WidgetModule) -> SharedString {
         WidgetModule::Messages => {
             "Shows only when a message arrives. Reply to iMessage from the island; WhatsApp opens a prefilled chat. Full Disk Access is required to read messages.".into()
         }
-        WidgetModule::Obsidian => {
-            "Vault notes on the shelf. FSEvents keeps the list current; capture appends to today's daily note.".into()
-        }
         WidgetModule::Weather => {
             "Current conditions and a short hourly strip from Open-Meteo. Manual city by default.".into()
-        }
-        WidgetModule::Vpn => {
-            "Live utun/ipsec/ppp status. The compact face flashes on connect and disconnect; the card shows the session clock. Ignore listed interfaces to hide helpers that look like a VPN.".into()
-        }
-        WidgetModule::HighAlert => {
-            "IOPM keep-awake. Timed chips expire in powerd — lid-close sleep is not prevented.".into()
         }
         WidgetModule::SysStats => {
             "Live CPU, memory, network, and disk capacity. Idle cost is zero — sampling starts on expand and stops on collapse.".into()
         }
         WidgetModule::Recorder => {
             "Record from the island. Transcription uses Apple's on-device Speech model when available; turn it off for long recordings.".into()
-        }
-        WidgetModule::Meeting => {
-            "Mute and leave from the island. Zoom reads mute from the Meeting menu. Teams is a blind shortcut (the localhost API is gone). Meet focuses the tab unless you enable Apple Events JS.".into()
-        }
-        WidgetModule::Notifications => {
-            "Captures other apps' banners via Accessibility. Optional usernoted backfill needs a manual Full Disk Access grant. Misses Focus / Do Not Disturb / 'None' styles.".into()
         }
     }
 }
@@ -3283,66 +2946,6 @@ fn caption_text(text: impl Into<SharedString>) -> impl IntoElement {
         .line_height(px(theme::SUBHEADLINE.leading))
         .text_color(theme::SECONDARY_LABEL)
         .child(text.into())
-}
-
-fn high_alert_rows(settings: &AppSettings, cx: &mut Context<SettingsView>) -> Vec<AnyElement> {
-    let duration = settings.high_alert_default_duration_secs;
-    let kind = settings.high_alert_kind;
-    let battery = settings.low_battery_release_pct;
-    vec![
-        chip_row(
-            "Default Duration",
-            &[
-                ("15m", duration == 15 * 60),
-                ("30m", duration == 30 * 60),
-                ("1h", duration == 60 * 60),
-                ("Until Off", duration == 0),
-            ],
-            cx,
-            |caption, s| {
-                s.high_alert_default_duration_secs = match caption {
-                    "15m" => 15 * 60,
-                    "1h" => 60 * 60,
-                    "Until Off" => 0,
-                    _ => 30 * 60,
-                };
-            },
-        )
-        .into_any_element(),
-        chip_row(
-            "Keep Awake",
-            &[
-                ("Display", kind == HighAlertKind::Display),
-                ("System", kind == HighAlertKind::System),
-            ],
-            cx,
-            |caption, s| {
-                s.high_alert_kind = if caption == "System" {
-                    HighAlertKind::System
-                } else {
-                    HighAlertKind::Display
-                };
-            },
-        )
-        .into_any_element(),
-        chip_row(
-            "Release Below",
-            &[
-                ("Never", battery == 0),
-                ("10%", battery == 10),
-                ("20%", battery == 20),
-            ],
-            cx,
-            |caption, s| {
-                s.low_battery_release_pct = match caption {
-                    "Never" => 0,
-                    "20%" => 20,
-                    _ => 10,
-                };
-            },
-        )
-        .into_any_element(),
-    ]
 }
 
 fn pomodoro_rows(
@@ -3484,12 +3087,11 @@ fn widget_badge_color(module: WidgetModule) -> Rgba {
         WidgetModule::Calendar | WidgetModule::Reminders | WidgetModule::Recorder => 0xFF453A,
         WidgetModule::Speed | WidgetModule::Battery | WidgetModule::Messages => 0x30D158,
         WidgetModule::Mirror | WidgetModule::Observe => 0x64D2FF,
-        WidgetModule::Agents | WidgetModule::Meeting => 0xBF5AF2,
-        WidgetModule::Timers | WidgetModule::HighAlert | WidgetModule::Notifications => TILE_ORANGE,
+        WidgetModule::Agents => 0xBF5AF2,
+        WidgetModule::Timers => TILE_ORANGE,
         WidgetModule::Notes => 0xFFD60A,
-        WidgetModule::Weather | WidgetModule::Vpn => TILE_BLUE,
+        WidgetModule::Weather => TILE_BLUE,
         WidgetModule::Files => 0x5E5CE6,
-        WidgetModule::Obsidian => 0x7C5CFF,
     };
     theme::rgba_from_u32(rgb, 1.0)
 }
@@ -3781,14 +3383,8 @@ fn module_toggle(
                 return;
             }
             let mut s = nook_core::settings::get_app_settings();
-            let was_enabled = s.show_notifications;
             module.set_enabled(&mut s);
-            let request_notifications =
-                module == WidgetModule::Notifications && !was_enabled && s.show_notifications;
             nook_core::settings::update_app_settings(s);
-            if request_notifications {
-                nook_core::notifications::ax_trusted(true);
-            }
             cx.notify();
         }))
         .child(toggle_knob(on))
@@ -3888,7 +3484,6 @@ fn push_button(
 ) -> impl IntoElement {
     let id = id.into();
     let destructive = id.as_ref() == "island-reset-btn"
-        || id.as_ref() == "obsidian-clear-btn"
         || id.as_ref() == "reset-all-btn"
         || id.as_ref() == "term-clear-history-btn"
         || id.as_ref() == "quit-btn"
@@ -4125,26 +3720,10 @@ mod tests {
     }
 
     #[test]
-    fn notifications_subtitle_is_honest_when_off() {
-        let settings = AppSettings::default();
-        assert!(!settings.show_notifications);
-        assert_eq!(
-            WidgetModule::Notifications.subtitle(&settings).as_ref(),
-            "Off"
-        );
-    }
-
-    #[test]
     fn observe_subtitle_counts_pinned_metrics() {
         assert_eq!(observe_subtitle(0).as_ref(), "Prometheus");
         assert_eq!(observe_subtitle(1).as_ref(), "1 metric");
         assert_eq!(observe_subtitle(5).as_ref(), "5 metrics");
-    }
-
-    #[test]
-    fn vpn_subtitle_follows_the_timer_toggle() {
-        assert_eq!(vpn_subtitle(true).as_ref(), "Session timer");
-        assert_eq!(vpn_subtitle(false).as_ref(), "Status");
     }
 
     #[test]
@@ -4165,14 +3744,9 @@ mod tests {
                 "Mirror",
                 "Battery",
                 "Messages",
-                "Obsidian",
                 "Weather",
-                "VPN",
-                "Alert",
                 "Stats",
                 "Voice",
-                "Meetings",
-                "Notify",
             ]
         );
         assert!(!names
@@ -4193,7 +3767,7 @@ mod tests {
         let caption = widget_caption(WidgetModule::Calendar, &settings);
         assert!(caption.starts_with("Next event · "), "{caption}");
         assert!(caption.contains("slot"), "{caption}");
-        let experimental = widget_caption(WidgetModule::Vpn, &settings);
+        let experimental = widget_caption(WidgetModule::Observe, &settings);
         assert!(experimental.ends_with("· Experimental"), "{experimental}");
     }
 

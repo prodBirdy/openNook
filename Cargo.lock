@@ -3756,7 +3756,6 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "sysinfo 0.37.2",
- "system-configuration 0.6.1",
  "tokio",
  "uuid",
  "vt100",

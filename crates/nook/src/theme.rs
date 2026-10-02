@@ -544,7 +544,8 @@ pub const DISPLAY: Text = Text {
 
 /// Compact Live Activity face — lucide glyphs, HUD marks, avatars, file thumbs.
 pub const COMPACT_FACE: f32 = 20.0;
-/// Small inline badge next to a compact face (e.g. High Alert sun).
+/// Small inline badge next to a compact face.
+#[allow(dead_code)]
 pub const COMPACT_BADGE: f32 = 12.0;
 /// Small inline glyph next to text.
 #[allow(dead_code)]
@@ -553,10 +554,10 @@ pub const TRACK_H: f32 = 4.0;
 pub const TRACK_RADIUS: f32 = 2.0;
 /// Inset from the compact capsule edge to the leading/trailing glyph.
 /// Past the 14pt corner so a 20pt face does not sit on the curve.
-#[cfg(test)]
+#[allow(dead_code)]
 pub const COMPACT_INSET: f32 = 8.0;
 /// Expanded Nook Mirror circle. Fills `NOOK_BODY` minus the pane inset.
-#[cfg(test)]
+#[allow(dead_code)]
 pub const MIRROR_FACE: f32 = 112.0;
 
 /// HIG › Accessibility › Buttons gives macOS a 28×28 pt recommended hit target

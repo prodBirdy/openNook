@@ -6,8 +6,9 @@ use crate::theme;
 use gpui::{
     div, prelude::*, px, Context, CursorStyle, FontWeight, MouseButton, MouseDownEvent,
 };
+use nook_core::widgets::SpeedPhase;
 use std::cell::RefCell;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -25,6 +26,7 @@ const SPEED_NUM: theme::Text = theme::Text {
 
 pub(crate) fn speed_card(
     mbps: Option<f64>,
+    up_mbps: Option<f64>,
     progress: f64,
     running: bool,
     cx: &mut Context<Island>,
@@ -39,14 +41,21 @@ pub(crate) fn speed_card(
         }
         slot.as_ref().map(|(msg, _)| msg.clone())
     });
-    // Pencil: "284" + "Mbps down · 41 up". Core only measures download — up is
-    // a placeholder dash until an upload sample exists.
     let (value, caption) = if running {
-        let (n, unit) = format_speed(mbps.unwrap_or(0.0));
-        (n, format!("{unit} down · {progress:.0}%"))
+        if progress <= 50.0 {
+            let (n, unit) = format_speed(mbps.unwrap_or(0.0));
+            (n, format!("{unit} down · {progress:.0}%"))
+        } else {
+            let (n, unit) = format_speed(up_mbps.unwrap_or(0.0));
+            (n, format!("{unit} up · {progress:.0}%"))
+        }
     } else if let Some(v) = mbps {
         let (n, unit) = format_speed(v);
-        (n, format!("{unit} down · — up"))
+        let up = match up_mbps {
+            Some(u) => format_speed(u).0,
+            None => "—".into(),
+        };
+        (n, format!("{unit} down · {up} up"))
     } else {
         ("—".into(), "Tap to test".into())
     };
@@ -128,10 +137,13 @@ impl Island {
         cx.spawn(async move |this, cx| {
             let progress = Arc::new(AtomicU64::new(0));
             let speed = Arc::new(AtomicU64::new(0));
+            let phase = Arc::new(AtomicU8::new(0));
             let done = Arc::new(AtomicBool::new(false));
-            let slot: Arc<Mutex<Option<Result<f64, String>>>> = Arc::new(Mutex::new(None));
+            let slot: Arc<Mutex<Option<Result<nook_core::widgets::SpeedResult, String>>>> =
+                Arc::new(Mutex::new(None));
             let p2 = progress.clone();
             let s2 = speed.clone();
+            let ph2 = phase.clone();
             let done2 = done.clone();
             let slot2 = slot.clone();
             cx.background_executor()
@@ -140,6 +152,13 @@ impl Island {
                         move |sample| {
                             p2.store(sample.progress.to_bits(), Ordering::Relaxed);
                             s2.store(sample.speed.to_bits(), Ordering::Relaxed);
+                            ph2.store(
+                                match sample.phase {
+                                    SpeedPhase::Download => 0,
+                                    SpeedPhase::Upload => 1,
+                                },
+                                Ordering::Relaxed,
+                            );
                         },
                     ));
                     if let Ok(mut guard) = slot2.lock() {
@@ -157,6 +176,11 @@ impl Island {
                         this.apply_speed_sample(
                             f64::from_bits(speed.load(Ordering::Relaxed)),
                             f64::from_bits(progress.load(Ordering::Relaxed)),
+                            if phase.load(Ordering::Relaxed) == 0 {
+                                SpeedPhase::Download
+                            } else {
+                                SpeedPhase::Upload
+                            },
                         );
                         cx.notify();
                         !done.load(Ordering::SeqCst)
@@ -176,14 +200,16 @@ impl Island {
                 this.speed_running = false;
                 if let Ok(mut guard) = slot.lock() {
                     match guard.take() {
-                        Some(Ok(mbps)) => {
+                        Some(Ok(result)) => {
                             this.speed_progress = 100.0;
-                            this.speed_mbps = Some(mbps);
+                            this.speed_mbps = Some(result.down_mbps);
+                            this.speed_up_mbps = result.up_mbps;
                             SPEED_ERROR.with(|e| *e.borrow_mut() = None);
                         }
                         Some(Err(err)) => {
                             this.speed_progress = 0.0;
                             this.speed_mbps = None;
+                            this.speed_up_mbps = None;
                             SPEED_ERROR.with(|e| {
                                 *e.borrow_mut() = Some((short_speed_error(&err), Instant::now()));
                             });
@@ -228,6 +254,7 @@ impl Island {
         self.speed_running = true;
         self.speed_progress = 0.0;
         self.speed_mbps = Some(0.0);
+        self.speed_up_mbps = None;
         SPEED_ERROR.with(|e| *e.borrow_mut() = None);
         self.speed_gen
     }
@@ -237,10 +264,14 @@ impl Island {
         self.speed_running = false;
         self.speed_progress = 0.0;
         self.speed_mbps = None;
+        self.speed_up_mbps = None;
     }
 
-    pub(crate) fn apply_speed_sample(&mut self, speed: f64, progress: f64) {
-        self.speed_mbps = Some(speed);
+    pub(crate) fn apply_speed_sample(&mut self, speed: f64, progress: f64, phase: SpeedPhase) {
+        match phase {
+            SpeedPhase::Download => self.speed_mbps = Some(speed),
+            SpeedPhase::Upload => self.speed_up_mbps = Some(speed),
+        }
         self.speed_progress = progress;
     }
 }

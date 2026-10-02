@@ -76,14 +76,9 @@ pub(super) fn module_icon(module: WidgetModule) -> &'static str {
         WidgetModule::Mirror => "webcam",
         WidgetModule::Battery => "battery",
         WidgetModule::Messages => "message-circle",
-        WidgetModule::Obsidian => "book",
         WidgetModule::Weather => "cloud-sun",
-        WidgetModule::Vpn => "shield",
-        WidgetModule::HighAlert => "sun",
         WidgetModule::SysStats => "activity",
         WidgetModule::Recorder => "mic",
-        WidgetModule::Meeting => "video",
-        WidgetModule::Notifications => "bell",
     }
 }
 
@@ -101,14 +96,9 @@ pub(super) fn module_short(module: WidgetModule) -> &'static str {
         WidgetModule::Mirror => "Mirror",
         WidgetModule::Battery => "Battery",
         WidgetModule::Messages => "Messages",
-        WidgetModule::Obsidian => "Obsidian",
         WidgetModule::Weather => "Weather",
-        WidgetModule::Vpn => "VPN",
-        WidgetModule::HighAlert => "Alert",
         WidgetModule::SysStats => "Stats",
         WidgetModule::Recorder => "Voice",
-        WidgetModule::Meeting => "Meetings",
-        WidgetModule::Notifications => "Notify",
     }
 }
 

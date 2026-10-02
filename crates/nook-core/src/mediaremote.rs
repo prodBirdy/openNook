@@ -476,6 +476,8 @@ pub struct AdapterQueueItem {
     pub album: Option<String>,
     pub duration: Option<f64>,
     pub identifier: Option<String>,
+    pub artwork_base64: Option<String>,
+    pub artwork_url: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -499,6 +501,10 @@ struct AdapterQueueItemJson {
     duration: Option<f64>,
     #[serde(default)]
     identifier: Option<String>,
+    #[serde(default, rename = "artworkData")]
+    artwork_base64: Option<String>,
+    #[serde(default, rename = "artworkURL")]
+    artwork_url: Option<String>,
 }
 
 /// `adapter_queue`. Kept off the hot now-playing path: one-shot perl, not stream.
@@ -529,6 +535,8 @@ pub fn parse_queue_output(stdout: &str) -> Result<Vec<AdapterQueueItem>, String>
                 album: row.album.filter(|a| !a.is_empty()),
                 duration: row.duration.filter(|d| d.is_finite() && *d > 0.0),
                 identifier: row.identifier.filter(|id| !id.is_empty()),
+                artwork_base64: row.artwork_base64.filter(|a| !a.is_empty()),
+                artwork_url: row.artwork_url.filter(|a| !a.is_empty()),
             })
         })
         .collect())
@@ -869,7 +877,7 @@ mod tests {
         let json = r#"{
             "index": 1,
             "items": [
-                {"title":"Now","artist":"A","album":"X","duration":120.5,"identifier":"1"},
+                {"title":"Now","artist":"A","album":"X","duration":120.5,"identifier":"1","artworkData":"QUJD","artworkURL":"https://example.com/a.jpg"},
                 {"title":"Next","artist":"B","duration":null},
                 {"title":"","artist":"skip-me"}
             ]
@@ -878,9 +886,16 @@ mod tests {
         assert_eq!(items.len(), 2);
         assert_eq!(items[0].title, "Now");
         assert_eq!(items[0].duration, Some(120.5));
+        assert_eq!(items[0].artwork_base64.as_deref(), Some("QUJD"));
+        assert_eq!(
+            items[0].artwork_url.as_deref(),
+            Some("https://example.com/a.jpg")
+        );
         assert_eq!(items[1].title, "Next");
         assert_eq!(items[1].duration, None);
         assert_eq!(items[1].album, None);
+        assert_eq!(items[1].artwork_base64, None);
+        assert_eq!(items[1].artwork_url, None);
     }
 
     #[test]
@@ -892,6 +907,8 @@ mod tests {
                 album: None,
                 duration: Some(194.0),
                 identifier: Some("1339::1349".into()),
+                artwork_base64: None,
+                artwork_url: None,
             },
             AdapterQueueItem {
                 title: "All Nighter".into(),
@@ -899,6 +916,8 @@ mod tests {
                 album: None,
                 duration: Some(227.0),
                 identifier: Some("1339::1350".into()),
+                artwork_base64: None,
+                artwork_url: None,
             },
         ];
         let next = drop_current_queue_item(

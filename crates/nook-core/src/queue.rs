@@ -318,22 +318,7 @@ fn try_mediaremote_queue(np: &NowPlayingData) -> Option<PlaybackQueue> {
         np.title.as_deref(),
         np.artist.as_deref(),
     );
-    let items: Vec<QueueItem> = upcoming
-        .into_iter()
-        .map(|row| QueueItem {
-            id: row
-                .identifier
-                .clone()
-                .unwrap_or_else(|| format!("mr-{}-{}", row.title, row.artist)),
-            title: row.title,
-            artist: row.artist,
-            artwork_url: None,
-            artwork_base64: None,
-            duration: row.duration,
-            source: QueueSource::MediaRemote,
-            jump: QueueJump::Unavailable,
-        })
-        .collect();
+    let items = mediaremote_queue_items(upcoming);
     if items.is_empty() {
         return None;
     }
@@ -344,6 +329,28 @@ fn try_mediaremote_queue(np: &NowPlayingData) -> Option<PlaybackQueue> {
         hidden: None,
         context_uri: None,
     })
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn mediaremote_queue_items(
+    upcoming: Vec<crate::mediaremote::AdapterQueueItem>,
+) -> Vec<QueueItem> {
+    upcoming
+        .into_iter()
+        .map(|row| QueueItem {
+            id: row
+                .identifier
+                .clone()
+                .unwrap_or_else(|| format!("mr-{}-{}", row.title, row.artist)),
+            title: row.title,
+            artist: row.artist,
+            artwork_url: row.artwork_url,
+            artwork_base64: row.artwork_base64,
+            duration: row.duration,
+            source: QueueSource::MediaRemote,
+            jump: QueueJump::Unavailable,
+        })
+        .collect()
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -468,6 +475,40 @@ mod tests {
         assert_eq!(upcoming[0].title, "Next");
         assert_eq!(upcoming[0].duration, Some(125.4));
         assert_eq!(upcoming[1].duration, None);
+    }
+
+    #[test]
+    fn mediaremote_rows_keep_artwork() {
+        let rows = vec![
+            crate::mediaremote::AdapterQueueItem {
+                title: "Next".into(),
+                artist: "B".into(),
+                album: None,
+                duration: Some(120.0),
+                identifier: Some("42".into()),
+                artwork_base64: Some("QUJD".into()),
+                artwork_url: None,
+            },
+            crate::mediaremote::AdapterQueueItem {
+                title: "Later".into(),
+                artist: "C".into(),
+                album: None,
+                duration: None,
+                identifier: None,
+                artwork_base64: None,
+                artwork_url: Some("https://example.com/c.jpg".into()),
+            },
+        ];
+        let items = mediaremote_queue_items(rows);
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].artwork_base64.as_deref(), Some("QUJD"));
+        assert_eq!(items[0].artwork_url, None);
+        assert_eq!(
+            items[1].artwork_url.as_deref(),
+            Some("https://example.com/c.jpg")
+        );
+        assert_eq!(items[1].artwork_base64, None);
+        assert_eq!(items[1].id, "mr-Later-C");
     }
 
     #[test]

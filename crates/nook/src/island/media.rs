@@ -10,8 +10,8 @@ use crate::icons::lucide_color;
 use crate::theme;
 use gpui::{
     canvas, div, img, linear_color_stop, linear_gradient, point, prelude::*, px, relative,
-    AnyElement, BoxShadow, Context, CursorStyle, FontWeight, Image, MouseButton, MouseDownEvent,
-    Rgba, SharedString,
+    AnyElement, BoxShadow, Context, CursorStyle, Font, FontFeatures, FontStyle, FontWeight,
+    Image, MouseButton, MouseDownEvent, Rgba, SharedString,
 };
 use nook_core::models::{NowPlayingData, PlaybackQueue, QueueItem, RepeatMode};
 use std::sync::{Mutex, OnceLock};
@@ -174,7 +174,7 @@ fn placeholder_art() -> AnyElement {
         .into_any_element()
 }
 
-fn artwork_element(b64: &str, size: f32, radius: f32) -> Option<AnyElement> {
+pub(crate) fn artwork_element(b64: &str, size: f32, radius: f32) -> Option<AnyElement> {
     let bytes = artwork_bytes(b64)?;
     let image = std::sync::Arc::new(Image::from_bytes(gpui_format(&bytes), bytes));
     // Overflow clip is a rect; the sprite only rounds via its own corner_radii.
@@ -342,17 +342,10 @@ const NOOK_ART: f32 = 52.0;
 pub(crate) const NOOK_ART_RADIUS: f32 = 13.0;
 const APP_BADGE: f32 = 22.0;
 const APP_BADGE_RADIUS: f32 = 5.0;
-const NOOK_PLAY_HIT: f32 = 40.0;
+const NOOK_PLAY_HIT: f32 = 34.0;
 const NOOK_SKIP_HIT: f32 = 32.0;
 const NOOK_PLAY_GLYPH: f32 = 26.0;
 const NOOK_SKIP_GLYPH: f32 = 19.0;
-/// Expanded track title: mockup 16/20 semibold (between TITLE_3 and TITLE_2).
-const MEDIA_TITLE: crate::theme::Text = crate::theme::Text {
-    size: 16.0,
-    leading: 20.0,
-    weight: FontWeight::NORMAL,
-    emphasized: FontWeight::SEMIBOLD,
-};
 /// Lyrics panel current line — Pencil export 17/20 bold.
 const LYRIC_CURRENT: crate::theme::Text = crate::theme::Text {
     size: 17.0,
@@ -360,32 +353,60 @@ const LYRIC_CURRENT: crate::theme::Text = crate::theme::Text {
     weight: FontWeight::NORMAL,
     emphasized: FontWeight::BOLD,
 };
-/// Gap between stacked lyric lines.
-const LYRIC_GAP: f32 = 4.0;
-/// One synced-line step (current leading + gap) for the Apple Music scroll.
-pub(super) const LYRIC_LINE_PITCH: f32 = LYRIC_CURRENT.leading + LYRIC_GAP;
-/// Current-line top as a fraction of the lines viewport.
-const LYRIC_ANCHOR: f32 = 0.30;
-/// Neighbor rest alphas on `theme::LABEL`. Past is slightly dimmer than next.
-const LYRIC_PAST_ALPHA: f32 = 0.25;
-const LYRIC_NEXT_ALPHA: f32 = 0.35;
-const LYRIC_PAST_FAR_ALPHA: f32 = 0.16;
+/// Gap between stacked lyric lines (Pencil Lines `gap: 5`).
+const LYRIC_GAP: f32 = 5.0;
+/// Synced-line step: neighbour leading + gap (current top moves by this).
+pub(super) const LYRIC_LINE_PITCH: f32 = theme::BODY.leading + LYRIC_GAP;
+/// Sequential travel when the outgoing line is still current-sized (20+5).
+const LYRIC_STEP: f32 = LYRIC_CURRENT.leading + LYRIC_GAP;
+/// Per-line delay from the top of the stack (Apple Music wave).
+const LYRIC_STAGGER_MS: f32 = 35.0;
+/// `Spring::smooth` duration sampled for each line; 4×35ms + 0.5s ≤ 650ms.
+const LYRIC_SPRING_S: f32 = 0.5;
+/// Lines box in the 128 Pencil card: pad 8×2 + header 28 → 84.
+const LYRIC_LINES_H: f32 = 84.0;
+/// At-rest three-line stack (past + gap + current + gap + next).
+const LYRIC_REST_STACK: f32 =
+    theme::BODY.leading + LYRIC_GAP + LYRIC_CURRENT.leading + LYRIC_GAP + theme::BODY.leading;
+/// Incoming next2 peek while the wave is in flight (hidden at rest).
 const LYRIC_NEXT_FAR_ALPHA: f32 = 0.22;
 #[allow(dead_code)]
 const NOOK_PROGRESS_H: f32 = 6.0;
-/// Pencil Media Card pad `8 12`.
-const NOOK_PAD_X: f32 = 12.0;
-const NOOK_PAD_Y: f32 = 8.0;
-/// AirPlay / Up Next row height (Pencil).
+/// Pencil pad is 12/8 border-box (1 px cell border eats into it); app border is outside.
+const NOOK_PAD_X: f32 = 11.0;
+const NOOK_PAD_Y: f32 = 7.0;
+/// Scrubber: Pencil `padding-top: 10` + 16-tall track/labels row → 26.
+const NOOK_SCRUBBER_ROW: f32 = 26.0;
+/// Transport row height (Pencil `Transport` 34: play hit 34, skips 32, slots 28).
+const NOOK_TRANSPORT_ROW: f32 = 34.0;
+/// AirPlay / Up Next / Lyrics header row height (Pencil).
 const PANEL_ROW_H: f32 = 28.0;
+/// Lyrics header thumb (Pencil 20 r5).
 const QUEUE_ART: f32 = 20.0;
 const QUEUE_ART_RADIUS: f32 = 5.0;
+/// Up Next row thumb (Pencil 24 r6).
+const QUEUE_ROW_ART: f32 = 24.0;
+const QUEUE_ROW_ART_RADIUS: f32 = 6.0;
+/// Pencil track label 13/16 bold (700) — not the old 16/20 title.
+const TRACK_LABEL: crate::theme::Text = crate::theme::Text {
+    size: 13.0,
+    leading: 16.0,
+    weight: FontWeight::NORMAL,
+    emphasized: FontWeight::BOLD,
+};
 /// Artwork ring `#FFFFFF1A` (shadow `0 3 10 #00000066` is inline below).
 const NOOK_ART_RING: Rgba = Rgba {
     r: 1.0,
     g: 1.0,
     b: 1.0,
-    a: 0.10,
+    a: 0x1A as f32 / 255.0,
+};
+/// Scrubber track fill `#FFFFFF24`.
+const NOOK_SCRUB_TRACK: Rgba = Rgba {
+    r: 1.0,
+    g: 1.0,
+    b: 1.0,
+    a: 0x24 as f32 / 255.0,
 };
 
 /// Expanded Now Playing: artwork + title row, flanked scrubber, filled
@@ -438,6 +459,7 @@ pub(crate) fn nook_media_pane(island: &Island, cx: &mut Context<Island>) -> AnyE
     // Gallery draws AirPlay here whatever the current route is.
     let picker_icon = "airplay";
 
+    // Pencil Now Playing: art 52 r13, gap 12; title 13/16 bold, artist 12/15, gap 2.
     let header = div()
         .w_full()
         .flex()
@@ -455,21 +477,21 @@ pub(crate) fn nook_media_pane(island: &Island, cx: &mut Context<Island>) -> AnyE
                 .justify_center()
                 .gap(px(2.))
                 .child(if has {
-                    slide_label(title.clone(), MEDIA_TITLE, true)
+                    slide_label(title.clone(), TRACK_LABEL, true)
                         .w_full()
                         .into_any_element()
                 } else {
                     div()
                         .w_full()
-                        .text_size(px(MEDIA_TITLE.size))
-                        .line_height(px(MEDIA_TITLE.leading))
-                        .font_weight(MEDIA_TITLE.emphasized)
+                        .text_size(px(TRACK_LABEL.size))
+                        .line_height(px(TRACK_LABEL.leading))
+                        .font_weight(TRACK_LABEL.emphasized)
                         .text_color(theme::secondary_label())
                         .whitespace_nowrap()
                         .child("Not Playing")
                         .into_any_element()
                 })
-                .child(slide_label(artist.clone(), theme::BODY, false).w_full()),
+                .child(slide_label(artist.clone(), theme::CALLOUT, false).w_full()),
         );
 
     let body = if picker_open {
@@ -509,6 +531,7 @@ pub(crate) fn nook_media_pane(island: &Island, cx: &mut Context<Island>) -> AnyE
             .child(lyrics_panel(island, &title, &artist, cx))
             .into_any_element()
     } else {
+        // Pencil rows 52 + 26 + 34 = 112 pane height exactly.
         div()
             .flex()
             .flex_col()
@@ -517,13 +540,12 @@ pub(crate) fn nook_media_pane(island: &Island, cx: &mut Context<Island>) -> AnyE
             .h_full()
             .min_w(px(0.))
             .min_h(px(0.))
-            .gap(px(8.))
             .overflow_hidden()
             .child(header.flex_shrink_0().h(px(NOOK_ART)))
             .child(
                 div()
                     .w_full()
-                    .h(px(16.))
+                    .h(px(NOOK_SCRUBBER_ROW))
                     .flex_shrink_0()
                     .min_h(px(0.))
                     .child(nook_progress(
@@ -533,7 +555,7 @@ pub(crate) fn nook_media_pane(island: &Island, cx: &mut Context<Island>) -> AnyE
             .child(
                 div()
                     .w_full()
-                    .h(px(28.))
+                    .h(px(NOOK_TRANSPORT_ROW))
                     .flex_shrink_0()
                     .min_h(px(0.))
                     .opacity(if has { 1.0 } else { theme::DISABLED_OPACITY })
@@ -639,6 +661,42 @@ fn nook_art_frame(art: Option<AnyElement>) -> impl IntoElement {
                 .inset_0(),
             ),
     )
+}
+
+/// Thumb tile with overlay ring so `border_1` does not shrink the content box.
+fn thumb_frame(art: AnyElement, size: f32, radius: f32) -> impl IntoElement {
+    div()
+        .relative()
+        .size(px(size))
+        .rounded(px(radius))
+        .overflow_hidden()
+        .flex_shrink_0()
+        .child(art)
+        .child(
+            div()
+                .absolute()
+                .inset_0()
+                .rounded(px(radius))
+                .border_1()
+                .border_color(NOOK_ART_RING),
+        )
+}
+
+/// Placeholder art for Up Next 24 r6 thumbs — same gradient as `placeholder_art`.
+fn queue_placeholder_art() -> AnyElement {
+    div()
+        .size(px(QUEUE_ROW_ART))
+        .rounded(px(QUEUE_ROW_ART_RADIUS))
+        .bg(linear_gradient(
+            135.0,
+            linear_color_stop(ART_PLACEHOLDER.0, 0.0),
+            linear_color_stop(ART_PLACEHOLDER.1, 1.0),
+        ))
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(lucide_color("music", 12.0, theme::SECONDARY_LABEL))
+        .into_any_element()
 }
 
 fn nook_transport(
@@ -826,32 +884,88 @@ fn lyrics_toggle_btn(open: bool, cx: &mut Context<Island>) -> impl IntoElement {
         )
 }
 
+/// Pop Out control: 28×28 r14 FILL (accent-tinted while the PiP is open).
+pub(crate) fn pip_popout_btn(
+    kind: crate::pip::PipKind,
+    cx: &mut Context<Island>,
+) -> impl IntoElement {
+    pip_popout_btn_sized(kind, theme::HIT_MIN, 14.0, 14.0, cx)
+}
+
+/// Sized Pop Out control (Observe card uses 24×24 r12 / 13 px icon).
+pub(crate) fn pip_popout_btn_sized(
+    kind: crate::pip::PipKind,
+    size: f32,
+    radius: f32,
+    icon: f32,
+    cx: &mut Context<Island>,
+) -> impl IntoElement {
+    let open = crate::pip::is_open(kind);
+    let id = match kind {
+        crate::pip::PipKind::Lyrics => "pip-popout-lyrics",
+        crate::pip::PipKind::Observe => "pip-popout-observe",
+    };
+    // `#0A84FF33` — active Pop Out fill while the window is open.
+    const ACTIVE_BG: Rgba = Rgba {
+        r: 0.039,
+        g: 0.518,
+        b: 1.0,
+        a: 51.0 / 255.0,
+    };
+    div()
+        .id(id)
+        .size(px(size))
+        .flex_shrink_0()
+        .rounded(px(radius))
+        .bg(if open { ACTIVE_BG } else { theme::FILL })
+        .flex()
+        .items_center()
+        .justify_center()
+        .cursor(CursorStyle::PointingHand)
+        .hover(|s| s.opacity(0.85))
+        .active(|s| s.opacity(0.75))
+        .child(lucide_color(
+            "picture-in-picture-2",
+            icon,
+            if open {
+                theme::accent()
+            } else {
+                theme::LABEL
+            },
+        ))
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                cx.stop_propagation();
+                if crate::pip::is_open(kind) {
+                    crate::pip::close(kind, cx);
+                } else {
+                    crate::pip::open(kind, cx.entity().downgrade(), cx);
+                    if kind == crate::pip::PipKind::Lyrics {
+                        if this.lyrics_open {
+                            this.begin_media_view_transition(false);
+                            this.lyrics_open = false;
+                        }
+                        this.arm_lyrics_line_timer(cx);
+                    }
+                }
+                cx.notify();
+            }),
+        )
+}
+
 fn lyrics_panel(
     island: &Island,
     title: &SharedString,
     artist: &SharedString,
     cx: &mut Context<Island>,
 ) -> impl IntoElement {
-    // Compact header + five-line window; current stays at LYRIC_ANCHOR.
+    // Compact header + five-line window; current sits centred in the lines box.
     let thumb = island
         .now_playing
         .artwork_base64
         .as_deref()
         .and_then(|b64| artwork_element(b64, QUEUE_ART, QUEUE_ART_RADIUS));
-    let [past2, past1, cur, next1, next2] = lyrics_five_lines(island);
-    let scroll = island.lyrics_scroll.value;
-    let fade = island.lyrics_fade.value.clamp(0.0, 1.0);
-    let sliding = island
-        .lyrics
-        .as_ref()
-        .is_some_and(|lyrics| lyrics.has_synced())
-        && scroll.abs() > crate::motion::REST_PX;
-    let current_alpha = LYRIC_NEXT_ALPHA + (1.0 - LYRIC_NEXT_ALPHA) * fade;
-    let past1_alpha = if sliding {
-        1.0 + (LYRIC_PAST_ALPHA - 1.0) * fade
-    } else {
-        LYRIC_PAST_ALPHA
-    };
 
     div()
         .id("nook-lyrics")
@@ -874,25 +988,17 @@ fn lyrics_panel(
                 .items_center()
                 .gap(px(8.))
                 .when_some(thumb, |d, art| {
-                    d.child(
-                        div()
-                            .size(px(QUEUE_ART))
-                            .rounded(px(QUEUE_ART_RADIUS))
-                            .overflow_hidden()
-                            .flex_shrink_0()
-                            .border_1()
-                            .border_color(NOOK_ART_RING)
-                            .child(art),
-                    )
+                    d.child(thumb_frame(art, QUEUE_ART, QUEUE_ART_RADIUS))
                 })
                 .child(
+                    // Pencil lyrics header: title 13/16 bold, artist 12/15, align end, gap 6.
                     div()
                         .flex_1()
                         .min_w(px(0.))
                         .min_h(px(0.))
                         .overflow_hidden()
                         .flex()
-                        .items_center()
+                        .items_end()
                         .gap(px(6.))
                         .child(
                             div()
@@ -900,9 +1006,9 @@ fn lyrics_panel(
                                 .overflow_hidden()
                                 .text_ellipsis()
                                 .whitespace_nowrap()
-                                .text_size(px(theme::BODY.size))
-                                .line_height(px(theme::BODY.leading))
-                                .font_weight(theme::BODY.emphasized)
+                                .text_size(px(TRACK_LABEL.size))
+                                .line_height(px(TRACK_LABEL.leading))
+                                .font_weight(TRACK_LABEL.emphasized)
                                 .text_color(theme::LABEL)
                                 .child(title.clone()),
                         )
@@ -913,60 +1019,83 @@ fn lyrics_panel(
                                 .overflow_hidden()
                                 .text_ellipsis()
                                 .whitespace_nowrap()
-                                .text_size(px(theme::BODY.size))
-                                .line_height(px(theme::BODY.leading))
+                                .text_size(px(theme::CALLOUT.size))
+                                .line_height(px(theme::CALLOUT.leading))
                                 .text_color(theme::secondary_label())
                                 .child(artist.clone()),
                         ),
                 )
+                .child(pip_popout_btn(crate::pip::PipKind::Lyrics, cx))
                 .child(lyrics_toggle_btn(true, cx)),
         )
+        .child(lyrics_lines_block(island, LYRIC_LINES_H))
+}
+
+/// Animated lyric stack shared by the island Lyrics pane and the Lyrics PiP.
+/// `box_h` is the lines viewport height (island 84, PiP 66) used to centre the
+/// rest stack; the element itself fills its parent (flex_1) like the pre-extract
+/// lines box so gallery/island height never collapses to zero.
+pub(crate) fn lyrics_lines_block(island: &Island, box_h: f32) -> AnyElement {
+    let [past2, past1, cur, next1, next2] = lyrics_five_lines(island);
+    let slots = lyric_motion_slots(island);
+    let wrap = lyrics_wrap_offset(island);
+    let current_top =
+        (box_h - LYRIC_REST_STACK) * 0.5 + theme::BODY.leading + LYRIC_GAP;
+    let stack_y = current_top - 2.0 * LYRIC_LINE_PITCH + wrap;
+
+    div()
+        .flex_1()
+        .min_w(px(0.))
+        .min_h(px(box_h))
+        .w_full()
+        .h(px(box_h))
+        .flex_shrink_0()
+        .overflow_hidden()
+        .relative()
         .child(
             div()
-                .flex_1()
-                .min_w(px(0.))
-                .min_h(px(0.))
+                .id("nook-lyrics-lines")
+                .absolute()
+                .inset_0()
                 .w_full()
-                .h_full()
+                .px(px(2.))
                 .overflow_hidden()
-                .relative()
                 .child(
                     div()
-                        .id("nook-lyrics-lines")
-                        .absolute()
                         .w_full()
-                        .top(relative(LYRIC_ANCHOR))
-                        .mt(px(-2.0 * LYRIC_LINE_PITCH + scroll))
+                        .relative()
+                        .top(px(stack_y))
                         .flex()
                         .flex_col()
                         .gap(px(LYRIC_GAP))
-                        .child(lyric_line(
+                        .child(lyric_slot_el(
                             past2.as_deref().unwrap_or(""),
+                            &slots[0],
                             false,
-                            LYRIC_PAST_FAR_ALPHA,
                         ))
-                        .child(lyric_line(
+                        .child(lyric_slot_el(
                             past1.as_deref().unwrap_or(""),
+                            &slots[1],
                             false,
-                            past1_alpha,
                         ))
-                        .child(lyric_line(
+                        .child(lyric_slot_el(
                             cur.as_deref().unwrap_or(""),
+                            &slots[2],
                             true,
-                            current_alpha,
                         ))
-                        .child(lyric_line(
+                        .child(lyric_slot_el(
                             next1.as_deref().unwrap_or(""),
+                            &slots[3],
                             false,
-                            LYRIC_NEXT_ALPHA,
                         ))
-                        .child(lyric_line(
+                        .child(lyric_slot_el(
                             next2.as_deref().unwrap_or(""),
+                            &slots[4],
                             false,
-                            LYRIC_NEXT_FAR_ALPHA,
                         )),
                 ),
         )
+        .into_any_element()
 }
 
 fn lyrics_five_lines(island: &Island) -> [Option<String>; 5] {
@@ -974,8 +1103,13 @@ fn lyrics_five_lines(island: &Island) -> [Option<String>; 5] {
         return [None, None, None, None, None];
     };
     if lyrics.has_synced() {
-        let live = lyrics.active_index(island.lyrics_position_ms());
-        let idx = live;
+        // Motion-committed index once bound (avoids a one-frame rest flash).
+        // Gallery / first paint never run `sync_lyrics_line_motion`, so fall
+        // back to the live playhead — `None` is "before the first line", not
+        // "index unset", and would park "Short" in the next slot at the bottom.
+        let idx = island
+            .lyrics_line_idx
+            .or_else(|| lyrics.active_index(island.lyrics_position_ms()));
         let [a, b, c, d, e] = lyrics.highlight_at_5(idx);
         return [
             a.map(str::to_string),
@@ -1022,18 +1156,300 @@ fn lyrics_five_lines(island: &Island) -> [Option<String>; 5] {
     }
 }
 
-fn lyric_line(text: &str, current: bool, alpha: f32) -> AnyElement {
-    let color = theme::with_alpha(theme::LABEL, alpha.clamp(0.0, 1.0));
+fn lyric_lerp(a: Rgba, b: Rgba, t: f32) -> Rgba {
+    let t = t.clamp(0.0, 1.0);
+    Rgba {
+        r: a.r + (b.r - a.r) * t,
+        g: a.g + (b.g - a.g) * t,
+        b: a.b + (b.b - a.b) * t,
+        a: a.a + (b.a - a.a) * t,
+    }
+}
+
+fn lyric_dim(a: f32, b: f32, t: f32) -> f32 {
+    a + (b - a) * t.clamp(0.0, 1.0)
+}
+
+#[derive(Clone, Copy)]
+struct LyricPaint {
+    offset: f32,
+    size: f32,
+    leading: f32,
+    bold: bool,
+    wrap: bool,
+    color: Rgba,
+}
+
+thread_local! {
+    static LYRIC_CURRENT_H: std::cell::Cell<f32> =
+        const { std::cell::Cell::new(LYRIC_CURRENT.leading) };
+}
+
+fn report_lyric_current_h(h: f32) -> bool {
+    if !h.is_finite() || h <= 0.0 {
+        return false;
+    }
+    // Canvas `inset_0` can report the whole lines box on the first layout.
+    // Current wraps at most two leadings; anything larger wrecks wrap-shift.
+    let cap = LYRIC_CURRENT.leading * 2.0;
+    let h = h.min(cap);
+    let prev = LYRIC_CURRENT_H.get();
+    if prev.is_finite() && (prev - h).abs() < 0.5 {
+        return false;
+    }
+    LYRIC_CURRENT_H.set(h);
+    true
+}
+
+pub(super) fn lyric_wrap_target() -> f32 {
+    let extra = lyric_wrap_extra();
+    if extra > 0.0 {
+        -extra / 2.0
+    } else {
+        0.0
+    }
+}
+
+/// Extra height a wrapped current line needs above one leading, capped at
+/// one extra row (20pt). Shared by the island wrap-shift and the Lyrics PiP
+/// window, which grows by this amount instead of clipping past/next.
+pub(crate) fn lyric_wrap_extra() -> f32 {
+    let h = LYRIC_CURRENT_H.get();
+    if !h.is_finite() {
+        return 0.0;
+    }
+    if h > LYRIC_CURRENT.leading + 0.5 {
+        (h - LYRIC_CURRENT.leading).min(LYRIC_CURRENT.leading)
+    } else {
+        0.0
+    }
+}
+
+fn lyrics_wrap_offset(island: &Island) -> f32 {
+    // Gallery (and Reduce Motion) never step the wrap spring, so sample the
+    // measured target directly. Live motion uses the sprung value.
+    let v = if island.reduce_motion {
+        lyric_wrap_target()
+    } else {
+        island.lyrics_wrap_shift.value
+    };
+    if v.is_finite() {
+        v
+    } else {
+        0.0
+    }
+}
+
+/// Shared clock: one `Spring::smooth(0.5)` sampled at `elapsed − 35ms·line` (line 0 leads).
+pub(super) fn lyric_stagger_progress(elapsed_ms: f32, line: usize) -> f32 {
+    let delay = (line.min(4) as f32) * LYRIC_STAGGER_MS;
+    let local_s = (elapsed_ms - delay) / 1000.0;
+    lyric_spring_sample(local_s)
+}
+
+fn lyric_spring_sample(elapsed_s: f32) -> f32 {
+    const SPRING: crate::motion::Spring = crate::motion::Spring::smooth(LYRIC_SPRING_S);
+    if elapsed_s <= 0.0 {
+        return 0.0;
+    }
+    // Cap so line 4 (delay 140ms) finishes by ~650ms.
+    if elapsed_s >= 0.51 {
+        return 1.0;
+    }
+    let mut v = crate::motion::SpringValue::at(0.0);
+    let mut left = elapsed_s;
+    while left > 0.0 {
+        let dt = left.min(0.25);
+        let moving = v.step(SPRING, 1.0, dt, crate::motion::REST_ALPHA);
+        if v.value >= 1.0 {
+            return 1.0;
+        }
+        if !moving {
+            return 1.0;
+        }
+        left -= dt;
+    }
+    v.value.clamp(0.0, 1.0)
+}
+
+pub(super) fn lyrics_retarget_from(from: [f32; 5], elapsed_ms: f32) -> [f32; 5] {
+    let mut next = [0.0f32; 5];
+    for i in 0..4 {
+        let visual = from[i + 1] * (1.0 - lyric_stagger_progress(elapsed_ms, i + 1));
+        next[i] = visual + LYRIC_STEP;
+    }
+    next[4] = LYRIC_STEP;
+    next
+}
+
+fn lyric_motion_slots(island: &Island) -> [LyricPaint; 5] {
+    let synced = island
+        .lyrics
+        .as_ref()
+        .is_some_and(|lyrics| lyrics.has_synced());
+    let sliding = synced
+        && !island.reduce_motion
+        && island
+            .lyrics_line_from
+            .iter()
+            .any(|&y| y.abs() > crate::motion::REST_PX);
+    let elapsed_ms = island.lyrics_wave_at.elapsed().as_secs_f32() * 1000.0;
+    lyric_motion_paint(
+        sliding,
+        elapsed_ms,
+        &island.lyrics_line_from,
+        island.lyrics_fade.value,
+        synced,
+    )
+}
+
+fn lyric_motion_paint(
+    sliding: bool,
+    elapsed_ms: f32,
+    from: &[f32; 5],
+    fade: f32,
+    synced: bool,
+) -> [LyricPaint; 5] {
+    let past_color = theme::tertiary_label();
+    let next_color = theme::secondary_label();
+    let fade = fade.clamp(0.0, 1.0);
+
+    let mut sizes = [theme::BODY.size; 5];
+    let mut leadings = [theme::BODY.leading; 5];
+    sizes[2] = LYRIC_CURRENT.size;
+    leadings[2] = LYRIC_CURRENT.leading;
+    let mut bolds = [false; 5];
+    bolds[2] = true;
+    let mut wraps = [false; 5];
+    wraps[2] = true;
+    let mut colors = [
+        theme::with_alpha(theme::LABEL, 0.0),
+        past_color,
+        theme::LABEL,
+        next_color,
+        theme::with_alpha(theme::LABEL, 0.0),
+    ];
+    let mut offsets = [0.0f32; 5];
+
+    if sliding {
+        for i in 0..5 {
+            let t = lyric_stagger_progress(elapsed_ms, i);
+            offsets[i] = from[i] * (1.0 - t);
+            match i {
+                0 => {
+                    colors[0] = lyric_lerp(past_color, theme::with_alpha(past_color, 0.0), t);
+                }
+                1 => {
+                    sizes[1] = lyric_dim(LYRIC_CURRENT.size, theme::BODY.size, t);
+                    leadings[1] = lyric_dim(LYRIC_CURRENT.leading, theme::BODY.leading, t);
+                    bolds[1] = t < 0.5;
+                    wraps[1] = t < 0.5;
+                    colors[1] = lyric_lerp(theme::LABEL, past_color, t);
+                }
+                2 => {
+                    // Incoming current: next-style at t=0 (never LABEL/bold).
+                    sizes[2] = lyric_dim(theme::BODY.size, LYRIC_CURRENT.size, t);
+                    leadings[2] = lyric_dim(theme::BODY.leading, LYRIC_CURRENT.leading, t);
+                    bolds[2] = t >= 0.5;
+                    wraps[2] = true;
+                    colors[2] = lyric_lerp(next_color, theme::LABEL, t);
+                }
+                3 => {
+                    colors[3] = lyric_lerp(theme::with_alpha(next_color, 0.0), next_color, t);
+                }
+                _ => {
+                    let peak = 4.0 * t * (1.0 - t);
+                    colors[4] = lyric_lerp(
+                        theme::with_alpha(theme::LABEL, 0.0),
+                        theme::with_alpha(theme::LABEL, LYRIC_NEXT_FAR_ALPHA),
+                        peak,
+                    );
+                }
+            }
+        }
+    } else if synced && (1.0 - fade).abs() > crate::motion::REST_ALPHA {
+        let hide = |c: Rgba| theme::with_alpha(c, 0.0);
+        colors = [
+            hide(theme::LABEL),
+            lyric_lerp(hide(past_color), past_color, fade),
+            lyric_lerp(hide(next_color), theme::LABEL, fade),
+            lyric_lerp(hide(next_color), next_color, fade),
+            hide(theme::LABEL),
+        ];
+    }
+
+    std::array::from_fn(|i| LyricPaint {
+        offset: offsets[i],
+        size: sizes[i],
+        leading: leadings[i],
+        bold: bolds[i],
+        wrap: wraps[i],
+        color: colors[i],
+    })
+}
+
+fn lyric_slot_el(text: &str, slot: &LyricPaint, measure: bool) -> AnyElement {
+    div()
+        .relative()
+        .w_full()
+        .flex_shrink_0()
+        .top(px(slot.offset))
+        .child(lyric_line(
+            text,
+            slot.size,
+            slot.leading,
+            slot.bold,
+            slot.wrap,
+            slot.color,
+        ))
+        .when(measure, |d| {
+            d.child(
+                canvas(
+                    |bounds, window, cx| {
+                        let h: f32 = bounds.size.height.into();
+                        if report_lyric_current_h(h) {
+                            // Measure lands after this frame's height math.
+                            // Defer a notify so PiP can grow/shrink next cycle
+                            // (request_animation_frame during prepaint borrows
+                            // Window::next_frame_callbacks).
+                            let id = window.current_view();
+                            window.defer(cx, move |_, cx| cx.notify(id));
+                        }
+                    },
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .inset_0(),
+            )
+        })
+        .into_any_element()
+}
+
+fn lyric_line(
+    text: &str,
+    size: f32,
+    leading: f32,
+    bold: bool,
+    wrap: bool,
+    color: Rgba,
+) -> AnyElement {
+    let size = size.max(1.0);
+    let leading = leading.max(1.0);
+    let weight = if bold {
+        LYRIC_CURRENT.emphasized
+    } else {
+        theme::BODY.weight
+    };
     if text.is_empty() {
         return div()
-            .h(px(LYRIC_CURRENT.leading))
+            .h(px(leading))
             .w_full()
             .min_h(px(0.))
             .flex_shrink_0()
             .into_any_element();
     }
-    if current {
-        let max_h = LYRIC_CURRENT.leading * 2.0;
+    if wrap {
+        let max_h = leading * 2.0;
         return div()
             .w_full()
             .min_w(px(0.))
@@ -1045,9 +1461,9 @@ fn lyric_line(text: &str, current: bool, alpha: f32) -> AnyElement {
                     .w_full()
                     .min_w(px(0.))
                     .line_clamp(2)
-                    .text_size(px(LYRIC_CURRENT.size))
-                    .line_height(px(LYRIC_CURRENT.leading))
-                    .font_weight(LYRIC_CURRENT.emphasized)
+                    .text_size(px(size))
+                    .line_height(px(leading))
+                    .font_weight(weight)
                     .text_color(color)
                     .child(text.to_string()),
             )
@@ -1055,15 +1471,15 @@ fn lyric_line(text: &str, current: bool, alpha: f32) -> AnyElement {
     }
     div()
         .w_full()
-        .h(px(LYRIC_CURRENT.leading))
+        .h(px(leading))
         .min_w(px(0.))
         .flex_shrink_0()
         .overflow_hidden()
         .text_ellipsis()
         .whitespace_nowrap()
-        .text_size(px(LYRIC_CURRENT.size))
-        .line_height(px(LYRIC_CURRENT.leading))
-        .font_weight(LYRIC_CURRENT.emphasized)
+        .text_size(px(size))
+        .line_height(px(leading))
+        .font_weight(weight)
         .text_color(color)
         .child(text.to_string())
         .into_any_element()
@@ -1210,27 +1626,20 @@ fn output_device_row(device: &OutputDevice, cx: &mut Context<Island>) -> impl In
                     },
                 )),
         )
+        // Pencil AirPlay row: name 13/16 (selected semibold white / else regular
+        // secondary), kind 11/14 tertiary flex 1, trailing 28×20.
         .child(
-            div()
-                .flex_1()
-                .min_w(px(0.))
-                .overflow_hidden()
-                .flex()
-                .flex_col()
-                .child(
-                    label(name, theme::BODY, selected)
-                        .text_color(if selected {
-                            theme::LABEL
-                        } else {
-                            theme::secondary_label()
-                        })
-                        .text_ellipsis()
-                        .whitespace_nowrap(),
-                ),
+            label(name, theme::BODY, selected)
+                .flex_shrink_0()
+                .text_color(if selected {
+                    theme::LABEL
+                } else {
+                    theme::secondary_label()
+                }),
         )
         .child(
             div()
-                .flex_shrink_0()
+                .flex_1()
                 .min_w(px(0.))
                 .min_h(px(0.))
                 .overflow_hidden()
@@ -1243,7 +1652,7 @@ fn output_device_row(device: &OutputDevice, cx: &mut Context<Island>) -> impl In
         )
         .child(
             div()
-                .w(px(theme::HIT_MIN))
+                .w(px(28.))
                 .h(px(20.))
                 .flex_shrink_0()
                 .flex()
@@ -1358,8 +1767,12 @@ fn nook_progress(
     let dragging = island.scrubber_drag.is_some();
     let progress = island.scrubber_drag.unwrap_or(progress).clamp(0.0, 1.0);
     let bounds = island.scrubber_bounds.clone();
+    // Pencil Scrubber: pt 10 under art, then 16-tall row (labels 11/14 + track
+    // area share a midline); bar 6 r3, played #FFFFFF, track #FFFFFF24.
     div()
         .w_full()
+        .h(px(NOOK_SCRUBBER_ROW))
+        .pt(px(10.))
         .flex()
         .items_center()
         .gap(px(8.))
@@ -1382,13 +1795,13 @@ fn nook_progress(
             }),
         )
         .child(
-            time_label(if duration > 0.0 {
+            media_time_label(if duration > 0.0 {
                 format_time(elapsed)
             } else {
                 "0:00".into()
             })
             .w(px(30.))
-            .text_color(theme::tertiary_label()),
+            .flex_shrink_0(),
         )
         .child(
             div()
@@ -1420,7 +1833,7 @@ fn nook_progress(
                         .w_full()
                         .h(px(6.))
                         .rounded(px(3.))
-                        .bg(theme::with_alpha(theme::LABEL, 0.14))
+                        .bg(NOOK_SCRUB_TRACK)
                         .child(
                             div()
                                 .h_full()
@@ -1445,14 +1858,14 @@ fn nook_progress(
                 }),
         )
         .child(
-            time_label(if duration > 0.0 {
+            media_time_label(if duration > 0.0 {
                 format_remaining(elapsed, duration)
             } else {
                 "-0:00".into()
             })
             .w(px(34.))
-            .text_right()
-            .text_color(theme::tertiary_label()),
+            .flex_shrink_0()
+            .text_right(),
         )
 }
 
@@ -1794,13 +2207,15 @@ fn queue_empty_state(
 }
 
 fn shuffle_btn(on: bool, cx: &mut Context<Island>) -> impl IntoElement {
+    // Pencil: 20×24, icon right-aligned.
     div()
         .id("nook-shuffle")
-        .size(px(24.))
+        .w(px(20.))
+        .h(px(24.))
         .flex_shrink_0()
         .flex()
         .items_center()
-        .justify_center()
+        .justify_end()
         .hover(|s| s.opacity(0.85))
         .active(|s| s.opacity(0.75))
         .cursor(CursorStyle::PointingHand)
@@ -1834,13 +2249,15 @@ fn repeat_btn(mode: RepeatMode, cx: &mut Context<Island>) -> impl IntoElement {
         RepeatMode::One => ("repeat-1", true),
         RepeatMode::All => ("repeat", true),
     };
+    // Pencil: 20×24, icon right-aligned.
     div()
         .id("nook-repeat")
-        .size(px(24.))
+        .w(px(20.))
+        .h(px(24.))
         .flex_shrink_0()
         .flex()
         .items_center()
-        .justify_center()
+        .justify_end()
         .hover(|s| s.opacity(0.85))
         .active(|s| s.opacity(0.75))
         .cursor(CursorStyle::PointingHand)
@@ -1896,26 +2313,19 @@ fn queue_row(index: usize, item: &QueueItem, cx: &mut Context<Island>) -> impl I
         .or_else(|| nook_core::queue::cached_artwork(&item.id).and_then(|hit| hit));
     let art = thumb
         .as_deref()
-        .and_then(|b64| artwork_element(b64, QUEUE_ART, QUEUE_ART_RADIUS))
-        .unwrap_or_else(|| {
-            div()
-                .size(px(QUEUE_ART))
-                .rounded(px(QUEUE_ART_RADIUS))
-                .bg(theme::FILL_TERTIARY)
-                .flex()
-                .items_center()
-                .justify_center()
-                .child(lucide_color("music", 10.0, theme::secondary_label()))
-                .into_any_element()
-        });
+        .and_then(|b64| artwork_element(b64, QUEUE_ROW_ART, QUEUE_ROW_ART_RADIUS))
+        .unwrap_or_else(queue_placeholder_art);
     let title = item.title.clone();
     let artist = item.artist.clone();
     let clickable = !matches!(item.jump, nook_core::models::QueueJump::Unavailable);
     let duration = item.duration.filter(|d| *d > 0.0).map(format_time);
+    // Pencil Up Next row: pl 2, 28 tall gap 10; thumb 24 r6; title 12/15
+    // semibold; artist 12/15 secondary; duration 11/14 tertiary.
     div()
         .id(SharedString::from(format!("up-next-{index}")))
         .h(px(PANEL_ROW_H))
         .w_full()
+        .pl(px(2.))
         .flex_shrink_0()
         .min_h(px(0.))
         .overflow_hidden()
@@ -1943,16 +2353,7 @@ fn queue_row(index: usize, item: &QueueItem, cx: &mut Context<Island>) -> impl I
                     }),
                 )
         })
-        .child(
-            div()
-                .size(px(QUEUE_ART))
-                .rounded(px(QUEUE_ART_RADIUS))
-                .overflow_hidden()
-                .flex_shrink_0()
-                .border_1()
-                .border_color(NOOK_ART_RING)
-                .child(art),
-        )
+        .child(thumb_frame(art, QUEUE_ROW_ART, QUEUE_ROW_ART_RADIUS))
         .child(
             div()
                 .flex_1()
@@ -1991,9 +2392,9 @@ fn queue_row(index: usize, item: &QueueItem, cx: &mut Context<Island>) -> impl I
             d.child(
                 div()
                     .flex_shrink_0()
-                    .text_size(px(theme::FOOTNOTE.size))
-                    .line_height(px(theme::FOOTNOTE.leading))
-                    .text_color(theme::secondary_label())
+                    .text_size(px(theme::SUBHEADLINE.size))
+                    .line_height(px(theme::SUBHEADLINE.leading))
+                    .text_color(theme::tertiary_label())
                     .child(stamp),
             )
         })
@@ -2098,6 +2499,24 @@ fn play_btn(playing: bool, cx: &mut Context<Island>) -> impl IntoElement {
 fn time_label(text: String) -> gpui::Div {
     // Mockup scrubber stamps: 11px tabular, tertiary (#EBEBF54D).
     timer_text(text, theme::SUBHEADLINE).text_color(theme::tertiary_label())
+}
+
+/// Now Playing scrubber stamps: Pencil 11/14, regular weight (the mockup's
+/// 400, not the compact timer's semibold), tabular figures, tertiary.
+fn media_time_label(text: String) -> gpui::Div {
+    div()
+        .font(Font {
+            family: "SF Pro".into(),
+            features: FontFeatures(std::sync::Arc::new(vec![("tnum".into(), 1)])),
+            fallbacks: None,
+            weight: FontWeight::NORMAL,
+            style: FontStyle::Normal,
+        })
+        .text_size(px(theme::SUBHEADLINE.size))
+        .line_height(px(theme::SUBHEADLINE.leading))
+        .text_color(theme::tertiary_label())
+        .whitespace_nowrap()
+        .child(text)
 }
 
 fn format_time(seconds: f64) -> String {
@@ -2455,6 +2874,82 @@ mod tests {
         assert_eq!(
             take_art_bounds(&mut seen).expect("moved"),
             (40.0, 20.0, 84.0, 84.0)
+        );
+    }
+
+    #[test]
+    fn lyric_stagger_progress_is_monotonic_and_line_zero_leads() {
+        let mut last = [0.0f32; 5];
+        for ms in 0..=800 {
+            let ms = ms as f32;
+            let mut prev = 1.0;
+            for line in 0..5 {
+                let p = lyric_stagger_progress(ms, line);
+                assert!(
+                    (0.0..=1.0).contains(&p),
+                    "p={p} line={line} ms={ms}"
+                );
+                assert!(
+                    p + 1e-5 >= last[line],
+                    "non-monotonic line={line} ms={ms}"
+                );
+                assert!(
+                    p <= prev + 1e-5,
+                    "line {line} led a higher line at {ms}"
+                );
+                last[line] = p;
+                prev = p;
+            }
+        }
+        assert_eq!(lyric_stagger_progress(0.0, 0), 0.0);
+        assert_eq!(lyric_stagger_progress(0.0, 4), 0.0);
+        assert!(lyric_stagger_progress(35.0, 0) > lyric_stagger_progress(35.0, 4));
+        assert_eq!(lyric_stagger_progress(35.0, 4), 0.0);
+        assert!(lyric_stagger_progress(650.0, 4) >= 0.999);
+    }
+
+    #[test]
+    fn lyric_wrap_target_caps_oversized_measure() {
+        report_lyric_current_h(LYRIC_CURRENT.leading);
+        assert_eq!(lyric_wrap_target(), 0.0);
+        assert_eq!(lyric_wrap_extra(), 0.0);
+        report_lyric_current_h(LYRIC_CURRENT.leading * 2.0);
+        assert!((lyric_wrap_target() - (-LYRIC_CURRENT.leading / 2.0)).abs() < 1e-3);
+        assert!((lyric_wrap_extra() - LYRIC_CURRENT.leading).abs() < 1e-3);
+        report_lyric_current_h(84.0);
+        assert!((lyric_wrap_target() - (-LYRIC_CURRENT.leading / 2.0)).abs() < 1e-3);
+        assert!((lyric_wrap_extra() - LYRIC_CURRENT.leading).abs() < 1e-3);
+        report_lyric_current_h(f32::NAN);
+        assert!((lyric_wrap_target() - (-LYRIC_CURRENT.leading / 2.0)).abs() < 1e-3);
+        assert!((lyric_wrap_extra() - LYRIC_CURRENT.leading).abs() < 1e-3);
+        report_lyric_current_h(LYRIC_CURRENT.leading);
+        assert_eq!(lyric_wrap_target(), 0.0);
+        assert_eq!(lyric_wrap_extra(), 0.0);
+    }
+
+    #[test]
+    fn first_frame_after_advance_keeps_incoming_current_next_styled() {
+        let from = lyrics_retarget_from([0.0; 5], 10_000.0);
+        let cur = lyric_motion_paint(true, 0.0, &from, 0.0, true)[2];
+        assert!(
+            (cur.size - theme::BODY.size).abs() < 1e-3,
+            "size {}",
+            cur.size
+        );
+        assert!(
+            (cur.leading - theme::BODY.leading).abs() < 1e-3,
+            "leading {}",
+            cur.leading
+        );
+        assert!(!cur.bold);
+        let next = theme::secondary_label();
+        assert!((cur.color.r - next.r).abs() < 1e-3);
+        assert!((cur.color.g - next.g).abs() < 1e-3);
+        assert!((cur.color.b - next.b).abs() < 1e-3);
+        assert!((cur.color.a - next.a).abs() < 1e-3);
+        assert!(
+            (cur.color.r - theme::LABEL.r).abs() > 0.01
+                || (cur.color.a - theme::LABEL.a).abs() > 0.01
         );
     }
 }

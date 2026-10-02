@@ -3,6 +3,7 @@ mod icons;
 mod island;
 mod motion;
 mod notify;
+mod pip;
 mod platform;
 mod theme;
 mod weather_shader;

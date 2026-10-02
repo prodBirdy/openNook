@@ -5,7 +5,6 @@ use crate::share::ShareSettings;
 use crate::sysstats::SysStatsSettings;
 use crate::weather::WeatherSettings;
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
 use std::sync::RwLock;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -24,18 +23,13 @@ pub enum WidgetModule {
     Mirror = 9,
     Battery = 10,
     Messages = 11,
-    Obsidian = 12,
     Weather = 14,
-    Vpn = 15,
-    HighAlert = 16,
     SysStats = 17,
     Recorder = 18,
-    Meeting = 19,
-    Notifications = 20,
 }
 
 impl WidgetModule {
-    pub const ALL: [Self; 20] = [
+    pub const ALL: [Self; 15] = [
         Self::Calendar,
         Self::Music,
         Self::Files,
@@ -48,14 +42,9 @@ impl WidgetModule {
         Self::Mirror,
         Self::Battery,
         Self::Messages,
-        Self::Obsidian,
         Self::Weather,
-        Self::Vpn,
-        Self::HighAlert,
         Self::SysStats,
         Self::Recorder,
-        Self::Meeting,
-        Self::Notifications,
     ];
 
     pub fn from_u8(value: u8) -> Self {
@@ -74,19 +63,10 @@ impl WidgetModule {
             | Self::Observe
             | Self::Reminders
             | Self::Agents
-            | Self::Obsidian
-            | Self::SysStats
-            | Self::Notifications => 4,
+            | Self::SysStats => 4,
             Self::Recorder => 5,
             Self::Messages => 6,
-            Self::Timers
-            | Self::Speed
-            | Self::Mirror
-            | Self::Battery
-            | Self::Weather
-            | Self::Vpn
-            | Self::HighAlert
-            | Self::Meeting => 3,
+            Self::Timers | Self::Speed | Self::Mirror | Self::Battery | Self::Weather => 3,
         }
     }
 
@@ -98,33 +78,21 @@ impl WidgetModule {
             | Self::Observe
             | Self::Reminders
             | Self::Mirror
-            | Self::SysStats
-            | Self::Notifications => 3,
+            | Self::SysStats => 3,
             Self::Messages => 4,
             Self::Notes
             | Self::Timers
             | Self::Speed
             | Self::Agents
             | Self::Battery
-            | Self::Obsidian
-            | Self::Weather
-            | Self::Vpn
-            | Self::HighAlert
-            | Self::Meeting => 2,
+            | Self::Weather => 2,
             Self::Recorder => 3,
         }
     }
 
     pub fn max_cells(self) -> u8 {
         match self {
-            Self::Timers
-            | Self::Speed
-            | Self::Mirror
-            | Self::Battery
-            | Self::Weather
-            | Self::Vpn
-            | Self::HighAlert
-            | Self::Meeting => 6,
+            Self::Timers | Self::Speed | Self::Mirror | Self::Battery | Self::Weather => 6,
             // Raised from 6; Notes/Reminders/etc. already sit at 8 via `_`.
             Self::Agents => 7,
             // Music and Calendar stay at 8.
@@ -139,15 +107,7 @@ impl WidgetModule {
 
     /// Bundle ids of third-party apps this widget wraps. Empty for first-party.
     pub fn host_apps(self) -> &'static [&'static str] {
-        match self {
-            Self::Obsidian => &[crate::obsidian::BUNDLE_ID],
-            Self::Meeting => &[
-                crate::meetings::ZOOM_BUNDLE,
-                crate::meetings::TEAMS_BUNDLE,
-                crate::meetings::TEAMS_CLASSIC_BUNDLE,
-            ],
-            _ => &[],
-        }
+        &[]
     }
 
     /// Host app installed (third-party widgets).
@@ -164,15 +124,7 @@ impl WidgetModule {
     pub fn is_experimental(self) -> bool {
         matches!(
             self,
-            Self::Observe
-                | Self::Obsidian
-                | Self::Vpn
-                | Self::HighAlert
-                | Self::SysStats
-                | Self::Recorder
-                | Self::Meeting
-                | Self::Notifications
-                | Self::Messages
+            Self::Observe | Self::SysStats | Self::Recorder | Self::Messages
         )
     }
 }
@@ -211,6 +163,18 @@ where
         .collect())
 }
 
+/// Drop per-widget sizes for modules that no longer exist.
+fn lenient_widget_widths<'de, D>(deserializer: D) -> Result<Vec<(WidgetModule, u8)>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw: Vec<serde_json::Value> = serde::Deserialize::deserialize(deserializer)?;
+    Ok(raw
+        .into_iter()
+        .filter_map(|v| serde_json::from_value::<(WidgetModule, u8)>(v).ok())
+        .collect())
+}
+
 fn default_widget_order() -> Vec<WidgetModule> {
     vec![
         WidgetModule::Music,
@@ -218,21 +182,16 @@ fn default_widget_order() -> Vec<WidgetModule> {
         WidgetModule::Mirror,
         WidgetModule::Files,
         WidgetModule::Agents,
-        WidgetModule::Meeting,
         WidgetModule::Observe,
         WidgetModule::Reminders,
         WidgetModule::Timers,
         WidgetModule::Notes,
-        WidgetModule::Obsidian,
         WidgetModule::Speed,
         WidgetModule::Battery,
         WidgetModule::Messages,
         WidgetModule::Weather,
-        WidgetModule::Vpn,
-        WidgetModule::HighAlert,
         WidgetModule::SysStats,
         WidgetModule::Recorder,
-        WidgetModule::Notifications,
     ]
 }
 
@@ -242,6 +201,35 @@ pub struct WindowSettings {
     /// Unknown legacy keys such as `extra_width` / `extra_height` are ignored.
     #[serde(default, skip_serializing)]
     pub non_notch_mode: bool,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum PipKind {
+    #[default]
+    Lyrics,
+    Observe,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum PipCorner {
+    TopLeft,
+    TopRight,
+    BottomLeft,
+    #[default]
+    BottomRight,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+pub struct PipWindowState {
+    pub kind: PipKind,
+    #[serde(default)]
+    pub corner: PipCorner,
+    #[serde(default)]
+    pub mini: bool,
+    #[serde(default = "default_true")]
+    pub keep_on_top: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -302,38 +290,14 @@ pub struct AppSettings {
     /// Fragile Accessibility CGEvent Return after opening `whatsapp://`.
     #[serde(default)]
     pub experimental_whatsapp_autosend: bool,
-    /// Reveal unfinished widgets (Observe, Obsidian, VPN, …) in Customize/Settings.
+    /// Reveal unfinished widgets (Observe, Stats, Voice, Messages, …) in Customize/Settings.
     #[serde(default)]
     pub experimental_widgets: bool,
     /// Mirror Apple Clock timers in the Timers widget (plist / vnode watch).
     #[serde(default = "default_true")]
     pub sync_clock_timers: bool,
     #[serde(default)]
-    pub show_obsidian: bool,
-    /// User-chosen vault folder. `None` until Settings picks one.
-    #[serde(default)]
-    pub obsidian_vault: Option<PathBuf>,
-    /// Optional markdown heading that daily-note capture appends under.
-    #[serde(default)]
-    pub obsidian_capture_heading: Option<String>,
-    /// Use `obsidian://new?append=true` instead of writing the daily note.
-    #[serde(default)]
-    pub obsidian_uri_capture: bool,
-    #[serde(default)]
     pub weather: WeatherSettings,
-    #[serde(default)]
-    pub show_vpn: bool,
-    /// Elapsed session clock on the compact VPN face.
-    #[serde(default = "default_true")]
-    pub vpn_show_timer: bool,
-    /// Interface names the classifier must ignore (utun helpers, ZTNA, etc.).
-    #[serde(default)]
-    pub vpn_ignore_interfaces: Vec<String>,
-    #[serde(default)]
-    pub show_high_alert: bool,
-    /// Seconds; `0` means until turned off. Default is 30 minutes — never forever.
-    #[serde(default = "default_high_alert_duration")]
-    pub high_alert_default_duration_secs: u32,
     #[serde(default)]
     pub high_alert_kind: HighAlertKind,
     /// Auto-release the assertion at or below this battery percent. `0` disables.
@@ -364,21 +328,6 @@ pub struct AppSettings {
     /// On-device Speech while recording. Off = record-only (cheaper).
     #[serde(default = "default_true")]
     pub recorder_transcribe: bool,
-    #[serde(default)]
-    pub show_meetings: bool,
-    #[serde(default)]
-    pub meetings: MeetingsConfig,
-    /// Off by default: Accessibility (and optional Full Disk Access) must be
-    /// granted before the shelf can see other apps' notifications.
-    #[serde(default)]
-    pub show_notifications: bool,
-    /// User opted into reading the usernoted SQLite store. Still requires a
-    /// manual Full Disk Access grant — there is no programmatic prompt.
-    #[serde(default)]
-    pub notification_fda_opt_in: bool,
-    /// Bundle IDs (or app names) hidden from the shelf.
-    #[serde(default)]
-    pub notification_blocked_apps: Vec<String>,
     #[serde(default)]
     pub observe: ObserveConfig,
     #[serde(default)]
@@ -414,7 +363,10 @@ pub struct AppSettings {
     #[serde(default)]
     pub island_accent: bool,
     /// Per-widget widths in Nook cells. Missing entries use [`WidgetModule::default_cells`].
-    #[serde(default = "default_widget_widths")]
+    #[serde(
+        default = "default_widget_widths",
+        deserialize_with = "lenient_widget_widths"
+    )]
     pub widget_widths: Vec<(WidgetModule, u8)>,
     #[serde(default)]
     pub share: ShareSettings,
@@ -448,6 +400,8 @@ pub struct AppSettings {
     pub ambient_art_glow: bool,
     #[serde(default)]
     pub window: WindowSettings,
+    #[serde(default)]
+    pub pip_windows: Vec<PipWindowState>,
 }
 
 fn default_terminal_font_size() -> f32 {
@@ -462,48 +416,6 @@ fn default_glass_gradient() -> f32 {
     0.5
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum MeetControlMode {
-    /// Activate the Meet tab then send Cmd+D / Cmd+E (focus-stealing).
-    #[default]
-    FocusTab,
-    /// Chrome/Safari `execute javascript` — needs "Allow JavaScript from Apple Events".
-    AppleEventsJs,
-}
-
-impl MeetControlMode {
-    pub fn caption(self) -> &'static str {
-        match self {
-            Self::FocusTab => "Focus tab",
-            Self::AppleEventsJs => "Apple Events JS",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct MeetingsConfig {
-    #[serde(default = "default_true")]
-    pub zoom: bool,
-    #[serde(default = "default_true")]
-    pub teams: bool,
-    #[serde(default = "default_true")]
-    pub meet: bool,
-    #[serde(default)]
-    pub meet_mode: MeetControlMode,
-}
-
-impl Default for MeetingsConfig {
-    fn default() -> Self {
-        Self {
-            zoom: true,
-            teams: true,
-            meet: true,
-            meet_mode: MeetControlMode::FocusTab,
-        }
-    }
-}
-
 fn default_true() -> bool {
     true
 }
@@ -515,10 +427,6 @@ fn default_battery_alert_threshold() -> u8 {
 fn default_lpm_shortcut_name() -> Option<String> {
     Some(crate::power::default_lpm_shortcut_name().into())
 }
-fn default_high_alert_duration() -> u32 {
-    30 * 60
-}
-
 fn default_low_battery_pct() -> u8 {
     10
 }
@@ -599,16 +507,7 @@ impl Default for AppSettings {
             experimental_whatsapp_autosend: false,
             experimental_widgets: false,
             sync_clock_timers: true,
-            show_obsidian: false,
-            obsidian_vault: None,
-            obsidian_capture_heading: None,
-            obsidian_uri_capture: false,
             weather: WeatherSettings::default(),
-            show_vpn: false,
-            vpn_show_timer: true,
-            vpn_ignore_interfaces: Vec::new(),
-            show_high_alert: false,
-            high_alert_default_duration_secs: default_high_alert_duration(),
             high_alert_kind: HighAlertKind::default(),
             low_battery_release_pct: default_low_battery_pct(),
             pomodoro_work_secs: default_pomo_work(),
@@ -623,11 +522,6 @@ impl Default for AppSettings {
             sysstats: SysStatsSettings::default(),
             show_recorder: false,
             recorder_transcribe: true,
-            show_meetings: false,
-            meetings: MeetingsConfig::default(),
-            show_notifications: false,
-            notification_fda_opt_in: false,
-            notification_blocked_apps: Vec::new(),
             observe: ObserveConfig::default(),
             liquid_glass_mode: false,
             liquid_glass_gradient: default_glass_gradient(),
@@ -649,6 +543,7 @@ impl Default for AppSettings {
             animated_album_art: false,
             ambient_art_glow: true,
             window: WindowSettings::default(),
+            pip_windows: Vec::new(),
         }
     }
 }
@@ -701,14 +596,9 @@ impl AppSettings {
             WidgetModule::Mirror => self.show_mirror,
             WidgetModule::Battery => self.show_battery,
             WidgetModule::Messages => self.show_messages,
-            WidgetModule::Obsidian => self.show_obsidian,
             WidgetModule::Weather => self.weather.enabled,
-            WidgetModule::Vpn => self.show_vpn,
-            WidgetModule::HighAlert => self.show_high_alert,
             WidgetModule::SysStats => self.show_sysstats,
             WidgetModule::Recorder => self.show_recorder,
-            WidgetModule::Meeting => self.show_meetings,
-            WidgetModule::Notifications => self.show_notifications,
         }
     }
 
@@ -716,24 +606,6 @@ impl AppSettings {
     /// experimental only when the toggle is on). Code stays regardless.
     pub fn widget_visible(&self, module: WidgetModule) -> bool {
         !module.is_experimental() || self.experimental_widgets
-    }
-
-    pub fn notification_app_blocked(&self, id: &str) -> bool {
-        self.notification_blocked_apps
-            .iter()
-            .any(|entry| entry.eq_ignore_ascii_case(id))
-    }
-
-    pub fn toggle_notification_app(&mut self, id: &str) {
-        if let Some(index) = self
-            .notification_blocked_apps
-            .iter()
-            .position(|entry| entry.eq_ignore_ascii_case(id))
-        {
-            self.notification_blocked_apps.remove(index);
-        } else if !id.is_empty() {
-            self.notification_blocked_apps.push(id.to_string());
-        }
     }
 
     pub fn toggle_enabled(&mut self, module: WidgetModule) {
@@ -791,19 +663,9 @@ impl AppSettings {
                 }
                 crate::messages::request_refresh();
             }
-            WidgetModule::Obsidian => self.show_obsidian = on,
             WidgetModule::Weather => self.weather.enabled = on,
-            WidgetModule::Vpn => {
-                self.show_vpn = on;
-                if on {
-                    crate::vpn::start();
-                }
-            }
-            WidgetModule::HighAlert => self.show_high_alert = on,
             WidgetModule::SysStats => self.show_sysstats = on,
             WidgetModule::Recorder => self.show_recorder = on,
-            WidgetModule::Meeting => self.show_meetings = on,
-            WidgetModule::Notifications => self.show_notifications = on,
         }
     }
 
@@ -1397,17 +1259,8 @@ mod tests {
         assert!(!parsed.show_messages);
         assert!(!parsed.experimental_whatsapp_autosend);
         assert!(parsed.sync_clock_timers);
-        assert!(!parsed.show_obsidian);
-        assert_eq!(parsed.obsidian_vault, None);
-        assert_eq!(parsed.obsidian_capture_heading, None);
-        assert!(!parsed.obsidian_uri_capture);
         assert!(!parsed.weather.enabled);
         assert!(parsed.weather.show_on_compact_face);
-        assert!(!parsed.show_vpn);
-        assert!(parsed.vpn_show_timer);
-        assert!(parsed.vpn_ignore_interfaces.is_empty());
-        assert!(!parsed.show_high_alert);
-        assert_eq!(parsed.high_alert_default_duration_secs, 30 * 60);
         assert_eq!(parsed.high_alert_kind, HighAlertKind::Display);
         assert_eq!(parsed.low_battery_release_pct, 10);
         assert_eq!(parsed.pomodoro_work_secs, 25 * 60);
@@ -1421,14 +1274,6 @@ mod tests {
         assert_eq!(parsed.sysstats, SysStatsSettings::default());
         assert!(!parsed.show_recorder);
         assert!(parsed.recorder_transcribe);
-        assert!(!parsed.show_meetings);
-        assert!(parsed.meetings.zoom);
-        assert!(parsed.meetings.teams);
-        assert!(parsed.meetings.meet);
-        assert_eq!(parsed.meetings.meet_mode, MeetControlMode::FocusTab);
-        assert!(!parsed.show_notifications);
-        assert!(!parsed.notification_fda_opt_in);
-        assert!(parsed.notification_blocked_apps.is_empty());
         assert!(parsed.liquid_glass_mode);
         assert!((parsed.liquid_glass_gradient - default_glass_gradient()).abs() < f32::EPSILON);
         assert!(!parsed.non_notch_mode);
@@ -1641,14 +1486,9 @@ mod tests {
         settings.show_mirror = false;
         settings.show_battery = false;
         settings.show_messages = false;
-        settings.show_obsidian = false;
         settings.weather.enabled = false;
-        settings.show_vpn = false;
-        settings.show_high_alert = false;
         settings.show_sysstats = false;
         settings.show_recorder = false;
-        settings.show_meetings = false;
-        settings.show_notifications = false;
         settings.set_cells(WidgetModule::Music, 5);
         assert_eq!(settings.used_cells(), 5);
         assert_eq!(settings.remaining_cells(), AppSettings::TOTAL_CELLS - 5);
@@ -1723,17 +1563,16 @@ mod tests {
     #[test]
     fn can_enable_refuses_when_row_is_full() {
         let mut settings = AppSettings::default();
-        settings.experimental_widgets = true;
-        // Defaults 11 + Battery 3 + Weather 3 = 17; HighAlert needs another row.
+        // Defaults 11 + Battery 3 + Weather 3 = 17; Speed needs another row.
         assert!(settings.set_enabled(WidgetModule::Battery, true));
         assert!(settings.set_enabled(WidgetModule::Weather, true));
         assert_eq!(settings.used_cells(), AppSettings::TOTAL_CELLS);
         assert_eq!(settings.nook_row_count(), 1);
-        assert!(!settings.can_enable(WidgetModule::HighAlert));
-        assert!(!settings.set_enabled(WidgetModule::HighAlert, true));
+        assert!(!settings.can_enable(WidgetModule::Speed));
+        assert!(!settings.set_enabled(WidgetModule::Speed, true));
         assert!(settings.set_enabled(WidgetModule::Weather, false));
-        assert!(settings.can_enable(WidgetModule::HighAlert));
-        assert!(settings.set_enabled(WidgetModule::HighAlert, true));
+        assert!(settings.can_enable(WidgetModule::Speed));
+        assert!(settings.set_enabled(WidgetModule::Speed, true));
     }
 
     #[test]
@@ -1752,7 +1591,6 @@ mod tests {
             WidgetModule::Agents,
             WidgetModule::Mirror,
             WidgetModule::Reminders,
-            WidgetModule::HighAlert,
             WidgetModule::Notes,
         ];
         for module in [
@@ -1762,7 +1600,6 @@ mod tests {
             WidgetModule::Agents,
             WidgetModule::Mirror,
             WidgetModule::Reminders,
-            WidgetModule::HighAlert,
             WidgetModule::Notes,
         ] {
             settings.write_enabled(module, true);
@@ -1775,7 +1612,7 @@ mod tests {
         assert!(settings.show_media);
         assert!(settings.show_calendar);
         assert!(settings.show_timers);
-        assert!(!settings.show_high_alert);
+        assert!(!settings.show_speed);
         assert!(!settings.show_notes);
     }
 
@@ -1907,11 +1744,11 @@ mod tests {
         assert!(settings.set_enabled(WidgetModule::Weather, true));
         assert_eq!(settings.used_cells(), AppSettings::TOTAL_CELLS);
         let order_before = settings.widget_order.clone();
-        let enabled_before = settings.show_high_alert;
-        assert!(!settings.insert_widget_at(WidgetModule::HighAlert, 0));
+        let enabled_before = settings.show_speed;
+        assert!(!settings.insert_widget_at(WidgetModule::Speed, 0));
         assert_eq!(settings.widget_order, order_before);
-        assert_eq!(settings.show_high_alert, enabled_before);
-        assert!(!settings.is_enabled(WidgetModule::HighAlert));
+        assert_eq!(settings.show_speed, enabled_before);
+        assert!(!settings.is_enabled(WidgetModule::Speed));
     }
 
     #[test]
@@ -1922,9 +1759,9 @@ mod tests {
         assert_eq!(settings.cells_short_for(WidgetModule::Music), 0); // already on
         assert!(settings.set_enabled(WidgetModule::Battery, true));
         assert!(settings.set_enabled(WidgetModule::Weather, true));
-        // Full row; HighAlert needs 3 → short by 3.
+        // Full row; Speed needs 3 → short by 3.
         assert_eq!(settings.remaining_cells(), 0);
-        assert_eq!(settings.cells_short_for(WidgetModule::HighAlert), 3);
+        assert_eq!(settings.cells_short_for(WidgetModule::Speed), 3);
         assert_eq!(settings.cells_short_for(WidgetModule::Files), 0); // not a Nook cell
     }
 
@@ -1987,20 +1824,55 @@ mod tests {
     }
 
     #[test]
-    fn notifications_default_off_and_filter_toggles() {
-        let parsed: AppSettings = serde_json::from_str("{}").unwrap();
-        assert!(!parsed.show_notifications);
-        assert!(!parsed.notification_fda_opt_in);
-        assert!(!parsed.is_enabled(WidgetModule::Notifications));
-        let mut settings = AppSettings::default();
-        assert!(settings.set_enabled(WidgetModule::Calendar, false));
-        assert!(settings.set_enabled(WidgetModule::Timers, false));
-        assert!(settings.set_enabled(WidgetModule::Notifications, true));
-        assert!(settings.show_notifications);
-        settings.toggle_notification_app("com.apple.mail");
-        assert!(settings.notification_app_blocked("com.apple.mail"));
-        settings.toggle_notification_app("com.apple.mail");
-        assert!(!settings.notification_app_blocked("com.apple.mail"));
+    fn removed_widgets_drop_silently_from_old_settings_json() {
+        let parsed: AppSettings = serde_json::from_str(
+            r#"{
+                "widget_order": [
+                    "obsidian",
+                    "vpn",
+                    "high_alert",
+                    "meeting",
+                    "notifications",
+                    "calendar",
+                    "music"
+                ],
+                "widget_widths": [
+                    ["obsidian", 4],
+                    ["vpn", 3],
+                    ["high_alert", 3],
+                    ["meeting", 3],
+                    ["notifications", 4],
+                    ["calendar", 5]
+                ],
+                "show_obsidian": true,
+                "obsidian_vault": "/Users/me/Vault",
+                "obsidian_capture_heading": "Inbox",
+                "obsidian_uri_capture": true,
+                "show_vpn": true,
+                "vpn_show_timer": false,
+                "vpn_ignore_interfaces": ["utun3"],
+                "show_high_alert": true,
+                "high_alert_default_duration_secs": 900,
+                "show_meetings": true,
+                "meetings": {
+                    "zoom": false,
+                    "teams": true,
+                    "meet": true,
+                    "meet_mode": "apple_events_js"
+                },
+                "show_notifications": true,
+                "notification_fda_opt_in": true,
+                "notification_blocked_apps": ["com.apple.mail"]
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            parsed.widget_order,
+            vec![WidgetModule::Calendar, WidgetModule::Music]
+        );
+        assert_eq!(parsed.widget_widths, vec![(WidgetModule::Calendar, 5)]);
+        assert!(parsed.show_calendar);
+        assert!(parsed.show_media);
     }
 
     #[cfg(target_os = "macos")]
@@ -2029,33 +1901,57 @@ mod tests {
 
     #[test]
     fn third_party_widgets_need_their_host_app() {
-        assert_eq!(
-            WidgetModule::Obsidian.host_apps(),
-            &[crate::obsidian::BUNDLE_ID]
-        );
-        assert_eq!(
-            WidgetModule::Meeting.host_apps(),
-            &[
-                crate::meetings::ZOOM_BUNDLE,
-                crate::meetings::TEAMS_BUNDLE,
-                crate::meetings::TEAMS_CLASSIC_BUNDLE,
-            ]
-        );
         let third_party: Vec<_> = WidgetModule::ALL
             .iter()
             .copied()
             .filter(|module| !module.host_apps().is_empty())
             .collect();
-        assert_eq!(third_party, [WidgetModule::Obsidian, WidgetModule::Meeting]);
+        assert!(third_party.is_empty());
         for module in WidgetModule::ALL {
-            if module.host_apps().is_empty() {
-                assert!(module.available_if(|_| false));
-            }
+            assert!(module.host_apps().is_empty());
+            assert!(module.available_if(|_| false));
         }
-        assert!(!WidgetModule::Obsidian.available_if(|_| false));
-        assert!(WidgetModule::Obsidian.available_if(|id| id == crate::obsidian::BUNDLE_ID));
-        assert!(!WidgetModule::Meeting.available_if(|_| false));
-        assert!(WidgetModule::Meeting.available_if(|id| id == crate::meetings::ZOOM_BUNDLE));
-        assert!(WidgetModule::Meeting.available_if(|id| id == crate::meetings::TEAMS_BUNDLE));
+    }
+
+    #[test]
+    fn pip_window_state_roundtrips_with_defaults() {
+        let full = PipWindowState {
+            kind: PipKind::Lyrics,
+            corner: PipCorner::TopLeft,
+            mini: true,
+            keep_on_top: false,
+        };
+        let json = serde_json::to_string(&full).unwrap();
+        assert_eq!(serde_json::from_str::<PipWindowState>(&json).unwrap(), full);
+        let observe = PipWindowState {
+            kind: PipKind::Observe,
+            corner: PipCorner::BottomRight,
+            mini: false,
+            keep_on_top: true,
+        };
+        let json = serde_json::to_string(&observe).unwrap();
+        assert!(json.contains("\"observe\""));
+        assert_eq!(serde_json::from_str::<PipWindowState>(&json).unwrap(), observe);
+        let sparse: PipWindowState = serde_json::from_str(r#"{"kind":"lyrics"}"#).unwrap();
+        assert_eq!(sparse.corner, PipCorner::BottomRight);
+        assert!(!sparse.mini);
+        assert!(sparse.keep_on_top);
+        assert_eq!(PipKind::default(), PipKind::Lyrics);
+        assert_eq!(PipCorner::default(), PipCorner::BottomRight);
+    }
+
+    #[test]
+    fn pip_windows_default_to_empty_and_survive_settings_roundtrip() {
+        let parsed: AppSettings = serde_json::from_str("{}").unwrap();
+        assert!(parsed.pip_windows.is_empty());
+        let mut settings = AppSettings::default();
+        settings.pip_windows.push(PipWindowState {
+            kind: PipKind::Observe,
+            corner: PipCorner::TopRight,
+            mini: false,
+            keep_on_top: true,
+        });
+        let json = serde_json::to_string(&settings).unwrap();
+        assert_eq!(serde_json::from_str::<AppSettings>(&json).unwrap(), settings);
     }
 }

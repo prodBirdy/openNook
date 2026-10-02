@@ -42,7 +42,7 @@ Linux uses the same `nook` crate after installing the system packages listed by 
 
 ## Permissions
 
-Calendar and Reminders access is requested only when those widgets are enabled. Camera access is requested when you enable Mirror. Location access is requested when Weather uses your location; manual city entry is available instead. Automation is requested when media control needs a fallback. Microphone and Speech Recognition are requested when you enable the experimental Voice recorder. Accessibility is requested for media-key and HUD interception. Full Disk Access is requested by the experimental Messages and Notifications widgets. Local Network access is requested when LocalSend is enabled.
+Calendar and Reminders access is requested only when those widgets are enabled. Camera access is requested when you enable Mirror. Location access is requested when Weather uses your location; manual city entry is available instead. Automation is requested when media control needs a fallback. Microphone and Speech Recognition are requested when you enable the experimental Voice recorder. Accessibility is requested for media-key and HUD interception. Full Disk Access is requested by the experimental Messages widget. Local Network access is requested when LocalSend is enabled.
 
 ## Keyboard
 

@@ -1,6 +1,3 @@
-//! Voice-memo Nook pane: dated list and a ringed record/stop control.
-//! Compact face: live waveform, `00:06` clock, ringed stop.
-
 use crate::icons::lucide_color;
 use crate::island::ui::{
     label, nook_empty, nook_pane, open_privacy_pane, scroll_body, text_btn, timer_text,
@@ -11,9 +8,8 @@ use crate::platform;
 use crate::theme;
 use chrono::{Local, TimeZone, Utc};
 use gpui::{
-    canvas, div, linear_color_stop, linear_gradient, prelude::*, px, relative, rgba, AnyElement,
-    Context, CursorStyle, FontWeight, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-    ScrollWheelEvent, SharedString,
+    canvas, div, prelude::*, px, relative, AnyElement, Context, CursorStyle, MouseButton,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, ScrollWheelEvent, SharedString,
 };
 use nook_core::recorder::{self, Playback, RecordingItem};
 use std::cell::{Cell, RefCell};
@@ -27,115 +23,57 @@ thread_local! {
     static DRAG_ARM: RefCell<Option<(String, f64, f64)>> = const { RefCell::new(None) };
 }
 
-const RING: f32 = 48.0;
-const DOT: f32 = 30.0;
-const STOP: f32 = 16.0;
-const STOP_RADIUS: f32 = 5.0;
-
 const WAVE_BARS: usize = 16;
 const WAVE_H: f32 = 26.0;
 const WAVE_BAR_W: f32 = 3.0;
 const WAVE_GAP: f32 = 3.0;
 const WAVE_INTERVAL: Duration = Duration::from_millis(50);
 
-const COMPACT_STOP_RING: f32 = 26.0;
-const COMPACT_STOP_INNER: f32 = 10.0;
-const COMPACT_STOP_RADIUS: f32 = 3.0;
-
-/// Extra width on the compact recording face so the waveform and stop
-/// control fit beside the camera housing.
-pub(crate) const COMPACT_EXTRA: f32 = 176.0;
-pub(crate) const COMPACT_HOVER_EXTRA: f32 = 192.0;
+pub(crate) const COMPACT_EXTRA: f32 = 98.0;
+pub(crate) const COMPACT_HOVER_EXTRA: f32 = 114.0;
 
 pub(crate) fn recorder_card(island: &Island, cx: &mut Context<Island>) -> impl IntoElement {
-    let recording = island.recording;
+    if island.recording {
+        return recording_pane(island, cx).into_any_element();
+    }
+    if island.recordings.is_empty() {
+        return empty_pane(island, cx).into_any_element();
+    }
+    let playback = effective_playback(island);
+    let active_id = playback.as_ref().map(|p| p.id).or(island.playing_recording);
+    if let Some(id) = active_id {
+        if island.recordings.iter().any(|r| r.id == id) {
+            return playing_pane(island, playback.as_ref(), cx).into_any_element();
+        }
+    }
+    recordings_pane(island, cx).into_any_element()
+}
+
+fn effective_playback(island: &Island) -> Option<Playback> {
+    if let Some(pb) = recorder::playback_state() {
+        return Some(pb);
+    }
+    if island.gallery_mode {
+        if let Some(id) = island.playing_recording {
+            return Some(Playback {
+                id,
+                position_s: 41.0,
+                duration_s: 113.0,
+                playing: true,
+            });
+        }
+    }
+    None
+}
+
+fn recording_pane(island: &Island, cx: &mut Context<Island>) -> impl IntoElement {
     let elapsed = island.recording_elapsed_secs();
     let clock = recorder::format_duration_ms(elapsed as i64 * 1000);
-    let hint = island.recorder_error.clone();
-    let transcript = island.live_transcript.trim();
-    let mic = mic_caption(recording, island.recordings.is_empty());
-
-    let mic_denied = hint
-        .as_deref()
-        .is_some_and(|h| h.to_lowercase().contains("denied"));
-    let list = if recording {
-        div()
-            .flex_1()
-            .min_h(px(0.))
-            .w_full()
-            .flex()
-            .flex_col()
-            .justify_center()
-            .gap(px(10.))
-            .child(rec_waveform(island.recorder_wave.iter().copied()))
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(7.))
-                    .child(div().size(px(7.)).rounded_full().bg(theme::DESTRUCTIVE))
-                    .child(label(clock.clone(), theme::CALLOUT, false).text_color(theme::LABEL))
-                    .child(
-                        label("recording", theme::FOOTNOTE, false)
-                            .text_color(theme::TERTIARY_LABEL),
-                    ),
-            )
-            .into_any_element()
-    } else if island.recordings.is_empty() {
-        if mic_denied {
-            div()
-                .flex_1()
-                .flex()
-                .flex_col()
-                .items_center()
-                .justify_center()
-                .gap(px(8.))
-                .child(nook_empty(
-                    "mic-off",
-                    hint.unwrap_or_else(|| "Microphone access is off".into()),
-                ))
-                .child(text_btn("Open Privacy Settings", cx, |_, _, _| {
-                    open_privacy_pane("Privacy_Microphone");
-                }))
-                .into_any_element()
-        } else {
-            nook_empty("mic", hint.unwrap_or_else(|| "Tap to record".into())).into_any_element()
-        }
-    } else {
-        let mut rows = div().flex().flex_col().w_full().flex_shrink_0().pb(px(28.));
-        if recording {
-            rows = rows.child(live_row(&clock, transcript));
-        }
-        let playback = recorder::playback_state();
-        for item in &island.recordings {
-            rows = rows.child(recording_row(item, playback.as_ref(), cx));
-        }
-        div()
-            .relative()
-            .flex()
-            .flex_col()
-            .flex_1()
-            .min_h(px(0.))
-            .w_full()
-            .child(scroll_body("rec-list", rows))
-            .child(
-                div()
-                    .absolute()
-                    .left_0()
-                    .right_0()
-                    .bottom_0()
-                    .h(px(28.))
-                    .bg(linear_gradient(
-                        180.0,
-                        linear_color_stop(rgba(0x00000000), 0.0),
-                        linear_color_stop(rgba(0x000000CC), 1.0),
-                    )),
-            )
-            .into_any_element()
-    };
-
-    card_shell("nook-recorder")
+    let (caption, live) = live_caption(island);
+    nook_pane("nook-recorder")
         .w_full()
+        .p(px(15.))
+        .gap(px(10.))
         .on_mouse_down(
             MouseButton::Left,
             cx.listener(|_, _: &MouseDownEvent, _, cx| {
@@ -145,7 +83,94 @@ pub(crate) fn recorder_card(island: &Island, cx: &mut Context<Island>) -> impl I
                 }
             }),
         )
-        .child(list)
+        .child(
+            div()
+                .flex_1()
+                .min_h(px(0.))
+                .w_full()
+                .flex()
+                .flex_col()
+                .justify_center()
+                .gap(px(10.))
+                .child(rec_waveform(island.recorder_wave.iter().copied()))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(7.))
+                        .cursor(CursorStyle::PointingHand)
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                                cx.stop_propagation();
+                                if this.recording {
+                                    this.stop_recording(cx);
+                                }
+                            }),
+                        )
+                        .child(div().size(px(7.)).rounded_full().bg(theme::DESTRUCTIVE))
+                        .child(label(clock, theme::CALLOUT, false).text_color(theme::LABEL))
+                        .child(
+                            label(caption, theme::FOOTNOTE, false).text_color(if live {
+                                theme::SECONDARY_LABEL
+                            } else {
+                                theme::TERTIARY_LABEL
+                            }),
+                        ),
+                ),
+        )
+}
+
+fn live_caption(island: &Island) -> (String, bool) {
+    if !island.settings.recorder_transcribe {
+        return ("recording".into(), false);
+    }
+    let text = island.live_transcript.trim();
+    if text.is_empty() {
+        return ("recording".into(), false);
+    }
+    let last = text.lines().last().unwrap_or(text).trim();
+    if last.is_empty() {
+        return ("recording".into(), false);
+    }
+    let chars: Vec<char> = last.chars().collect();
+    if chars.len() <= 60 {
+        return (last.to_string(), true);
+    }
+    let tail: String = chars[chars.len() - 59..].iter().collect();
+    (format!("…{tail}"), true)
+}
+
+fn empty_pane(island: &Island, cx: &mut Context<Island>) -> impl IntoElement {
+    let hint = island.recorder_error.clone().or_else(recorder::permission_hint);
+    let denied = hint
+        .as_deref()
+        .is_some_and(|h| h.to_lowercase().contains("denied"));
+    let body = if denied {
+        div()
+            .flex_1()
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .gap(px(8.))
+            .child(nook_empty(
+                "mic-off",
+                hint.clone().unwrap_or_else(|| "Microphone access is off".into()),
+            ))
+            .child(text_btn("Open Privacy Settings", cx, |_, _, _| {
+                open_privacy_pane("Privacy_Microphone");
+            }))
+            .into_any_element()
+    } else {
+        nook_empty("mic", hint.clone().unwrap_or_else(|| "Tap to record".into()))
+            .into_any_element()
+    };
+    nook_pane("nook-recorder")
+        .w_full()
+        .p(px(15.))
+        .gap(px(10.))
+        .child(body)
         .child(
             div()
                 .w_full()
@@ -153,98 +178,250 @@ pub(crate) fn recorder_card(island: &Island, cx: &mut Context<Island>) -> impl I
                 .flex()
                 .flex_col()
                 .items_center()
-                .pt(px(0.))
-                .when(recording, |d| d)
-                .when_some(mic, |d, (text, err)| {
-                    d.child(
-                        label(text, theme::FOOTNOTE, false)
-                            .text_color(if err {
-                                theme::DESTRUCTIVE
-                            } else {
-                                theme::SECONDARY_LABEL
-                            })
-                            .pb(px(6.)),
-                    )
-                    .when(err, |d| {
-                        d.child(div().pb(px(6.)).child(text_btn(
-                            "Open Privacy Settings",
-                            cx,
-                            |_, _, _| {
-                                open_privacy_pane("Privacy_Microphone");
-                            },
-                        )))
-                    })
-                })
-                .child(record_btn(recording, cx)),
+                .child(record_footer_hint(hint.as_deref(), denied, cx))
+                .when(!denied, |d| d.child(record_dot_btn(false, cx))),
         )
 }
 
-fn card_shell(id: impl Into<gpui::ElementId>) -> gpui::Stateful<gpui::Div> {
-    nook_pane(id).p(px(16.)).gap(px(10.))
+fn record_footer_hint(
+    hint: Option<&str>,
+    denied: bool,
+    _cx: &mut Context<Island>,
+) -> impl IntoElement {
+    let show_info = !denied;
+    let denied_hint: SharedString = hint
+        .unwrap_or("Microphone access is off")
+        .to_string()
+        .into();
+    div()
+        .flex()
+        .flex_col()
+        .items_center()
+        .when(show_info, |d| {
+            d.child(
+                label(
+                    "Recording uses the microphone. macOS will ask for access.",
+                    theme::FOOTNOTE,
+                    false,
+                )
+                .text_color(theme::SECONDARY_LABEL)
+                .pb(px(6.)),
+            )
+        })
+        .when(denied, |d| {
+            d.child(
+                label(denied_hint, theme::FOOTNOTE, false)
+                    .text_color(theme::DESTRUCTIVE)
+                    .pb(px(6.)),
+            )
+        })
 }
 
-fn mic_caption(recording: bool, empty: bool) -> Option<(String, bool)> {
-    let hint = recorder::permission_hint()?;
-    let denied = hint.to_lowercase().contains("denied");
-    if denied {
-        // Empty list already shows the privacy CTA; skip the footer duplicate.
-        if empty && !recording {
-            return None;
+fn recordings_pane(island: &Island, cx: &mut Context<Island>) -> impl IntoElement {
+    let mut rows = div().flex().flex_col().w_full().flex_shrink_0();
+    for item in &island.recordings {
+        rows = rows.child(list_row(item, false, cx));
+    }
+    nook_pane("nook-recorder")
+        .w_full()
+        .px(px(11.))
+        .py(px(7.))
+        .gap(px(0.))
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(|_, _: &MouseDownEvent, _, cx| {
+                if PENDING_DELETE.get().is_some() {
+                    PENDING_DELETE.set(None);
+                    cx.notify();
+                }
+            }),
+        )
+        .child(header_row(island, cx))
+        .child(
+            div()
+                .flex_1()
+                .min_h(px(0.))
+                .w_full()
+                .flex()
+                .flex_col()
+                .child(scroll_body("rec-list", rows)),
+        )
+}
+
+const MEMO_ROW_H: f32 = 28.0;
+const ACTIVE_PANEL_H: f32 = 66.0;
+
+fn playing_pane(
+    island: &Island,
+    playback: Option<&Playback>,
+    cx: &mut Context<Island>,
+) -> impl IntoElement {
+    let active_id = playback.map(|p| p.id).or(island.playing_recording);
+    let mut rest = div().flex().flex_col().w_full().flex_shrink_0();
+    for item in &island.recordings {
+        if Some(item.id) == active_id {
+            continue;
         }
-        return Some((hint, true));
+        rest = rest.child(list_row(item, false, cx));
     }
-    if !recording && empty {
-        return Some((
-            "Recording uses the microphone. macOS will ask for access.".into(),
-            false,
-        ));
-    }
-    None
+    let pane_h = if island.gallery_mode {
+        theme::NOOK_BODY
+    } else {
+        theme::RECORDER_BODY
+    };
+    let rows_fit = ((pane_h - 14.0 - 4.0 - ACTIVE_PANEL_H) / MEMO_ROW_H)
+        .floor()
+        .max(1.0);
+    let active = island
+        .recordings
+        .iter()
+        .find(|r| Some(r.id) == active_id);
+    nook_pane("nook-recorder")
+        .w_full()
+        .px(px(11.))
+        .py(px(7.))
+        .gap(px(4.))
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(|_, _: &MouseDownEvent, _, cx| {
+                if PENDING_DELETE.get().is_some() {
+                    PENDING_DELETE.set(None);
+                    cx.notify();
+                }
+            }),
+        )
+        .when_some(active, |d, item| {
+            d.child(active_panel(item, playback, cx))
+        })
+        .child(
+            div()
+                .w_full()
+                .h(px(rows_fit * MEMO_ROW_H))
+                .flex_shrink_0()
+                .flex()
+                .flex_col()
+                .child(scroll_body("rec-list-playing", rest)),
+        )
 }
 
-fn live_row(clock: &str, transcript: &str) -> impl IntoElement {
-    let subtitle = if transcript.is_empty() {
-        "Recording".to_string()
+fn header_row(island: &Island, cx: &mut Context<Island>) -> impl IntoElement {
+    let n = island.recordings.len();
+    let count = if n == 1 {
+        "1 memo".to_string()
     } else {
-        transcript.to_string()
+        format!("{n} memos")
     };
     div()
-        .id("rec-live")
         .w_full()
-        .flex()
         .flex_shrink_0()
+        .flex()
         .items_center()
-        .py(px(8.))
-        .border_b_1()
-        .border_color(theme::FILL_TERTIARY)
+        .gap(px(8.))
+        .h(px(28.))
+        .child(
+            div()
+                .size(px(28.))
+                .flex_shrink_0()
+                .rounded(px(14.))
+                .bg(theme::FILL)
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(lucide_color("mic", 15.0, theme::DESTRUCTIVE)),
+        )
         .child(
             div()
                 .flex_1()
                 .min_w(px(0.))
-                .flex()
-                .flex_col()
-                .child(
-                    div()
-                        .text_size(px(theme::TITLE_3.size))
-                        .line_height(px(theme::TITLE_3.leading))
-                        .font_weight(theme::TITLE_3.emphasized)
-                        .text_color(theme::LABEL)
-                        .whitespace_nowrap()
-                        .overflow_hidden()
-                        .text_ellipsis()
-                        .child(SharedString::from(clock.to_string())),
-                )
-                .child(
-                    label(subtitle, theme::SUBHEADLINE, false)
-                        .w_full()
-                        .min_w(px(0.)),
-                ),
+                .text_size(px(theme::BODY.size))
+                .line_height(px(theme::BODY.leading))
+                .font_weight(theme::BODY.emphasized)
+                .text_color(theme::LABEL)
+                .whitespace_nowrap()
+                .overflow_hidden()
+                .text_ellipsis()
+                .child(SharedString::from("Recordings")),
+        )
+        .child(
+            label(count, theme::SUBHEADLINE, false).text_color(theme::TERTIARY_LABEL),
+        )
+        .child(record_dot_btn(island.recording, cx))
+}
+
+fn record_dot_btn(recording: bool, cx: &mut Context<Island>) -> impl IntoElement {
+    div()
+        .id("rec-toggle")
+        .relative()
+        .size(px(22.))
+        .flex_shrink_0()
+        .flex()
+        .items_center()
+        .justify_center()
+        .cursor(CursorStyle::PointingHand)
+        .hover(|s| s.opacity(0.92))
+        .active(|s| s.opacity(0.8))
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                cx.stop_propagation();
+                if this.recording {
+                    this.stop_recording(cx);
+                } else {
+                    this.begin_recording(cx);
+                }
+            }),
+        )
+        .child(if recording {
+            div()
+                .size(px(10.))
+                .rounded(px(2.5))
+                .bg(theme::DESTRUCTIVE)
+        } else {
+            div()
+                .size(px(10.))
+                .rounded_full()
+                .bg(theme::DESTRUCTIVE)
+        })
+        .child(
+            div()
+                .absolute()
+                .inset_0()
+                .rounded_full()
+                .border_1()
+                .border_color(theme::TERTIARY_LABEL),
         )
 }
 
-fn recording_row(
+fn list_row(item: &RecordingItem, in_active: bool, cx: &mut Context<Island>) -> impl IntoElement {
+    memo_row(item, None, false, in_active, cx)
+}
+
+fn active_panel(
     item: &RecordingItem,
     playback: Option<&Playback>,
+    cx: &mut Context<Island>,
+) -> impl IntoElement {
+    let playing = playback.is_some_and(|p| p.id == item.id && p.playing);
+    div()
+        .w_full()
+        .flex_shrink_0()
+        .flex()
+        .flex_col()
+        .rounded(px(10.))
+        .bg(theme::FILL)
+        .pt(px(4.))
+        .pr(px(8.))
+        .pb(px(2.))
+        .pl(px(6.))
+        .child(memo_row(item, playback, playing, true, cx))
+        .child(transport_row(item.id, playback, cx))
+}
+
+fn memo_row(
+    item: &RecordingItem,
+    playback: Option<&Playback>,
+    playing: bool,
+    in_active: bool,
     cx: &mut Context<Island>,
 ) -> impl IntoElement {
     let id = item.id;
@@ -253,29 +430,29 @@ fn recording_row(
     let dur = recorder::format_duration_ms(item.duration_ms);
     let pending = PENDING_DELETE.get() == Some(id);
     let menu = ROW_MENU.get() == Some(id);
-    let active = playback.is_some_and(|p| p.id == id);
-    let playing = playback.is_some_and(|p| p.id == id && p.playing);
+    let active = in_active || playback.is_some_and(|p| p.id == id);
+    let preview = transcript_preview(&item.transcript);
     let drag_path = path.clone();
+    let has_preview = !preview.is_empty();
 
     div()
         .id(SharedString::from(format!("rec-{id}")))
         .group("rec-row")
+        .relative()
         .w_full()
+        .flex_shrink_0()
+        .h(px(28.))
         .flex()
         .flex_col()
-        .flex_shrink_0()
-        .py(px(8.))
-        .border_b_1()
-        .border_color(theme::FILL_TERTIARY)
-        .when(active, |d| d.bg(theme::FILL_TERTIARY))
-        .hover(|s| s.bg(theme::FILL_TERTIARY))
+        .justify_center()
         .child(
             div()
                 .w_full()
                 .flex()
                 .items_center()
-                .gap(px(8.))
-                .min_h(px(theme::HIT_MIN))
+                .gap(px(10.))
+                .h(px(28.))
+                .pl(px(2.))
                 .cursor(CursorStyle::PointingHand)
                 .on_mouse_down(
                     MouseButton::Left,
@@ -320,55 +497,143 @@ fn recording_row(
                         }
                     }),
                 )
+                .child(play_circle(id, active, playing))
                 .child(
                     div()
                         .flex_1()
                         .min_w(px(0.))
                         .flex()
-                        .flex_col()
+                        .items_center()
+                        .gap(px(6.))
+                        .overflow_hidden()
                         .child(
                             div()
-                                .text_size(px(theme::TITLE_3.size))
-                                .line_height(px(theme::TITLE_3.leading))
-                                .font_weight(theme::TITLE_3.emphasized)
+                                .text_size(px(theme::CALLOUT.size))
+                                .line_height(px(theme::CALLOUT.leading))
+                                .font_weight(theme::CALLOUT.emphasized)
                                 .text_color(theme::LABEL)
                                 .whitespace_nowrap()
                                 .overflow_hidden()
                                 .text_ellipsis()
+                                .flex_shrink_0()
                                 .child(SharedString::from(title)),
                         )
-                        .child(label(date, theme::SUBHEADLINE, false)),
+                        .child(
+                            div()
+                                .relative()
+                                .flex_1()
+                                .min_w(px(0.))
+                                .h(px(theme::CALLOUT.leading))
+                                .flex()
+                                .items_center()
+                                .child(
+                                    label(date.clone(), theme::CALLOUT, false)
+                                        .w_full()
+                                        .when(has_preview, |d| {
+                                            d.opacity(1.0).group_hover("rec-row", |s| {
+                                                s.opacity(0.0)
+                                            })
+                                        }),
+                                )
+                                .when(has_preview, |d| {
+                                    d.child(
+                                        div()
+                                            .absolute()
+                                            .inset_0()
+                                            .flex()
+                                            .items_center()
+                                            .opacity(0.0)
+                                            .group_hover("rec-row", |s| s.opacity(1.0))
+                                            .child(
+                                                label(preview.clone(), theme::CALLOUT, false)
+                                                    .w_full(),
+                                            ),
+                                    )
+                                }),
+                        ),
                 )
                 .child(
-                    timer_text(dur, theme::CALLOUT)
-                        .text_color(theme::SECONDARY_LABEL)
-                        .font_weight(FontWeight::NORMAL)
+                    timer_text(dur, theme::SUBHEADLINE)
+                        .text_color(theme::TERTIARY_LABEL)
                         .flex_shrink_0(),
-                )
-                .child(row_menu_btn(id, menu, cx))
-                .child(delete_btn(id, pending, cx)),
+                ),
         )
-        .when(menu, |d| d.child(row_menu_actions(id, path, cx)))
-        .when(active, |d| {
-            d.child(transport_row(id, playback, playing, cx))
+        .child(row_hover_actions(id, pending, menu, in_active, cx))
+        .when(menu, |d| d.child(row_menu_actions(id, path.clone(), cx)))
+}
+
+fn play_circle(id: i64, active: bool, playing: bool) -> impl IntoElement {
+    let icon = if active && playing { "pause" } else { "play" };
+    let glyph = if active {
+        theme::ISLAND
+    } else {
+        theme::SECONDARY_LABEL
+    };
+    div()
+        .id(SharedString::from(format!("rec-play-{id}")))
+        .size(px(24.))
+        .flex_shrink_0()
+        .rounded(px(12.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .bg(if active { theme::LABEL } else { theme::FILL })
+        .child(lucide_color(icon, 11.0, glyph))
+}
+
+fn transcript_preview(transcript: &str) -> String {
+    let text = transcript.trim();
+    if text.is_empty() {
+        return String::new();
+    }
+    let first = text.lines().next().unwrap_or(text).trim();
+    let chars: Vec<char> = first.chars().collect();
+    if chars.len() <= 48 {
+        first.to_string()
+    } else {
+        chars[..47].iter().collect::<String>() + "…"
+    }
+}
+
+fn row_hover_actions(
+    id: i64,
+    pending: bool,
+    menu_open: bool,
+    in_active: bool,
+    cx: &mut Context<Island>,
+) -> impl IntoElement {
+    let show = pending || menu_open;
+    let bg = if in_active { theme::FILL } else { theme::ISLAND };
+    div()
+        .absolute()
+        .right_0()
+        .top_0()
+        .bottom_0()
+        .flex()
+        .items_center()
+        .gap(px(2.))
+        .pl(px(8.))
+        .bg(bg)
+        .opacity(if show { 1.0 } else { 0.0 })
+        .when(!show, |d| {
+            d.group_hover("rec-row", |s| s.opacity(1.0))
         })
+        .child(row_menu_btn(id, menu_open, cx))
+        .child(delete_btn(id, pending, cx))
 }
 
 fn row_menu_btn(id: i64, open: bool, cx: &mut Context<Island>) -> impl IntoElement {
     div()
         .id(SharedString::from(format!("rec-more-{id}")))
-        .size(px(theme::HIT_MIN))
+        .size(px(24.))
         .flex_shrink_0()
         .flex()
         .items_center()
         .justify_center()
         .rounded_full()
-        .when(!open, |d| {
-            d.opacity(0.0)
-                .group_hover("rec-row", |s| s.opacity(1.0))
-        })
-        .hover(|s| s.bg(theme::FILL))
+        .hover(|s| s.bg(theme::FILL_SECONDARY))
         .cursor(CursorStyle::PointingHand)
+        .when(open, |d| d.bg(theme::FILL_SECONDARY))
         .on_mouse_down(
             MouseButton::Left,
             cx.listener(move |_, _: &MouseDownEvent, _, cx| {
@@ -384,17 +649,14 @@ fn row_menu_btn(id: i64, open: bool, cx: &mut Context<Island>) -> impl IntoEleme
         .child(label("…", theme::BODY, true).text_color(theme::SECONDARY_LABEL))
 }
 
-fn row_menu_actions(
-    id: i64,
-    path: String,
-    cx: &mut Context<Island>,
-) -> impl IntoElement {
+fn row_menu_actions(id: i64, path: String, cx: &mut Context<Island>) -> impl IntoElement {
     let reveal = path.clone();
     div()
         .w_full()
         .flex()
         .gap(px(8.))
-        .pt(px(4.))
+        .pl(px(36.))
+        .pb(px(4.))
         .child(menu_chip("Open in QuickTime", format!("rec-open-{id}"), cx, move |this, cx| {
             ROW_MENU.set(None);
             this.open_recording(&path, cx);
@@ -435,15 +697,15 @@ fn delete_btn(id: i64, pending: bool, cx: &mut Context<Island>) -> impl IntoElem
     if pending {
         div()
             .id(SharedString::from(format!("rec-del-{id}")))
-            .h(px(theme::HIT_MIN))
+            .h(px(24.))
             .px_3()
             .flex_shrink_0()
             .flex()
             .items_center()
             .justify_center()
             .rounded(px(theme::CONTROL_RADIUS))
-            .bg(theme::FILL)
-            .hover(|s| s.bg(theme::FILL_SECONDARY))
+            .bg(theme::FILL_SECONDARY)
+            .hover(|s| s.bg(theme::FILL_TERTIARY))
             .active(|s| s.opacity(0.85))
             .cursor(CursorStyle::PointingHand)
             .on_mouse_down(
@@ -459,13 +721,13 @@ fn delete_btn(id: i64, pending: bool, cx: &mut Context<Island>) -> impl IntoElem
     } else {
         div()
             .id(SharedString::from(format!("rec-del-{id}")))
-            .size(px(theme::HIT_MIN))
+            .size(px(24.))
             .flex_shrink_0()
             .flex()
             .items_center()
             .justify_center()
             .rounded_full()
-            .hover(|s| s.bg(theme::FILL))
+            .hover(|s| s.bg(theme::FILL_SECONDARY))
             .active(|s| s.opacity(0.8))
             .cursor(CursorStyle::PointingHand)
             .on_mouse_down(
@@ -481,24 +743,20 @@ fn delete_btn(id: i64, pending: bool, cx: &mut Context<Island>) -> impl IntoElem
     }
 }
 
-fn transport_row(
-    id: i64,
-    playback: Option<&Playback>,
-    playing: bool,
-    cx: &mut Context<Island>,
-) -> impl IntoElement {
+fn transport_row(id: i64, playback: Option<&Playback>, cx: &mut Context<Island>) -> impl IntoElement {
     let pb = playback.filter(|p| p.id == id);
     let duration = pb.map(|p| p.duration_s).unwrap_or(0.0);
     let position = pb.map(|p| p.position_s).unwrap_or(0.0);
     let drag = SCRUB_DRAG.get();
-    let progress = drag.unwrap_or_else(|| {
-        if duration > 0.0 {
-            (position / duration) as f32
-        } else {
-            0.0
-        }
-    })
-    .clamp(0.0, 1.0);
+    let progress = drag
+        .unwrap_or_else(|| {
+            if duration > 0.0 {
+                (position / duration) as f32
+            } else {
+                0.0
+            }
+        })
+        .clamp(0.0, 1.0);
     let shown_pos = if let Some(ratio) = drag {
         duration * ratio as f64
     } else {
@@ -509,18 +767,13 @@ fn transport_row(
         .w_full()
         .flex()
         .items_center()
-        .gap(px(6.))
-        .pt(px(6.))
-        .child(icon_hit(
-            if playing { "media-pause" } else { "media-play" },
-            format!("rec-play-{id}"),
-            cx,
-            move |this, cx| this.toggle_playback(id, cx),
-        ))
+        .gap(px(8.))
+        .h(px(32.))
+        .pl(px(2.))
         .child(
             timer_text(recorder::format_elapsed_s(shown_pos), theme::SUBHEADLINE)
                 .text_color(theme::SECONDARY_LABEL)
-                .min_w(px(30.))
+                .w(px(26.))
                 .flex_shrink_0(),
         )
         .child(rec_scrubber(id, progress, duration, cx))
@@ -530,7 +783,7 @@ fn transport_row(
                 theme::SUBHEADLINE,
             )
             .text_color(theme::SECONDARY_LABEL)
-            .min_w(px(36.))
+            .w(px(32.))
             .text_right()
             .flex_shrink_0(),
         )
@@ -540,8 +793,8 @@ fn transport_row(
             cx,
             move |this, cx| this.skip_recording(id, -15.0, cx),
         ))
-        .child(icon_hit(
-            "chevron-right",
+        .child(icon_hit_mirrored(
+            "rotate-ccw",
             format!("rec-fwd-{id}"),
             cx,
             move |this, cx| this.skip_recording(id, 15.0, cx),
@@ -556,13 +809,13 @@ fn icon_hit(
 ) -> impl IntoElement {
     div()
         .id(id.into())
-        .size(px(theme::HIT_MIN))
+        .size(px(24.))
         .flex_shrink_0()
         .flex()
         .items_center()
         .justify_center()
         .rounded_full()
-        .hover(|s| s.bg(theme::FILL))
+        .hover(|s| s.bg(theme::FILL_SECONDARY))
         .active(|s| s.opacity(0.8))
         .cursor(CursorStyle::PointingHand)
         .on_mouse_down(
@@ -572,22 +825,51 @@ fn icon_hit(
                 on_click(this, cx);
             }),
         )
-        .child(lucide_color(icon, 14.0, theme::LABEL))
+        .child(lucide_color(icon, 14.0, theme::SECONDARY_LABEL))
 }
 
-fn rec_scrubber(
-    id: i64,
-    progress: f32,
-    duration: f64,
+fn icon_hit_mirrored(
+    icon: &'static str,
+    id: impl Into<SharedString>,
     cx: &mut Context<Island>,
+    on_click: impl Fn(&mut Island, &mut Context<Island>) + 'static,
 ) -> impl IntoElement {
+    div()
+        .id(id.into())
+        .size(px(24.))
+        .flex_shrink_0()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded_full()
+        .hover(|s| s.bg(theme::FILL_SECONDARY))
+        .active(|s| s.opacity(0.8))
+        .cursor(CursorStyle::PointingHand)
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                cx.stop_propagation();
+                on_click(this, cx);
+            }),
+        )
+        .child(
+            gpui::svg()
+                .path(SharedString::from(format!("icons/{icon}.svg")))
+                .with_transformation(gpui::Transformation::scale(gpui::size(-1.0, 1.0)))
+                .size(px(14.0))
+                .flex_shrink_0()
+                .text_color(theme::SECONDARY_LABEL),
+        )
+}
+
+fn rec_scrubber(id: i64, progress: f32, duration: f64, cx: &mut Context<Island>) -> impl IntoElement {
     let _ = duration;
     div()
         .id(SharedString::from(format!("rec-scrub-{id}")))
         .relative()
         .flex_1()
         .min_w(px(24.))
-        .h(px(theme::HIT_MIN))
+        .h(px(16.))
         .flex()
         .items_center()
         .cursor(CursorStyle::PointingHand)
@@ -637,35 +919,35 @@ fn rec_scrubber(
         .child(
             div()
                 .w_full()
-                .h(px(theme::TRACK_H))
-                .rounded(px(theme::TRACK_RADIUS))
-                .bg(theme::FILL_TERTIARY)
+                .h(px(6.))
+                .rounded(px(3.))
+                .bg(theme::FILL_SECONDARY)
                 .child(
                     div()
                         .h_full()
                         .w(relative(progress))
-                        .rounded(px(theme::TRACK_RADIUS))
+                        .rounded(px(3.))
                         .bg(theme::LABEL),
                 ),
         )
 }
 
-pub(crate) fn compact_left(island: &Island) -> AnyElement {
-    rec_waveform(island.recorder_wave.iter().copied()).into_any_element()
-}
-
-pub(crate) fn compact_right(island: &Island, cx: &mut Context<Island>) -> AnyElement {
-    let clock = format_recording_clock(island.recording_elapsed_secs());
+pub(crate) fn compact_left(_island: &Island) -> AnyElement {
     div()
+        .size(px(22.))
+        .flex_shrink_0()
         .flex()
         .items_center()
-        .gap(px(10.))
-        .child(
-            timer_text(clock, theme::BODY)
-                .min_w(px(42.))
-                .text_right(),
-        )
-        .child(compact_stop_btn(cx))
+        .justify_center()
+        .child(lucide_color("mic", 17.0, theme::DESTRUCTIVE))
+        .into_any_element()
+}
+
+pub(crate) fn compact_right(island: &Island, _cx: &mut Context<Island>) -> AnyElement {
+    let clock = format_recording_clock(island.recording_elapsed_secs());
+    timer_text(clock, theme::BODY)
+        .min_w(px(42.))
+        .text_right()
         .into_any_element()
 }
 
@@ -695,9 +977,10 @@ fn rec_waveform(levels: impl IntoIterator<Item = f32>) -> impl IntoElement {
     row
 }
 
-/// Speech RMS is typically 0.01–0.2; boost so quiet talk still reads as bars.
+/// Speech RMS is typically 0.01–0.2; a modest boost keeps quiet talk visible
+/// without pinning every bar near full height, so the wave reads as speech.
 pub(crate) fn wave_bar_height(rms: f32) -> f32 {
-    let boosted = (rms.max(0.0) * 8.0).min(1.0);
+    let boosted = (rms.max(0.0) * 4.0).min(1.0);
     if boosted < 0.04 {
         0.14
     } else {
@@ -705,8 +988,7 @@ pub(crate) fn wave_bar_height(rms: f32) -> f32 {
     }
 }
 
-/// Compact recording clock, as the mockup shows it: `0:12`, then `1:00:00`
-/// past an hour (matches `nook_core::recorder::format_duration_ms`).
+/// Compact recording clock: `0:12`, then `1:00:00` past an hour.
 pub(crate) fn format_recording_clock(seconds: u32) -> String {
     let h = seconds / 3600;
     let m = (seconds % 3600) / 60;
@@ -716,72 +998,6 @@ pub(crate) fn format_recording_clock(seconds: u32) -> String {
     } else {
         format!("{m}:{s:02}")
     }
-}
-
-fn compact_stop_btn(cx: &mut Context<Island>) -> impl IntoElement {
-    div()
-        .id("rec-stop")
-        .size(px(COMPACT_STOP_RING))
-        .rounded_full()
-        .border_2()
-        .border_color(theme::LABEL)
-        .flex_shrink_0()
-        .flex()
-        .items_center()
-        .justify_center()
-        .cursor(CursorStyle::PointingHand)
-        .hover(|s| s.opacity(0.92))
-        .active(|s| s.opacity(0.8))
-        .on_mouse_down(
-            MouseButton::Left,
-            cx.listener(move |this, _: &MouseDownEvent, _, cx| {
-                cx.stop_propagation();
-                if this.recording {
-                    this.stop_recording(cx);
-                }
-            }),
-        )
-        .child(
-            div()
-                .size(px(COMPACT_STOP_INNER))
-                .rounded(px(COMPACT_STOP_RADIUS))
-                .bg(theme::DESTRUCTIVE),
-        )
-}
-
-fn record_btn(recording: bool, cx: &mut Context<Island>) -> impl IntoElement {
-    let inner = if recording {
-        div()
-            .size(px(STOP))
-            .rounded(px(STOP_RADIUS))
-            .bg(theme::DESTRUCTIVE)
-    } else {
-        div().size(px(DOT)).rounded_full().bg(theme::DESTRUCTIVE)
-    };
-    div()
-        .id("rec-toggle")
-        .size(px(RING))
-        .rounded_full()
-        .border_2()
-        .border_color(theme::SECONDARY_LABEL)
-        .flex()
-        .items_center()
-        .justify_center()
-        .cursor(CursorStyle::PointingHand)
-        .hover(|s| s.opacity(0.92))
-        .active(|s| s.opacity(0.8))
-        .on_mouse_down(
-            MouseButton::Left,
-            cx.listener(move |this, _: &MouseDownEvent, _, cx| {
-                cx.stop_propagation();
-                if this.recording {
-                    this.stop_recording(cx);
-                } else {
-                    this.begin_recording(cx);
-                }
-            }),
-        )
-        .child(inner)
 }
 
 pub(crate) fn memo_stamp(created_at: i64) -> (String, String) {

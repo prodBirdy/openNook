@@ -118,6 +118,8 @@ const MIGRATIONS: &[&[&str]] = &[
     ],
     // Version 2 — drop unused widget_state table.
     &["DROP TABLE IF EXISTS widget_state"],
+    // Version 3 — Notifications widget removed; drop its shelf.
+    &["DROP TABLE IF EXISTS notification_shelf"],
 ];
 
 fn migrate(conn: &Connection) -> Result<()> {

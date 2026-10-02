@@ -41,15 +41,15 @@
 	<key>NSLocationWhenInUseUsageDescription</key>
 	<string>openNook can use a one-shot city-level location so Weather can show the forecast for where you are. Location is optional — you can enter a city instead.</string>
 	<key>NSAppleEventsUsageDescription</key>
-	<string>openNook uses Automation to control Music, Spotify, and Safari when system media controls are unavailable, read the current Safari or Chrome tab URL for artwork, read the Music playlist for Up Next, click Zoom and Meet controls through System Events when Accessibility is unavailable, and send iMessage replies.</string>
+	<string>openNook uses Automation to control Music, Spotify, and Safari when system media controls are unavailable, read the current Safari or Chrome tab URL for artwork, read the Music playlist for Up Next, and send iMessage replies.</string>
 	<key>NSUserNotificationsUsageDescription</key>
 	<string>openNook mirrors island timers into Notification Center so a countdown still fires if the overlay is hidden.</string>
 	<key>NSDocumentsFolderUsageDescription</key>
-	<string>openNook reads and writes notes in the Obsidian vault you choose and runs terminal commands you type that access your Documents folder.</string>
+	<string>openNook runs terminal commands you type that access your Documents folder.</string>
 	<key>NSDesktopFolderUsageDescription</key>
-	<string>openNook reads and writes notes in the Obsidian vault you choose and runs terminal commands you type that access your Desktop folder.</string>
+	<string>openNook runs terminal commands you type that access your Desktop folder.</string>
 	<key>NSDownloadsFolderUsageDescription</key>
-	<string>openNook reads and writes notes in the Obsidian vault you choose, which may live in Downloads.</string>
+	<string>openNook runs terminal commands you type that access your Downloads folder.</string>
 	<key>NSAudioCaptureUsageDescription</key>
 	<string>openNook adjusts each app's volume by tapping its audio output. It does not save or send what you hear — it only scales the sound in real time. macOS shows a recording indicator while any per-app slider is below 100%.</string>
 	<key>NSLocalNetworkUsageDescription</key>

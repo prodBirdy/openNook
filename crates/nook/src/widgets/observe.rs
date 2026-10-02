@@ -81,7 +81,10 @@ pub(crate) fn observe_card(
         }
     }
 
+    let pip_open = crate::pip::is_open(crate::pip::PipKind::Observe);
     card_shell("nook-observe")
+        .group("nook-observe")
+        .relative()
         .w_full()
         .cursor(CursorStyle::PointingHand)
         .active(|s| s.opacity(0.85))
@@ -93,6 +96,25 @@ pub(crate) fn observe_card(
             }),
         )
         .child(body)
+        .child(
+            // No header row: Pop Out overlays top-right (8 pt inset), hover-only
+            // unless that PiP is open (then accent-tinted and always visible).
+            div()
+                .absolute()
+                .top(px(8.))
+                .right(px(8.))
+                .when(!pip_open, |d| {
+                    d.opacity(0.0)
+                        .group_hover("nook-observe", |s| s.opacity(1.0))
+                })
+                .child(crate::island::media::pip_popout_btn_sized(
+                    crate::pip::PipKind::Observe,
+                    24.0,
+                    12.0,
+                    13.0,
+                    cx,
+                )),
+        )
 }
 
 pub(crate) fn observe_big_view(
@@ -153,7 +175,22 @@ pub(crate) fn observe_big_view(
         .child(observe_headline(headline))
         .child(observe_unit("req/s"))
         .child(div().flex_1())
-        .child(chips);
+        .child(
+            // Pop Out left of the range chips (8 pt gap), not near the × corner.
+            div()
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .flex_shrink_0()
+                .child(crate::island::media::pip_popout_btn_sized(
+                    crate::pip::PipKind::Observe,
+                    24.0,
+                    12.0,
+                    13.0,
+                    cx,
+                ))
+                .child(chips),
+        );
 
     nook_pane("nook-observe-big")
         .group("nook-observe-big")

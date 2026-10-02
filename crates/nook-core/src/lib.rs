@@ -23,7 +23,6 @@ pub mod login_item;
 pub mod lyrics;
 #[cfg(any(target_os = "macos", test))]
 mod mediaremote;
-pub mod meetings;
 pub mod messages;
 pub mod models;
 pub mod motion_artwork;
@@ -31,9 +30,7 @@ pub mod mouse;
 pub mod nl_parse;
 pub mod notch;
 pub mod notes;
-pub mod notifications;
 pub mod observe;
-pub mod obsidian;
 pub mod occupancy;
 pub mod osd;
 pub mod pomodoro;
@@ -50,7 +47,6 @@ pub mod system_timers;
 pub mod sysvol;
 pub mod ui_tick;
 pub mod utils;
-pub mod vpn;
 pub mod weather;
 pub mod widgets;
 
@@ -105,14 +101,10 @@ pub fn init() {
             if settings.sync_clock_timers {
                 system_timers::start_watcher();
             }
-            if settings.show_vpn {
-                vpn::start();
-            }
         }
         sysvol::start();
         brightness::start();
         osd::install();
         shell::reap_orphaned_jobs();
-        notifications::load_persisted();
     });
 }

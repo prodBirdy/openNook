@@ -74,10 +74,10 @@ index 0000000..6b558ae
 +#endif
 diff --git a/src/adapter/queue.m b/src/adapter/queue.m
 new file mode 100644
-index 0000000..51132be
+index 0000000..20d1cf0
 --- /dev/null
 +++ b/src/adapter/queue.m
-@@ -0,0 +1,225 @@
+@@ -0,0 +1,268 @@
 +// Copyright (c) 2025 Jonas van den Berg
 +// This file is licensed under the BSD 3-Clause License.
 +
@@ -133,6 +133,11 @@ index 0000000..51132be
 +- (NSDictionary *)nowPlayingInfo;
 +- (NSString *)identifier;
 +- (id)metadata;
++- (id)artwork;
++@end
++
++@interface MRArtwork : NSObject
++- (NSData *)imageData;
 +@end
 +
 +static id jsonSafe(id value) {
@@ -200,6 +205,34 @@ index 0000000..51132be
 +        out[@"duration"] = jsonSafe(duration);
 +    if (identifier)
 +        out[@"identifier"] = jsonSafe(identifier);
++
++    NSData *artworkData = nil;
++    id artwork = [item respondsToSelector:@selector(artwork)] ? [item artwork] : nil;
++    if ([artwork respondsToSelector:@selector(imageData)]) {
++        id data = [artwork imageData];
++        if ([data isKindOfClass:[NSData class]] && [data length] > 0)
++            artworkData = data;
++    }
++    // Cap inline art so the queue payload stays small; fall back to the URL.
++    if (artworkData.length > 0 && artworkData.length <= 256 * 1024) {
++        NSString *b64 = [artworkData base64EncodedStringWithOptions:0];
++        if (b64.length > 0) {
++            out[@"artworkData"] = b64;
++            id mime = pick(@[ @"artworkMIMEType" ]);
++            if ([mime isKindOfClass:[NSString class]] && [mime length] > 0)
++                out[@"artworkMimeType"] = mime;
++        }
++    } else {
++        id url = pick(@[ @"artworkURL" ]);
++        NSString *urlString = nil;
++        if ([url isKindOfClass:[NSURL class]])
++            urlString = [(NSURL *)url absoluteString];
++        else if ([url isKindOfClass:[NSString class]])
++            urlString = url;
++        NSString *lower = [urlString lowercaseString];
++        if ([lower hasPrefix:@"http://"] || [lower hasPrefix:@"https://"])
++            out[@"artworkURL"] = urlString;
++    }
 +    return out;
 +}
 +
@@ -235,6 +268,16 @@ index 0000000..51132be
 +                                            YES);
 +    ((void (*)(id, SEL, BOOL))objc_msgSend)(qreq, @selector(setIncludeInfo:),
 +                                            YES);
++    if ([qreq respondsToSelector:@selector(setArtworkWidth:)]) {
++        ((void (*)(id, SEL, double))objc_msgSend)(qreq,
++                                                  @selector(setArtworkWidth:),
++                                                  64.0);
++    }
++    if ([qreq respondsToSelector:@selector(setArtworkHeight:)]) {
++        ((void (*)(id, SEL, double))objc_msgSend)(qreq,
++                                                  @selector(setArtworkHeight:),
++                                                  64.0);
++    }
 +
 +    id cfg = ((id(*)(id, SEL, id))objc_msgSend)([Cfg alloc],
 +                                                @selector(initWithOrigin:),

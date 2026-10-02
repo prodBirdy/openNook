@@ -5,6 +5,25 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Added
+
+- Floating widgets: pop Lyrics or Observe out of the notch into a small always-on-top window that joins every Space. Throw it toward a corner and it springs there (multi-display, three-finger drag works), hover for Keep on Top / Back to Notch / Close, double-click Lyrics for a mini pill. Windows reopen where you left them.
+- Observe picks its metrics from what the endpoint provides: warmUP totals, latency, per-route counts, errors and latency, and rate limits, or Prometheus metric names, with a filter and pin/unpin.
+- Speed measures upload as well as download.
+- Up Next shows cover art for Apple Music and other MediaRemote players, not only Spotify.
+
+### Changed
+
+- Media card, Up Next, AirPlay, Lyrics, Mirror and Voice matched 1:1 to the updated design: bold titles with smaller artist lines, the new Now Playing row heights, 24 pt queue covers, and artwork rings that no longer clip the image.
+- Lyric changes animate like Apple Music: lines follow each other with a short stagger and the text size eases instead of snapping. Wrapped lines push the next line down, and the first frame no longer flashes.
+- The Voice recording state shows the live transcript under the waveform.
+
+### Removed
+
+- Dropped the Obsidian, VPN, High Alert, Meetings, and Notifications widgets (deleted from the design). Saved settings that still list those modules load without failing and silently drop them.
+
 ## 1.0.0 - 2026-09-27
 
 The first open-source 1.0 release.

@@ -13,21 +13,19 @@ use nook_core::agents::{AgentKind, AgentSession, AgentStatus};
 use nook_core::audio_devices::{OutputDevice, OutputTransport};
 use nook_core::calendar::{CalendarEvent, Reminder};
 use nook_core::files::FileTrayItem;
-use nook_core::meetings::{MeetingApp, MeetingSnapshot, MeetingState};
 use nook_core::messages::{IncomingPeek, MessageService};
 use nook_core::models::{
     LyricLine, NowPlayingData, PlaybackQueue, QueueItem, QueueJump, QueueSource, RepeatMode,
     SyncedLyrics,
 };
-use nook_core::notifications::NotificationEvent;
 use nook_core::observe::{
     ChartPoint, FiringAlert, MetricReading, ObserveChartKind, ObserveSnapshot, RangeSeries,
     SamplePoint, SeriesValue,
 };
 use nook_core::power::PowerSnapshot;
+use nook_core::recorder::RecordingItem;
 use nook_core::settings::{WidgetModule, WidgetSize};
 use nook_core::share::SharePhase;
-use nook_core::vpn::VpnSnapshot;
 use nook_core::weather::{HourlyForecast, WeatherSnapshot, WeatherUnits};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
@@ -56,12 +54,38 @@ fn gallery_art_png() -> Vec<u8> {
     encoded.into_inner()
 }
 
+fn gallery_art_png_tint(dr: i16, dg: i16, db: i16) -> Vec<u8> {
+    let mut img = image::RgbImage::new(64, 64);
+    for (x, y, pixel) in img.enumerate_pixels_mut() {
+        let fx = x as f32 / 63.0;
+        let fy = y as f32 / 63.0;
+        let r = (24.0 + 190.0 * fx) as i16 + dr;
+        let g = (60.0 + 110.0 * fy + 40.0 * fx) as i16 + dg;
+        let b = (110.0 + 120.0 * fy) as i16 + db;
+        *pixel = image::Rgb([
+            r.clamp(0, 255) as u8,
+            g.clamp(0, 255) as u8,
+            b.clamp(0, 255) as u8,
+        ]);
+    }
+    let mut encoded = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgb8(img)
+        .write_to(&mut encoded, image::ImageFormat::Png)
+        .expect("gallery art PNG encodes");
+    encoded.into_inner()
+}
+
 fn gallery_art_base64() -> String {
     use base64::Engine;
     static CACHE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     CACHE
         .get_or_init(|| base64::engine::general_purpose::STANDARD.encode(gallery_art_png()))
         .clone()
+}
+
+fn gallery_art_base64_tint(dr: i16, dg: i16, db: i16) -> String {
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD.encode(gallery_art_png_tint(dr, dg, db))
 }
 
 const TAB_COMPACT: u8 = 0;
@@ -126,7 +150,7 @@ pub(crate) fn open(cx: &mut App) {
     } else {
         WindowBackgroundAppearance::Blurred
     };
-    let _ = cx.open_window(
+    let opened = cx.open_window(
         WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
             titlebar: Some(gpui::TitlebarOptions {
@@ -161,6 +185,27 @@ pub(crate) fn open(cx: &mut App) {
             })
         },
     );
+    // Dev screenshots: open both floating windows against this mock island
+    // (no keychain, no notch, no settings writes — see pip gallery_mode).
+    if std::env::var("NOOK_GALLERY_PIP").as_deref() == Ok("1") {
+        if let Ok(handle) = opened {
+            // Prepare state under the update lock, then open PiPs outside it —
+            // `pip::open` reads the Island and must not re-enter an update.
+            let weak = handle
+                .update(cx, |island, _window, cx| {
+                    if let Some(lyrics) = island.lyrics.as_ref() {
+                        island.lyrics_line_idx =
+                            lyrics.active_index(island.lyrics_position_ms());
+                    }
+                    cx.entity().downgrade()
+                })
+                .ok();
+            if let Some(weak) = weak {
+                crate::pip::open(nook_core::settings::PipKind::Lyrics, weak.clone(), cx);
+                crate::pip::open(nook_core::settings::PipKind::Observe, weak, cx);
+            }
+        }
+    }
 }
 
 pub(crate) fn render(island: &mut Island, cx: &mut Context<Island>) -> AnyElement {
@@ -435,10 +480,7 @@ fn compact_section(island: &mut Island, cx: &mut Context<Island>) -> impl IntoEl
         CompactMode::Timer,
         CompactMode::Observe,
         CompactMode::Battery,
-        CompactMode::Vpn,
         CompactMode::Recording,
-        CompactMode::Meeting,
-        CompactMode::Notifications,
         CompactMode::Onboard,
         CompactMode::Messages,
         CompactMode::Share,
@@ -562,6 +604,19 @@ fn media_section(island: &mut Island, cx: &mut Context<Island>) -> impl IntoElem
     items.push(media_variant(
         island,
         cx,
+        "Up Next · no art",
+        pane_w,
+        |i| {
+            i.now_playing = playing_track(false);
+            i.queue = filled_queue_no_art();
+            i.queue_open = true;
+            i.lyrics_open = false;
+            i.output_picker_open = false;
+        },
+    ));
+    items.push(media_variant(
+        island,
+        cx,
         "Up Next · empty",
         pane_w,
         |i| {
@@ -672,6 +727,130 @@ impl MediaSnap {
     }
 }
 
+fn gallery_recordings() -> Vec<RecordingItem> {
+    use chrono::TimeZone;
+    let stamp = |y: i32, mo: u32, d: u32, h: u32, min: u32| {
+        chrono::Utc
+            .with_ymd_and_hms(y, mo, d, h, min, 0)
+            .single()
+            .map(|dt| dt.timestamp())
+            .unwrap_or(0)
+    };
+    vec![
+        RecordingItem {
+            id: 1,
+            path: "/tmp/openNook-gallery-memo1.m4a".into(),
+            created_at: stamp(2026, 10, 1, 14, 32),
+            duration_ms: 113_000,
+            transcript: "gallery memo one first words for hover preview".into(),
+        },
+        RecordingItem {
+            id: 2,
+            path: "/tmp/openNook-gallery-memo2.m4a".into(),
+            created_at: stamp(2026, 9, 30, 9, 15),
+            duration_ms: 47_000,
+            transcript: String::new(),
+        },
+        RecordingItem {
+            id: 3,
+            path: "/tmp/openNook-gallery-memo3.m4a".into(),
+            created_at: stamp(2026, 9, 29, 18, 2),
+            duration_ms: 250_000,
+            transcript: String::new(),
+        },
+    ]
+}
+
+struct RecorderSnap {
+    recording: bool,
+    recording_started: Option<Instant>,
+    live_transcript: String,
+    recorder_wave: std::collections::VecDeque<f32>,
+    recordings: Vec<RecordingItem>,
+    playing_recording: Option<i64>,
+    recorder_error: Option<String>,
+    transcribe: bool,
+}
+
+impl RecorderSnap {
+    fn capture(island: &Island) -> Self {
+        Self {
+            recording: island.recording,
+            recording_started: island.recording_started,
+            live_transcript: island.live_transcript.clone(),
+            recorder_wave: island.recorder_wave.clone(),
+            recordings: island.recordings.clone(),
+            playing_recording: island.playing_recording,
+            recorder_error: island.recorder_error.clone(),
+            transcribe: island.settings.recorder_transcribe,
+        }
+    }
+
+    fn restore(self, island: &mut Island) {
+        island.recording = self.recording;
+        island.recording_started = self.recording_started;
+        island.live_transcript = self.live_transcript;
+        island.recorder_wave = self.recorder_wave;
+        island.recordings = self.recordings;
+        island.playing_recording = self.playing_recording;
+        island.recorder_error = self.recorder_error;
+        island.settings.recorder_transcribe = self.transcribe;
+    }
+}
+
+fn recorder_variant(
+    island: &mut Island,
+    cx: &mut Context<Island>,
+    name: &str,
+    pane_w: f32,
+    setup: impl FnOnce(&mut Island),
+) -> AnyElement {
+    let snap = RecorderSnap::capture(island);
+    setup(island);
+    let pane = nook_cell(pane_w, widgets::recorder_card(island, cx));
+    snap.restore(island);
+    labelled(name.to_string(), pane)
+}
+
+fn recorder_entries(
+    island: &mut Island,
+    cell_w: f32,
+    cx: &mut Context<Island>,
+) -> impl IntoElement {
+    let pane_w = 5.0 * cell_w;
+    wrap_row(vec![
+        recorder_variant(island, cx, "Recorder · recording", pane_w, |i| {
+            i.recording = true;
+            i.recording_started = Some(Instant::now() - Duration::from_secs(12));
+            i.live_transcript = "Gallery transcript sample…".into();
+            i.settings.recorder_transcribe = true;
+            i.recorder_wave = std::collections::VecDeque::from(vec![
+                0.02, 0.08, 0.04, 0.19, 0.05, 0.13, 0.025, 0.11, 0.22, 0.045, 0.07,
+                0.03, 0.16, 0.04, 0.09, 0.02,
+            ]);
+            i.recordings = Vec::new();
+            i.playing_recording = None;
+            i.recorder_error = None;
+        }),
+        recorder_variant(island, cx, "Recorder · recordings", pane_w, |i| {
+            i.recording = false;
+            i.recording_started = None;
+            i.live_transcript.clear();
+            i.recordings = gallery_recordings();
+            i.playing_recording = None;
+            i.recorder_error = None;
+        }),
+        recorder_variant(island, cx, "Recorder · playing", pane_w, |i| {
+            i.recording = false;
+            i.recording_started = None;
+            i.live_transcript.clear();
+            i.recordings = gallery_recordings();
+            i.playing_recording = Some(1);
+            i.recorder_error = None;
+        }),
+    ])
+}
+
 fn widgets_section(island: &mut Island, cx: &mut Context<Island>) -> impl IntoElement {
     let cell_w = island.nook_cell_width();
     // Music is covered by the media section; Files / Mirror / Observe-big live
@@ -679,21 +858,16 @@ fn widgets_section(island: &mut Island, cx: &mut Context<Island>) -> impl IntoEl
     let modules = [
         WidgetModule::Calendar,
         WidgetModule::Agents,
-        WidgetModule::Meeting,
         WidgetModule::Observe,
         WidgetModule::Reminders,
         WidgetModule::Timers,
         WidgetModule::Notes,
-        WidgetModule::Obsidian,
         WidgetModule::Speed,
         WidgetModule::Battery,
         WidgetModule::Messages,
         WidgetModule::Weather,
-        WidgetModule::Vpn,
-        WidgetModule::HighAlert,
         WidgetModule::SysStats,
         WidgetModule::Recorder,
-        WidgetModule::Notifications,
     ];
     let mut col = div()
         .flex()
@@ -702,6 +876,10 @@ fn widgets_section(island: &mut Island, cx: &mut Context<Island>) -> impl IntoEl
         .items_start()
         .gap(px(20.));
     for module in modules {
+        if module == WidgetModule::Recorder {
+            col = col.child(island_panel(recorder_entries(island, cell_w, cx)));
+            continue;
+        }
         let sizes = island.settings.distinct_sizes(module);
         let mut items = Vec::new();
         for size in sizes {
@@ -778,7 +956,6 @@ fn widget_card(island: &mut Island, module: WidgetModule, cx: &mut Context<Islan
             cx,
         )
         .into_any_element(),
-        WidgetModule::Meeting => widgets::meeting_card(&island.meeting, cx).into_any_element(),
         WidgetModule::Observe => widgets::observe_card(
             &island.observe,
             &island.settings,
@@ -792,21 +969,19 @@ fn widget_card(island: &mut Island, module: WidgetModule, cx: &mut Context<Islan
         }
         WidgetModule::Timers => widgets::timer_card(island, cx).into_any_element(),
         WidgetModule::Notes => widgets::notes_card(island, cx).into_any_element(),
-        WidgetModule::Obsidian => widgets::obsidian_card(island, cx).into_any_element(),
-        WidgetModule::Speed => {
-            widgets::speed_card(island.speed_mbps, island.speed_progress, island.speed_running, cx)
-                .into_any_element()
-        }
+        WidgetModule::Speed => widgets::speed_card(
+            island.speed_mbps,
+            island.speed_up_mbps,
+            island.speed_progress,
+            island.speed_running,
+            cx,
+        )
+        .into_any_element(),
         WidgetModule::Battery => widgets::battery_card(island, cx).into_any_element(),
         WidgetModule::Messages => widgets::messages_card(island, cx).into_any_element(),
         WidgetModule::Weather => widgets::weather_card(island, cx).into_any_element(),
-        WidgetModule::Vpn => widgets::vpn_card(&island.vpn).into_any_element(),
-        WidgetModule::HighAlert => widgets::high_alert_card(island, cx).into_any_element(),
         WidgetModule::SysStats => widgets::sysstats_card(island, cx).into_any_element(),
         WidgetModule::Recorder => widgets::recorder_card(island, cx).into_any_element(),
-        WidgetModule::Notifications => {
-            widgets::notifications_card(&island.notifications, cx).into_any_element()
-        }
         WidgetModule::Music | WidgetModule::Files | WidgetModule::Mirror => {
             // Handled outside widget_card (media section / dedicated panes).
             div().into_any_element()
@@ -947,34 +1122,53 @@ fn playing_track(long_title: bool) -> NowPlayingData {
 }
 
 fn filled_queue() -> PlaybackQueue {
+    // Pencil Up Next: Neon Tides / Glasshouse / Low Orbit, each with art.
     PlaybackQueue {
         source: Some(QueueSource::MusicPlaylist),
-        label: "Up Next in playlist".into(),
+        label: "Up Next".into(),
         items: vec![
             QueueItem {
                 id: "q1".into(),
-                title: "Next Up".into(),
-                artist: "Artist A".into(),
+                title: "Neon Tides".into(),
+                artist: "Mara Holt".into(),
                 artwork_url: None,
-                artwork_base64: Some(gallery_art_base64()),
-                duration: Some(200.0),
+                artwork_base64: Some(gallery_art_base64_tint(80, -40, -20)),
+                duration: Some(221.0),
                 source: QueueSource::MusicPlaylist,
                 jump: QueueJump::MusicTrack { index: 2 },
             },
             QueueItem {
                 id: "q2".into(),
-                title: "After That".into(),
-                artist: "Artist B".into(),
+                title: "Glasshouse".into(),
+                artist: "The Quiet Hours".into(),
                 artwork_url: None,
-                artwork_base64: None,
-                duration: Some(180.0),
+                artwork_base64: Some(gallery_art_base64_tint(-20, 50, -60)),
+                duration: Some(245.0),
                 source: QueueSource::MusicPlaylist,
                 jump: QueueJump::MusicTrack { index: 3 },
+            },
+            QueueItem {
+                id: "q3".into(),
+                title: "Low Orbit".into(),
+                artist: "Arlo Vance".into(),
+                artwork_url: None,
+                artwork_base64: Some(gallery_art_base64_tint(-30, -40, 40)),
+                duration: Some(178.0),
+                source: QueueSource::MusicPlaylist,
+                jump: QueueJump::MusicTrack { index: 4 },
             },
         ],
         hidden: None,
         context_uri: None,
     }
+}
+
+fn filled_queue_no_art() -> PlaybackQueue {
+    let mut queue = filled_queue();
+    for item in &mut queue.items {
+        item.artwork_base64 = None;
+    }
+    queue
 }
 
 fn gallery_lyrics() -> SyncedLyrics {
@@ -1032,14 +1226,9 @@ fn fill_fixtures(island: &mut Island) {
     settings.show_speed = true;
     settings.show_battery = true;
     settings.show_messages = true;
-    settings.show_vpn = true;
     settings.show_sysstats = true;
     settings.show_recorder = true;
-    settings.show_notifications = true;
     settings.show_files = true;
-    settings.show_high_alert = true;
-    settings.show_meetings = true;
-    settings.show_obsidian = true;
     settings.show_mirror = true;
     settings.weather.enabled = true;
     settings.observe.prometheus_url = "http://127.0.0.1:9090".into();
@@ -1155,38 +1344,18 @@ fn fill_fixtures(island: &mut Island) {
         low_power_mode: false,
         has_battery: true,
     };
-    island.vpn = VpnSnapshot {
-        connected: true,
-        service_name: "WireGuard".into(),
-        interface: "utun4".into(),
-        since: Some(SystemTime::now() - Duration::from_secs(600)),
-        since_estimated: false,
-        tunnel_count: 1,
-    };
-    island.meeting = MeetingSnapshot {
-        state: MeetingState::InMeeting {
-            app: MeetingApp::Zoom,
-            pid: 99,
-            muted: Some(false),
-            started: Instant::now() - Duration::from_secs(320),
-        },
-        accessibility_trusted: true,
-    };
-    island.notifications = vec![NotificationEvent::new(
-        "com.apple.MobileSMS",
-        "Messages",
-        "Alex",
-        "",
-        "See you at 5?",
-        now as i64 - 300,
-    )];
-    island.notification_unread = 1;
     island.recording = true;
-    island.recording_started = Some(Instant::now() - Duration::from_secs(45));
+    island.recording_started = Some(Instant::now() - Duration::from_secs(12));
     island.live_transcript = "Gallery transcript sample…".into();
     island.recorder_level = 0.55;
-    island.recorder_wave = std::collections::VecDeque::from(vec![0.1, 0.4, 0.7, 0.3, 0.5, 0.2]);
+    island.recorder_wave = std::collections::VecDeque::from(vec![
+        0.02, 0.08, 0.04, 0.19, 0.05, 0.13, 0.025, 0.11, 0.22, 0.045, 0.07, 0.03,
+        0.16, 0.04, 0.09, 0.02,
+    ]);
+    island.recordings = gallery_recordings();
+    island.playing_recording = None;
     island.speed_mbps = Some(212.4);
+    island.speed_up_mbps = Some(41.0);
     island.speed_progress = 1.0;
 
     island.messages.incoming = Some(IncomingPeek {

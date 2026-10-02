@@ -28,19 +28,15 @@ use nook_core::automation::ExternalAction;
 use nook_core::calendar::{CalendarEvent, Reminder};
 use nook_core::files::FileTrayItem;
 use nook_core::high_alert::HighAlertOwner;
-use nook_core::meetings::MeetingSnapshot;
 use nook_core::messages::MessagesSnapshot;
 use nook_core::models::{NowPlayingData, PlaybackQueue, RepeatMode, SyncedLyrics};
 use nook_core::notch;
-use nook_core::notifications::NotificationEvent;
 use nook_core::observe::{MetricHistory, ObserveSnapshot};
-use nook_core::obsidian::{NoteEntry, VaultWatch};
 use nook_core::pomodoro::{PomodoroPhase, PomodoroSpec};
 use nook_core::power::PowerSnapshot;
 use nook_core::settings::{AppSettings, WidgetModule};
 use nook_core::system_timers::{self, SystemTimer};
 use nook_core::sysvol::{self, HudEvent, HudKind, HUD_TTL};
-use nook_core::vpn::VpnSnapshot;
 use nook_core::weather::WeatherSnapshot;
 use settings::SettingsView;
 use std::cell::RefCell;
@@ -108,10 +104,7 @@ pub enum CompactMode {
     Timer,
     Observe,
     Battery,
-    Vpn,
     Recording,
-    Meeting,
-    Notifications,
     Onboard,
     Messages,
     Share,
@@ -192,10 +185,16 @@ pub struct Island {
     lyrics_timer_gen: u64,
     /// Last committed synced line; drives Apple Music-style advance.
     lyrics_line_idx: Option<usize>,
-    /// Lines-column offset in px; springs to 0 after a +1 advance.
+    /// Dummy travel so the frame driver stays armed during a sequential wave.
     lyrics_scroll: SpringValue,
-    /// Line-advance fade 0..1 (incoming 0.35→1, outgoing 1→0.25).
+    /// Line-advance fade 0..1 (seek/reduce-motion colour; sequential keep-alive).
     lyrics_fade: SpringValue,
+    /// Shared wave clock; stagger samples `elapsed − 35ms·line`.
+    lyrics_wave_at: Instant,
+    /// Per-line start offsets for the current sequential wave.
+    lyrics_line_from: [f32; 5],
+    /// Extra stack shift to centre a wrapped current line in the 84pt box.
+    lyrics_wrap_shift: SpringValue,
     /// 2–3 dominant artwork colors for the ambient media glow.
     pub aura_palette: Option<[gpui::Rgba; 3]>,
     /// Seconds of aura drift, only advanced while the glow is on screen.
@@ -229,18 +228,6 @@ pub struct Island {
     pub(crate) notes_editor: Option<Entity<crate::widgets::NotesEditor>>,
     pub(crate) notes_editing: bool,
     notes_sub: Option<Subscription>,
-    pub(crate) obsidian_notes: Vec<NoteEntry>,
-    pub(crate) obsidian_dirty: bool,
-    obsidian_watch: Option<VaultWatch>,
-    obsidian_watch_vault: Option<PathBuf>,
-    pub(crate) obsidian_capture: String,
-    /// Byte index of the caret in [`Self::obsidian_capture`].
-    pub(crate) obsidian_capture_caret: usize,
-    /// When true, the next edit replaces the whole capture string (cmd-a).
-    obsidian_capture_select_all: bool,
-    pub(crate) obsidian_capture_focus: Option<gpui::FocusHandle>,
-    pub(crate) obsidian_typing: bool,
-    pub(crate) obsidian_flash: Option<String>,
     /// Quick-add field, created the first time the expanded reminders card renders.
     pub(crate) reminders_quick_add: Option<Entity<crate::widgets::QuickAdd>>,
     reminders_qa_sub: Option<Subscription>,
@@ -251,7 +238,7 @@ pub struct Island {
     pub calendar_day: u8,
     /// Preset chips for a new timer, matching the React add dialog.
     pub timer_composer: bool,
-    /// Manual High Alert deadline for the card readout. `None` = until off.
+    /// Pomodoro keep-awake deadline for the card readout. `None` = until off.
     /// powerd owns expiry; this is display-only and is not a wakeup source.
     pub awake_deadline: Option<Instant>,
     pub awake_active: bool,
@@ -272,14 +259,8 @@ pub struct Island {
     pub power: PowerSnapshot,
     pub(crate) lpm_pending: bool,
     pub(crate) lpm_error: Option<String>,
-    pub vpn: VpnSnapshot,
-    /// Brief compact-face takeover after a connect/disconnect edge.
-    vpn_reveal_until: Option<Instant>,
     pub sysstats: nook_core::sysstats::SysSnapshot,
     pub(crate) sysstats_sampling: bool,
-    pub meeting: MeetingSnapshot,
-    pub notifications: Vec<NotificationEvent>,
-    pub notification_unread: usize,
     pub settings: AppSettings,
     /// On-island widget customize mode (dashed chrome + picker).
     pub(crate) widget_edit: bool,
@@ -297,6 +278,7 @@ pub struct Island {
     content_transition_force: bool,
     pub first_run: bool,
     pub speed_mbps: Option<f64>,
+    pub speed_up_mbps: Option<f64>,
     pub speed_progress: f64,
     pub speed_running: bool,
     /// Bumped on start and on Stop so an in-flight test cannot apply after it
@@ -342,8 +324,6 @@ pub struct Island {
     media_view_fade: SpringValue,
     /// Short vertical travel for the same swap (px); positive = enter from below.
     media_view_shift: SpringValue,
-    /// Mute HUD flash on the meeting face; overlay springs to 1 while this is live.
-    meeting_flash_until: Option<Instant>,
     /// Mirrors Accessibility › Display › "Reduce motion"; refreshed by the
     /// poll loop so springs collapse to a dissolve while it is on.
     pub(crate) reduce_motion: bool,
@@ -460,6 +440,11 @@ struct PendingFileDrag {
     screen_y: f64,
 }
 
+/// Pure gate for lyric work: island panel and/or Lyrics PiP.
+pub(crate) fn lyrics_active_state(panel_visible: bool, pip_open: bool) -> bool {
+    panel_visible || pip_open
+}
+
 impl Island {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         nook_core::init();
@@ -502,6 +487,9 @@ impl Island {
             lyrics_line_idx: None,
             lyrics_scroll: SpringValue::at(0.0),
             lyrics_fade: SpringValue::at(1.0),
+            lyrics_wave_at: Instant::now(),
+            lyrics_line_from: [0.0; 5],
+            lyrics_wrap_shift: SpringValue::at(0.0),
             aura_palette: None,
             aura_t: 0.0,
             last_aura_frame: Instant::now(),
@@ -526,16 +514,6 @@ impl Island {
             notes_editor: None,
             notes_editing: false,
             notes_sub: None,
-            obsidian_notes: Vec::new(),
-            obsidian_dirty: false,
-            obsidian_watch: None,
-            obsidian_watch_vault: None,
-            obsidian_capture: String::new(),
-            obsidian_capture_caret: 0,
-            obsidian_capture_select_all: false,
-            obsidian_capture_focus: None,
-            obsidian_typing: false,
-            obsidian_flash: None,
             reminders_quick_add: None,
             reminders_qa_sub: None,
             timers: Vec::new(),
@@ -558,13 +536,8 @@ impl Island {
             power: nook_core::power::current(),
             lpm_pending: false,
             lpm_error: None,
-            vpn: nook_core::vpn::current(),
-            vpn_reveal_until: None,
             sysstats: nook_core::sysstats::SysSnapshot::default(),
             sysstats_sampling: false,
-            meeting: MeetingSnapshot::default(),
-            notifications: nook_core::notifications::snapshot(),
-            notification_unread: nook_core::notifications::unread_count(),
             settings,
             widget_edit: false,
             widget_edit_snapshot: None,
@@ -574,6 +547,7 @@ impl Island {
             content_transition_force: false,
             first_run,
             speed_mbps: None,
+            speed_up_mbps: None,
             speed_progress: 0.0,
             speed_running: false,
             speed_gen: 0,
@@ -599,7 +573,6 @@ impl Island {
             overlay_fade: SpringValue::at(0.0),
             media_view_fade: SpringValue::at(1.0),
             media_view_shift: SpringValue::at(0.0),
-            meeting_flash_until: None,
             reduce_motion: platform::reduce_motion(),
             blur: 0.0,
             topbar_follows_reveal: false,
@@ -680,14 +653,11 @@ impl Island {
         platform::install_mouse_monitors();
         platform::install_osd_wake_observer();
         platform::install_weather_observers();
-        platform::install_meeting_observers();
-        nook_core::notifications::sync_backends(&this.settings);
         // Do not touch GPUI's Window handle here — HasWindowHandle RefCell-panics
         // during construction. Chrome is applied via NSApp window enumeration.
         let _ = window;
         this.spawn_loops(cx);
         Self::spawn_pin(cx);
-        this.sync_obsidian_watch(cx);
         Self::spawn_external_actions(cx);
         this
     }
@@ -785,18 +755,20 @@ impl Island {
                             this.hud = None;
                             this.hud_dragging = false;
                         }
-                        this.sync_obsidian_watch(cx);
                         nook_core::high_alert::set_low_battery_release_pct(
                             this.settings.low_battery_release_pct,
                         );
                         if !this.settings.terminal_enabled {
                             this.close_terminal(cx);
                         }
+                        if !this.settings.show_lyrics || !this.settings.show_media {
+                            crate::pip::close(crate::pip::PipKind::Lyrics, cx);
+                        }
+                        if !this.settings.show_observe {
+                            crate::pip::close(crate::pip::PipKind::Observe, cx);
+                        }
                         this.correct_hidden_tab();
-                        // Per-settings-change syncs (VPN, motion art).
-                        nook_core::vpn::refresh();
                         this.sync_motion_art_from_settings(cx);
-                        nook_core::notifications::sync_backends(&this.settings);
                         dirty = true;
                     }
                     if this.repositioning {
@@ -904,7 +876,6 @@ impl Island {
                                 && !this.settings_open
                                 && !this.widget_edit
                                 && !this.notes_editing
-                                && !this.obsidian_typing
                                 && !this.shell_focused
                                 && !this.mirror_on
                                 && !this.file_drag
@@ -919,7 +890,6 @@ impl Island {
                                     this.clear_observe_expanded();
                                     this.close_notes_editor(cx);
                                     this.park_terminal();
-                                    this.obsidian_typing = false;
                                     dirty = true;
                                 }
                             } else {
@@ -976,9 +946,6 @@ impl Island {
                         if this.paints_live_widgets() && this.clock_timer_visible() {
                             dirty = true;
                         }
-                        if this.paints_live_widgets() && this.vpn_elapsed_should_tick() {
-                            dirty = true;
-                        }
                         if this.paints_live_widgets() && this.recording {
                             dirty = true;
                         }
@@ -1018,9 +985,6 @@ impl Island {
                         dirty = true;
                     }
                     if this.sync_recorder_playback(now) {
-                        dirty = true;
-                    }
-                    if this.clear_expired_vpn_reveal() {
                         dirty = true;
                     }
                     if this.share.maybe_reset_failure() {
@@ -1380,7 +1344,9 @@ impl Island {
         cx.spawn(async move |this, cx| loop {
             let settings = nook_core::settings::get_app_settings();
             let range = settings.observe.range;
-            let snapshot = if settings.show_observe {
+            let snapshot = if settings.show_observe
+                || crate::pip::is_open(crate::pip::PipKind::Observe)
+            {
                 cx.background_executor()
                     .spawn(async move {
                         nook_core::runtime().block_on(nook_core::observe::poll(&settings.observe))
@@ -1540,61 +1506,6 @@ impl Island {
         })
         .detach();
 
-        // VPN is push-based: SCDynamicStore / getifaddrs publish on the watch.
-        cx.spawn(async move |this, cx| {
-            let mut rx = nook_core::vpn::subscribe();
-            loop {
-                let snap = rx.borrow().clone();
-                if this
-                    .update(cx, |this, cx| {
-                        this.apply_vpn_snapshot(snap, cx);
-                    })
-                    .is_err()
-                {
-                    break;
-                }
-                let (alive, next_rx) = cx
-                    .background_executor()
-                    .spawn(async move {
-                        let ok = nook_core::runtime().block_on(rx.changed()).is_ok();
-                        (ok, rx)
-                    })
-                    .await;
-                rx = next_rx;
-                if !alive {
-                    break;
-                }
-            }
-        })
-        .detach();
-
-        cx.spawn(async move |this, cx| {
-            let mut rx = nook_core::notifications::subscribe();
-            loop {
-                let items = nook_core::notifications::snapshot();
-                let unread = nook_core::notifications::unread_count();
-                if this
-                    .update(cx, |this, cx| {
-                        let was = this.notification_unread;
-                        this.notifications = items;
-                        this.notification_unread = unread;
-                        if this.settings.show_notifications && unread > was {
-                            this.alert_preferred = Some(CompactMode::Notifications);
-                            nook_core::haptics::trigger(None);
-                        }
-                        cx.notify();
-                    })
-                    .is_err()
-                {
-                    break;
-                }
-                if rx.changed().await.is_err() {
-                    break;
-                }
-            }
-        })
-        .detach();
-
         // Weather: 30 min TTL, fetch only when stale and the card/adornment
         // is visible, or after a wake. The location is re-checked on the same
         // loop; nook-core throttles that to one request per 15 min.
@@ -1627,8 +1538,6 @@ impl Island {
             cx.background_executor().timer(wait).await;
         })
         .detach();
-
-        self.spawn_meetings_loop(cx);
     }
 
     fn apply_power_snapshot(&mut self, snap: PowerSnapshot, cx: &mut Context<Self>) {
@@ -1682,43 +1591,6 @@ impl Island {
         .detach();
     }
 
-    fn apply_vpn_snapshot(&mut self, snap: VpnSnapshot, cx: &mut Context<Self>) {
-        let was = self.vpn.connected;
-        let changed = self.vpn != snap;
-        self.vpn = snap;
-        if was != self.vpn.connected {
-            self.alert_preferred = Some(CompactMode::Vpn);
-            self.vpn_reveal_until = Some(Instant::now() + motion::VPN_REVEAL);
-            nook_core::haptics::trigger(None);
-        }
-        if changed {
-            cx.notify();
-        }
-    }
-
-    fn has_vpn_face(&self) -> bool {
-        self.settings.show_vpn && (self.vpn.connected || self.vpn_revealing())
-    }
-
-    fn vpn_revealing(&self) -> bool {
-        self.vpn_reveal_until
-            .is_some_and(|until| Instant::now() < until)
-    }
-
-    fn clear_expired_vpn_reveal(&mut self) -> bool {
-        let Some(until) = self.vpn_reveal_until else {
-            return false;
-        };
-        if Instant::now() < until {
-            return false;
-        }
-        self.vpn_reveal_until = None;
-        if !self.vpn.connected && self.alert_preferred == Some(CompactMode::Vpn) {
-            self.alert_preferred = None;
-        }
-        true
-    }
-
     fn sync_recorder_playback(&mut self, now: Instant) -> bool {
         if self.playing_recording.is_none() {
             return false;
@@ -1741,75 +1613,6 @@ impl Island {
                 true
             }
         }
-    }
-
-    fn vpn_elapsed_should_tick(&self) -> bool {
-        if !self.settings.show_vpn || self.vpn.since.is_none() {
-            return false;
-        }
-        let compact =
-            !self.expanded && self.mode() == CompactMode::Vpn && self.settings.vpn_show_timer;
-        let card = self.expanded && self.tab == Tab::Widgets;
-        compact || card
-    }
-
-    fn spawn_meetings_loop(&self, cx: &mut Context<Self>) {
-        // Meetings: wait on hardware events. The only timed work is a 1–2s
-        // Zoom menu-title readback, and only while the meeting face is shown.
-        cx.spawn(async move |this, cx| loop {
-            let face = this
-                .update(cx, |this, _| this.meeting_face_shown())
-                .unwrap_or(false);
-            let cadence = if face {
-                Duration::from_millis(1500)
-            } else {
-                Duration::from_secs(30)
-            };
-            let slice = Duration::from_millis(250);
-            let mut waited = Duration::ZERO;
-            loop {
-                cx.background_executor().timer(slice).await;
-                waited += slice;
-                if nook_core::meetings::take_meeting_event() || waited >= cadence {
-                    break;
-                }
-            }
-            let zoom_readback = this
-                .update(cx, |this, _| {
-                    this.meeting_face_shown()
-                        && this.meeting.app() == Some(nook_core::meetings::MeetingApp::Zoom)
-                })
-                .unwrap_or(false);
-            let snap = cx
-                .background_executor()
-                .spawn(async move {
-                    if zoom_readback {
-                        if let Some(muted) = nook_core::meetings::read_zoom_mute() {
-                            nook_core::meetings::apply_zoom_mute(Some(muted));
-                        }
-                    }
-                    nook_core::meetings::refresh()
-                })
-                .await;
-            if this
-                .update(cx, |this, cx| {
-                    let was = this.meeting.in_meeting();
-                    let changed = this.meeting != snap;
-                    this.meeting = snap;
-                    if !was && this.meeting.in_meeting() {
-                        this.alert_preferred = Some(CompactMode::Meeting);
-                        nook_core::haptics::trigger(None);
-                    }
-                    if changed {
-                        cx.notify();
-                    }
-                })
-                .is_err()
-            {
-                break;
-            }
-        })
-        .detach();
     }
 
     /// Merge a fresh poll into the island: extend the local sample history and
@@ -2121,6 +1924,36 @@ impl Island {
         self.lyrics_open && self.lyrics_panel_available() && self.expanded && self.tab == Tab::Widgets
     }
 
+    /// True when the island Lyrics pane or the Lyrics PiP needs live lyric work.
+    pub(crate) fn lyrics_active(&self) -> bool {
+        lyrics_active_state(
+            self.lyrics_panel_visible(),
+            crate::pip::is_open(crate::pip::PipKind::Lyrics),
+        )
+    }
+
+    /// Expand the island onto the Widgets tab for a PiP "Back to Notch".
+    pub(crate) fn reveal_from_pip(
+        &mut self,
+        kind: crate::pip::PipKind,
+        cx: &mut Context<Self>,
+    ) {
+        self.expanded = true;
+        self.tab = Tab::Widgets;
+        if kind == crate::pip::PipKind::Lyrics && self.lyrics_panel_available() {
+            if !self.lyrics_open {
+                self.begin_media_view_transition(true);
+            }
+            self.lyrics_open = true;
+            self.output_picker_open = false;
+            self.queue_open = false;
+        }
+        if kind == crate::pip::PipKind::Observe {
+            self.observe_expanded = true;
+        }
+        cx.notify();
+    }
+
     /// Width the Music cell claims (Up Next replaces the body — no extra width).
     #[cfg(test)]
     pub(crate) fn music_pane_width(&self, cells: u8) -> f32 {
@@ -2339,7 +2172,7 @@ impl Island {
     fn lyrics_timer_should_run(&self) -> bool {
         self.settings.show_lyrics
             && self.settings.show_media
-            && self.expanded
+            && self.lyrics_active()
             && self.now_playing.is_playing
             && self
                 .lyrics
@@ -2364,13 +2197,15 @@ impl Island {
     fn park_lyrics_motion(&mut self) {
         self.lyrics_scroll.set(0.0);
         self.lyrics_fade.set(1.0);
+        self.lyrics_line_from = [0.0; 5];
+        self.lyrics_wrap_shift.set(0.0);
     }
 
     /// Kick scroll/fade when the synced line index moves. +1 scrolls the
     /// stack; any other jump is a short crossfade. First bind parks.
     fn sync_lyrics_line_motion(&mut self) {
         let next = self.synced_lyrics_index();
-        if !self.lyrics_panel_visible() {
+        if !self.lyrics_active() {
             self.lyrics_line_idx = next;
             self.park_lyrics_motion();
             return;
@@ -2381,19 +2216,32 @@ impl Island {
         let prev = self.lyrics_line_idx;
         self.lyrics_line_idx = next;
         let sequential = matches!((prev, next), (Some(from), Some(to)) if to == from + 1);
-        if self.reduce_motion {
+        let jump = prev.is_some() && next.is_some();
+        if !(sequential || jump) {
             self.park_lyrics_motion();
             return;
         }
-        if sequential {
-            self.lyrics_fade.set(0.0);
-            self.lyrics_scroll.set(media::LYRIC_LINE_PITCH);
-        } else if prev.is_some() && next.is_some() {
-            self.lyrics_fade.set(0.0);
+        self.lyrics_fade.set(0.0);
+        if self.reduce_motion {
+            self.lyrics_line_from = [0.0; 5];
             self.lyrics_scroll.set(0.0);
-        } else {
-            self.park_lyrics_motion();
+            self.lyrics_wave_at = Instant::now();
+            return;
         }
+        if sequential {
+            let elapsed = self.lyrics_wave_elapsed_ms();
+            self.lyrics_line_from = media::lyrics_retarget_from(self.lyrics_line_from, elapsed);
+            self.lyrics_scroll.value += media::LYRIC_LINE_PITCH;
+            self.lyrics_wave_at = Instant::now();
+        } else {
+            self.lyrics_line_from = [0.0; 5];
+            self.lyrics_scroll.set(0.0);
+            self.lyrics_wave_at = Instant::now();
+        }
+    }
+
+    fn lyrics_wave_elapsed_ms(&self) -> f32 {
+        self.lyrics_wave_at.elapsed().as_secs_f32() * 1000.0
     }
 
     pub(crate) fn toggle_mirror(&mut self, cx: &mut Context<Self>) {
@@ -2830,20 +2678,6 @@ impl Island {
         self.awake_active = nook_core::high_alert::is_active();
     }
 
-    pub(crate) fn high_alert_active(&self) -> bool {
-        self.awake_active || nook_core::high_alert::is_active()
-    }
-
-    pub(crate) fn high_alert_remaining_secs(&self) -> Option<u32> {
-        let deadline = self.awake_deadline?;
-        Some(
-            deadline
-                .saturating_duration_since(Instant::now())
-                .as_secs()
-                .min(u32::MAX as u64) as u32,
-        )
-    }
-
     /// Sync UI with powerd / low-battery release. Cheap atomics; no extra loops.
     pub(crate) fn sync_high_alert_ui(&mut self, now: Instant) -> bool {
         let stale = nook_core::high_alert::take_ui_stale();
@@ -2862,32 +2696,6 @@ impl Island {
         }
         nook_core::high_alert::reap_idle();
         changed
-    }
-
-    pub(crate) fn set_high_alert(&mut self, on: bool, duration_secs: Option<u32>) {
-        nook_core::high_alert::set_low_battery_release_pct(self.settings.low_battery_release_pct);
-        if on {
-            let secs = duration_secs.unwrap_or(self.settings.high_alert_default_duration_secs);
-            let timeout = if secs == 0 {
-                None
-            } else {
-                Some(Duration::from_secs(secs as u64))
-            };
-            if nook_core::high_alert::acquire(
-                HighAlertOwner::Manual,
-                self.settings.high_alert_kind,
-                timeout,
-            )
-            .is_ok()
-            {
-                self.awake_deadline = timeout.map(|d| Instant::now() + d);
-                self.awake_active = true;
-            }
-        } else {
-            nook_core::high_alert::release(HighAlertOwner::Manual);
-            self.awake_deadline = None;
-            self.awake_active = nook_core::high_alert::is_active();
-        }
     }
 
     pub(crate) fn control_clock_timer(&self, action: ClockTimerAction) {
@@ -2930,305 +2738,6 @@ impl Island {
         self.mirror_gen = 0;
         if let Some(old) = self.mirror_frame.take() {
             cx.drop_image(old, None);
-        }
-    }
-
-    pub(crate) fn obsidian_capture_focus(&mut self, cx: &mut Context<Self>) -> gpui::FocusHandle {
-        self.obsidian_capture_focus
-            .get_or_insert_with(|| cx.focus_handle())
-            .clone()
-    }
-
-    pub(crate) fn focus_obsidian_capture(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let focus = self.obsidian_capture_focus(cx);
-        window.focus(&focus);
-        window.activate_window();
-        platform::activate_app();
-        self.obsidian_typing = true;
-        self.obsidian_capture_caret = self.obsidian_capture.len();
-        self.obsidian_capture_select_all = false;
-        cx.notify();
-    }
-
-    pub(crate) fn on_obsidian_capture_key(
-        &mut self,
-        event: &gpui::KeyDownEvent,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let ks = &event.keystroke;
-        if ks.key == "enter" {
-            self.submit_obsidian_capture(cx);
-            return;
-        }
-        if ks.key == "escape" {
-            self.obsidian_typing = false;
-            self.obsidian_capture_select_all = false;
-            cx.notify();
-            return;
-        }
-        if ks.modifiers.secondary() && ks.key == "a" {
-            self.obsidian_capture_select_all = !self.obsidian_capture.is_empty();
-            cx.notify();
-            return;
-        }
-        if ks.modifiers.secondary() && ks.key == "v" {
-            if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
-                self.obsidian_insert_text(&text);
-                cx.notify();
-            }
-            return;
-        }
-        if ks.modifiers.platform || ks.modifiers.control {
-            return;
-        }
-        match ks.key.as_str() {
-            "left" => {
-                self.obsidian_capture_select_all = false;
-                self.obsidian_capture_caret =
-                    prev_char_boundary(&self.obsidian_capture, self.obsidian_capture_caret);
-                cx.notify();
-            }
-            "right" => {
-                self.obsidian_capture_select_all = false;
-                self.obsidian_capture_caret =
-                    next_char_boundary(&self.obsidian_capture, self.obsidian_capture_caret);
-                cx.notify();
-            }
-            "backspace" => {
-                self.obsidian_delete_backward();
-                cx.notify();
-            }
-            "delete" => {
-                self.obsidian_delete_forward();
-                cx.notify();
-            }
-            _ => {
-                if let Some(ch) = &ks.key_char {
-                    if !ch.chars().any(|c| c.is_control()) {
-                        self.obsidian_insert_text(ch);
-                        cx.notify();
-                    }
-                }
-            }
-        }
-    }
-
-    fn obsidian_insert_text(&mut self, text: &str) {
-        if self.obsidian_capture_select_all {
-            self.obsidian_capture.clear();
-            self.obsidian_capture_caret = 0;
-            self.obsidian_capture_select_all = false;
-        }
-        let caret = self.obsidian_capture_caret.min(self.obsidian_capture.len());
-        self.obsidian_capture.insert_str(caret, text);
-        self.obsidian_capture_caret = caret + text.len();
-    }
-
-    fn obsidian_delete_backward(&mut self) {
-        if self.obsidian_capture_select_all {
-            self.obsidian_capture.clear();
-            self.obsidian_capture_caret = 0;
-            self.obsidian_capture_select_all = false;
-            return;
-        }
-        let caret = self.obsidian_capture_caret.min(self.obsidian_capture.len());
-        if caret == 0 {
-            return;
-        }
-        let start = prev_char_boundary(&self.obsidian_capture, caret);
-        self.obsidian_capture.replace_range(start..caret, "");
-        self.obsidian_capture_caret = start;
-    }
-
-    fn obsidian_delete_forward(&mut self) {
-        if self.obsidian_capture_select_all {
-            self.obsidian_capture.clear();
-            self.obsidian_capture_caret = 0;
-            self.obsidian_capture_select_all = false;
-            return;
-        }
-        let caret = self.obsidian_capture_caret.min(self.obsidian_capture.len());
-        if caret >= self.obsidian_capture.len() {
-            return;
-        }
-        let end = next_char_boundary(&self.obsidian_capture, caret);
-        self.obsidian_capture.replace_range(caret..end, "");
-    }
-
-    pub(crate) fn submit_obsidian_capture(&mut self, cx: &mut Context<Self>) {
-        let text = self.obsidian_capture.trim().to_string();
-        if text.is_empty() {
-            return;
-        }
-        let Some(vault) = self.settings.obsidian_vault.clone() else {
-            self.obsidian_flash = Some("Choose a vault in Settings".into());
-            cx.notify();
-            return;
-        };
-        self.obsidian_capture.clear();
-        self.obsidian_capture_caret = 0;
-        self.obsidian_capture_select_all = false;
-        self.obsidian_typing = false;
-        let heading = self.settings.obsidian_capture_heading.clone();
-        let use_uri = self.settings.obsidian_uri_capture;
-        cx.spawn(async move |this, cx| {
-            let result = cx
-                .background_executor()
-                .spawn(async move {
-                    nook_core::obsidian::capture_to_daily(
-                        &vault,
-                        heading.as_deref(),
-                        &text,
-                        use_uri,
-                    )
-                })
-                .await;
-            let _ = this.update(cx, |this, cx| {
-                match result {
-                    Ok(_) => {
-                        this.obsidian_flash = Some("Captured".into());
-                        this.obsidian_dirty = true;
-                        this.flush_obsidian_dirty(cx);
-                    }
-                    Err(err) => this.obsidian_flash = Some(err),
-                }
-                cx.notify();
-            });
-        })
-        .detach();
-        cx.notify();
-    }
-
-    pub(crate) fn open_obsidian_note(&mut self, rel: &str, _cx: &mut Context<Self>) {
-        let Some(vault) = self.settings.obsidian_vault.as_ref() else {
-            return;
-        };
-        let url = nook_core::obsidian::open_file_url(&nook_core::obsidian::vault_name(vault), rel);
-        if let Err(err) = nook_core::obsidian::open_url(&url) {
-            log::warn!("obsidian open: {err}");
-        }
-    }
-
-    pub(crate) fn open_obsidian_daily(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
-        let Some(vault) = self.settings.obsidian_vault.clone() else {
-            self.obsidian_flash = Some("Choose a vault in Settings".into());
-            cx.notify();
-            return;
-        };
-        cx.spawn(async move |this, cx| {
-            let result = cx
-                .background_executor()
-                .spawn(async move {
-                    let config = nook_core::obsidian::read_daily_notes_config(&vault);
-                    let rel = nook_core::obsidian::ensure_daily_note(
-                        &vault,
-                        &config,
-                        nook_core::obsidian::CivilDate::today(),
-                    )?;
-                    let url = nook_core::obsidian::open_file_url(
-                        &nook_core::obsidian::vault_name(&vault),
-                        &rel,
-                    );
-                    nook_core::obsidian::open_url(&url)?;
-                    Ok::<_, String>(rel)
-                })
-                .await;
-            let _ = this.update(cx, |this, cx| {
-                match result {
-                    Ok(_) => {
-                        this.obsidian_flash = Some("Today".into());
-                        this.obsidian_dirty = true;
-                        this.flush_obsidian_dirty(cx);
-                    }
-                    Err(err) => this.obsidian_flash = Some(err),
-                }
-                cx.notify();
-            });
-        })
-        .detach();
-    }
-
-    pub(crate) fn flush_obsidian_dirty(&mut self, cx: &mut Context<Self>) {
-        if !self.obsidian_dirty {
-            return;
-        }
-        self.refresh_obsidian_index(cx);
-    }
-
-    fn refresh_obsidian_index(&mut self, cx: &mut Context<Self>) {
-        let Some(vault) = self.settings.obsidian_vault.clone() else {
-            self.obsidian_notes.clear();
-            self.obsidian_dirty = false;
-            return;
-        };
-        self.obsidian_dirty = false;
-        cx.spawn(async move |this, cx| {
-            let notes = cx
-                .background_executor()
-                .spawn(async move { nook_core::obsidian::index_vault(&vault) })
-                .await;
-            let _ = this.update(cx, |this, cx| {
-                this.obsidian_notes = notes;
-                cx.notify();
-            });
-        })
-        .detach();
-    }
-
-    fn sync_obsidian_watch(&mut self, cx: &mut Context<Self>) {
-        let want = if self
-            .settings
-            .is_enabled(nook_core::settings::WidgetModule::Obsidian)
-        {
-            self.settings.obsidian_vault.clone()
-        } else {
-            None
-        };
-        if want == self.obsidian_watch_vault {
-            if want.is_none() {
-                self.stop_obsidian_watch();
-            }
-            return;
-        }
-        self.stop_obsidian_watch();
-        if let Some(vault) = want {
-            self.start_obsidian_watch(vault, cx);
-        }
-    }
-
-    fn stop_obsidian_watch(&mut self) {
-        self.obsidian_watch = None;
-        self.obsidian_watch_vault = None;
-    }
-
-    fn start_obsidian_watch(&mut self, vault: PathBuf, cx: &mut Context<Self>) {
-        self.obsidian_watch_vault = Some(vault.clone());
-        self.obsidian_dirty = true;
-        self.refresh_obsidian_index(cx);
-        match nook_core::obsidian::watch_vault(vault.clone()) {
-            Ok((watch, mut rx)) => {
-                self.obsidian_watch = Some(watch);
-                cx.spawn(async move |this, cx| {
-                    while let Some(paths) = rx.recv().await {
-                        let vault = vault.clone();
-                        let _ = this.update(cx, |this, cx| {
-                            if this.expanded {
-                                nook_core::obsidian::patch_index(
-                                    &mut this.obsidian_notes,
-                                    &vault,
-                                    &paths,
-                                );
-                                cx.notify();
-                            } else {
-                                this.obsidian_dirty = true;
-                            }
-                        });
-                    }
-                })
-                .detach();
-            }
-            Err(err) => log::warn!("obsidian watch: {err}"),
         }
     }
 
@@ -3344,66 +2853,6 @@ impl Island {
     pub(super) fn has_incoming_message(&self) -> bool {
         self.settings.show_messages && self.messages.incoming.is_some()
     }
-    fn has_meeting(&self) -> bool {
-        self.settings.show_meetings && self.meeting.in_meeting()
-    }
-
-    fn meeting_face_shown(&self) -> bool {
-        self.has_meeting()
-            && (self.mode() == CompactMode::Meeting
-                || (self.expanded && self.settings.show_meetings))
-    }
-
-    pub(crate) fn flash_meeting_mute(&mut self) {
-        self.overlay_fade.set(1.0);
-        self.meeting_flash_until = Some(Instant::now() + motion::MUTE_FLASH);
-    }
-
-    pub(crate) fn toggle_meeting_mute(&mut self, cx: &mut Context<Self>) {
-        nook_core::meetings::toggle_mute();
-        self.flash_meeting_mute();
-        nook_core::haptics::trigger(None);
-        cx.notify();
-        cx.spawn(async move |this, cx| {
-            let snap = cx
-                .background_executor()
-                .spawn(async { nook_core::meetings::refresh() })
-                .await;
-            let _ = this.update(cx, |this, cx| {
-                this.meeting = snap;
-                cx.notify();
-            });
-        })
-        .detach();
-    }
-
-    pub(crate) fn leave_meeting(&mut self, cx: &mut Context<Self>) {
-        nook_core::meetings::leave_meeting();
-        nook_core::haptics::trigger(None);
-        cx.notify();
-        cx.spawn(async move |this, cx| {
-            cx.background_executor()
-                .timer(Duration::from_millis(400))
-                .await;
-            let snap = cx
-                .background_executor()
-                .spawn(async { nook_core::meetings::refresh() })
-                .await;
-            let _ = this.update(cx, |this, cx| {
-                this.meeting = snap;
-                cx.notify();
-            });
-        })
-        .detach();
-    }
-    fn has_notifications(&self) -> bool {
-        self.settings.show_notifications && self.notification_unread > 0
-    }
-
-    pub(crate) fn refresh_notifications(&mut self) {
-        self.notifications = nook_core::notifications::snapshot();
-        self.notification_unread = nook_core::notifications::unread_count();
-    }
 
     fn available_modes(&self) -> Vec<CompactMode> {
         let mut modes = Vec::new();
@@ -3417,20 +2866,11 @@ impl Island {
             if self.settings.show_recorder && self.recording {
                 modes.push(CompactMode::Recording);
             }
-            if self.has_meeting() {
-                modes.push(CompactMode::Meeting);
-            }
             if self.has_observe_outage() {
                 modes.push(CompactMode::Observe);
             }
             if self.has_incoming_message() {
                 modes.push(CompactMode::Messages);
-            }
-            if self.has_vpn_face() {
-                modes.push(CompactMode::Vpn);
-            }
-            if self.has_notifications() {
-                modes.push(CompactMode::Notifications);
             }
         }
         if self.has_media() {
@@ -3705,12 +3145,10 @@ impl Island {
                 WidgetModule::Calendar => self.settings.show_calendar,
                 WidgetModule::Mirror => self.settings.show_mirror,
                 WidgetModule::Agents => self.settings.show_agents,
-                WidgetModule::Meeting => self.settings.is_enabled(module),
                 WidgetModule::Observe => self.settings.show_observe,
                 WidgetModule::Reminders => self.settings.show_reminders,
                 WidgetModule::Timers => self.settings.show_timers,
                 WidgetModule::Notes => self.settings.show_notes,
-                WidgetModule::Obsidian => self.settings.is_enabled(module),
                 WidgetModule::Speed => self.settings.show_speed,
                 WidgetModule::Battery => self.settings.show_battery,
                 WidgetModule::Messages => {
@@ -3720,11 +3158,8 @@ impl Island {
                             || self.messages.fda != FdaStatus::Granted)
                 }
                 WidgetModule::Weather => self.settings.weather.enabled,
-                WidgetModule::Vpn => self.settings.show_vpn,
-                WidgetModule::HighAlert => self.settings.show_high_alert,
                 WidgetModule::SysStats => self.settings.show_sysstats,
                 WidgetModule::Recorder => self.settings.show_recorder,
-                WidgetModule::Notifications => self.settings.show_notifications,
                 WidgetModule::Files => false,
             };
             if show {
@@ -3775,7 +3210,6 @@ impl Island {
         self.clear_observe_expanded();
         self.expanded = true;
         self.close_notes_editor(cx);
-        self.obsidian_typing = false;
         self.shell_focused = false;
         self.repositioning = false;
         // Size morph runs via MORPH; force a content dissolve even when already
@@ -3972,18 +3406,7 @@ impl Island {
 
     pub(super) fn springs_off_target(&self) -> bool {
         let (tw, th) = self.target_size();
-        let overlay = if self.mode() == CompactMode::Meeting {
-            if self
-                .meeting_flash_until
-                .is_some_and(|until| Instant::now() < until)
-            {
-                1.0
-            } else {
-                0.0
-            }
-        } else {
-            media::album_overlay_target(self.hovered)
-        };
+        let overlay = media::album_overlay_target(self.hovered);
         let hud_target = self
             .hud
             .filter(|_| self.hud_enabled())
@@ -4000,8 +3423,9 @@ impl Island {
             || self.media_view_shift.value.abs() > motion::REST_PX
             || self.lyrics_scroll.value.abs() > motion::REST_PX
             || (1.0 - self.lyrics_fade.value).abs() > motion::REST_ALPHA
-            || (self.lyrics_panel_visible()
-                && self.lyrics_line_idx != self.synced_lyrics_index())
+            || (self.lyrics_wrap_shift.value - media::lyric_wrap_target()).abs()
+                > motion::REST_PX
+            || (self.lyrics_active() && self.lyrics_line_idx != self.synced_lyrics_index())
     }
 
     pub(super) fn arm_frame_driver(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -4054,7 +3478,8 @@ impl Island {
             self.content_y.set(0.0);
             self.media_view_shift.set(0.0);
             self.lyrics_scroll.set(0.0);
-            self.lyrics_fade.set(1.0);
+            self.lyrics_line_from = [0.0; 5];
+            self.lyrics_wrap_shift.set(media::lyric_wrap_target());
             self.agent_morph_lite = false;
         } else {
             let size_spring = if self.resize_smooth {
@@ -4085,8 +3510,14 @@ impl Island {
                 motion::REST_PX,
             );
             moving |= self.lyrics_scroll.step(
-                motion::Spring::smooth(0.34),
+                motion::Spring::smooth(0.5),
                 0.0,
+                dt,
+                motion::REST_PX,
+            );
+            moving |= self.lyrics_wrap_shift.step(
+                motion::Spring::smooth(0.3),
+                media::lyric_wrap_target(),
                 dt,
                 motion::REST_PX,
             );
@@ -4100,12 +3531,36 @@ impl Island {
             dt,
             motion::REST_ALPHA,
         );
+        let lyrics_fade_spring = if self.reduce_motion {
+            motion::Spring::smooth(0.15)
+        } else if self
+            .lyrics_line_from
+            .iter()
+            .any(|&y| y.abs() > motion::REST_PX)
+        {
+            motion::Spring::smooth(0.5)
+        } else {
+            motion::Spring::smooth(0.18)
+        };
         moving |= self.lyrics_fade.step(
-            motion::Spring::smooth(0.24),
+            lyrics_fade_spring,
             1.0,
             dt,
             motion::REST_ALPHA,
         );
+        if !self.reduce_motion {
+            let wave = media::lyric_stagger_progress(self.lyrics_wave_elapsed_ms(), 4);
+            if wave < 1.0
+                && self
+                    .lyrics_line_from
+                    .iter()
+                    .any(|&y| y.abs() > motion::REST_PX)
+            {
+                moving = true;
+            } else if wave >= 1.0 {
+                self.lyrics_line_from = [0.0; 5];
+            }
+        }
         if !self.reduce_motion
             && self.agent_morph_lite
             && (self.anim_w.value - tw).abs() <= motion::REST_PX
@@ -4116,19 +3571,7 @@ impl Island {
         {
             self.agent_morph_lite = false;
         }
-        let overlay = if self.mode() == CompactMode::Meeting {
-            if self
-                .meeting_flash_until
-                .is_some_and(|until| Instant::now() < until)
-            {
-                1.0
-            } else {
-                self.meeting_flash_until = None;
-                0.0
-            }
-        } else {
-            media::album_overlay_target(self.hovered)
-        };
+        let overlay = media::album_overlay_target(self.hovered);
         moving |= self
             .overlay_fade
             .step(motion::REVEAL, overlay, dt, motion::REST_ALPHA);
@@ -4846,33 +4289,6 @@ impl Island {
     }
 }
 
-fn prev_char_boundary(text: &str, index: usize) -> usize {
-    if index == 0 {
-        return 0;
-    }
-    let mut i = index.min(text.len());
-    while i > 0 {
-        i -= 1;
-        if text.is_char_boundary(i) {
-            return i;
-        }
-    }
-    0
-}
-
-fn next_char_boundary(text: &str, index: usize) -> usize {
-    let len = text.len();
-    let mut i = index.min(len);
-    if i >= len {
-        return len;
-    }
-    i += 1;
-    while i < len && !text.is_char_boundary(i) {
-        i += 1;
-    }
-    i
-}
-
 impl Island {
     fn cycle_tab(&mut self, next: bool) {
         if self.widget_edit {
@@ -5158,6 +4574,9 @@ impl Island {
             lyrics_line_idx: None,
             lyrics_scroll: SpringValue::at(0.0),
             lyrics_fade: SpringValue::at(1.0),
+            lyrics_wave_at: Instant::now(),
+            lyrics_line_from: [0.0; 5],
+            lyrics_wrap_shift: SpringValue::at(0.0),
             aura_palette: None,
             aura_t: 0.0,
             last_aura_frame: Instant::now(),
@@ -5182,16 +4601,6 @@ impl Island {
             notes_editor: None,
             notes_editing: false,
             notes_sub: None,
-            obsidian_notes: Vec::new(),
-            obsidian_dirty: false,
-            obsidian_watch: None,
-            obsidian_watch_vault: None,
-            obsidian_capture: String::new(),
-            obsidian_capture_caret: 0,
-            obsidian_capture_select_all: false,
-            obsidian_capture_focus: None,
-            obsidian_typing: false,
-            obsidian_flash: None,
             reminders_quick_add: None,
             reminders_qa_sub: None,
             timers: Vec::new(),
@@ -5214,13 +4623,8 @@ impl Island {
             power: PowerSnapshot::default(),
             lpm_pending: false,
             lpm_error: None,
-            vpn: VpnSnapshot::default(),
-            vpn_reveal_until: None,
             sysstats: nook_core::sysstats::SysSnapshot::default(),
             sysstats_sampling: false,
-            meeting: MeetingSnapshot::default(),
-            notifications: Vec::new(),
-            notification_unread: 0,
             settings: AppSettings::default(),
             widget_edit: false,
             widget_edit_snapshot: None,
@@ -5230,6 +4634,7 @@ impl Island {
             content_transition_force: false,
             first_run: false,
             speed_mbps: None,
+            speed_up_mbps: None,
             speed_progress: 0.0,
             speed_running: false,
             speed_gen: 0,
@@ -5255,7 +4660,6 @@ impl Island {
             overlay_fade: SpringValue::at(0.0),
             media_view_fade: SpringValue::at(1.0),
             media_view_shift: SpringValue::at(0.0),
-            meeting_flash_until: None,
             reduce_motion: false,
             blur: 0.0,
             topbar_follows_reveal: false,
@@ -5337,8 +4741,8 @@ mod tests {
     use crate::theme;
     use nook_core::agents::{AgentKind, AgentSession, AgentStatus};
     use nook_core::files::FileTrayItem;
-    use nook_core::notifications::NotificationEvent;
     use nook_core::settings::WidgetModule;
+    use nook_core::widgets::SpeedPhase;
     use std::sync::{Mutex, MutexGuard};
 
     /// `outbound_drag_active` is process-global; overlay tests that toggle it
@@ -5546,18 +4950,31 @@ mod tests {
     fn speed_run_starts_at_zero_and_clears_on_cancel() {
         let mut island = test_island();
         island.speed_mbps = Some(99.0);
+        island.speed_up_mbps = Some(12.0);
         island.speed_progress = 100.0;
         island.arm_speed_test();
         assert_eq!(island.speed_mbps, Some(0.0));
+        assert_eq!(island.speed_up_mbps, None);
         assert_eq!(island.speed_progress, 0.0);
         assert!(island.speed_running);
-        island.apply_speed_sample(14.2, 18.0);
+        island.apply_speed_sample(14.2, 18.0, SpeedPhase::Download);
         assert_eq!(island.speed_mbps, Some(14.2));
         assert_eq!(island.speed_progress, 18.0);
         island.cancel_speed_test();
         assert!(!island.speed_running);
         assert_eq!(island.speed_progress, 0.0);
         assert_eq!(island.speed_mbps, None);
+        assert_eq!(island.speed_up_mbps, None);
+    }
+
+    #[test]
+    fn speed_upload_sample_sets_up_only() {
+        let mut island = test_island();
+        island.speed_mbps = Some(14.2);
+        island.apply_speed_sample(41.0, 75.0, SpeedPhase::Upload);
+        assert_eq!(island.speed_up_mbps, Some(41.0));
+        assert_eq!(island.speed_mbps, Some(14.2));
+        assert_eq!(island.speed_progress, 75.0);
     }
 
     #[test]
@@ -6344,50 +5761,6 @@ mod tests {
         assert_eq!(island.mode(), CompactMode::Recording);
         island.settings.show_recorder = false;
     }
-    #[test]
-    fn available_modes_includes_meeting() {
-        use nook_core::meetings::{MeetingApp, MeetingState};
-        let mut island = test_island();
-        island.settings.experimental_widgets = true;
-        island.settings.show_meetings = true;
-        island.meeting.state = MeetingState::InMeeting {
-            app: MeetingApp::Zoom,
-            pid: 7,
-            muted: Some(false),
-            started: Instant::now(),
-        };
-        assert_eq!(
-            island.available_modes(),
-            vec![CompactMode::Meeting, CompactMode::Idle]
-        );
-        assert_eq!(island.mode(), CompactMode::Meeting);
-        island.settings.show_meetings = false;
-    }
-    #[test]
-    fn available_modes_includes_notifications() {
-        let mut island = test_island();
-        island.settings.experimental_widgets = true;
-        island.settings.show_notifications = true;
-        island.notification_unread = 2;
-        island.notifications.push(NotificationEvent::new(
-            "com.hnc.Discord",
-            "Discord",
-            "Hello",
-            "",
-            "there",
-            1,
-        ));
-        assert_eq!(
-            island.available_modes(),
-            vec![CompactMode::Notifications, CompactMode::Idle]
-        );
-        assert_eq!(island.mode(), CompactMode::Notifications);
-        island.settings.show_notifications = false;
-        assert_eq!(island.available_modes(), vec![CompactMode::Idle]);
-        island.settings.show_notifications = true;
-        island.notification_unread = 0;
-        assert_eq!(island.available_modes(), vec![CompactMode::Idle]);
-    }
 
     #[test]
     fn available_modes_observe_only_when_user_alert_fires() {
@@ -6442,41 +5815,6 @@ mod tests {
         );
         island.power.has_battery = true;
         island.settings.show_battery = false;
-    }
-    #[test]
-    fn available_modes_includes_vpn_while_connected() {
-        let mut island = test_island();
-        island.settings.experimental_widgets = true;
-        island.settings.show_vpn = true;
-        assert_eq!(island.available_modes(), vec![CompactMode::Idle]);
-        island.vpn.connected = true;
-        island.vpn.service_name = "Tailscale".into();
-        island.vpn.interface = "utun4".into();
-        assert_eq!(
-            island.available_modes(),
-            vec![CompactMode::Vpn, CompactMode::Idle]
-        );
-        assert_eq!(island.mode(), CompactMode::Vpn);
-        island.settings.show_vpn = false;
-        assert_eq!(island.available_modes(), vec![CompactMode::Idle]);
-    }
-
-    #[test]
-    fn vpn_reveal_keeps_the_face_after_disconnect() {
-        let mut island = test_island();
-        island.settings.experimental_widgets = true;
-        island.settings.show_vpn = true;
-        island.vpn.connected = false;
-        island.vpn.service_name = "Tailscale".into();
-        island.vpn_reveal_until = Some(Instant::now() + Duration::from_secs(4));
-        island.alert_preferred = Some(CompactMode::Vpn);
-        assert!(island.has_vpn_face());
-        assert_eq!(island.mode(), CompactMode::Vpn);
-        island.vpn_reveal_until = Some(Instant::now() - Duration::from_secs(1));
-        assert!(island.clear_expired_vpn_reveal());
-        assert!(!island.has_vpn_face());
-        assert_eq!(island.alert_preferred, None);
-        assert_eq!(island.mode(), CompactMode::Idle);
     }
 
     #[test]
@@ -7127,7 +6465,11 @@ mod tests {
         assert!(pos < 13.0, "pos={pos}");
         assert!(!island.lyrics_timer_should_run());
         island.settings.show_lyrics = true;
+        island.settings.show_media = true;
         island.expanded = true;
+        island.tab = Tab::Widgets;
+        island.lyrics_open = true;
+        island.now_playing.title = Some("A".into());
         island.lyrics = Some(Arc::new(SyncedLyrics {
             lines: nook_core::lyrics::parse_lrc("[00:00.00] A\n[00:20.00] B\n"),
             ..SyncedLyrics::default()
@@ -7135,6 +6477,14 @@ mod tests {
         assert!(island.lyrics_timer_should_run());
         island.expanded = false;
         assert!(!island.lyrics_timer_should_run());
+    }
+
+    #[test]
+    fn lyrics_active_when_only_pip_is_open() {
+        assert!(!lyrics_active_state(false, false));
+        assert!(lyrics_active_state(true, false));
+        assert!(lyrics_active_state(false, true));
+        assert!(lyrics_active_state(true, true));
     }
 
     #[test]
