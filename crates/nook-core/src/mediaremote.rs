@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, Once, OnceLock};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// MediaRemote `MRCommand` / adapter `MRACommand` IDs.
 #[derive(Debug, Clone, Copy)]
@@ -265,10 +265,14 @@ pub fn take_stream_changed() -> bool {
 }
 
 fn interpolated_track(state: &StreamState) -> Option<AdapterTrack> {
+    interpolated_track_at(state, Instant::now())
+}
+
+fn interpolated_track_at(state: &StreamState, now: Instant) -> Option<AdapterTrack> {
     let mut track = state.track.clone()?;
     if state.playing {
         if let Some(base) = state.elapsed_base.or(track.elapsed_time) {
-            let mut elapsed = base + state.elapsed_at.elapsed().as_secs_f64();
+            let mut elapsed = base + now.saturating_duration_since(state.elapsed_at).as_secs_f64();
             if let Some(duration) = track.duration {
                 elapsed = elapsed.min(duration.max(0.0));
             }
@@ -301,6 +305,10 @@ fn merge_diff(target: &mut Value, diff: Value) {
 }
 
 fn apply_payload(diff: bool, payload: Value) {
+    apply_payload_at(diff, payload, Instant::now(), now_epoch_secs());
+}
+
+fn apply_payload_at(diff: bool, payload: Value, now_instant: Instant, now_epoch: f64) {
     let mut state = stream_state().lock().unwrap_or_else(|e| e.into_inner());
     if diff {
         merge_diff(&mut state.merged, payload);
@@ -312,10 +320,10 @@ fn apply_payload(diff: bool, payload: Value) {
         };
     }
     let json = serde_json::to_string(&state.merged).unwrap_or_else(|_| "{}".into());
-    let track = parse_get_output(&json).ok().flatten();
+    let track = parse_get_output_at(&json, now_epoch).ok().flatten();
     state.playing = track.as_ref().map(|t| t.is_playing).unwrap_or(false);
     state.elapsed_base = track.as_ref().and_then(|t| t.elapsed_time);
-    state.elapsed_at = Instant::now();
+    state.elapsed_at = now_instant;
     state.track = track;
     state.primed = true;
     STREAM_CHANGED.store(true, Ordering::Relaxed);
@@ -636,7 +644,18 @@ fn media_control_name(command: MraCommand) -> &'static str {
     }
 }
 
+fn now_epoch_secs() -> f64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0)
+}
+
 fn parse_get_output(stdout: &str) -> Result<Option<AdapterTrack>, String> {
+    parse_get_output_at(stdout, now_epoch_secs())
+}
+
+fn parse_get_output_at(stdout: &str, now_epoch: f64) -> Result<Option<AdapterTrack>, String> {
     let trimmed = stdout.trim();
     if trimmed.is_empty() || trimmed == "null" {
         return Ok(None);
@@ -659,20 +678,58 @@ fn parse_get_output(stdout: &str) -> Result<Option<AdapterTrack>, String> {
         .clone()
         .filter(|p| !p.is_empty())
         .or_else(|| bundle.clone());
+    let is_playing = json_bool(obj.get("playing")).unwrap_or(false);
+    let duration = json_f64(obj.get("duration"));
     Ok(Some(AdapterTrack {
         title,
         artist: json_string(obj.get("artist")),
         album: json_string(obj.get("album")),
         artwork_base64: json_string(obj.get("artworkData")),
-        duration: json_f64(obj.get("duration")),
-        elapsed_time: json_f64(obj.get("elapsedTimeNow"))
-            .or_else(|| json_f64(obj.get("elapsedTime"))),
-        is_playing: json_bool(obj.get("playing")).unwrap_or(false),
+        duration,
+        elapsed_time: resolve_elapsed(obj, is_playing, duration, now_epoch),
+        is_playing,
         app_name: app_name_from_bundle(bundle.as_deref(), parent.as_deref()),
         bundle_id,
         shuffle: parse_shuffle_mode(obj.get("shuffleMode")),
         repeat: parse_repeat_mode(obj.get("repeatMode")),
     }))
+}
+
+fn resolve_elapsed(obj: &Map<String, Value>, is_playing: bool, duration: Option<f64>, now_epoch: f64) -> Option<f64> {
+    if let Some(now_val) = json_f64(obj.get("elapsedTimeNow")) {
+        return Some(clamp_elapsed(now_val, duration));
+    }
+    let raw = json_f64(obj.get("elapsedTime"))?;
+    let Some(ts_micros) = json_f64(obj.get("timestampEpochMicros")) else {
+        return Some(raw);
+    };
+    if !ts_micros.is_finite() {
+        return Some(raw);
+    }
+    let delta = now_epoch - ts_micros / 1_000_000.0;
+    if delta < 0.0 || delta > 24.0 * 3600.0 {
+        return Some(raw);
+    }
+    let rate = if !is_playing {
+        0.0
+    } else {
+        match json_f64(obj.get("playbackRate")) {
+            Some(r) if r.is_finite() => r,
+            Some(_) => 1.0,
+            None => 1.0,
+        }
+    };
+    Some(clamp_elapsed(raw + delta * rate, duration))
+}
+
+fn clamp_elapsed(value: f64, duration: Option<f64>) -> f64 {
+    let mut elapsed = value.max(0.0);
+    if let Some(d) = duration {
+        if d.is_finite() && d >= 0.0 {
+            elapsed = elapsed.min(d);
+        }
+    }
+    elapsed
 }
 
 /// MediaRemote shuffleMode: 1=off, 2=albums, 3=tracks.
@@ -1052,6 +1109,85 @@ mod tests {
             latest_now_playing().unwrap().unwrap().elapsed_time,
             Some(10.0)
         );
+    }
+
+    #[test]
+    fn spotify_elapsed_extrapolates_from_timestamp() {
+        let now = 1_700_000_000.0f64;
+        let ts_10s_ago = ((now - 10.0) * 1_000_000.0) as i64;
+        let json = format!(
+            r#"{{"title":"A","playing":true,"elapsedTime":40,"timestampEpochMicros":{},"playbackRate":1,"bundleIdentifier":"com.spotify.client"}}"#,
+            ts_10s_ago
+        );
+        let track = parse_get_output_at(&json, now).unwrap().unwrap();
+        assert!((track.elapsed_time.unwrap() - 50.0).abs() < 0.001, "{:?}", track.elapsed_time);
+
+        let json = format!(
+            r#"{{"title":"A","playing":false,"elapsedTime":40,"timestampEpochMicros":{},"playbackRate":1,"bundleIdentifier":"com.spotify.client"}}"#,
+            ts_10s_ago
+        );
+        assert_eq!(parse_get_output_at(&json, now).unwrap().unwrap().elapsed_time, Some(40.0));
+
+        let json = format!(
+            r#"{{"title":"A","playing":true,"elapsedTime":40,"timestampEpochMicros":{},"playbackRate":0,"bundleIdentifier":"com.spotify.client"}}"#,
+            ts_10s_ago
+        );
+        assert_eq!(parse_get_output_at(&json, now).unwrap().unwrap().elapsed_time, Some(40.0));
+
+        let json = r#"{"title":"A","playing":true,"elapsedTime":40,"playbackRate":1,"bundleIdentifier":"com.spotify.client"}"#;
+        assert_eq!(parse_get_output_at(json, now).unwrap().unwrap().elapsed_time, Some(40.0));
+
+        let ts_future = ((now + 10.0) * 1_000_000.0) as i64;
+        let json = format!(
+            r#"{{"title":"A","playing":true,"elapsedTime":40,"timestampEpochMicros":{},"playbackRate":1,"bundleIdentifier":"com.spotify.client"}}"#,
+            ts_future
+        );
+        assert_eq!(parse_get_output_at(&json, now).unwrap().unwrap().elapsed_time, Some(40.0));
+
+        let ts_old = ((now - 25.0 * 3600.0) * 1_000_000.0) as i64;
+        let json = format!(
+            r#"{{"title":"A","playing":true,"elapsedTime":40,"timestampEpochMicros":{},"playbackRate":1,"bundleIdentifier":"com.spotify.client"}}"#,
+            ts_old
+        );
+        assert_eq!(parse_get_output_at(&json, now).unwrap().unwrap().elapsed_time, Some(40.0));
+
+        let json = format!(
+            r#"{{"title":"A","playing":true,"elapsedTime":40,"duration":45,"timestampEpochMicros":{},"playbackRate":1,"bundleIdentifier":"com.spotify.client"}}"#,
+            ts_10s_ago
+        );
+        assert_eq!(parse_get_output_at(&json, now).unwrap().unwrap().elapsed_time, Some(45.0));
+    }
+
+    #[test]
+    fn stream_artwork_diff_keeps_spotify_clock_advancing() {
+        let _guard = STREAM_TEST.lock().unwrap_or_else(|e| e.into_inner());
+        reset_stream();
+        let t0 = Instant::now();
+        let epoch0 = 1_700_000_000.0f64;
+        let ts_micros = ((epoch0 - 10.0) * 1_000_000.0) as i64;
+        let full = serde_json::json!({
+            "title": "A",
+            "playing": true,
+            "elapsedTime": 40,
+            "timestampEpochMicros": ts_micros,
+            "playbackRate": 1,
+            "duration": 200,
+            "bundleIdentifier": "com.spotify.client"
+        });
+        apply_payload_at(false, full, t0, epoch0);
+        {
+            let state = stream_state().lock().unwrap_or_else(|e| e.into_inner());
+            let base = state.elapsed_base.unwrap();
+            assert!((base - 50.0).abs() < 0.01, "base={base}");
+        }
+        let t1 = t0 + Duration::from_secs(5);
+        apply_payload_at(true, serde_json::json!({"artworkData": "eHh4"}), t1, epoch0 + 5.0);
+        let state = stream_state().lock().unwrap_or_else(|e| e.into_inner());
+        let base = state.elapsed_base.unwrap();
+        assert!((55.0..56.0).contains(&base), "base={base}");
+        let track = interpolated_track_at(&state, t1).unwrap();
+        let elapsed = track.elapsed_time.unwrap();
+        assert!((55.0..56.0).contains(&elapsed), "elapsed={elapsed}");
     }
 
     // Release builds only discover the adapter inside the .app bundle, so the
