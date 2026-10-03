@@ -244,6 +244,9 @@ pub struct AppSettings {
     /// Opt-in time-synced lyrics beside Now Playing (LRCLIB, cached locally).
     #[serde(default)]
     pub show_lyrics: bool,
+    /// Manual lyric sync shift in milliseconds, clamped to -1000..=1000.
+    #[serde(default)]
+    pub lyrics_offset_ms: i32,
     /// Opt-in browser tab artwork and Google site icons.
     #[serde(default)]
     pub browser_artwork: bool,
@@ -487,6 +490,7 @@ impl Default for AppSettings {
             widget_order: default_widget_order(),
             show_media: true,
             show_lyrics: false,
+            lyrics_offset_ms: 0,
             browser_artwork: false,
             show_media_queue: true,
             spotify_client_id: String::new(),
@@ -549,6 +553,11 @@ impl Default for AppSettings {
 }
 
 impl AppSettings {
+    /// Manual lyric sync shift in ms, clamped to -1000..=1000.
+    pub fn lyrics_offset_ms_clamped(&self) -> i32 {
+        self.lyrics_offset_ms.clamp(-1000, 1000)
+    }
+
     /// Slider value for the expanded glass fall, clamped to `0..=1`.
     pub fn glass_gradient(&self) -> f32 {
         if self.liquid_glass_gradient.is_finite() {

@@ -2116,6 +2116,10 @@ impl SettingsView {
                     .into_any_element(),
                 );
                 rows.push(
+                    lyrics_timing_row(settings.lyrics_offset_ms_clamped(), cx)
+                        .into_any_element(),
+                );
+                rows.push(
                     toggle_row(
                         "Animated Album Art (Apple Music)",
                         settings.animated_album_art,
@@ -3526,6 +3530,49 @@ fn threshold_row(value: u8, cx: &mut Context<SettingsView>) -> impl IntoElement 
                     });
                     cx.notify();
                 })),
+        )
+}
+
+fn lyrics_offset_label(offset_ms: i32) -> String {
+    let ms = offset_ms.clamp(-1000, 1000);
+    if ms == 0 {
+        "0 s".to_string()
+    } else {
+        format!("{:+.1} s", ms as f32 / 1000.0)
+    }
+}
+
+fn lyrics_timing_row(offset_ms: i32, cx: &mut Context<SettingsView>) -> impl IntoElement {
+    let value = lyrics_offset_label(offset_ms);
+    settings_row("lyrics-timing")
+        .child(label("Lyrics timing", theme::BODY, true))
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .child(label("Earlier", theme::CALLOUT, false))
+                .child(
+                    segmented_group()
+                        .child(segment("\u{2212}", false, cx, |_, _, cx| {
+                            nook_core::settings::tweak_app_settings(|s| {
+                                s.lyrics_offset_ms =
+                                    (s.lyrics_offset_ms_clamped() - 100).clamp(-1000, 1000);
+                            });
+                            cx.notify();
+                        }))
+                        .child(segment(value, true, cx, |_, _, cx| {
+                            cx.notify();
+                        }))
+                        .child(segment("+", false, cx, |_, _, cx| {
+                            nook_core::settings::tweak_app_settings(|s| {
+                                s.lyrics_offset_ms =
+                                    (s.lyrics_offset_ms_clamped() + 100).clamp(-1000, 1000);
+                            });
+                            cx.notify();
+                        })),
+                )
+                .child(label("Later", theme::CALLOUT, false)),
         )
 }
 

@@ -51,6 +51,8 @@ use std::time::{Duration, Instant, SystemTime};
 const MEDIA_INTENT_WINDOW: Duration = Duration::from_millis(2500);
 /// Polled elapsed within this many seconds of a seek target counts as caught up.
 const SEEK_CATCHUP_TOL: f64 = 1.5;
+/// Pre-advance synced lines so the staggered spring wave lands on the beat.
+const LYRIC_LEAD_S: f64 = 0.35;
 /// How long each coding-agent session holds the compact face.
 const AGENT_ROTATE: Duration = Duration::from_secs(4);
 
@@ -740,6 +742,8 @@ impl Island {
                     if this.settings_gen != settings_gen {
                         this.settings_gen = settings_gen;
                         let settings = nook_core::settings::get_app_settings();
+                        let offset_changed = this.settings.lyrics_offset_ms_clamped()
+                            != settings.lyrics_offset_ms_clamped();
                         if this.repositioning {
                             // Keep the in-flight drag's origin over the stored one.
                             let (x, y) = (this.settings.island_x, this.settings.island_y);
@@ -750,6 +754,10 @@ impl Island {
                             this.settings = settings;
                         }
                         this.sync_lyrics(cx);
+                        if offset_changed {
+                            this.sync_lyrics_line_motion();
+                            this.arm_lyrics_line_timer(cx);
+                        }
                         nook_core::osd::apply_from_settings();
                         if !this.settings.show_volume_brightness_hud {
                             this.hud = None;
@@ -1980,13 +1988,31 @@ impl Island {
     }
 
     /// Interpolated playback position from the last now-playing snapshot.
-    pub(crate) fn lyrics_position(&self) -> f64 {
+    fn raw_media_position(&self) -> f64 {
         let extra = if self.now_playing.is_playing {
             self.lyrics_anchor_at.elapsed().as_secs_f64()
         } else {
             0.0
         };
         let pos = (self.lyrics_anchor_elapsed + extra).max(0.0);
+        match self.now_playing.duration {
+            Some(duration) if duration > 0.0 => pos.min(duration),
+            _ => pos,
+        }
+    }
+
+    /// Lyric playhead: raw position + lead (while playing) + user offset.
+    /// The scrubber/progress keeps the raw position; every `active_index` /
+    /// `delay_until_next` call site goes through here.
+    pub(crate) fn lyrics_position(&self) -> f64 {
+        let raw = self.raw_media_position();
+        let lead = if self.now_playing.is_playing {
+            LYRIC_LEAD_S
+        } else {
+            0.0
+        };
+        let offset = self.settings.lyrics_offset_ms_clamped() as f64 / 1000.0;
+        let pos = (raw + lead + offset).max(0.0);
         match self.now_playing.duration {
             Some(duration) if duration > 0.0 => pos.min(duration),
             _ => pos,
@@ -2127,7 +2153,7 @@ impl Island {
     }
 
     pub(crate) fn note_media_play_pause(&mut self, cx: &mut Context<Self>) {
-        let pos = self.lyrics_position();
+        let pos = self.raw_media_position();
         self.now_playing.is_playing = !self.now_playing.is_playing;
         self.play_intent = Some((self.now_playing.is_playing, Instant::now()));
         self.lyrics_anchor_elapsed = pos;
@@ -6477,6 +6503,49 @@ mod tests {
         assert!(island.lyrics_timer_should_run());
         island.expanded = false;
         assert!(!island.lyrics_timer_should_run());
+    }
+
+    #[test]
+    fn lyrics_position_applies_lead_and_offset_only_while_playing() {
+        let mut island = test_island();
+        island.lyrics_anchor_elapsed = 10.0;
+        island.lyrics_anchor_at = Instant::now();
+        island.now_playing.duration = Some(100.0);
+        island.settings.lyrics_offset_ms = 200;
+        island.now_playing.is_playing = false;
+        assert!((island.lyrics_position() - 10.2).abs() < 0.02);
+        island.now_playing.is_playing = true;
+        island.lyrics_anchor_at = Instant::now();
+        assert!((island.lyrics_position() - 10.55).abs() < 0.05);
+    }
+
+    #[test]
+    fn lyrics_offset_clamps() {
+        let mut island = test_island();
+        island.settings.lyrics_offset_ms = 5000;
+        assert_eq!(island.settings.lyrics_offset_ms_clamped(), 1000);
+        island.settings.lyrics_offset_ms = -5000;
+        assert_eq!(island.settings.lyrics_offset_ms_clamped(), -1000);
+        island.lyrics_anchor_elapsed = 10.0;
+        island.lyrics_anchor_at = Instant::now();
+        island.now_playing.duration = Some(100.0);
+        island.now_playing.is_playing = false;
+        assert!((island.lyrics_position() - 9.0).abs() < 0.02);
+    }
+
+    #[test]
+    fn lyrics_lead_picks_next_line_early() {
+        let mut island = test_island();
+        island.lyrics_anchor_elapsed = 19.7;
+        island.lyrics_anchor_at = Instant::now();
+        island.now_playing.duration = Some(100.0);
+        island.now_playing.is_playing = true;
+        island.settings.lyrics_offset_ms = 0;
+        island.lyrics = Some(Arc::new(SyncedLyrics {
+            lines: nook_core::lyrics::parse_lrc("[00:10.00] A\n[00:20.00] B\n"),
+            ..SyncedLyrics::default()
+        }));
+        assert_eq!(island.synced_lyrics_index(), Some(1));
     }
 
     #[test]
