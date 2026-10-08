@@ -13,3 +13,7 @@ Banned:
 Keep comments that earn their space: why a choice was made, safety constraints, invariants, non-obvious edge cases, and TCC / platform gotchas.
 
 Product names (Claude Code, Cursor, Grok, ChatGPT, Copilot, and the rest) are fine when they describe real product behavior — for example an Agents widget row, a Grokbot card, or docs about a tool. They are not fine as author stamps on code or commits.
+
+## No tests
+
+Do not write unit tests or integration tests. Do not add test files, test helpers, or assertions unless the human already specified the cases. Running existing tests is fine. E2E is not banned. Never generate tests that restate the implementation.
