@@ -1,0 +1,6 @@
+{
+  "title": "World Clock",
+  "icon": "app:com.apple.clock",
+  "description": "The world in dots, lit where the sun is up, with your cities and their times.",
+  "props": { "cities": ["San Francisco", "New York", "London", "Tokyo"], "hours": 24 }
+}

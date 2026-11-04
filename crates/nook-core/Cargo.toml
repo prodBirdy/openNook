@@ -34,7 +34,15 @@ objc2 = "0.6"
 objc2-foundation = { version = "0.3", features = [
     "NSRegularExpression",
     "NSTextCheckingResult",
+    "NSArray",
+    "NSDictionary",
+    "NSString",
+    "NSUUID",
+    "NSValue",
 ] }
+objc2-core-audio = "0.3.2"
+objc2-core-audio-types = "0.3.2"
+objc2-core-foundation = { version = "0.3.2", features = ["CFDictionary", "CFString"] }
 objc2-event-kit = { version = "0.3", features = ["EKEventStore", "EKEvent", "EKReminder", "EKCalendar"] }
 objc2-core-location = { version = "0.3", features = ["CLLocationManager", "CLLocation"] }
 objc2-avf-audio = "0.3"

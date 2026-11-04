@@ -1,0 +1,30 @@
+{
+  "island": {
+    "width": 560,
+    "hover": "peek",
+    "hoverDelayMs": 120,
+    "collapseDelayMs": 200,
+    "display": "notch",
+    "hideInFullScreen": true,
+    "glass": true,
+    "glassTint": 0.5,
+    "haptics": true
+  },
+  "compact": [
+    "herdr",
+    "timer",
+    "now-playing",
+    "weather"
+  ],
+  "expanded": [
+    "now-playing",
+    "weather",
+    "world-clock",
+    "iss",
+    "timer",
+    "herdr"
+  ],
+  "hidden": [],
+  "mods": {},
+  "theme": {}
+}

@@ -51,7 +51,7 @@
 	<key>NSDownloadsFolderUsageDescription</key>
 	<string>openNook runs terminal commands you type that access your Downloads folder.</string>
 	<key>NSAudioCaptureUsageDescription</key>
-	<string>openNook adjusts each app's volume by tapping its audio output. It does not save or send what you hear — it only scales the sound in real time. macOS shows a recording indicator while any per-app slider is below 100%.</string>
+	<string>openNook moves the island's music meter with what you're playing. It reads only how loud the sound is, in a few bands, while the meter is on screen; it never records, saves or sends what you hear.</string>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>openNook finds nearby LocalSend devices on your network so you can send files from the island tray. Nothing is received unless you turn receive on in Settings.</string>
 	<key>CFBundleURLTypes</key>

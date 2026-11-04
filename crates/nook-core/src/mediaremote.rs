@@ -108,6 +108,13 @@ fn development_backend() -> Option<Backend> {
 
 #[cfg(not(debug_assertions))]
 fn development_backend() -> Option<Backend> {
+    // A release binary run from the workspace (`cargo run --release`) has no bundle; the
+    // adapter the workspace built still serves it. AppleScript alone needs an Automation grant
+    // per player that an unbundled binary never gets, so Spotify and the rest stay silent.
+    if let Some(backend) = from_third_party() {
+        log::info!("MediaRemote adapter from workspace (unbundled release build)");
+        return Some(backend);
+    }
     log::info!("Bundled MediaRemote adapter not found; AppleScript fallback will be used");
     None
 }
@@ -130,7 +137,6 @@ fn from_bundle_resources() -> Option<Backend> {
     )
 }
 
-#[cfg(debug_assertions)]
 fn from_third_party() -> Option<Backend> {
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let workspace = manifest.parent()?.parent()?;

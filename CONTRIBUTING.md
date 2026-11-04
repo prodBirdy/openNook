@@ -20,7 +20,7 @@ Permission-gated features need a real app bundle because macOS TCC attaches gran
 
 ## Layout and design
 
-`crates/nook-core` is the platform/back-end layer. `crates/nook` is the GPUI UI and island client.
+`crates/nook-core` is the platform/back-end layer. `crates/nook-mods` is the mod runtime (QuickJS). `crates/nook` is the Rune island, the services mods read, and the shipped mods.
 
 Keep the dot-matrix look only for coding-agent faces; everything else uses a clean macOS style. Test painted surfaces and Liquid Glass on supported systems.
 

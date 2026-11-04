@@ -1,3662 +1,479 @@
-//! Native window chrome GPUI does not expose: accessory activation policy,
-//! click-through, and pinning the overlay to the physical top of the main
-//! display (into the camera notch).
-//!
-//! GPUI always creates even `titlebar: None` windows with `NSTitledWindowMask`.
-//! AppKit then clamps them to `visibleFrame` (below the menu bar) via
-//! `constrainFrameRect:toScreen:`. The original Tauri client was borderless
-//! from the start, so it never hit that clamp. We:
-//!   1. Install an identity `constrainFrameRect:` on `GPUIPanel` *before* the
-//!      island window is created, so GPUI's own `setFrameTopLeftPoint` sticks.
-//!   2. After creation, flip the panel to borderless and pin using `NSScreen.frame`
-//!      (not `visibleFrame`), without touching GPUI's `Window` (that RefCell-panics).
+//! What the OS knows that nook-core doesn't cover: running apps and where an app lives.
 
-use gpui::Window;
-use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+use serde_json::{Value, json};
+use std::path::PathBuf;
 
 #[cfg(target_os = "macos")]
-use nook_core::notch::{CGPoint, CGRect, CGSize};
-#[cfg(target_os = "macos")]
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-#[cfg(target_os = "macos")]
-use std::sync::Once;
-#[cfg(target_os = "macos")]
-use std::collections::HashMap;
-#[cfg(target_os = "macos")]
-use std::sync::{Condvar, Mutex, OnceLock};
-use std::time::Duration;
-
-#[cfg(target_os = "macos")]
-static INSTALL: Once = Once::new();
-#[cfg(target_os = "macos")]
-static LOGGED_PIN: AtomicBool = AtomicBool::new(false);
-#[cfg(target_os = "macos")]
-static PIN_NEEDED: AtomicBool = AtomicBool::new(false);
-
-/// Call once before `open_island`. Safe to call again.
-pub fn install() {
-    #[cfg(target_os = "macos")]
-    {
-        install_macos();
-        install_mouse_monitors();
-    }
-}
-
-/// Ask the pin backstop loop to restyle/pin island windows. Notification
-/// handlers also pin immediately on the main thread.
-pub fn request_pin() {
-    #[cfg(target_os = "macos")]
-    {
-        PIN_NEEDED.store(true, Ordering::Release);
-        let wait = pin_wait();
-        if let Ok(mut ready) = wait.ready.lock() {
-            *ready = true;
-            wait.cv.notify_one();
-        }
-    }
-}
-
-pub fn take_pin_needed() -> bool {
-    #[cfg(target_os = "macos")]
-    {
-        PIN_NEEDED.swap(false, Ordering::AcqRel)
-    }
-    #[cfg(not(target_os = "macos"))]
-    false
-}
-
-#[cfg(target_os = "macos")]
-struct PinWait {
-    ready: Mutex<bool>,
-    cv: Condvar,
-}
-
-#[cfg(target_os = "macos")]
-fn pin_wait() -> &'static PinWait {
-    static WAIT: OnceLock<PinWait> = OnceLock::new();
-    WAIT.get_or_init(|| PinWait {
-        ready: Mutex::new(false),
-        cv: Condvar::new(),
-    })
-}
-
-/// Block until [`request_pin`] or `timeout`. Must run off the main thread.
-/// Consumes the wait signal (`ready`) so the next call can park again.
-/// [`PIN_NEEDED`] is left for [`take_pin_needed`] so a request that races
-/// in after wake is still observed by the caller.
-pub fn wait_pin_needed(timeout: Duration) -> bool {
-    #[cfg(target_os = "macos")]
-    {
-        let wait = pin_wait();
-        let Ok(mut ready) = wait.ready.lock() else {
-            std::thread::sleep(timeout);
-            return PIN_NEEDED.load(Ordering::Acquire);
-        };
-        // Consume an already-posted condvar signal before parking. Do not
-        // clear PIN_NEEDED here — the caller must take it (see spawn_pin).
-        if *ready {
-            *ready = false;
-            return true;
-        }
-        if PIN_NEEDED.load(Ordering::Acquire) {
-            return true;
-        }
-        let (mut ready, _) = wait
-            .cv
-            .wait_timeout(ready, timeout)
-            .unwrap_or_else(|e| e.into_inner());
-        let signaled = *ready;
-        *ready = false;
-        signaled || PIN_NEEDED.load(Ordering::Acquire)
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        std::thread::sleep(timeout);
-        false
-    }
-}
-
-#[cfg(target_os = "macos")]
-fn install_macos() {
-    INSTALL.call_once(|| unsafe {
-        use objc2::ffi::{class_addMethod, class_replaceMethod};
-        use objc2::runtime::{AnyClass, AnyObject, Sel};
-        use objc2::sel;
-        use std::ffi::CString;
-
-        let Some(gpui_panel) = AnyClass::get(c"GPUIPanel") else {
-            log::error!("GPUIPanel class missing — notch pin will fail");
-            return;
-        };
-
-        // Must be `extern "C"` (not C-unwind): AppKit calls this from C, and a
-        // Rust panic here aborts the process via didFinishLaunching.
-        extern "C" fn constrain_frame(
-            _this: *mut AnyObject,
-            _cmd: Sel,
-            frame: CGRect,
-            _screen: *mut AnyObject,
-        ) -> CGRect {
-            frame
-        }
-
-        let types =
-            CString::new("{CGRect={CGPoint=dd}{CGSize=dd}}@:{CGRect={CGPoint=dd}{CGSize=dd}}@")
-                .unwrap();
-        let sel = sel!(constrainFrameRect:toScreen:);
-        // SAFETY: constrain_frame matches the ObjC encoding in `types`.
-        let imp = nook_core::ffi::as_objc_imp(
-            constrain_frame as extern "C" fn(*mut AnyObject, Sel, CGRect, *mut AnyObject) -> CGRect,
-        );
-        let cls_ptr = gpui_panel as *const AnyClass as *mut AnyClass;
-        if !class_addMethod(cls_ptr, sel, imp, types.as_ptr()).as_bool() {
-            class_replaceMethod(cls_ptr, sel, imp, types.as_ptr());
-        }
-        log::info!("notch constrainFrameRect installed on GPUIPanel");
-        install_app_target();
-        install_services_provider();
-    });
-}
-
-#[cfg(target_os = "macos")]
-static SERVICES_PROVIDER: std::sync::atomic::AtomicPtr<objc2::runtime::AnyObject> =
-    std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
-
-/// Finder "Send to openNook" — same path bus as `opennook://tray/add`. Never shell.
-#[cfg(target_os = "macos")]
-fn install_services_provider() {
-    use objc2::runtime::{AnyClass, AnyObject, ClassBuilder, NSObject, Sel};
-    use objc2::{class, msg_send, sel, ClassType};
-    use std::sync::OnceLock;
-
-    static CLASS: OnceLock<&'static AnyClass> = OnceLock::new();
-    let cls = CLASS.get_or_init(|| {
-        if let Some(existing) = AnyClass::get(c"NookServicesProvider") {
-            return existing;
-        }
-        let mut builder = ClassBuilder::new(c"NookServicesProvider", NSObject::class())
-            .expect("NookServicesProvider");
-
-        extern "C-unwind" fn send_to_opennook(
-            _this: &NSObject,
-            _cmd: Sel,
-            pboard: *mut AnyObject,
-            _user_data: *mut AnyObject,
-            _error: *mut *mut AnyObject,
-        ) {
-            let paths = unsafe { read_service_paths(pboard) };
-            if !paths.is_empty() {
-                nook_core::automation::ingest_service_paths(paths);
-            }
-        }
-        unsafe {
-            builder.add_method(
-                sel!(sendToOpenNook:userData:error:),
-                send_to_opennook as extern "C-unwind" fn(_, _, _, _, _),
-            );
-        }
-        builder.register()
-    });
-
-    unsafe {
-        let provider: *mut AnyObject = msg_send![*cls, new];
-        if provider.is_null() {
-            log::error!("services provider alloc failed");
-            return;
-        }
-        let _: *mut AnyObject = msg_send![provider, retain];
-        SERVICES_PROVIDER.store(provider, Ordering::Relaxed);
-        let ns_app: *mut AnyObject = msg_send![class!(NSApplication), sharedApplication];
-        let _: () = msg_send![ns_app, setServicesProvider: provider];
-        ns_update_dynamic_services();
-        log::info!("NSServices provider installed (Send to openNook)");
-    }
-}
-
-#[cfg(target_os = "macos")]
-#[link(name = "AppKit", kind = "framework")]
-extern "C" {
-    fn NSUpdateDynamicServices();
-}
-
-#[cfg(target_os = "macos")]
-fn ns_update_dynamic_services() {
-    unsafe { NSUpdateDynamicServices() }
-}
-
-#[cfg(target_os = "macos")]
-unsafe fn read_service_paths(pboard: *mut objc2::runtime::AnyObject) -> Vec<std::path::PathBuf> {
+mod mac {
     use objc2::runtime::AnyObject;
-    use objc2::*;
-    if pboard.is_null() {
-        return Vec::new();
-    }
-    let type_name: *mut AnyObject = msg_send![
-        class!(NSString),
-        stringWithUTF8String: c"NSFilenamesPboardType".as_ptr()
-    ];
-    let list: *mut AnyObject = msg_send![pboard, propertyListForType: type_name];
-    if list.is_null() {
-        return Vec::new();
-    }
-    let count: usize = msg_send![list, count];
-    let mut paths = Vec::new();
-    for i in 0..count {
-        let item: *mut AnyObject = msg_send![list, objectAtIndex: i];
-        if item.is_null() {
-            continue;
+    use objc2::{class, msg_send};
+    use std::ffi::{CStr, CString};
+
+    pub unsafe fn string(ns: *mut AnyObject) -> Option<String> {
+        if ns.is_null() {
+            return None;
         }
-        let utf8: *const i8 = msg_send![item, UTF8String];
-        if utf8.is_null() {
-            continue;
-        }
-        let raw = std::ffi::CStr::from_ptr(utf8)
-            .to_string_lossy()
-            .into_owned();
-        paths.push(std::path::PathBuf::from(raw));
+        let ptr: *const std::os::raw::c_char = unsafe { msg_send![ns, UTF8String] };
+        (!ptr.is_null()).then(|| unsafe { CStr::from_ptr(ptr) }.to_string_lossy().into_owned())
     }
-    paths
-}
 
-/// Style + pin every GPUI island panel. Does not touch GPUI `Window`.
-#[cfg(target_os = "macos")]
-pub fn apply_island_chrome() {
-    install_macos();
-    unsafe {
-        set_accessory_policy();
-        for_each_island_window(|ns_win| {
-            style_island_window(ns_win);
-            pin_ns_window(ns_win);
-        });
+    pub unsafe fn ns_string(s: &str) -> *mut AnyObject {
+        let c = CString::new(s).unwrap_or_default();
+        unsafe { msg_send![class!(NSString), stringWithUTF8String: c.as_ptr()] }
     }
 }
 
-#[cfg(not(target_os = "macos"))]
-pub fn apply_island_chrome() {}
-
-#[cfg(target_os = "macos")]
-unsafe fn set_accessory_policy() {
-    use objc2::runtime::AnyObject;
-    use objc2::*;
-    let ns_app: *mut AnyObject = msg_send![class!(NSApplication), sharedApplication];
-    let _: bool = msg_send![ns_app, setActivationPolicy: 1_i64];
-}
-
-#[cfg(target_os = "macos")]
-unsafe fn style_island_window(ns_win: *mut objc2::runtime::AnyObject) {
-    use objc2::runtime::AnyObject;
-    use objc2::*;
-
-    // Do not object_setClass — GPUI looks up a windowState ivar on GPUIPanel.
-    // constrainFrameRect is already installed on GPUIPanel itself.
-
-    // Borderless | NonactivatingPanel | FullSizeContentView
-    // (titled mask is why AppKit inset us below the menu bar)
-    const BORDERLESS: u64 = 0;
-    const NONACTIVATING_PANEL: u64 = 1 << 7;
-    const FULL_SIZE_CONTENT: u64 = 1 << 15;
-    let mask = BORDERLESS | NONACTIVATING_PANEL | FULL_SIZE_CONTENT;
-    let _: () = msg_send![ns_win, setStyleMask: mask];
-    let _: () = msg_send![ns_win, setLevel: 25_i64];
-    // CanJoinAllSpaces | Stationary | FullScreenAuxiliary | IgnoresCycle
-    let _: () =
-        msg_send![ns_win, setCollectionBehavior: (1u64 | (1u64 << 4) | (1u64 << 8) | (1u64 << 6))];
-    let _: () = msg_send![ns_win, setHasShadow: false];
-    let _: () = msg_send![ns_win, setOpaque: false];
-    let _: () = msg_send![ns_win, setMovable: false];
-    let _: () = msg_send![ns_win, setHidesOnDeactivate: false];
-    // NSWindowAnimationBehaviorNone — don't animate our pin
-    let _: () = msg_send![ns_win, setAnimationBehavior: 2_i64];
-    let title: *mut AnyObject =
-        msg_send![class!(NSString), stringWithUTF8String: c"openNook-island".as_ptr()];
-    let _: () = msg_send![ns_win, setTitle: title];
-    let clear: *mut AnyObject = msg_send![class!(NSColor), clearColor];
-    let _: () = msg_send![ns_win, setBackgroundColor: clear];
-    // setStyleMask drops GPUI's registerForDraggedTypes; without it Finder
-    // never delivers draggingEntered to GPUIPanel.
-    register_file_drops(ns_win);
-}
-
-/// GPUI registers NSFilenamesPboardType on the window at creation. Restyle
-/// (borderless / nonactivating) clears that list, so the island stops being
-/// a drop target until we put it back.
-#[cfg(target_os = "macos")]
-unsafe fn register_file_drops(ns_win: *mut objc2::runtime::AnyObject) {
-    use objc2::runtime::AnyObject;
-    use objc2::*;
-
-    // Same type GPUI's draggingEntered reads via propertyListForType.
-    let filenames: *mut AnyObject = msg_send![
-        class!(NSString),
-        stringWithUTF8String: c"NSFilenamesPboardType".as_ptr()
-    ];
-    let types: *mut AnyObject = msg_send![class!(NSArray), arrayWithObject: filenames];
-    let _: () = msg_send![ns_win, registerForDraggedTypes: types];
-}
-
-#[cfg(target_os = "macos")]
-fn pin_ns_window(ns_win: *mut objc2::runtime::AnyObject) {
-    use objc2::runtime::AnyObject;
-    use objc2::*;
-
-    unsafe {
-        let screen: *mut AnyObject = {
-            let s: *mut AnyObject = msg_send![ns_win, screen];
-            if s.is_null() {
-                msg_send![class!(NSScreen), mainScreen]
-            } else {
-                s
-            }
-        };
-        if screen.is_null() {
-            return;
-        }
-        let frame: CGRect = msg_send![screen, frame];
-        let visible: CGRect = msg_send![screen, visibleFrame];
-        let (_, height) = nook_core::notch::overlay_window_size();
-        // Cocoa origin is bottom-left. TOP of the window = TOP of NSScreen.frame
-        // (the hardware notch), not visibleFrame (below the menu bar).
-        let rect = CGRect {
-            origin: CGPoint {
-                x: frame.origin.x,
-                y: frame.origin.y + frame.size.height - height,
-            },
-            size: CGSize {
-                width: frame.size.width,
-                height,
-            },
-        };
-
-        let current: CGRect = msg_send![ns_win, frame];
-        let moved = (current.origin.x - rect.origin.x).abs() > 0.5
-            || (current.origin.y - rect.origin.y).abs() > 0.5
-            || (current.size.width - rect.size.width).abs() > 0.5
-            || (current.size.height - rect.size.height).abs() > 0.5;
-
-        if moved {
-            // display:false — a forced synchronous draw here lands as a frame
-            // hitch when the strip resizes around an island animation; GPUI
-            // repaints on its own resize delegate a frame later.
-            let _: () = msg_send![ns_win, setFrame: rect, display: false];
-            let top_left = CGPoint {
-                x: frame.origin.x,
-                y: frame.origin.y + frame.size.height,
-            };
-            let _: () = msg_send![ns_win, setFrameTopLeftPoint: top_left];
-            let _: () = msg_send![ns_win, setLevel: 25_i64];
-        }
-
-        // After dropping the titled mask, keep the content view flush with the
-        // window so GPUI doesn't paint below a leftover titlebar inset.
-        let content: *mut AnyObject = msg_send![ns_win, contentView];
-        if !content.is_null() {
-            let local = CGRect {
-                origin: CGPoint { x: 0.0, y: 0.0 },
-                size: rect.size,
-            };
-            let _: () = msg_send![content, setFrame: local];
-            let glass = glass_cap().lock().unwrap_or_else(|e| e.into_inner()).view;
-            let subviews: *mut AnyObject = msg_send![content, subviews];
-            if !subviews.is_null() {
-                let n: usize = msg_send![subviews, count];
-                for i in 0..n {
-                    let v: *mut AnyObject = msg_send![subviews, objectAtIndex: i];
-                    if !glass.is_null() && v == glass {
-                        continue;
-                    }
-                    let _: () = msg_send![v, setFrame: local];
-                    // GPUI's CAMetalLayer defaults to `resize` gravity, so on
-                    // every strip resize CoreAnimation scales the stale
-                    // drawable into the new bounds until GPUI presents the
-                    // next frame — that is the one-frame squish/stretch of the
-                    // island seen when the strip re-quantizes on hover. The
-                    // strip's top edge never moves, so anchoring the stale
-                    // contents top-left leaves them exactly where they were
-                    // (growth reveals transparent rows, shrink just clips).
-                    let layer: *mut AnyObject = msg_send![v, layer];
-                    if !layer.is_null() {
-                        let gravity: *mut AnyObject = msg_send![
-                            class!(NSString),
-                            stringWithUTF8String: c"topLeft".as_ptr()
-                        ];
-                        let _: () = msg_send![layer, setContentsGravity: gravity];
-                    }
-                }
-            }
-        }
-
-        if !LOGGED_PIN.swap(true, Ordering::Relaxed) {
-            let after: CGRect = msg_send![ns_win, frame];
-            let cv: CGRect = if content.is_null() {
-                CGRect {
-                    origin: CGPoint { x: 0.0, y: 0.0 },
-                    size: CGSize {
-                        width: 0.0,
-                        height: 0.0,
-                    },
-                }
-            } else {
-                msg_send![content, frame]
-            };
-            let mask: u64 = msg_send![ns_win, styleMask];
-            let level: i64 = msg_send![ns_win, level];
-            let name_ns: *mut AnyObject = msg_send![ns_win, className];
-            let name_c: *const i8 = msg_send![name_ns, UTF8String];
-            let name = if name_c.is_null() {
-                std::borrow::Cow::Borrowed("?")
-            } else {
-                std::ffi::CStr::from_ptr(name_c).to_string_lossy()
-            };
-            log::info!(
-                "pin {name} level={level} mask={mask:#x} screen=({:.0},{:.0} {:.0}×{:.0}) visible_top={:.0} notch_gap={:.0} before=({:.1},{:.1} {:.0}×{:.0}) after=({:.1},{:.1} {:.0}×{:.0}) content=({:.1},{:.1} {:.0}×{:.0}) window_top={:.1}",
-                frame.origin.x,
-                frame.origin.y,
-                frame.size.width,
-                frame.size.height,
-                visible.origin.y + visible.size.height,
-                frame.origin.y + frame.size.height - (visible.origin.y + visible.size.height),
-                current.origin.x,
-                current.origin.y,
-                current.size.width,
-                current.size.height,
-                after.origin.x,
-                after.origin.y,
-                after.size.width,
-                after.size.height,
-                cv.origin.x,
-                cv.origin.y,
-                cv.size.width,
-                cv.size.height,
-                after.origin.y + after.size.height,
-            );
-        }
-    }
-}
-
-/// Re-pin without touching GPUI's Window (safe from timers).
-pub fn pin_island_windows() {
-    #[cfg(target_os = "macos")]
-    unsafe {
-        install_macos();
-        for_each_island_window(|w| {
-            use objc2::*;
-            let mask: u64 = msg_send![w, styleMask];
-            let level: i64 = msg_send![w, level];
-            // NSTitledWindowMask = 1. GPUI re-applies it; restyle when that happens.
-            if (mask & 1) != 0 || level != 25 {
-                style_island_window(w);
-            }
-            pin_ns_window(w);
-        });
-        if island_glass_setting_on() {
-            let last = glass_cap().lock().unwrap_or_else(|e| e.into_inner()).last;
-            if let Some(spec) = last {
-                let _ = apply_island_glass(spec);
-            }
-        } else {
-            hide_island_glass();
-        }
-    }
-}
-
-#[cfg(target_os = "macos")]
-unsafe fn for_each_island_window(mut f: impl FnMut(*mut objc2::runtime::AnyObject)) {
-    use objc2::runtime::{AnyClass, AnyObject};
-    use objc2::*;
-
-    let Some(panel_cls) = AnyClass::get(c"GPUIPanel") else {
-        return;
-    };
-    let ns_app: *mut AnyObject = msg_send![class!(NSApplication), sharedApplication];
-    let windows: *mut AnyObject = msg_send![ns_app, windows];
-    if windows.is_null() {
-        return;
-    }
-    let count: usize = msg_send![windows, count];
-    for i in 0..count {
-        let w: *mut AnyObject = msg_send![windows, objectAtIndex: i];
-        let is_panel: bool = msg_send![w, isKindOfClass: panel_cls];
-        // PiP windows are also GPUIPanel (WindowKind::PopUp). Without this
-        // guard the island pin below would restyle them click-through and
-        // drag them to the notch on every tick.
-        if is_panel && !is_pip_ns_window(w) {
-            f(w);
-        }
-    }
-}
-
-#[cfg(target_os = "macos")]
-fn pip_window_numbers() -> &'static std::sync::Mutex<Vec<i64>> {
-    static NUMBERS: std::sync::OnceLock<std::sync::Mutex<Vec<i64>>> =
-        std::sync::OnceLock::new();
-    NUMBERS.get_or_init(|| std::sync::Mutex::new(Vec::new()))
-}
-
-#[cfg(target_os = "macos")]
-fn is_pip_ns_window(ns_win: *mut objc2::runtime::AnyObject) -> bool {
-    use objc2::*;
-    if ns_win.is_null() {
-        return false;
-    }
-    let number: i64 = unsafe { msg_send![ns_win, windowNumber] };
-    pip_window_numbers()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .contains(&number)
-}
-
-// PiP frame/style calls must never run inside a GPUI window/entity update:
-// NSWindow `setFrame:` synchronously fires AppKit's resize/move callback,
-// which re-enters GPUI's `update_window` on the same leased window and
-// panics as `RefCell already borrowed` (logged, resize dropped → clipped
-// content). Every mutating PiP call below therefore only records the
-// latest request and flushes it with `dispatch_async_f` on the main queue,
-// outside any GPUI lease. Coalesced per windowNumber: drags fire faster
-// than the runloop. The registry lock is never held while calling AppKit.
-
-
-#[cfg(target_os = "macos")]
-struct PipFrameReq {
-    x: f64,
-    y: f64,
-    w: f64,
-    h: f64,
-    animate: bool,
-    shadow: bool,
-}
-
-#[cfg(target_os = "macos")]
-fn pip_pending_frames() -> &'static Mutex<HashMap<i64, PipFrameReq>> {
-    static PENDING: OnceLock<Mutex<HashMap<i64, PipFrameReq>>> = OnceLock::new();
-    PENDING.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-#[cfg(target_os = "macos")]
-fn pip_pending_styles() -> &'static Mutex<HashMap<i64, bool>> {
-    static PENDING: OnceLock<Mutex<HashMap<i64, bool>>> = OnceLock::new();
-    PENDING.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-#[cfg(target_os = "macos")]
-static PIP_FLUSH_SCHEDULED: AtomicBool = AtomicBool::new(false);
-
-/// Run `f` on the main queue, outside any GPUI lease. `dispatch2` reaches
-/// the main queue through the exported `_dispatch_main_q` object instead of
-/// the `dispatch_get_main_queue()` SDK inline, which has no exported symbol
-/// and fails to link.
-#[cfg(target_os = "macos")]
-fn dispatch_on_main(f: impl FnOnce() + Send + 'static) {
-    dispatch2::DispatchQueue::main().exec_async(f);
-}
-
-#[cfg(target_os = "macos")]
-fn schedule_pip_flush() {
-    if PIP_FLUSH_SCHEDULED.swap(true, Ordering::AcqRel) {
-        return;
-    }
-    dispatch_on_main(flush_pip_pending);
-}
-
-#[cfg(target_os = "macos")]
-fn enqueue_pip_frame(number: i64, x: f64, y: f64, w: f64, h: f64, animate: bool, shadow: bool) {
-    if number < 0 {
-        return;
-    }
-    if let Ok(mut pending) = pip_pending_frames().lock() {
-        pending.insert(number, PipFrameReq { x, y, w, h, animate, shadow });
-    }
-    schedule_pip_flush();
-}
-
-#[cfg(target_os = "macos")]
-fn enqueue_pip_style(number: i64, keep_on_top: bool) {
-    if number < 0 {
-        return;
-    }
-    if let Ok(mut pending) = pip_pending_styles().lock() {
-        pending.insert(number, keep_on_top);
-    }
-    schedule_pip_flush();
-}
-
-/// Drain both pending maps without holding any lock across AppKit calls,
-/// then apply styles first and frames second. Runs on the main queue,
-/// outside any GPUI lease, so AppKit's resize/move callback re-enters a
-/// window that is not leased and GPUI lays out at the real size.
-#[cfg(target_os = "macos")]
-fn flush_pip_pending() {
-    loop {
-        let styles: Vec<(i64, bool)> = pip_pending_styles()
-            .lock()
-            .map(|mut guard| guard.drain().collect())
-            .unwrap_or_default();
-        let frames: Vec<(i64, PipFrameReq)> = pip_pending_frames()
-            .lock()
-            .map(|mut guard| guard.drain().collect())
-            .unwrap_or_default();
-        if styles.is_empty() && frames.is_empty() {
-            PIP_FLUSH_SCHEDULED.store(false, Ordering::Release);
-            // Lost-wakeup check: an enqueue that landed between the drain
-            // and the store saw `true` and skipped scheduling.
-            let more = pip_pending_styles()
-                .lock()
-                .map(|guard| !guard.is_empty())
-                .unwrap_or(false)
-                || pip_pending_frames()
-                    .lock()
-                    .map(|guard| !guard.is_empty())
-                    .unwrap_or(false);
-            if !more {
-                return;
-            }
-            if PIP_FLUSH_SCHEDULED.swap(true, Ordering::AcqRel) {
-                return;
-            }
-            continue;
-        }
-        for (number, keep_on_top) in styles {
-            unsafe { apply_pip_style_by_number(number, keep_on_top) };
-        }
-        for (number, req) in frames {
-            unsafe { apply_pip_frame_by_number(number, req) };
-        }
-    }
-}
-
-#[cfg(target_os = "macos")]
-unsafe fn pip_ns_window_by_number(number: i64) -> *mut objc2::runtime::AnyObject {
-    use objc2::runtime::AnyObject;
-    use objc2::*;
-    let ns_app: *mut AnyObject = msg_send![class!(NSApplication), sharedApplication];
-    if ns_app.is_null() {
-        return std::ptr::null_mut();
-    }
-    msg_send![ns_app, windowWithWindowNumber: number]
-}
-
-#[cfg(target_os = "macos")]
-unsafe fn apply_pip_style_by_number(number: i64, keep_on_top: bool) {
-    let ns_win = pip_ns_window_by_number(number);
-    if !ns_win.is_null() {
-        style_pip_ns_window(ns_win, keep_on_top);
-    }
-}
-
-#[cfg(target_os = "macos")]
-unsafe fn apply_pip_frame_by_number(number: i64, req: PipFrameReq) {
-    use objc2::*;
-    let ns_win = pip_ns_window_by_number(number);
-    if ns_win.is_null() {
-        return;
-    }
-    let rect = CGRect {
-        origin: CGPoint { x: req.x, y: req.y },
-        size: CGSize { width: req.w, height: req.h },
-    };
-    if req.animate {
-        let _: () = msg_send![ns_win, setFrame: rect, display: true, animate: true];
-    } else {
-        let _: () = msg_send![ns_win, setFrame: rect, display: true];
-    }
-    if req.shadow {
-        let _: () = msg_send![ns_win, invalidateShadow];
-    }
-}
-
-/// Remember a PiP window by its AppKit windowNumber so island styling skips
-/// it. Number-only so the post-`open_window` path never touches GPUI state
-/// from inside a `handle.update` lease.
-pub fn register_pip_window_number(number: i64) {
-    #[cfg(target_os = "macos")]
-    {
-        let mut guard = pip_window_numbers()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        if !guard.contains(&number) {
-            guard.push(number);
-        }
-    }
-    #[cfg(not(target_os = "macos"))]
-    let _ = number;
-}
-
-pub fn unregister_pip_window(number: i64) {
-    #[cfg(target_os = "macos")]
-    if let Ok(mut guard) = pip_window_numbers().lock() {
-        guard.retain(|n| *n != number);
-    }
-    #[cfg(not(target_os = "macos"))]
-    let _ = number;
-}
-
-pub fn pip_window_number(window: &Window) -> Option<i64> {
-    #[cfg(target_os = "macos")]
-    {
-        ns_window(window).map(|ns_win| {
-            use objc2::*;
-            unsafe { msg_send![ns_win, windowNumber] }
-        })
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = window;
-        None
-    }
-}
-
-/// Borderless nonactivating panel for a PiP window. Level 3
-/// (NSFloatingWindowLevel) when keep-on-top is on, else a normal level so the
-/// window sits in the regular ordering. Joins all Spaces and works as a
-/// FullScreenAuxiliary so it is reachable from full-screen apps.
-pub fn style_pip_window_for(window: &Window, keep_on_top: bool) {
-    #[cfg(target_os = "macos")]
-    if let Some(number) = pip_window_number(window) {
-        enqueue_pip_style(number, keep_on_top);
-    }
-    #[cfg(not(target_os = "macos"))]
-    let _ = (window, keep_on_top);
-}
-
-/// Number-based style setup for the post-`open_window` path. Enqueued on
-/// the main queue, never inside a GPUI lease.
-pub fn style_pip_by_number(number: i64, keep_on_top: bool) {
-    #[cfg(target_os = "macos")]
-    enqueue_pip_style(number, keep_on_top);
-    #[cfg(not(target_os = "macos"))]
-    let _ = (number, keep_on_top);
-}
-
-#[cfg(target_os = "macos")]
-unsafe fn style_pip_ns_window(ns_win: *mut objc2::runtime::AnyObject, keep_on_top: bool) {
-    use objc2::runtime::AnyObject;
-    use objc2::*;
-    // Do not object_setClass — GPUI looks up a windowState ivar on GPUIPanel.
-    const NONACTIVATING_PANEL: u64 = 1 << 7;
-    const FULL_SIZE_CONTENT: u64 = 1 << 15;
-    let _: () = msg_send![ns_win, setStyleMask: NONACTIVATING_PANEL | FULL_SIZE_CONTENT];
-    let _: () = msg_send![ns_win, setLevel: if keep_on_top { 3_i64 } else { 0_i64 }];
-    let _: () = msg_send![ns_win, setCollectionBehavior: (1u64 | (1u64 << 8))];
-    let _: () = msg_send![ns_win, setOpaque: false];
-    let clear: *mut AnyObject = msg_send![class!(NSColor), clearColor];
-    let _: () = msg_send![ns_win, setBackgroundColor: clear];
-    let _: () = msg_send![ns_win, setHasShadow: true];
-    let _: () = msg_send![ns_win, setMovable: true];
-    let _: () = msg_send![ns_win, setHidesOnDeactivate: false];
-    let _: () = msg_send![ns_win, setIgnoresMouseEvents: false];
-    let title: *mut AnyObject =
-        msg_send![class!(NSString), stringWithUTF8String: c"openNook-pip".as_ptr()];
-    let _: () = msg_send![ns_win, setTitle: title];
-}
-
-/// Animated frame move for a PiP window. `setFrame:display:animate:` eases the
-/// ~220 ms corner snap; AppKit ignores `animate` under Reduce Motion.
-/// Enqueued on the main queue so it lands outside any GPUI lease.
-pub fn snap_pip_window_to(window: &Window, x: f64, y: f64, w: f64, h: f64, animate: bool) {
-    #[cfg(target_os = "macos")]
-    if let Some(number) = pip_window_number(window) {
-        enqueue_pip_frame(number, x, y, w, h, animate, true);
-    }
-    #[cfg(not(target_os = "macos"))]
-    let _ = (window, x, y, w, h, animate);
-}
-
-/// Current AppKit frame (Cocoa bottom-left coordinates) of a PiP window.
-pub fn pip_window_frame(window: &Window) -> Option<(f64, f64, f64, f64)> {
-    #[cfg(target_os = "macos")]
-    {
-        ns_window(window).map(|ns_win| {
-            use objc2::*;
-            let rect: CGRect = unsafe { msg_send![ns_win, frame] };
-            (rect.origin.x, rect.origin.y, rect.size.width, rect.size.height)
-        })
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = window;
-        None
-    }
-}
-
-/// `visibleFrame` of the screen holding the PiP window (below the menu bar /
-/// notch, above the Dock), in Cocoa coordinates.
-pub fn pip_visible_frame_for(window: &Window) -> Option<(f64, f64, f64, f64)> {
-    #[cfg(target_os = "macos")]
-    {
-        ns_window(window).map(|ns_win| {
-            use objc2::runtime::AnyObject;
-            use objc2::*;
-            unsafe {
-                let screen: *mut AnyObject = {
-                    let s: *mut AnyObject = msg_send![ns_win, screen];
-                    if s.is_null() {
-                        msg_send![class!(NSScreen), mainScreen]
-                    } else {
-                        s
-                    }
-                };
-                if screen.is_null() {
-                    return (0.0, 0.0, 0.0, 0.0);
-                }
-                let visible: CGRect = msg_send![screen, visibleFrame];
-                (
-                    visible.origin.x,
-                    visible.origin.y,
-                    visible.size.width,
-                    visible.size.height,
-                )
-            }
-        })
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = window;
-        None
-    }
-}
-
-/// Drop point for the open animation: screen top centre, just below the notch.
-#[allow(dead_code)]
-pub fn pip_notch_drop_origin(w: f64, h: f64) -> Option<(f64, f64)> {
-    #[cfg(target_os = "macos")]
-    {
-        use objc2::runtime::AnyObject;
-        use objc2::*;
-        unsafe {
-            let screen: *mut AnyObject = msg_send![class!(NSScreen), mainScreen];
-            if screen.is_null() {
-                return None;
-            }
-            let frame: CGRect = msg_send![screen, frame];
-            let notch = nook_core::notch::get_notch_info().notch_height.max(32.0);
-            Some((
-                frame.origin.x + (frame.size.width - w) / 2.0,
-                frame.origin.y + frame.size.height - notch - h,
-            ))
-        }
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = (w, h);
-        None
-    }
-}
-
-/// Visible frames of all screens in Cocoa coordinates, primary first.
-/// A throw can carry the window across displays, so the settle target is
-/// picked from these rather than a single screen.
-pub fn pip_screen_frames() -> Vec<(f64, f64, f64, f64)> {
+/// Regular (Dock) apps that are running: `{ bundleId, name, pid }`.
+pub fn running_apps() -> Vec<Value> {
     #[cfg(target_os = "macos")]
     unsafe {
         use objc2::runtime::AnyObject;
-        use objc2::*;
+        use objc2::{class, msg_send};
         let mut out = Vec::new();
-        let screens: *mut AnyObject = msg_send![class!(NSScreen), screens];
-        if screens.is_null() {
-            return out;
-        }
-        let count: usize = msg_send![screens, count];
+        let pool: *mut AnyObject = msg_send![class!(NSAutoreleasePool), new];
+        let ws: *mut AnyObject = msg_send![class!(NSWorkspace), sharedWorkspace];
+        let apps: *mut AnyObject = msg_send![ws, runningApplications];
+        let count: usize = if apps.is_null() { 0 } else { msg_send![apps, count] };
         for i in 0..count {
-            let screen: *mut AnyObject = msg_send![screens, objectAtIndex: i];
-            if screen.is_null() {
+            let app: *mut AnyObject = msg_send![apps, objectAtIndex: i];
+            // 0 = regular, 1 = accessory (menu-bar apps like Hex), 2 = background-only.
+            let policy: isize = msg_send![app, activationPolicy];
+            if policy > 1 {
                 continue;
             }
-            let visible: CGRect = msg_send![screen, visibleFrame];
-            out.push((
-                visible.origin.x,
-                visible.origin.y,
-                visible.size.width,
-                visible.size.height,
-            ));
+            let Some(bundle) = mac::string(msg_send![app, bundleIdentifier]) else { continue };
+            let name = mac::string(msg_send![app, localizedName]).unwrap_or_default();
+            let pid: i32 = msg_send![app, processIdentifier];
+            out.push(json!({ "bundleId": bundle, "name": name, "pid": pid }));
         }
+        let _: () = msg_send![pool, drain];
+        out.sort_by(|a, b| a["bundleId"].as_str().cmp(&b["bundleId"].as_str()));
         out
     }
     #[cfg(not(target_os = "macos"))]
     Vec::new()
 }
 
-/// Unanimated frame set for the manual drag path. No `invalidateShadow`: a
-/// pure move leaves the shadow valid, and per-event invalidation would cost a
-/// shadow re-render on every mouse-move.
-pub fn move_pip_frame(window: &Window, x: f64, y: f64, w: f64, h: f64) {
-    #[cfg(target_os = "macos")]
-    if let Some(number) = pip_window_number(window) {
-        enqueue_pip_frame(number, x, y, w, h, false, false);
-    }
-    #[cfg(not(target_os = "macos"))]
-    let _ = (window, x, y, w, h);
+/// Pointer input Rune doesn't deliver to an overlay panel: it routes only left presses and
+/// movement there. Scrolls and right-clicks on the island's panel come through here.
+pub enum IslandInput {
+    /// Points, positive moving content right and down (the fingers' way with natural scrolling).
+    Scroll { dx: f32, dy: f32, phase: rune::GesturePhase, momentum: bool },
+    /// Window points from the panel's top-left.
+    SecondaryClick { x: f32, y: f32 },
 }
 
-/// Global mouse position in Cocoa screen coordinates (bottom-left origin).
-/// Screen-space PiP dragging reads this so the window follows the cursor 1:1
-/// instead of accumulating window-relative deltas. Non-macOS: None (callers
-/// fall back to window-relative deltas).
-pub fn mouse_screen_location() -> Option<(f64, f64)> {
-    #[cfg(target_os = "macos")]
-    unsafe {
-        use objc2::*;
-        let loc: CGPoint = msg_send![class!(NSEvent), mouseLocation];
-        Some((loc.x, loc.y))
-    }
-    #[cfg(not(target_os = "macos"))]
-    None
-}
-
-/// Whether the left mouse button is currently held (`[NSEvent
-/// pressedMouseButtons]` bit 0). The drag poll timer uses this as the
-/// drag-end signal, which also covers the three-finger drag lock that holds
-/// ~0.5 s after the fingers lift. Non-macOS: true so a poll timer never
-/// ends the drag spuriously (the timer only runs when `mouse_screen_location`
-/// is `Some` anyway).
-pub fn pip_left_mouse_pressed() -> bool {
-    #[cfg(target_os = "macos")]
-    unsafe {
-        use objc2::*;
-        let buttons: usize = msg_send![class!(NSEvent), pressedMouseButtons];
-        (buttons & 1) != 0
-    }
-    #[cfg(not(target_os = "macos"))]
-    true
-}
-
-/// Current AppKit frame looked up by windowNumber, for the drag poll task
-/// and poll-driven snap, which have no GPUI `Window`. Main thread only.
-pub fn pip_frame_by_number(number: i64) -> Option<(f64, f64, f64, f64)> {
+/// Watches the app's own events for ones aimed at the window numbered `window`. Must run on
+/// the main thread; the monitor lives as long as the app.
+pub fn watch_island_input(window: u32, on: impl Fn(IslandInput) + 'static) {
     #[cfg(target_os = "macos")]
     unsafe {
         use objc2::runtime::AnyObject;
-        use objc2::*;
-        let ns_app: *mut AnyObject = msg_send![class!(NSApplication), sharedApplication];
-        let ns_win: *mut AnyObject = msg_send![ns_app, windowWithWindowNumber: number];
-        if ns_win.is_null() {
-            return None;
-        }
-        let rect: CGRect = msg_send![ns_win, frame];
-        Some((rect.origin.x, rect.origin.y, rect.size.width, rect.size.height))
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = number;
-        None
-    }
-}
-
-/// `visibleFrame` of the screen holding the window identified by
-/// windowNumber. Poll-task counterpart of [`pip_visible_frame_for`].
-pub fn pip_visible_frame_by_number(number: i64) -> Option<(f64, f64, f64, f64)> {
-    #[cfg(target_os = "macos")]
-    unsafe {
-        use objc2::runtime::AnyObject;
-        use objc2::*;
-        let ns_app: *mut AnyObject = msg_send![class!(NSApplication), sharedApplication];
-        let ns_win: *mut AnyObject = msg_send![ns_app, windowWithWindowNumber: number];
-        if ns_win.is_null() {
-            return None;
-        }
-        let screen: *mut AnyObject = {
-            let s: *mut AnyObject = msg_send![ns_win, screen];
-            if s.is_null() {
-                msg_send![class!(NSScreen), mainScreen]
-            } else {
-                s
+        use objc2::{class, msg_send};
+        // NSEventMaskRightMouseDown | NSEventMaskScrollWheel.
+        const MASK: u64 = (1 << 3) | (1 << 22);
+        let handler = block2::RcBlock::new(move |event: *mut AnyObject| -> *mut AnyObject {
+            if event.is_null() {
+                return event;
             }
-        };
-        if screen.is_null() {
-            return None;
-        }
-        let visible: CGRect = msg_send![screen, visibleFrame];
-        Some((visible.origin.x, visible.origin.y, visible.size.width, visible.size.height))
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = number;
-        None
-    }
-}
-
-/// Animated frame move by windowNumber. Poll-task counterpart of
-/// [`snap_pip_window_to`]: `setFrame:display:animate:` eases the corner snap;
-/// AppKit ignores `animate` under Reduce Motion. Main thread only.
-pub fn snap_pip_frame_by_number(number: i64, x: f64, y: f64, w: f64, h: f64, animate: bool) {
-    #[cfg(target_os = "macos")]
-    enqueue_pip_frame(number, x, y, w, h, animate, true);
-    #[cfg(not(target_os = "macos"))]
-    let _ = (number, x, y, w, h, animate);
-}
-
-/// Unanimated frame set by AppKit windowNumber for the spring settle task,
-/// which has no GPUI `Window` handle. Must run on the main thread — the task
-/// routes every tick through `AsyncApp::update` for exactly this reason.
-pub fn set_pip_frame_by_number(number: i64, x: f64, y: f64, w: f64, h: f64) {
-    #[cfg(target_os = "macos")]
-    enqueue_pip_frame(number, x, y, w, h, false, false);
-    #[cfg(not(target_os = "macos"))]
-    let _ = (number, x, y, w, h);
-}
-
-/// Bring a PiP window forward without making it key: the panel stays
-/// nonactivating so typing in other apps keeps working.
-pub fn order_pip_front(window: &Window) {
-    #[cfg(target_os = "macos")]
-    if let Some(ns_win) = ns_window(window) {
-        use objc2::*;
-        unsafe {
-            let _: () = msg_send![ns_win, orderFront: std::ptr::null_mut::<objc2::runtime::AnyObject>()];
-        }
-    }
-    #[cfg(not(target_os = "macos"))]
-    let _ = window;
-}
-
-/// Re-register Finder drop types on the overlay. `setStyleMask` and
-/// `ignoresMouseEvents` both drop the list, so a drag that starts while we
-/// were click-through would otherwise never get `draggingEntered`.
-pub fn register_current_file_drops() {
-    #[cfg(target_os = "macos")]
-    unsafe {
-        for_each_island_window(|w| register_file_drops(w));
-    }
-}
-
-pub fn set_click_through_current(ignore: bool) {
-    #[cfg(target_os = "macos")]
-    unsafe {
-        for_each_island_window(|w| {
-            use objc2::*;
-            let _: () = msg_send![w, setIgnoresMouseEvents: ignore];
-            if !ignore {
-                register_file_drops(w);
+            let number: isize = msg_send![event, windowNumber];
+            if number as u32 != window {
+                return event;
             }
+            let kind: usize = msg_send![event, type];
+            if kind == 22 {
+                let precise: bool = msg_send![event, hasPreciseScrollingDeltas];
+                // A notched wheel reports lines; a trackpad, points.
+                let unit = if precise { 1.0 } else { 10.0 };
+                let dx: f64 = msg_send![event, scrollingDeltaX];
+                let dy: f64 = msg_send![event, scrollingDeltaY];
+                let phase: usize = msg_send![event, phase];
+                let momentum: usize = msg_send![event, momentumPhase];
+                // NSEventPhase: began 1, changed 4, ended 8, cancelled 16.
+                let phase = match phase {
+                    1 => rune::GesturePhase::Began,
+                    8 | 16 => rune::GesturePhase::Ended,
+                    _ => rune::GesturePhase::Moved,
+                };
+                on(IslandInput::Scroll { dx: dx as f32 * unit, dy: dy as f32 * unit, phase, momentum: momentum != 0 });
+                return std::ptr::null_mut();
+            }
+            if kind == 3 {
+                #[repr(C)]
+                #[derive(Clone, Copy)]
+                struct Point { x: f64, y: f64 }
+                #[repr(C)]
+                #[derive(Clone, Copy)]
+                struct Rect { origin: Point, size: Point }
+                unsafe impl objc2::Encode for Point {
+                    const ENCODING: objc2::Encoding = objc2::Encoding::Struct("CGPoint", &[f64::ENCODING, f64::ENCODING]);
+                }
+                unsafe impl objc2::Encode for Rect {
+                    const ENCODING: objc2::Encoding = objc2::Encoding::Struct("CGRect", &[Point::ENCODING, Point::ENCODING]);
+                }
+                let at: Point = msg_send![event, locationInWindow];
+                let win: *mut AnyObject = msg_send![event, window];
+                let frame: Rect = if win.is_null() { Rect { origin: Point { x: 0.0, y: 0.0 }, size: Point { x: 0.0, y: 0.0 } } } else { msg_send![win, frame] };
+                on(IslandInput::SecondaryClick { x: at.x as f32, y: (frame.size.y - at.y) as f32 });
+                return std::ptr::null_mut();
+            }
+            event
         });
+        let token: *mut AnyObject = msg_send![class!(NSEvent), addLocalMonitorForEventsMatchingMask: MASK, handler: &*handler];
+        // The monitor holds the block; keep both for the process.
+        let _: *mut AnyObject = msg_send![token, retain];
+        std::mem::forget(handler);
     }
     #[cfg(not(target_os = "macos"))]
-    let _ = ignore;
+    let _ = (window, on);
 }
 
-/// Hand activation back to whatever app sits underneath before a drag-out.
-/// The island is a nonactivating panel, but the app can still be the active
-/// one (Settings brings it forward, and it stays forward after that window
-/// closes). While we hold activation the destination app never comes forward
-/// for the drop, so the file lands only when the target happens to accept a
-/// background drag — hence "sometimes". `setHidesOnDeactivate: false` in
-/// `style_island_window` keeps the island painted through this.
-pub fn resign_focus() {
-    #[cfg(target_os = "macos")]
-    unsafe {
-        use objc2::runtime::{AnyClass, AnyObject};
-        use objc2::*;
-        let ns_app: *mut AnyObject = msg_send![class!(NSApplication), sharedApplication];
-        let active: bool = msg_send![ns_app, isActive];
-        if !active {
-            return;
-        }
-        // Never yank focus out of Settings (a Normal window, not a GPUIPanel)
-        // while the user is typing in it.
-        let key_win: *mut AnyObject = msg_send![ns_app, keyWindow];
-        if !key_win.is_null() {
-            if let Some(panel_cls) = AnyClass::get(c"GPUIPanel") {
-                let is_panel: bool = msg_send![key_win, isKindOfClass: panel_cls];
-                if !is_panel {
-                    return;
-                }
-            }
-        }
-        let _: () = msg_send![ns_app, deactivate];
-        log::debug!("resigned focus for drag-out");
-    }
-}
-
-pub fn activate_app() {
-    #[cfg(target_os = "macos")]
-    unsafe {
-        use objc2::runtime::AnyObject;
-        use objc2::*;
-        let ns_app: *mut AnyObject = msg_send![class!(NSApplication), sharedApplication];
-        let _: () = msg_send![ns_app, activateIgnoringOtherApps: true];
-    }
-}
-
-/// Start a real OS drag of `paths` so Finder / other apps accept the files.
-/// GPUI 0.2.2 only has in-app `on_drag`; this uses AppKit `NSDraggingSource`
-/// the same way the Tauri `drag` plugin (`beginDraggingSession`) does.
-pub fn start_file_drag(paths: &[String], window: Option<&Window>) {
-    #[cfg(target_os = "macos")]
-    unsafe {
-        let existing: Vec<String> = paths
-            .iter()
-            .filter(|p| std::path::Path::new(p.as_str()).exists())
-            .cloned()
-            .collect();
-        if existing.is_empty() {
-            log::warn!("drag-out skipped; no existing paths");
-            return;
-        }
-        if let Some(ns_win) = window.and_then(ns_window) {
-            begin_file_drag(ns_win, &existing);
-            return;
-        }
-        for_each_island_window(|ns_win| {
-            if window_title_is(ns_win, "openNook-island") {
-                begin_file_drag(ns_win, &existing);
-            }
-        });
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = (paths, window);
-        log::warn!("file drag-out is macOS-only (AppKit NSDraggingSource)");
-    }
-}
-
-#[cfg(target_os = "macos")]
-unsafe fn window_title_is(ns_win: *mut objc2::runtime::AnyObject, want: &str) -> bool {
-    use objc2::runtime::AnyObject;
-    use objc2::*;
-    let title: *mut AnyObject = msg_send![ns_win, title];
-    if title.is_null() {
-        return false;
-    }
-    let cstr: *const i8 = msg_send![title, UTF8String];
-    if cstr.is_null() {
-        return false;
-    }
-    std::ffi::CStr::from_ptr(cstr).to_string_lossy() == want
-}
-
-#[cfg(target_os = "macos")]
-fn drag_source_class() -> &'static objc2::runtime::AnyClass {
-    use objc2::runtime::{AnyClass, AnyObject, AnyProtocol, ClassBuilder, NSObject, Sel};
-    use objc2::{sel, ClassType};
-    use std::sync::OnceLock;
-
-    static CLASS: OnceLock<&'static AnyClass> = OnceLock::new();
-    CLASS.get_or_init(|| {
-        if let Some(existing) = AnyClass::get(c"NookFileDragSource") {
-            return existing;
-        }
-        let mut builder = ClassBuilder::new(c"NookFileDragSource", NSObject::class())
-            .expect("NookFileDragSource");
-        if let Some(proto) = AnyProtocol::get(c"NSDraggingSource") {
-            builder.add_protocol(proto);
-        }
-
-        // NSDraggingContextOutsideApplication = 0, WithinApplication = 1.
-        // Finder is outside. Offer Copy|Move|Generic so the destination can
-        // pick; returning None for 0 was rejecting every Finder drop.
-        extern "C-unwind" fn source_mask(
-            _this: &NSObject,
-            _cmd: Sel,
-            _session: *mut AnyObject,
-            _context: usize,
-        ) -> usize {
-            1 | 4 | 16 // NSDragOperationCopy | Generic | Move
-        }
-        unsafe {
-            builder.add_method(
-                sel!(draggingSession:sourceOperationMaskForDraggingContext:),
-                source_mask as extern "C-unwind" fn(_, _, _, _) -> _,
-            );
-        }
-
-        extern "C-unwind" fn session_ended(
-            _this: &NSObject,
-            _cmd: Sel,
-            _session: *mut AnyObject,
-            _point: nook_core::notch::CGPoint,
-            operation: usize,
-        ) {
-            let dropped = operation != 0;
-            log::info!("drag-out ended dropped={dropped} op={operation}");
-            nook_core::files::finish_outbound_drag(dropped);
-        }
-        unsafe {
-            builder.add_method(
-                sel!(draggingSession:endedAtPoint:operation:),
-                session_ended as extern "C-unwind" fn(_, _, _, _, _),
-            );
-        }
-
-        builder.register()
-    })
-}
-
-#[cfg(target_os = "macos")]
-unsafe fn begin_file_drag(ns_win: *mut objc2::runtime::AnyObject, paths: &[String]) {
-    use nook_core::notch::{CGPoint, CGRect, CGSize};
-    use objc2::runtime::AnyObject;
-    use objc2::*;
-    use std::ffi::CString;
-
-    let loc: CGPoint = msg_send![ns_win, mouseLocationOutsideOfEventStream];
-    let icon_size = 32.0;
-    let workspace: *mut AnyObject = msg_send![class!(NSWorkspace), sharedWorkspace];
-    let items: *mut AnyObject = msg_send![class!(NSMutableArray), array];
-    if items.is_null() {
-        log::error!("drag-out: NSMutableArray alloc failed");
-        return;
-    }
-
-    for (i, path) in paths.iter().enumerate() {
-        if !std::path::Path::new(path).exists() {
-            continue;
-        }
-        let Ok(c_path) = CString::new(path.as_str()) else {
-            continue;
-        };
-        let path_ns: *mut AnyObject =
-            msg_send![class!(NSString), stringWithUTF8String: c_path.as_ptr()];
-        if path_ns.is_null() {
-            continue;
-        }
-
-        let is_dir = std::path::Path::new(path).is_dir();
-        let url: *mut AnyObject =
-            msg_send![class!(NSURL), fileURLWithPath: path_ns, isDirectory: is_dir];
-        if url.is_null() {
-            log::error!("drag-out: NSURL failed for {path}");
-            continue;
-        }
-
-        let item: *mut AnyObject = msg_send![class!(NSDraggingItem), alloc];
-        let item: *mut AnyObject = msg_send![item, initWithPasteboardWriter: url];
-        if item.is_null() {
-            log::error!("drag-out: NSDraggingItem alloc failed");
-            continue;
-        }
-
-        let icon: *mut AnyObject = if workspace.is_null() {
-            std::ptr::null_mut()
-        } else {
-            msg_send![workspace, iconForFile: path_ns]
-        };
-        if !icon.is_null() {
-            let size = CGSize {
-                width: icon_size,
-                height: icon_size,
-            };
-            let _: () = msg_send![icon, setSize: size];
-        }
-        // Stack icons a few points apart (cap so a large selection still looks tidy).
-        let offset = 4.0 * (i.min(4) as f64);
-        let frame = CGRect {
-            origin: CGPoint {
-                x: loc.x - icon_size / 2.0 + offset,
-                y: loc.y - icon_size / 2.0 + offset,
-            },
-            size: CGSize {
-                width: icon_size,
-                height: icon_size,
-            },
-        };
-        let _: () = msg_send![item, setDraggingFrame: frame, contents: icon];
-        let _: () = msg_send![items, addObject: item];
-    }
-
-    let count: usize = msg_send![items, count];
-    if count == 0 {
-        log::warn!("drag-out skipped; no drag items");
-        return;
-    }
-
-    let content: *mut AnyObject = msg_send![ns_win, contentView];
-    if content.is_null() {
-        log::error!("drag-out: contentView missing");
-        return;
-    }
-
-    // AppKit wants a mouse-dragged event. Synthesize one, matching drag-rs /
-    // tauri-plugin-drag — the same call the React tray uses.
-    const LEFT_MOUSE_DRAGGED: u64 = 6;
-    let window_number: i64 = msg_send![ns_win, windowNumber];
-    let event: *mut AnyObject = msg_send![
-        class!(NSEvent),
-        mouseEventWithType: LEFT_MOUSE_DRAGGED,
-        location: loc,
-        modifierFlags: 0_u64,
-        timestamp: 0.0_f64,
-        windowNumber: window_number,
-        context: std::ptr::null_mut::<AnyObject>(),
-        eventNumber: 0_i64,
-        clickCount: 1_i64,
-        pressure: 1.0_f32
-    ];
-    if event.is_null() {
-        log::error!("drag-out: failed to synthesize NSEvent");
-        return;
-    }
-
-    let cls = drag_source_class();
-    let source: *mut AnyObject = msg_send![cls, alloc];
-    let source: *mut AnyObject = msg_send![source, init];
-    if source.is_null() {
-        log::error!("drag-out: drag source alloc failed");
-        return;
-    }
-
-    nook_core::files::begin_outbound_drag(paths);
-    let session: *mut AnyObject = msg_send![
-        content,
-        beginDraggingSessionWithItems: items,
-        event: event,
-        source: source
-    ];
-    if session.is_null() {
-        nook_core::files::finish_outbound_drag(false);
-        log::error!("drag-out: beginDraggingSession returned nil for {count} path(s)");
-        return;
-    }
-    log::info!("drag-out started {count} path(s)");
-    // Only after the session exists — deactivating first would pull the
-    // synthesized event's window out from under beginDraggingSession.
-    resign_focus();
-}
-
-pub fn set_accessory(accessory: bool) {
-    #[cfg(target_os = "macos")]
-    unsafe {
-        use objc2::runtime::AnyObject;
-        use objc2::*;
-        let ns_app: *mut AnyObject = msg_send![class!(NSApplication), sharedApplication];
-        let policy: i64 = if accessory { 1 } else { 0 };
-        let _: bool = msg_send![ns_app, setActivationPolicy: policy];
-    }
-}
-
-#[cfg(target_os = "macos")]
-fn ns_window(window: &Window) -> Option<*mut objc2::runtime::AnyObject> {
-    use objc2::runtime::AnyObject;
-    use objc2::*;
-    let handle = HasWindowHandle::window_handle(window).ok()?;
-    match handle.as_raw() {
-        RawWindowHandle::AppKit(appkit) => unsafe {
-            let ns_view = appkit.ns_view.as_ptr() as *mut AnyObject;
-            let ns_win: *mut AnyObject = msg_send![ns_view, window];
-            if ns_win.is_null() {
-                None
-            } else {
-                Some(ns_win)
-            }
-        },
-        _ => None,
-    }
-}
-
-#[cfg(target_os = "macos")]
-fn install_app_target() {
-    use objc2::ffi::{class_addMethod, objc_allocateClassPair, objc_registerClassPair};
-    use objc2::runtime::{AnyClass, AnyObject, Sel};
-    use objc2::{class, sel};
-    use std::ffi::CString;
-
-    unsafe {
-        if AnyClass::get(c"NookAppTarget").is_some() {
-            observe_screen_changes();
-            return;
-        }
-
-        extern "C" fn screen_changed(_this: *mut AnyObject, _cmd: Sel, _note: *mut AnyObject) {
-            nook_core::notch::invalidate_screen_cache();
-            request_pin();
-            pin_island_windows();
-        }
-        extern "C" fn space_changed(_this: *mut AnyObject, _cmd: Sel, _note: *mut AnyObject) {
-            nook_core::notch::invalidate_screen_cache();
-            request_pin();
-            pin_island_windows();
-        }
-        extern "C" fn app_activated(_this: *mut AnyObject, _cmd: Sel, _note: *mut AnyObject) {
-            nook_core::occupancy::invalidate();
-        }
-        extern "C" fn accessibility_changed(
-            _this: *mut AnyObject,
-            _cmd: Sel,
-            _note: *mut AnyObject,
-        ) {
-            invalidate_accessibility_flags();
-        }
-        extern "C" fn colors_changed(_this: *mut AnyObject, _cmd: Sel, _note: *mut AnyObject) {
-            invalidate_accent_color();
-        }
-
-        let super_cls = class!(NSObject) as *const AnyClass as *mut AnyClass;
-        let cls = objc_allocateClassPair(super_cls, c"NookAppTarget".as_ptr(), 0);
-        if cls.is_null() {
-            log::error!("could not allocate NookAppTarget");
-            return;
-        }
-        let types = CString::new("v@:@").unwrap();
-        // SAFETY: each handler matches encoding "v@:@".
-        let imp_screen = nook_core::ffi::as_objc_imp(
-            screen_changed as extern "C" fn(*mut AnyObject, Sel, *mut AnyObject),
-        );
-        let imp_space = nook_core::ffi::as_objc_imp(
-            space_changed as extern "C" fn(*mut AnyObject, Sel, *mut AnyObject),
-        );
-        let imp_app = nook_core::ffi::as_objc_imp(
-            app_activated as extern "C" fn(*mut AnyObject, Sel, *mut AnyObject),
-        );
-        let imp_a11y = nook_core::ffi::as_objc_imp(
-            accessibility_changed as extern "C" fn(*mut AnyObject, Sel, *mut AnyObject),
-        );
-        let imp_colors = nook_core::ffi::as_objc_imp(
-            colors_changed as extern "C" fn(*mut AnyObject, Sel, *mut AnyObject),
-        );
-        let _ = class_addMethod(cls, sel!(screenChanged:), imp_screen, types.as_ptr());
-        let _ = class_addMethod(cls, sel!(spaceChanged:), imp_space, types.as_ptr());
-        let _ = class_addMethod(cls, sel!(appActivated:), imp_app, types.as_ptr());
-        let _ = class_addMethod(cls, sel!(accessibilityChanged:), imp_a11y, types.as_ptr());
-        let _ = class_addMethod(cls, sel!(colorsChanged:), imp_colors, types.as_ptr());
-        objc_registerClassPair(cls);
-        observe_screen_changes();
-    }
-}
-
-#[cfg(target_os = "macos")]
-unsafe fn observe_screen_changes() {
-    use objc2::runtime::AnyObject;
-    use objc2::*;
-
-    let Some(cls) = objc2::runtime::AnyClass::get(c"NookAppTarget") else {
-        return;
-    };
-    let target: *mut AnyObject = msg_send![cls, new];
-    if target.is_null() {
-        return;
-    }
-    let center: *mut AnyObject = msg_send![class!(NSNotificationCenter), defaultCenter];
-    let name: *mut AnyObject = msg_send![
-        class!(NSString),
-        stringWithUTF8String: c"NSApplicationDidChangeScreenParametersNotification".as_ptr()
-    ];
-    let _: () = msg_send![
-        center,
-        addObserver: target,
-        selector: sel!(screenChanged:),
-        name: name,
-        object: std::ptr::null_mut::<AnyObject>()
-    ];
-
-    let colors_name: *mut AnyObject = msg_send![
-        class!(NSString),
-        stringWithUTF8String: c"NSSystemColorsDidChangeNotification".as_ptr()
-    ];
-    let _: () = msg_send![
-        center,
-        addObserver: target,
-        selector: sel!(colorsChanged:),
-        name: colors_name,
-        object: std::ptr::null_mut::<AnyObject>()
-    ];
-    let appearance_name: *mut AnyObject = msg_send![
-        class!(NSString),
-        stringWithUTF8String: c"NSApplicationDidChangeEffectiveAppearanceNotification".as_ptr()
-    ];
-    let _: () = msg_send![
-        center,
-        addObserver: target,
-        selector: sel!(colorsChanged:),
-        name: appearance_name,
-        object: std::ptr::null_mut::<AnyObject>()
-    ];
-
-    let workspace: *mut AnyObject = msg_send![class!(NSWorkspace), sharedWorkspace];
-    if workspace.is_null() {
-        return;
-    }
-    let wsnc: *mut AnyObject = msg_send![workspace, notificationCenter];
-    if wsnc.is_null() {
-        return;
-    }
-    let space_name: *mut AnyObject = msg_send![
-        class!(NSString),
-        stringWithUTF8String: c"NSWorkspaceActiveSpaceDidChangeNotification".as_ptr()
-    ];
-    let _: () = msg_send![
-        wsnc,
-        addObserver: target,
-        selector: sel!(spaceChanged:),
-        name: space_name,
-        object: std::ptr::null_mut::<AnyObject>()
-    ];
-    let app_name: *mut AnyObject = msg_send![
-        class!(NSString),
-        stringWithUTF8String: c"NSWorkspaceDidActivateApplicationNotification".as_ptr()
-    ];
-    let _: () = msg_send![
-        wsnc,
-        addObserver: target,
-        selector: sel!(appActivated:),
-        name: app_name,
-        object: std::ptr::null_mut::<AnyObject>()
-    ];
-    let a11y_name: *mut AnyObject = msg_send![
-        class!(NSString),
-        stringWithUTF8String: c"NSWorkspaceAccessibilityDisplayOptionsDidChangeNotification"
-            .as_ptr()
-    ];
-    let _: () = msg_send![
-        wsnc,
-        addObserver: target,
-        selector: sel!(accessibilityChanged:),
-        name: a11y_name,
-        object: std::ptr::null_mut::<AnyObject>()
-    ];
-}
-
-/// NSEvent global + local monitors for mouse moved / left-drag / left-up.
-/// Main thread only. Handlers write the same atomics as the 1 s backstop
-/// poll in `nook_core::mouse` and poke the island wake when relevant.
-/// Local handler must return the event.
-pub fn install_mouse_monitors() {
-    #[cfg(target_os = "macos")]
-    unsafe {
-        use block2::RcBlock;
-        use objc2::runtime::AnyObject;
-        use objc2::*;
-
-        static INSTALLED: Once = Once::new();
-        INSTALLED.call_once(|| {
-            // MouseMoved | LeftMouseDragged | LeftMouseUp.
-            // sample_now only pokes the island wake when near/dragging, so
-            // far-away moves stay cheap atomic writes. A tracking area plus
-            // drag-only global would cut further; not wired yet.
-            const MASK: u64 = (1 << 5) | (1 << 6) | (1 << 2);
-
-            let global = RcBlock::new(move |_event: *mut AnyObject| {
-                nook_core::mouse::sample_now();
-            });
-            let g: *mut AnyObject = msg_send![
-                class!(NSEvent),
-                addGlobalMonitorForEventsMatchingMask: MASK,
-                handler: &*global
-            ];
-            std::mem::forget(global);
-            let _ = g;
-
-            let local = RcBlock::new(move |event: *mut AnyObject| -> *mut AnyObject {
-                nook_core::mouse::sample_now();
-                event
-            });
-            let l: *mut AnyObject = msg_send![
-                class!(NSEvent),
-                addLocalMonitorForEventsMatchingMask: MASK,
-                handler: &*local
-            ];
-            std::mem::forget(local);
-            let _ = l;
-        });
-    }
-}
-
-/// Hand files to the system AirDrop picker (`NSSharingServiceNameSendViaAirDrop`).
-pub fn share_via_airdrop(paths: &[std::path::PathBuf]) {
-    #[cfg(target_os = "macos")]
-    unsafe {
-        share_via_airdrop_macos(paths);
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = paths;
-        log::warn!("AirDrop is macOS-only");
-    }
-}
-
-#[cfg(target_os = "macos")]
-unsafe fn share_via_airdrop_macos(paths: &[std::path::PathBuf]) {
-    use objc2::runtime::AnyObject;
-    use objc2::*;
-    use std::ffi::CString;
-
-    if paths.is_empty() {
-        return;
-    }
-    set_accessory(false);
-    activate_app();
-    let name: *mut AnyObject = msg_send![
-        class!(NSString),
-        stringWithUTF8String: c"com.apple.share.AirDrop.send".as_ptr()
-    ];
-    let service: *mut AnyObject = msg_send![class!(NSSharingService), sharingServiceNamed: name];
-    if service.is_null() {
-        log::warn!("AirDrop sharing service missing");
-        return;
-    }
-    let items: *mut AnyObject = msg_send![class!(NSMutableArray), array];
-    for path in paths {
-        let Ok(cstr) = CString::new(path.to_string_lossy().as_bytes()) else {
-            continue;
-        };
-        let ns: *mut AnyObject = msg_send![class!(NSString), stringWithUTF8String: cstr.as_ptr()];
-        let url: *mut AnyObject = msg_send![class!(NSURL), fileURLWithPath: ns];
-        if !url.is_null() {
-            let _: () = msg_send![items, addObject: url];
-        }
-    }
-    let can: bool = msg_send![service, canPerformWithItems: items];
-    if !can {
-        log::warn!("AirDrop cannot send these items");
-        return;
-    }
-    let _: () = msg_send![service, performWithItems: items];
-}
-
-/// Start a live FaceTime-camera stream for the Mirror circle.
-pub fn start_mirror() -> bool {
-    #[cfg(target_os = "macos")]
-    {
-        start_mirror_macos()
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        log::warn!("Mirror camera is macOS-only");
-        false
-    }
-}
-
-pub fn stop_mirror() {
-    #[cfg(target_os = "macos")]
-    stop_mirror_macos();
-}
-
-/// Pixel edge of the square BGRA frame `mirror_frame` returns.
-/// 2× `theme::MIRROR_FACE` so the circle stays sharp on retina.
-pub const MIRROR_SIZE: u32 = 224;
-
-/// Latest square BGRA8 frame from the Mirror camera, if `gen` is newer than `seen`.
-pub fn mirror_frame(seen: u64) -> Option<(u64, Vec<u8>)> {
-    #[cfg(target_os = "macos")]
-    {
-        let cap = MIRROR
-            .get_or_init(default_mirror)
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        if cap.running && cap.gen != seen {
-            if let Some(bgra) = cap.bgra.as_ref() {
-                return Some((cap.gen, bgra.clone()));
-            }
-        }
-        None
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = seen;
-        None
-    }
-}
-
-/// PNG of the main display's current desktop wallpaper.
-///
-/// AppKit performs the source decode, so this also works for macOS wallpaper
-/// formats (such as HEIC) that GPUI's cross-platform image decoder may not
-/// understand directly.
-#[allow(dead_code)]
-pub fn desktop_wallpaper_png() -> Option<Vec<u8>> {
-    #[cfg(target_os = "macos")]
-    unsafe {
-        desktop_wallpaper_png_macos()
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        None
-    }
-}
-
-#[cfg(target_os = "macos")]
-#[allow(dead_code)]
-unsafe fn desktop_wallpaper_png_macos() -> Option<Vec<u8>> {
-    desktop_wallpaper_window_png_macos().or_else(|| desktop_wallpaper_url_png_macos())
-}
-
-/// Modern macOS wallpapers can be rendered by an extension (dynamic, video, or
-/// shader based). In that case `desktopImageURLForScreen:` returns the generic
-/// `DefaultDesktop.heic`, not what the user sees. The Dock owns one wallpaper
-/// window per display, so capture its already-rendered frame instead.
-#[cfg(target_os = "macos")]
-#[allow(dead_code)]
-unsafe fn desktop_wallpaper_window_png_macos() -> Option<Vec<u8>> {
-    use nook_core::ffi::macos::CGWindowListCopyWindowInfo;
-    use objc2::rc::autoreleasepool;
-    use objc2::runtime::AnyObject;
-    use objc2::*;
-
-    // CGImageRef needs objc2::Encode (`^{CGImage=}`); keep these local.
-    #[link(name = "CoreGraphics", kind = "framework")]
-    #[allow(dead_code)]
-    unsafe extern "C" {
-        fn CGWindowListCreateImage(
-            screen_bounds: CGRect,
-            list_option: u32,
-            window_id: u32,
-            image_option: u32,
-        ) -> CGImageRef;
-        fn CGImageRelease(image: CGImageRef);
-    }
-
-    const OPTION_ALL: u32 = 0;
-    const OPTION_INCLUDING_WINDOW: u32 = 1 << 3;
-    const IMAGE_BOUNDS_IGNORE_FRAMING: u32 = 1 << 0;
-    const IMAGE_BEST_RESOLUTION: u32 = 1 << 3;
-
-    autoreleasepool(|_| {
-        let windows = CGWindowListCopyWindowInfo(OPTION_ALL, 0) as *mut AnyObject;
-        if windows.is_null() {
-            return None;
-        }
-        let owner_key: *mut AnyObject = msg_send![
-            class!(NSString),
-            stringWithUTF8String: c"kCGWindowOwnerName".as_ptr()
-        ];
-        let name_key: *mut AnyObject = msg_send![
-            class!(NSString),
-            stringWithUTF8String: c"kCGWindowName".as_ptr()
-        ];
-        let number_key: *mut AnyObject = msg_send![
-            class!(NSString),
-            stringWithUTF8String: c"kCGWindowNumber".as_ptr()
-        ];
-        let dock: *mut AnyObject =
-            msg_send![class!(NSString), stringWithUTF8String: c"Dock".as_ptr()];
-        let wallpaper: *mut AnyObject = msg_send![
-            class!(NSString),
-            stringWithUTF8String: c"Wallpaper".as_ptr()
-        ];
-
-        let count: usize = msg_send![windows, count];
-        let mut wallpaper_window = None;
-        for index in 0..count {
-            let info: *mut AnyObject = msg_send![windows, objectAtIndex: index];
-            let owner: *mut AnyObject = msg_send![info, objectForKey: owner_key];
-            let name: *mut AnyObject = msg_send![info, objectForKey: name_key];
-            if owner.is_null() || name.is_null() {
-                continue;
-            }
-            let is_dock: bool = msg_send![owner, isEqualToString: dock];
-            let is_wallpaper: bool = msg_send![name, hasPrefix: wallpaper];
-            if is_dock && is_wallpaper {
-                let number: *mut AnyObject = msg_send![info, objectForKey: number_key];
-                if !number.is_null() {
-                    wallpaper_window = Some(msg_send![number, unsignedIntValue]);
-                    break;
-                }
-            }
-        }
-        let _: () = msg_send![windows, release];
-
-        let window_id = wallpaper_window?;
-        let image = CGWindowListCreateImage(
-            CGRect {
-                origin: CGPoint {
-                    x: f64::INFINITY,
-                    y: f64::INFINITY,
-                },
-                size: CGSize {
-                    width: 0.0,
-                    height: 0.0,
-                },
-            },
-            OPTION_INCLUDING_WINDOW,
-            window_id,
-            IMAGE_BOUNDS_IGNORE_FRAMING | IMAGE_BEST_RESOLUTION,
-        );
-        if image.0.is_null() {
-            return None;
-        }
-        let rep: *mut AnyObject = msg_send![class!(NSBitmapImageRep), alloc];
-        let rep: *mut AnyObject = msg_send![rep, initWithCGImage: image];
-        CGImageRelease(image);
-        if rep.is_null() {
-            return None;
-        }
-        let png = bitmap_rep_png(rep);
-        let _: () = msg_send![rep, release];
-        png
-    })
-}
-
-#[cfg(target_os = "macos")]
-#[allow(dead_code)]
-unsafe fn desktop_wallpaper_url_png_macos() -> Option<Vec<u8>> {
-    use objc2::rc::autoreleasepool;
-    use objc2::runtime::AnyObject;
-    use objc2::*;
-
-    autoreleasepool(|_| {
-        let screen: *mut AnyObject = msg_send![class!(NSScreen), mainScreen];
-        let workspace: *mut AnyObject = msg_send![class!(NSWorkspace), sharedWorkspace];
-        if screen.is_null() || workspace.is_null() {
-            return None;
-        }
-
-        let url: *mut AnyObject = msg_send![workspace, desktopImageURLForScreen: screen];
-        if url.is_null() {
-            return None;
-        }
-        let image: *mut AnyObject = msg_send![class!(NSImage), alloc];
-        let image: *mut AnyObject = msg_send![image, initWithContentsOfURL: url];
-        if image.is_null() {
-            return None;
-        }
-        let tiff: *mut AnyObject = msg_send![image, TIFFRepresentation];
-        let _: () = msg_send![image, release];
-        if tiff.is_null() {
-            return None;
-        }
-        let rep: *mut AnyObject = msg_send![class!(NSBitmapImageRep), imageRepWithData: tiff];
-        bitmap_rep_png(rep)
-    })
-}
-
-#[cfg(target_os = "macos")]
-#[allow(dead_code)]
-unsafe fn bitmap_rep_png(rep: *mut objc2::runtime::AnyObject) -> Option<Vec<u8>> {
-    use objc2::runtime::AnyObject;
-    use objc2::*;
-    use std::ffi::c_void;
-
-    const PNG_TYPE: usize = 4; // NSBitmapImageFileTypePNG
-    const MAX_PNG: usize = 64 * 1024 * 1024;
-
-    if rep.is_null() {
-        return None;
-    }
-    let props: *mut AnyObject = msg_send![class!(NSDictionary), dictionary];
-    let png: *mut AnyObject = msg_send![rep, representationUsingType: PNG_TYPE, properties: props];
-    if png.is_null() {
-        return None;
-    }
-    let len: usize = msg_send![png, length];
-    if len == 0 || len > MAX_PNG {
-        log::warn!("desktop wallpaper: PNG length {len}");
-        return None;
-    }
-    let mut bytes = vec![0u8; len];
-    let dst: *mut c_void = bytes.as_mut_ptr().cast();
-    let _: () = msg_send![png, getBytes: dst, length: len];
-    Some(bytes)
-}
-
-/// PNG of the running media app's icon, from its bundle via NSWorkspace.
-pub fn app_icon_png(bundle_id: Option<&str>, app_name: Option<&str>) -> Option<Vec<u8>> {
-    #[cfg(target_os = "macos")]
-    unsafe {
-        app_icon_png_macos(bundle_id, app_name)
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = (bundle_id, app_name);
-        None
-    }
-}
-
-#[cfg(target_os = "macos")]
-fn known_bundle_id(app_name: &str) -> Option<&'static str> {
-    Some(match app_name {
-        "Spotify" => "com.spotify.client",
-        "Music" | "iTunes" => "com.apple.Music",
-        "Safari" => "com.apple.Safari",
-        "Chrome" | "Google Chrome" => "com.google.Chrome",
-        "Brave" | "Brave Browser" => "com.brave.Browser",
-        "Edge" | "Microsoft Edge" => "com.microsoft.edgemac",
-        "Firefox" => "org.mozilla.firefox",
-        "TV" => "com.apple.TV",
-        "Podcasts" => "com.apple.podcasts",
-        "IINA" => "com.colliderli.iina",
-        "VLC" => "org.videolan.vlc",
-        "TIDAL" => "com.tidal.desktop",
-        "Arc" => "company.thebrowser.Browser",
-        "zoom.us" | "Zoom" => "us.zoom.xos",
-        "Microsoft Teams" | "Teams" => "com.microsoft.teams2",
-        _ => return None,
-    })
-}
-
-/// `CGImageRef` encodes as `^{CGImage=}`; a raw `*const c_void` is `^v`
-/// and panics objc2's encoding check.
-#[cfg(target_os = "macos")]
-#[derive(Clone, Copy)]
-#[repr(transparent)]
-struct CGImageRef(*const std::ffi::c_void);
-
-#[cfg(target_os = "macos")]
-unsafe impl objc2::Encode for CGImageRef {
-    const ENCODING: objc2::Encoding =
-        objc2::Encoding::Pointer(&objc2::Encoding::Struct("CGImage", &[]));
-}
-
-#[cfg(target_os = "macos")]
-#[repr(transparent)]
-struct NSRectPtr(*mut nook_core::notch::CGRect);
-
-#[cfg(target_os = "macos")]
-unsafe impl objc2::Encode for NSRectPtr {
-    const ENCODING: objc2::Encoding =
-        objc2::Encoding::Pointer(&<nook_core::notch::CGRect as objc2::Encode>::ENCODING);
-}
-
-#[cfg(target_os = "macos")]
-unsafe fn app_icon_png_macos(bundle_id: Option<&str>, app_name: Option<&str>) -> Option<Vec<u8>> {
-    use nook_core::notch::{CGPoint, CGRect, CGSize};
-    use objc2::rc::autoreleasepool;
-    use objc2::runtime::AnyObject;
-    use objc2::*;
-    use std::ffi::{c_void, CString};
-
-    // App icons are multi-rep ICNS. `TIFFRepresentation` dumps every size
-    // (tens of MB) and our 2 MB cap discarded them, so the media badge
-    // always fell back to a generic glyph.
-    const ICON_PT: f64 = 128.0;
-    const PNG_TYPE: usize = 4; // NSBitmapImageFileTypePNG
-    const MAX_PNG: usize = 512 * 1024;
-
-    autoreleasepool(|_| {
-        let ws: *mut AnyObject = msg_send![class!(NSWorkspace), sharedWorkspace];
-        if ws.is_null() {
-            return None;
-        }
-
-        let mut path: *mut AnyObject = std::ptr::null_mut();
-        let bundle = bundle_id
-            .filter(|s| !s.is_empty())
-            .or_else(|| app_name.and_then(known_bundle_id));
-        if let Some(id) = bundle {
-            if let Ok(cstr) = CString::new(id) {
-                let ns: *mut AnyObject =
-                    msg_send![class!(NSString), stringWithUTF8String: cstr.as_ptr()];
-                let url: *mut AnyObject = msg_send![ws, URLForApplicationWithBundleIdentifier: ns];
-                if !url.is_null() {
-                    path = msg_send![url, path];
-                }
-            }
-        }
-        if path.is_null() {
-            if let Some(name) = app_name.filter(|s| !s.is_empty()) {
-                if let Ok(cstr) = CString::new(name) {
-                    let ns: *mut AnyObject =
-                        msg_send![class!(NSString), stringWithUTF8String: cstr.as_ptr()];
-                    path = msg_send![ws, fullPathForApplication: ns];
-                }
-            }
-        }
-        if path.is_null() {
-            return None;
-        }
-
-        let icon: *mut AnyObject = msg_send![ws, iconForFile: path];
-        if icon.is_null() {
-            log::warn!("app icon: iconForFile returned nil");
-            return None;
-        }
-        let size = CGSize {
-            width: ICON_PT,
-            height: ICON_PT,
-        };
-        let _: () = msg_send![icon, setSize: size];
-        let mut rect = CGRect {
-            origin: CGPoint { x: 0.0, y: 0.0 },
-            size,
-        };
-        let null: *mut AnyObject = std::ptr::null_mut();
-        let cg: CGImageRef = msg_send![
-            icon,
-            CGImageForProposedRect: NSRectPtr(&mut rect),
-            context: null,
-            hints: null
-        ];
-        if cg.0.is_null() {
-            log::warn!("app icon: CGImageForProposedRect nil");
-            return None;
-        }
-        let rep: *mut AnyObject = msg_send![class!(NSBitmapImageRep), alloc];
-        let rep: *mut AnyObject = msg_send![rep, initWithCGImage: cg];
-        if rep.is_null() {
-            log::warn!("app icon: NSBitmapImageRep initWithCGImage nil");
-            return None;
-        }
-        let props: *mut AnyObject = msg_send![class!(NSDictionary), dictionary];
-        let png: *mut AnyObject =
-            msg_send![rep, representationUsingType: PNG_TYPE, properties: props];
-        let _: () = msg_send![rep, release];
-        if png.is_null() {
-            log::warn!("app icon: PNG representation nil");
-            return None;
-        }
-        let len: usize = msg_send![png, length];
-        if len == 0 || len > MAX_PNG {
-            log::warn!("app icon: PNG length {len}");
-            return None;
-        }
-        let mut bytes = vec![0u8; len];
-        let dst: *mut c_void = bytes.as_mut_ptr().cast();
-        let _: () = msg_send![png, getBytes: dst, length: len];
-        log::debug!("app icon loaded {} bytes", bytes.len());
-        Some(bytes)
-    })
-}
-
-/// Open the system Calendar app. No-op off macOS.
-pub fn open_calendar() {
-    #[cfg(target_os = "macos")]
-    {
-        let _ = std::process::Command::new("open")
-            .arg("-a")
-            .arg("Calendar")
-            .spawn();
-    }
-}
-
-#[cfg(target_os = "macos")]
-static ACCENT_VALID: AtomicBool = AtomicBool::new(false);
-#[cfg(target_os = "macos")]
-static ACCENT_R: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-#[cfg(target_os = "macos")]
-static ACCENT_G: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-#[cfg(target_os = "macos")]
-static ACCENT_B: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-
-#[cfg(target_os = "macos")]
-fn invalidate_accent_color() {
-    ACCENT_VALID.store(false, Ordering::Relaxed);
-}
-/// Accessibility TCC via `AXIsProcessTrustedWithOptions`. `prompt` shows the
-/// system dialog (and deep-links if the user agrees).
-pub fn ax_process_trusted(prompt: bool) -> bool {
-    nook_core::eventtap::ax_trusted(prompt)
-}
-
-pub fn open_privacy_accessibility() {
-    open_privacy_pane("Privacy_Accessibility");
-}
-
-pub fn open_privacy_full_disk_access() {
-    open_privacy_pane("Privacy_AllFiles");
-}
-
-fn open_privacy_pane(anchor: &str) {
-    #[cfg(target_os = "macos")]
-    {
-        let url = format!("x-apple.systempreferences:com.apple.preference.security?{anchor}");
-        let _ = std::process::Command::new("/usr/bin/open").arg(url).spawn();
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = anchor;
-    }
-}
-
-/// System Settings → Appearance → *Accent color* (`NSColor.controlAccentColor`),
-/// as sRGB components in 0..=1. `None` when there is no AppKit to ask or the
-/// color cannot be converted to an RGB space — callers fall back to systemBlue.
-///
-/// Cached until `NSSystemColorsDidChangeNotification` so idle frames do not
-/// walk CoreUI catalog colors. Must be called on the main thread for the
-/// first resolve.
-pub fn accent_color() -> Option<(f32, f32, f32)> {
-    #[cfg(target_os = "macos")]
-    {
-        if ACCENT_VALID.load(Ordering::Relaxed) {
-            return Some((
-                f32::from_bits(ACCENT_R.load(Ordering::Relaxed)),
-                f32::from_bits(ACCENT_G.load(Ordering::Relaxed)),
-                f32::from_bits(ACCENT_B.load(Ordering::Relaxed)),
-            ));
-        }
-        let color = accent_color_macos()?;
-        ACCENT_R.store(color.0.to_bits(), Ordering::Relaxed);
-        ACCENT_G.store(color.1.to_bits(), Ordering::Relaxed);
-        ACCENT_B.store(color.2.to_bits(), Ordering::Relaxed);
-        ACCENT_VALID.store(true, Ordering::Relaxed);
-        Some(color)
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        None
-    }
-}
-
-#[cfg(target_os = "macos")]
-fn accent_color_macos() -> Option<(f32, f32, f32)> {
-    use objc2::rc::autoreleasepool;
-    use objc2::runtime::AnyObject;
-    use objc2::*;
-
-    // `colorUsingColorSpace:` returns an autoreleased color; without a pool it
-    // would pile up for as long as the frame's pool lives.
-    autoreleasepool(|_| unsafe {
-        let color: *mut AnyObject = msg_send![class!(NSColor), controlAccentColor];
-        if color.is_null() {
-            return None;
-        }
-        let space: *mut AnyObject = msg_send![class!(NSColorSpace), sRGBColorSpace];
-        if space.is_null() {
-            return None;
-        }
-        // `getRed:…` throws on a catalog/pattern color, so convert first and
-        // bail if AppKit says the conversion is impossible.
-        let srgb: *mut AnyObject = msg_send![color, colorUsingColorSpace: space];
-        if srgb.is_null() {
-            return None;
-        }
-        let (mut r, mut g, mut b, mut a) = (0f64, 0f64, 0f64, 0f64);
-        let _: () = msg_send![
-            srgb,
-            getRed: &mut r as *mut f64,
-            green: &mut g as *mut f64,
-            blue: &mut b as *mut f64,
-            alpha: &mut a as *mut f64
-        ];
-        Some((r as f32, g as f32, b as f32))
-    })
-}
-
-#[cfg(target_os = "macos")]
-static REDUCE_TRANSPARENCY_CACHE: AtomicU64 = AtomicU64::new(0);
-#[cfg(target_os = "macos")]
-static REDUCE_MOTION_CACHE: AtomicU64 = AtomicU64::new(0);
-#[cfg(target_os = "macos")]
-static INCREASE_CONTRAST_CACHE: AtomicU64 = AtomicU64::new(0);
-#[cfg(target_os = "macos")]
-static DIFFERENTIATE_WITHOUT_COLOR_CACHE: AtomicU64 = AtomicU64::new(0);
-
-#[cfg(target_os = "macos")]
-fn invalidate_accessibility_flags() {
-    REDUCE_TRANSPARENCY_CACHE.store(0, Ordering::Relaxed);
-    REDUCE_MOTION_CACHE.store(0, Ordering::Relaxed);
-    INCREASE_CONTRAST_CACHE.store(0, Ordering::Relaxed);
-    DIFFERENTIATE_WITHOUT_COLOR_CACHE.store(0, Ordering::Relaxed);
-}
-
-/// 1s-TTL cache for an AppKit accessibility flag. Both flags below are read
-/// from the 20ms island tick; two ObjC round-trips per tick is pointless for
-/// settings a human toggles at most a few times a day. The workspace
-/// accessibility-display observer also invalidates these so a toggle applies
-/// on the next tick. Layout: bit0 = value, bit1 = valid, upper bits = last-read
-/// unix ms.
-#[cfg(target_os = "macos")]
-fn cached_accessibility_flag(cache: &AtomicU64, read: unsafe fn() -> bool) -> bool {
-    let now_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0);
-    let packed = cache.load(Ordering::Relaxed);
-    if packed & 0b10 != 0 && now_ms.saturating_sub(packed >> 2) < 1000 {
-        return packed & 1 != 0;
-    }
-    let value = unsafe { read() };
-    cache.store((now_ms << 2) | 0b10 | value as u64, Ordering::Relaxed);
-    value
-}
-
-/// Accessibility › Display › "Reduce transparency". HIG › Materials requires
-/// materials to respond to it, so the island drops its translucency when it is
-/// on. `false` when there is no AppKit to ask. Cached for 1s.
+/// System Settings › Accessibility › Display › Reduce transparency.
 pub fn reduce_transparency() -> bool {
     #[cfg(target_os = "macos")]
-    {
-        unsafe fn read() -> bool {
-            use objc2::runtime::AnyObject;
-            use objc2::*;
-            let workspace: *mut AnyObject = msg_send![class!(NSWorkspace), sharedWorkspace];
-            if workspace.is_null() {
-                return false;
-            }
-            msg_send![workspace, accessibilityDisplayShouldReduceTransparency]
-        }
-        cached_accessibility_flag(&REDUCE_TRANSPARENCY_CACHE, read)
+    unsafe {
+        use objc2::runtime::AnyObject;
+        use objc2::{class, msg_send};
+        let ws: *mut AnyObject = msg_send![class!(NSWorkspace), sharedWorkspace];
+        let on: bool = msg_send![ws, accessibilityDisplayShouldReduceTransparency];
+        on
     }
     #[cfg(not(target_os = "macos"))]
     false
 }
 
-/// Accessibility › Display › "Reduce motion". HIG › Motion requires motion to
-/// be optional, so the island parks its size spring and drops the motion blur
-/// when it is on, keeping only the crossfade (Apple's dissolve substitute).
-/// `false` when there is no AppKit to ask. Cached for 1s.
-pub fn reduce_motion() -> bool {
-    #[cfg(target_os = "macos")]
-    {
-        unsafe fn read() -> bool {
-            use objc2::runtime::AnyObject;
-            use objc2::*;
-            let workspace: *mut AnyObject = msg_send![class!(NSWorkspace), sharedWorkspace];
-            if workspace.is_null() {
-                return false;
-            }
-            msg_send![workspace, accessibilityDisplayShouldReduceMotion]
-        }
-        cached_accessibility_flag(&REDUCE_MOTION_CACHE, read)
-    }
-    #[cfg(not(target_os = "macos"))]
-    false
-}
-
-/// Accessibility › Display › "Increase contrast". Cached for 1s like the other
-/// display flags; `false` when there is no AppKit to ask.
-pub fn increase_contrast() -> bool {
-    #[cfg(target_os = "macos")]
-    {
-        unsafe fn read() -> bool {
-            use objc2::runtime::AnyObject;
-            use objc2::*;
-            let workspace: *mut AnyObject = msg_send![class!(NSWorkspace), sharedWorkspace];
-            if workspace.is_null() {
-                return false;
-            }
-            msg_send![workspace, accessibilityDisplayShouldIncreaseContrast]
-        }
-        cached_accessibility_flag(&INCREASE_CONTRAST_CACHE, read)
-    }
-    #[cfg(not(target_os = "macos"))]
-    false
-}
-
-/// Accessibility › Display › "Differentiate without color". Cached for 1s;
-/// `false` when there is no AppKit to ask.
-#[allow(dead_code)]
-pub fn differentiate_without_color() -> bool {
-    #[cfg(target_os = "macos")]
-    {
-        unsafe fn read() -> bool {
-            use objc2::runtime::AnyObject;
-            use objc2::*;
-            let workspace: *mut AnyObject = msg_send![class!(NSWorkspace), sharedWorkspace];
-            if workspace.is_null() {
-                return false;
-            }
-            msg_send![
-                workspace,
-                accessibilityDisplayShouldDifferentiateWithoutColor
-            ]
-        }
-        cached_accessibility_flag(&DIFFERENTIATE_WITHOUT_COLOR_CACHE, read)
-    }
-    #[cfg(not(target_os = "macos"))]
-    false
-}
-
-#[cfg(target_os = "macos")]
-unsafe fn workspace_note_bundle_id(note: *mut objc2::runtime::AnyObject) -> Option<String> {
-    use objc2::runtime::AnyObject;
-    use objc2::*;
-    if note.is_null() {
-        return None;
-    }
-    let info: *mut AnyObject = msg_send![note, userInfo];
-    if info.is_null() {
-        return None;
-    }
-    let key: *mut AnyObject = msg_send![
-        class!(NSString),
-        stringWithUTF8String: c"NSWorkspaceApplicationKey".as_ptr()
-    ];
-    let app: *mut AnyObject = msg_send![info, objectForKey: key];
-    if app.is_null() {
-        return None;
-    }
-    let ident: *mut AnyObject = msg_send![app, bundleIdentifier];
-    if ident.is_null() {
-        return None;
-    }
-    let utf8: *const std::ffi::c_char = msg_send![ident, UTF8String];
-    if utf8.is_null() {
-        return None;
-    }
-    Some(
-        std::ffi::CStr::from_ptr(utf8)
-            .to_string_lossy()
-            .into_owned(),
-    )
-}
-
-/// Subscribe to Spotify's and Music's public playback-change broadcasts.
-///
-/// Both players post on the distributed notification center on every
-/// play/pause/track change (no TCC involved). With these installed the
-/// now-playing poll can idle at seconds-scale cadence and still react
-/// instantly — each poll spawns an osascript/perl child, so cadence is the
-/// battery cost that matters. Safari/YouTube posts nothing and rides the slow
-/// poll. Blocks only flip an atomic, so the posting thread is fine. Observer
-/// tokens are intentionally leaked — they live for the process.
-pub fn install_media_observers() {
+/// An app's icon in its light (Aqua) variant, as straight-alpha RGBA, `px` square. The island is
+/// black: a dark-mode icon (macOS's "dark" icon style) would vanish on it.
+pub fn app_icon_light(bundle_id: &str, px: u32) -> Option<(u32, u32, Vec<u8>)> {
     #[cfg(target_os = "macos")]
     unsafe {
-        use block2::RcBlock;
         use objc2::runtime::AnyObject;
-        use objc2::*;
-
-        static INSTALLED: Once = Once::new();
-        INSTALLED.call_once(|| {
-            let _ = nook_core::audio::prime_media_apps();
-
-            let center: *mut AnyObject =
-                msg_send![class!(NSDistributedNotificationCenter), defaultCenter];
-            if !center.is_null() {
-                for name in [
-                    c"com.spotify.client.PlaybackStateChanged",
-                    c"com.apple.Music.playerInfo",
-                    c"com.apple.iTunes.playerInfo",
-                ] {
-                    let ns_name: *mut AnyObject =
-                        msg_send![class!(NSString), stringWithUTF8String: name.as_ptr()];
-                    let block = RcBlock::new(move |_note: *mut AnyObject| {
-                        nook_core::audio::note_media_event();
-                    });
-                    let token: *mut AnyObject = msg_send![
-                        center,
-                        addObserverForName: ns_name,
-                        object: std::ptr::null_mut::<AnyObject>(),
-                        queue: std::ptr::null_mut::<AnyObject>(),
-                        usingBlock: &*block
-                    ];
-                    std::mem::forget(block);
-                    let _ = token;
-                }
-            }
-
-            let workspace: *mut AnyObject = msg_send![class!(NSWorkspace), sharedWorkspace];
-            if workspace.is_null() {
-                return;
-            }
-            let wsnc: *mut AnyObject = msg_send![workspace, notificationCenter];
-            if wsnc.is_null() {
-                return;
-            }
-            for (name, running) in [
-                (c"NSWorkspaceDidLaunchApplicationNotification", true),
-                (c"NSWorkspaceDidTerminateApplicationNotification", false),
-            ] {
-                let ns_name: *mut AnyObject =
-                    msg_send![class!(NSString), stringWithUTF8String: name.as_ptr()];
-                let block = RcBlock::new(move |note: *mut AnyObject| {
-                    if let Some(id) = workspace_note_bundle_id(note) {
-                        nook_core::audio::note_media_app_running(&id, running);
-                        if matches!(
-                            id.as_str(),
-                            "com.spotify.client" | "com.apple.Music" | "com.apple.Safari"
-                        ) {
-                            nook_core::audio::note_media_event();
-                        }
+        use objc2::{class, msg_send};
+        #[repr(C)]
+        #[derive(Clone, Copy)]
+        struct Size { w: f64, h: f64 }
+        #[repr(C)]
+        #[derive(Clone, Copy)]
+        struct Rect { x: f64, y: f64, w: f64, h: f64 }
+        unsafe impl objc2::Encode for Size {
+            const ENCODING: objc2::Encoding = objc2::Encoding::Struct("CGSize", &[f64::ENCODING, f64::ENCODING]);
+        }
+        unsafe impl objc2::Encode for Rect {
+            const ENCODING: objc2::Encoding = objc2::Encoding::Struct("CGRect", &[
+                objc2::Encoding::Struct("CGPoint", &[f64::ENCODING, f64::ENCODING]),
+                objc2::Encoding::Struct("CGSize", &[f64::ENCODING, f64::ENCODING]),
+            ]);
+        }
+        let path = app_path(bundle_id)?;
+        let pool: *mut AnyObject = msg_send![class!(NSAutoreleasePool), new];
+        // The bundle's own .icns holds the standard (light) artwork; the workspace's icon follows
+        // the person's icon style, dark included.
+        let bundle: *mut AnyObject = msg_send![class!(NSBundle), bundleWithPath: mac::ns_string(&path.to_string_lossy())];
+        let name: *mut AnyObject = if bundle.is_null() { std::ptr::null_mut() } else { msg_send![bundle, objectForInfoDictionaryKey: mac::ns_string("CFBundleIconFile")] };
+        let file: Option<String> = mac::string(name).and_then(|n| {
+            let n = n.trim_end_matches(".icns").to_owned();
+            mac::string(msg_send![bundle, pathForResource: mac::ns_string(&n), ofType: mac::ns_string("icns")])
+        });
+        let mut icon: *mut AnyObject = std::ptr::null_mut();
+        if let Some(file) = file {
+            let alloc: *mut AnyObject = msg_send![class!(NSImage), alloc];
+            icon = msg_send![alloc, initWithContentsOfFile: mac::ns_string(&file)];
+            let _: *mut AnyObject = msg_send![icon, autorelease];
+        }
+        if icon.is_null() {
+            let ws: *mut AnyObject = msg_send![class!(NSWorkspace), sharedWorkspace];
+            icon = msg_send![ws, iconForFile: mac::ns_string(&path.to_string_lossy())];
+        }
+        if icon.is_null() {
+            let _: () = msg_send![pool, drain];
+            return None;
+        }
+        let _: () = msg_send![icon, setSize: Size { w: px as f64, h: px as f64 }];
+        // Premultiplied (CoreGraphics draws no other); straightened below, as Rune takes it.
+        let rep: *mut AnyObject = msg_send![class!(NSBitmapImageRep), alloc];
+        let rep: *mut AnyObject = msg_send![rep,
+            initWithBitmapDataPlanes: std::ptr::null_mut::<*mut u8>(),
+            pixelsWide: px as isize, pixelsHigh: px as isize,
+            bitsPerSample: 8isize, samplesPerPixel: 4isize,
+            hasAlpha: true, isPlanar: false,
+            colorSpaceName: mac::ns_string("NSDeviceRGBColorSpace"),
+            bitmapFormat: 0usize,
+            bytesPerRow: (px * 4) as isize, bitsPerPixel: 32isize];
+        if rep.is_null() {
+            let _: () = msg_send![pool, drain];
+            return None;
+        }
+        let ctx: *mut AnyObject = msg_send![class!(NSGraphicsContext), graphicsContextWithBitmapImageRep: rep];
+        let aqua: *mut AnyObject = msg_send![class!(NSAppearance), appearanceNamed: mac::ns_string("NSAppearanceNameAqua")];
+        let previous: *mut AnyObject = msg_send![class!(NSAppearance), currentDrawingAppearance];
+        let _: () = msg_send![class!(NSGraphicsContext), saveGraphicsState];
+        let _: () = msg_send![class!(NSGraphicsContext), setCurrentContext: ctx];
+        // The drawing appearance picks which of the icon's variants draws.
+        let _: () = msg_send![class!(NSAppearance), setCurrentAppearance: aqua];
+        let rect = Rect { x: 0.0, y: 0.0, w: px as f64, h: px as f64 };
+        let zero = Rect { x: 0.0, y: 0.0, w: 0.0, h: 0.0 };
+        // NSCompositingOperationSourceOver = 2.
+        let _: () = msg_send![icon, drawInRect: rect, fromRect: zero, operation: 2usize, fraction: 1.0f64];
+        let _: () = msg_send![class!(NSAppearance), setCurrentAppearance: previous];
+        let _: () = msg_send![class!(NSGraphicsContext), restoreGraphicsState];
+        let data: *const u8 = msg_send![rep, bitmapData];
+        let out = (!data.is_null()).then(|| {
+            let mut rgba = std::slice::from_raw_parts(data, (px * px * 4) as usize).to_vec();
+            for p in rgba.as_chunks_mut::<4>().0 {
+                let a = p[3] as u32;
+                if a > 0 && a < 255 {
+                    for c in &mut p[..3] {
+                        *c = ((*c as u32 * 255 + a / 2) / a).min(255) as u8;
                     }
-                });
-                let token: *mut AnyObject = msg_send![
-                    wsnc,
-                    addObserverForName: ns_name,
-                    object: std::ptr::null_mut::<AnyObject>(),
-                    queue: std::ptr::null_mut::<AnyObject>(),
-                    usingBlock: &*block
-                ];
-                std::mem::forget(block);
-                let _ = token;
-            }
-        });
-    }
-}
-
-/// Re-assert OSDUIHelper suppression after sleep — launchd can respawn it.
-pub fn install_osd_wake_observer() {}
-/// Refresh weather after sleep without polling through it. The weather loop
-/// consumes [`nook_core::weather::take_wake`] and only hits the network when
-/// the 30 min cache is stale.
-pub fn install_weather_observers() {
-    #[cfg(target_os = "macos")]
-    unsafe {
-        use block2::RcBlock;
-        use objc2::runtime::AnyObject;
-        use objc2::*;
-
-        static INSTALLED: Once = Once::new();
-        INSTALLED.call_once(|| {
-            let workspace: *mut AnyObject = msg_send![class!(NSWorkspace), sharedWorkspace];
-            if workspace.is_null() {
-                return;
-            }
-            let center: *mut AnyObject = msg_send![workspace, notificationCenter];
-            if center.is_null() {
-                return;
-            }
-            let ns_name: *mut AnyObject = msg_send![
-                class!(NSString),
-                stringWithUTF8String: c"NSWorkspaceDidWakeNotification".as_ptr()
-            ];
-            let block = RcBlock::new(move |_note: *mut AnyObject| {
-                nook_core::osd::apply_from_settings();
-                nook_core::weather::note_wake();
-            });
-            let token: *mut AnyObject = msg_send![
-                center,
-                addObserverForName: ns_name,
-                object: std::ptr::null_mut::<AnyObject>(),
-                queue: std::ptr::null_mut::<AnyObject>(),
-                usingBlock: &*block
-            ];
-            std::mem::forget(block);
-            let _ = token;
-        });
-    }
-}
-
-/// GPUI-space island rect (origin top-left) for the native glass underlay.
-#[derive(Clone, Copy, Debug)]
-pub struct IslandGlass {
-    pub x: f64,
-    pub y: f64,
-    pub w: f64,
-    pub h: f64,
-    pub radius: f64,
-    pub wing: f64,
-    /// Optional stained-glass tint (`NSGlassEffectView.tintColor`). `None`
-    /// leaves the system default.
-    pub tint: Option<(f32, f32, f32)>,
-    /// Material strength. `0` is the black compact pill; `1` is fully open.
-    pub opacity: f64,
-}
-
-impl IslandGlass {
-    fn same_shape(self, other: Self) -> bool {
-        (self.w - other.w).abs() < 0.5
-            && (self.h - other.h).abs() < 0.5
-            && (self.y - other.y).abs() < 0.5
-            && (self.wing - other.wing).abs() < 0.5
-            && (self.radius - other.radius).abs() < 0.5
-    }
-}
-
-/// Convert a GPUI top-left rect into AppKit view coordinates (origin bottom-left).
-pub fn cocoa_rect_from_gpui(x: f64, y: f64, w: f64, h: f64, view_h: f64) -> (f64, f64, f64, f64) {
-    (x, view_h - y - h, w, h)
-}
-
-/// Glass underlay height. Attached to the top edge: island plus corner radius
-/// so the top rounding is clipped at the screen and the visible top stays
-/// flat. Detached: the island's own height, so all four corners show.
-#[allow(dead_code)]
-pub fn glass_underlay_height(island_h: f64, radius: f64, attached: bool) -> f64 {
-    if attached {
-        island_h + radius.max(0.0)
-    } else {
-        island_h
-    }
-}
-
-fn glass_extra(spec: IslandGlass) -> f64 {
-    if spec.y < 1.0 {
-        spec.radius.max(0.0)
-    } else {
-        0.0
-    }
-}
-
-/// Place, update, or hide the island's native glass underlay.
-///
-/// Returns `true` when a system material view is attached, so GPUI paints the
-/// black veil instead of a flat fill. `IslandGlass::opacity` fades that view
-/// in as the sheet opens. macOS 26+ uses `NSGlassEffectView`
-/// (regular style — the island is text-heavy). Older systems fall back to
-/// `NSVisualEffectView` HUD material.
-///
-/// Hard gate: Settings → Liquid Glass island must be on, and Reduce
-/// Transparency must be off. Pin/restyle cannot resurrect the view otherwise.
-///
-/// The glass is a sibling *behind* GPUI's content view, sized to the island —
-/// wrapping the Metal view as `contentView` would glass the whole overlay.
-pub fn sync_island_glass(spec: Option<IslandGlass>) -> bool {
-    #[cfg(target_os = "macos")]
-    {
-        sync_island_glass_macos(spec)
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = spec;
-        false
-    }
-}
-
-/// Settings toggle plus Reduce Transparency. Native glass is illegal otherwise.
-pub fn island_glass_setting_on() -> bool {
-    nook_core::settings::get_app_settings().liquid_glass_mode && !reduce_transparency()
-}
-
-/// True while the AppKit underlay is in the window, even if this tick's
-/// `sync_island_glass` failed to talk to the panel.
-pub fn island_glass_attached() -> bool {
-    #[cfg(target_os = "macos")]
-    {
-        !glass_cap()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .view
-            .is_null()
-    }
-    #[cfg(not(target_os = "macos"))]
-    false
-}
-
-#[cfg(target_os = "macos")]
-struct GlassCap {
-    view: *mut objc2::runtime::AnyObject,
-    last: Option<IslandGlass>,
-}
-
-#[cfg(target_os = "macos")]
-unsafe impl Send for GlassCap {}
-
-#[cfg(target_os = "macos")]
-fn glass_cap() -> &'static std::sync::Mutex<GlassCap> {
-    static GLASS: std::sync::OnceLock<std::sync::Mutex<GlassCap>> = std::sync::OnceLock::new();
-    GLASS.get_or_init(|| {
-        std::sync::Mutex::new(GlassCap {
-            view: std::ptr::null_mut(),
-            last: None,
-        })
-    })
-}
-
-#[cfg(target_os = "macos")]
-fn sync_island_glass_macos(spec: Option<IslandGlass>) -> bool {
-    if !island_glass_setting_on() {
-        hide_island_glass();
-        return false;
-    }
-    let Some(spec) = spec else {
-        hide_island_glass();
-        return false;
-    };
-    if spec.w < 2.0 || spec.h < 2.0 {
-        hide_island_glass();
-        return false;
-    }
-    unsafe { apply_island_glass(spec) }
-}
-
-#[cfg(target_os = "macos")]
-fn hide_island_glass() {
-    use objc2::*;
-    let mut cap = glass_cap().lock().unwrap_or_else(|e| e.into_inner());
-    cap.last = None;
-    let view = cap.view;
-    cap.view = std::ptr::null_mut();
-    if view.is_null() {
-        return;
-    }
-    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
-        let _: () = msg_send![view, removeFromSuperview];
-        let _: () = msg_send![view, release];
-    }));
-}
-
-#[cfg(target_os = "macos")]
-unsafe fn apply_island_glass(spec: IslandGlass) -> bool {
-    use objc2::runtime::AnyObject;
-    use objc2::*;
-
-    if !island_glass_setting_on() {
-        hide_island_glass();
-        return false;
-    }
-
-    let mut ns_win: *mut AnyObject = std::ptr::null_mut();
-    for_each_island_window(|w| {
-        if ns_win.is_null() {
-            ns_win = w;
-        }
-    });
-    if ns_win.is_null() {
-        return false;
-    }
-
-    let content: *mut AnyObject = msg_send![ns_win, contentView];
-    if content.is_null() {
-        return false;
-    }
-    let content_frame: CGRect = msg_send![content, frame];
-    let rect = glass_underlay_rect(content_frame, spec);
-
-    let mut cap = glass_cap().lock().unwrap_or_else(|e| e.into_inner());
-    if cap.view.is_null() {
-        cap.view = match create_glass_view(rect, spec) {
-            Some(v) => v,
-            None => return false,
-        };
-        attach_glass_behind_content(ns_win, content, cap.view);
-    } else {
-        let hosted: *mut AnyObject = msg_send![cap.view, window];
-        if hosted != ns_win {
-            attach_glass_behind_content(ns_win, content, cap.view);
-            pin_dark_appearance(cap.view);
-        }
-        let current: CGRect = msg_send![cap.view, frame];
-        let moved = (current.origin.x - rect.origin.x).abs() > 0.4
-            || (current.origin.y - rect.origin.y).abs() > 0.4
-            || (current.size.width - rect.size.width).abs() > 0.4
-            || (current.size.height - rect.size.height).abs() > 0.4;
-        if moved {
-            let _: () = msg_send![cap.view, setFrame: rect];
-        }
-        // Replacing the mask/layer every tick makes Regular glass flash
-        // between the inactive (dark) and specular (white) recipes.
-        let reshape = cap.last.map(|old| !old.same_shape(spec)).unwrap_or(true);
-        let retint = cap.last.map(|old| old.tint != spec.tint).unwrap_or(true);
-        if reshape {
-            configure_glass_shape(cap.view, spec);
-        }
-        if reshape || retint {
-            apply_glass_tint(cap.view, spec.tint);
-        }
-    }
-    let opacity = spec.opacity.clamp(0.0, 1.0);
-    let opacity_changed = cap
-        .last
-        .map(|old| (old.opacity - opacity).abs() > 0.01)
-        .unwrap_or(true);
-    if opacity_changed {
-        let _: () = msg_send![cap.view, setAlphaValue: opacity];
-    }
-    cap.last = Some(spec);
-    let hidden: bool = msg_send![cap.view, isHidden];
-    if hidden {
-        let _: () = msg_send![cap.view, setHidden: false];
-    }
-    true
-}
-
-#[cfg(target_os = "macos")]
-unsafe fn create_glass_view(
-    rect: CGRect,
-    spec: IslandGlass,
-) -> Option<*mut objc2::runtime::AnyObject> {
-    use objc2::runtime::{AnyClass, AnyObject, Bool};
-    use objc2::*;
-
-    // No wrapper and no CALayer mask: masking the view clips
-    // NSGlassEffectView's rim (sheen / refraction) off the bottom radius.
-    let glass = if let Some(cls) = AnyClass::get(c"NSGlassEffectView") {
-        let v: *mut AnyObject = msg_send![cls, alloc];
-        let v: *mut AnyObject = msg_send![v, initWithFrame: rect];
-        if v.is_null() {
-            return None;
-        }
-        // Regular, not Clear: island chrome is text-heavy (HIG Materials).
-        // Leave tintColor at the default — a 45% black tint was the "always
-        // dark" look, and interactive lighting then flashed white on top.
-        let _: () = msg_send![v, setStyle: 0_i64];
-        let ix = sel!(setEffectIsInteractive:);
-        let can_ix: bool = msg_send![v, respondsToSelector: ix];
-        if can_ix {
-            let no = Bool::from(false);
-            let _: () = msg_send![v, setEffectIsInteractive: no];
-        }
-        // Nonactivating panel is never key; without this the material sits
-        // in the inactive (dark) recipe until a hover lights it.
-        let sub = sel!(setSubduedState:);
-        let can_sub: bool = msg_send![v, respondsToSelector: sub];
-        if can_sub {
-            let _: () = msg_send![v, setSubduedState: 0_i64];
-        }
-        v
-    } else {
-        let v: *mut AnyObject = msg_send![class!(NSVisualEffectView), alloc];
-        let v: *mut AnyObject = msg_send![v, initWithFrame: rect];
-        if v.is_null() {
-            return None;
-        }
-        // HUDWindow = 13, BehindWindow = 0, Active = 1.
-        let _: () = msg_send![v, setMaterial: 13_i64];
-        let _: () = msg_send![v, setBlendingMode: 0_i64];
-        let _: () = msg_send![v, setState: 1_i64];
-        v
-    };
-
-    let id_sel = sel!(setIdentifier:);
-    let can_id: bool = msg_send![glass, respondsToSelector: id_sel];
-    if can_id {
-        let id = ns_string("nook-island-glass");
-        if !id.is_null() {
-            let _: () = msg_send![glass, setIdentifier: id];
-        }
-    }
-    // Island chrome is always the dark Live Activity fill (white labels).
-    // Without this, NSGlassEffectView inherits Light appearance and paints
-    // the light glass recipe under those labels.
-    pin_dark_appearance(glass);
-    configure_glass_shape(glass, spec);
-    apply_glass_tint(glass, spec.tint);
-    Some(glass)
-}
-
-/// Pin the underlay to Dark Aqua so Regular glass keeps the dark luminosity
-/// recipe in Light Mode. Choosing a Specific Appearance for Your macOS App:
-/// set the view's `appearance` when a surface must not follow the system.
-#[cfg(target_os = "macos")]
-unsafe fn pin_dark_appearance(view: *mut objc2::runtime::AnyObject) {
-    use objc2::runtime::AnyObject;
-    use objc2::*;
-
-    let name = ns_string("NSAppearanceNameDarkAqua");
-    if name.is_null() {
-        return;
-    }
-    let dark: *mut AnyObject = msg_send![class!(NSAppearance), appearanceNamed: name];
-    if dark.is_null() {
-        return;
-    }
-    let _: () = msg_send![view, setAppearance: dark];
-}
-
-#[cfg(target_os = "macos")]
-unsafe fn apply_glass_tint(view: *mut objc2::runtime::AnyObject, tint: Option<(f32, f32, f32)>) {
-    use objc2::runtime::AnyObject;
-    use objc2::*;
-
-    let sel = sel!(setTintColor:);
-    let can: bool = msg_send![view, respondsToSelector: sel];
-    if !can {
-        return;
-    }
-    match tint {
-        Some((r, g, b)) => {
-            let color: *mut AnyObject = msg_send![
-                class!(NSColor),
-                colorWithSRGBRed: r as f64,
-                green: g as f64,
-                blue: b as f64,
-                alpha: 0.45
-            ];
-            if !color.is_null() {
-                let _: () = msg_send![view, setTintColor: color];
-            }
-        }
-        None => {
-            let nil: *mut AnyObject = std::ptr::null_mut();
-            let _: () = msg_send![view, setTintColor: nil];
-        }
-    }
-}
-
-/// Grow the underlay upward by `radius`. Cocoa origin is the island bottom,
-/// so extra height is clipped at the window's top — a flat, notch-attached
-/// edge instead of all-corner rounding.
-#[cfg(target_os = "macos")]
-fn glass_underlay_rect(content_frame: CGRect, spec: IslandGlass) -> CGRect {
-    let (gx, gy, gw, gh) =
-        cocoa_rect_from_gpui(spec.x, spec.y, spec.w, spec.h, content_frame.size.height);
-    CGRect {
-        origin: CGPoint {
-            x: content_frame.origin.x + gx,
-            y: content_frame.origin.y + gy,
-        },
-        size: CGSize {
-            width: gw,
-            height: gh + glass_extra(spec),
-        },
-    }
-}
-
-#[cfg(target_os = "macos")]
-unsafe fn set_inner_corner_radius(view: *mut objc2::runtime::AnyObject, radius: f64) {
-    use objc2::runtime::AnyObject;
-    use objc2::*;
-
-    // Only NSGlassEffectView.cornerRadius — CALayer.cornerRadius / a path
-    // mask clips the glass rim off the curve.
-    let sel = sel!(setCornerRadius:);
-    let can: bool = msg_send![view, respondsToSelector: sel];
-    if can {
-        let _: () = msg_send![view, setCornerRadius: radius];
-        return;
-    }
-    let _: () = msg_send![view, setWantsLayer: true];
-    let layer: *mut AnyObject = msg_send![view, layer];
-    if !layer.is_null() {
-        let _: () = msg_send![layer, setCornerRadius: radius];
-    }
-}
-
-#[cfg(target_os = "macos")]
-unsafe fn configure_glass_shape(view: *mut objc2::runtime::AnyObject, spec: IslandGlass) {
-    set_inner_corner_radius(view, spec.radius);
-}
-
-#[cfg(target_os = "macos")]
-unsafe fn attach_glass_behind_content(
-    ns_win: *mut objc2::runtime::AnyObject,
-    content: *mut objc2::runtime::AnyObject,
-    glass: *mut objc2::runtime::AnyObject,
-) {
-    use objc2::runtime::AnyObject;
-    use objc2::*;
-
-    let _ = ns_win;
-    let super_view: *mut AnyObject = msg_send![content, superview];
-    let parent = if super_view.is_null() {
-        content
-    } else {
-        super_view
-    };
-    let relative: *mut AnyObject = if super_view.is_null() {
-        std::ptr::null_mut()
-    } else {
-        content
-    };
-    // NSWindowBelow = -1 so Metal (the content view) composites on top.
-    let _: () = msg_send![
-        parent,
-        addSubview: glass,
-        positioned: -1_i64,
-        relativeTo: relative
-    ];
-}
-
-#[cfg(target_os = "macos")]
-struct MirrorCap {
-    session: *mut objc2::runtime::AnyObject,
-    sink: *mut objc2::runtime::AnyObject,
-    running: bool,
-    gen: u64,
-    /// Square BGRA8, `MIRROR_SIZE` on a side.
-    bgra: Option<Vec<u8>>,
-    last_tick: std::time::Instant,
-}
-
-#[cfg(target_os = "macos")]
-unsafe impl Send for MirrorCap {}
-
-#[cfg(target_os = "macos")]
-fn default_mirror() -> std::sync::Mutex<MirrorCap> {
-    std::sync::Mutex::new(MirrorCap {
-        session: std::ptr::null_mut(),
-        sink: std::ptr::null_mut(),
-        running: false,
-        gen: 0,
-        bgra: None,
-        last_tick: std::time::Instant::now(),
-    })
-}
-
-#[cfg(target_os = "macos")]
-static MIRROR: std::sync::OnceLock<std::sync::Mutex<MirrorCap>> = std::sync::OnceLock::new();
-
-#[cfg(target_os = "macos")]
-#[link(name = "CoreMedia", kind = "framework")]
-unsafe extern "C" {
-    fn CMSampleBufferGetImageBuffer(sample: *mut std::ffi::c_void) -> *mut std::ffi::c_void;
-}
-
-#[cfg(target_os = "macos")]
-#[link(name = "CoreVideo", kind = "framework")]
-unsafe extern "C" {
-    fn CVPixelBufferLockBaseAddress(buf: *mut std::ffi::c_void, flags: u64) -> i32;
-    fn CVPixelBufferUnlockBaseAddress(buf: *mut std::ffi::c_void, flags: u64) -> i32;
-    fn CVPixelBufferGetBaseAddress(buf: *mut std::ffi::c_void) -> *mut std::ffi::c_void;
-    fn CVPixelBufferGetBytesPerRow(buf: *mut std::ffi::c_void) -> usize;
-    fn CVPixelBufferGetWidth(buf: *mut std::ffi::c_void) -> usize;
-    fn CVPixelBufferGetHeight(buf: *mut std::ffi::c_void) -> usize;
-    fn CVPixelBufferGetPixelFormatType(buf: *mut std::ffi::c_void) -> u32;
-}
-
-#[cfg(target_os = "macos")]
-unsafe extern "C" {
-    fn dispatch_get_global_queue(identifier: isize, flags: usize) -> *mut std::ffi::c_void;
-}
-
-#[cfg(target_os = "macos")]
-fn ns_string(s: &str) -> *mut objc2::runtime::AnyObject {
-    use objc2::*;
-    let c = std::ffi::CString::new(s).unwrap_or_default();
-    unsafe { msg_send![class!(NSString), stringWithUTF8String: c.as_ptr()] }
-}
-
-#[cfg(target_os = "macos")]
-fn av_class(name: &std::ffi::CStr) -> Option<&'static objc2::runtime::AnyClass> {
-    load_avfoundation();
-    objc2::runtime::AnyClass::get(name)
-}
-
-#[cfg(target_os = "macos")]
-fn load_avfoundation() {
-    use objc2::*;
-    use std::sync::Once;
-    static LOAD: Once = Once::new();
-    LOAD.call_once(|| unsafe {
-        let path = ns_string("/System/Library/Frameworks/AVFoundation.framework");
-        if path.is_null() {
-            return;
-        }
-        let bundle: *mut objc2::runtime::AnyObject =
-            msg_send![class!(NSBundle), bundleWithPath: path];
-        if !bundle.is_null() {
-            let _: objc2::runtime::Bool = msg_send![bundle, load];
-        }
-    });
-}
-
-#[cfg(target_os = "macos")]
-fn camera_sink_class() -> Option<&'static objc2::runtime::AnyClass> {
-    use objc2::runtime::{AnyClass, AnyObject, ClassBuilder, NSObject, Sel};
-    use objc2::{sel, ClassType};
-    static CLASS: std::sync::OnceLock<Option<&'static AnyClass>> = std::sync::OnceLock::new();
-    *CLASS.get_or_init(|| {
-        if let Some(existing) = AnyClass::get(c"NookCameraSink") {
-            return Some(existing);
-        }
-        let mut builder = ClassBuilder::new(c"NookCameraSink", NSObject::class())?;
-        extern "C" fn did_output(
-            _this: &NSObject,
-            _cmd: Sel,
-            _output: *mut AnyObject,
-            sample: *mut std::ffi::c_void,
-            _conn: *mut AnyObject,
-        ) {
-            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
-                ingest_camera_sample(sample);
-            }));
-        }
-        unsafe {
-            builder.add_method(
-                sel!(captureOutput:didOutputSampleBuffer:fromConnection:),
-                did_output as extern "C" fn(_, _, _, _, _),
-            );
-        }
-        Some(builder.register())
-    })
-}
-
-#[cfg(target_os = "macos")]
-unsafe fn ingest_camera_sample(sample: *mut std::ffi::c_void) {
-    if sample.is_null() {
-        return;
-    }
-    {
-        let cap = MIRROR
-            .get_or_init(default_mirror)
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        if !cap.running || cap.last_tick.elapsed() < std::time::Duration::from_millis(80) {
-            return;
-        }
-    }
-    let buf = CMSampleBufferGetImageBuffer(sample);
-    if buf.is_null() {
-        return;
-    }
-    // 32BGRA. Planar YUV would make GetBaseAddress null or a 1-byte plane;
-    // reading it as 4-byte pixels overruns and kills the process.
-    const BGRA: u32 = 0x4247_5241;
-    if CVPixelBufferGetPixelFormatType(buf) != BGRA {
-        return;
-    }
-    if CVPixelBufferLockBaseAddress(buf, 0) != 0 {
-        return;
-    }
-    let width = CVPixelBufferGetWidth(buf);
-    let height = CVPixelBufferGetHeight(buf);
-    let stride = CVPixelBufferGetBytesPerRow(buf);
-    let base = CVPixelBufferGetBaseAddress(buf) as *const u8;
-    if base.is_null() || width < 16 || height < 16 || stride < width.saturating_mul(4) {
-        let _ = CVPixelBufferUnlockBaseAddress(buf, 0);
-        return;
-    }
-    // Square centre-crop so the BGRA buffer is the same shape as the Mirror
-    // circle. Landscape 16:9 would otherwise stick out of the rounded sprite.
-    const DST: u32 = MIRROR_SIZE;
-    let side = width.min(height);
-    let x0 = (width - side) / 2;
-    let y0 = (height - side) / 2;
-    let mut rgba = vec![0u8; (DST * DST * 4) as usize];
-    for y in 0..DST {
-        let sy = y0 + (y as usize * side) / DST as usize;
-        if sy >= height {
-            break;
-        }
-        let row = unsafe { base.add(sy * stride) };
-        for x in 0..DST {
-            let local = (x as usize * side) / DST as usize;
-            let sx = x0 + (side - 1 - local);
-            if sx >= width || sx.saturating_mul(4).saturating_add(4) > stride {
-                continue;
-            }
-            let px = unsafe { row.add(sx * 4) };
-            let i = ((y * DST + x) * 4) as usize;
-            // Keep BGRA — `RenderImage` wants that channel order.
-            rgba[i] = unsafe { *px.add(0) };
-            rgba[i + 1] = unsafe { *px.add(1) };
-            rgba[i + 2] = unsafe { *px.add(2) };
-            rgba[i + 3] = unsafe { *px.add(3) };
-        }
-    }
-    let _ = CVPixelBufferUnlockBaseAddress(buf, 0);
-    let mut cap = MIRROR
-        .get_or_init(default_mirror)
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    if !cap.running {
-        return;
-    }
-    cap.bgra = Some(rgba);
-    cap.gen = cap.gen.wrapping_add(1);
-    cap.last_tick = std::time::Instant::now();
-}
-
-#[cfg(target_os = "macos")]
-fn start_mirror_macos() -> bool {
-    {
-        let cap = MIRROR
-            .get_or_init(default_mirror)
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        if cap.running {
-            return true;
-        }
-    }
-    match std::panic::catch_unwind(start_capture_session) {
-        Ok(ok) => ok,
-        Err(_) => {
-            log::error!("mirror: capture setup panicked");
-            false
-        }
-    }
-}
-
-#[cfg(target_os = "macos")]
-fn start_capture_session() -> bool {
-    use objc2::runtime::{AnyObject, Bool};
-    use objc2::*;
-
-    unsafe {
-        let Some(dev_cls) = av_class(c"AVCaptureDevice") else {
-            log::warn!("AVCaptureDevice missing — AVFoundation not loaded");
-            return false;
-        };
-        let Some(in_cls) = av_class(c"AVCaptureDeviceInput") else {
-            return false;
-        };
-        let Some(sess_cls) = av_class(c"AVCaptureSession") else {
-            return false;
-        };
-        let Some(out_cls) = av_class(c"AVCaptureVideoDataOutput") else {
-            return false;
-        };
-        let Some(sink_cls) = camera_sink_class() else {
-            return false;
-        };
-
-        let vide = ns_string("vide");
-        if vide.is_null() {
-            return false;
-        }
-        let device: *mut AnyObject = msg_send![dev_cls, defaultDeviceWithMediaType: vide];
-        if device.is_null() {
-            log::warn!("no camera device");
-            return false;
-        }
-        let mut err: *mut AnyObject = std::ptr::null_mut();
-        let input: *mut AnyObject = msg_send![
-            in_cls,
-            deviceInputWithDevice: device,
-            error: &mut err
-        ];
-        if input.is_null() {
-            log::warn!("camera input failed");
-            return false;
-        }
-        let session: *mut AnyObject = msg_send![sess_cls, new];
-        if session.is_null() {
-            return false;
-        }
-        let can_in: Bool = msg_send![session, canAddInput: input];
-        if !can_in.as_bool() {
-            log::warn!("camera cannot add input");
-            let _: () = msg_send![session, release];
-            return false;
-        }
-        let _: () = msg_send![session, addInput: input];
-
-        let output: *mut AnyObject = msg_send![out_cls, new];
-        if output.is_null() {
-            let _: () = msg_send![session, release];
-            return false;
-        }
-        let yes = Bool::from(true);
-        let _: () = msg_send![output, setAlwaysDiscardsLateVideoFrames: yes];
-        let key = ns_string("PixelFormatType");
-        let num_cls = class!(NSNumber);
-        let num: *mut AnyObject = msg_send![num_cls, numberWithUnsignedInt: 0x4247_5241_u32];
-        let settings: *mut AnyObject =
-            msg_send![class!(NSDictionary), dictionaryWithObject: num, forKey: key];
-        let _: () = msg_send![output, setVideoSettings: settings];
-
-        let sink: *mut AnyObject = msg_send![sink_cls, new];
-        // dispatch_queue_t is an NSObject on Darwin; passing *mut c_void
-        // panics objc2's encoding check (`^v` vs `@`).
-        let queue = dispatch_get_global_queue(0, 0) as *mut AnyObject;
-        if queue.is_null() || sink.is_null() {
-            let _: () = msg_send![session, release];
-            let _: () = msg_send![output, release];
-            return false;
-        }
-        let _: () = msg_send![output, setSampleBufferDelegate: sink, queue: queue];
-
-        let can_out: Bool = msg_send![session, canAddOutput: output];
-        if !can_out.as_bool() {
-            log::warn!("camera cannot add output");
-            let _: () = msg_send![session, release];
-            let _: () = msg_send![output, release];
-            let _: () = msg_send![sink, release];
-            return false;
-        }
-        let _: () = msg_send![session, addOutput: output];
-
-        {
-            let mut cap = MIRROR
-                .get_or_init(default_mirror)
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            cap.session = session;
-            cap.sink = sink;
-            cap.running = true;
-            cap.bgra = None;
-        }
-
-        let session_ptr = session as usize;
-        std::thread::Builder::new()
-            .name("nook-mirror".into())
-            .spawn(move || {
-                let session = session_ptr as *mut AnyObject;
-                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    let _: () = msg_send![session, startRunning];
-                }));
-                if result.is_err() {
-                    log::error!("mirror: startRunning panicked");
-                    let mut cap = MIRROR
-                        .get_or_init(default_mirror)
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner());
-                    cap.running = false;
-                } else {
-                    log::info!("mirror camera running");
                 }
-            })
-            .ok();
-        true
-    }
-}
-
-#[cfg(target_os = "macos")]
-fn stop_mirror_macos() {
-    use objc2::*;
-
-    let (session, sink) = {
-        let mut cap = MIRROR
-            .get_or_init(default_mirror)
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        cap.running = false;
-        cap.bgra = None;
-        let session = cap.session;
-        let sink = cap.sink;
-        cap.session = std::ptr::null_mut();
-        cap.sink = std::ptr::null_mut();
-        (session, sink)
-    };
-    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
-        if !session.is_null() {
-            let _: () = msg_send![session, stopRunning];
-            let _: () = msg_send![session, release];
-        }
-        if !sink.is_null() {
-            let _: () = msg_send![sink, release];
-        }
-    }));
-}
-
-/// GPUI top-left artwork rect plus the HLS URL to play over it.
-#[derive(Clone, Debug, PartialEq)]
-pub struct MotionArtSpec {
-    pub url: String,
-    pub x: f64,
-    pub y: f64,
-    pub w: f64,
-    pub h: f64,
-    pub radius: f64,
-    pub playing: bool,
-}
-
-/// Attach or update the looping AVPlayerLayer. `None` hides and pauses.
-/// Created once per URL; later calls only move the frame or pause.
-pub fn sync_motion_art(spec: Option<&MotionArtSpec>) {
-    #[cfg(target_os = "macos")]
-    unsafe {
-        sync_motion_art_macos(spec);
+            }
+            rgba
+        });
+        let _: () = msg_send![rep, release];
+        let _: () = msg_send![pool, drain];
+        out.map(|rgba| (px, px, rgba))
     }
     #[cfg(not(target_os = "macos"))]
-    let _ = spec;
-}
-
-pub fn hide_motion_art() {
-    sync_motion_art(None);
-}
-
-#[cfg(target_os = "macos")]
-struct MotionArtCap {
-    url: String,
-    layer: *mut objc2::runtime::AnyObject,
-    player: *mut objc2::runtime::AnyObject,
-    looper: *mut objc2::runtime::AnyObject,
-    last: Option<(f64, f64, f64, f64, f64)>,
-    hidden: bool,
-    paused: bool,
-}
-
-// Raw AppKit pointers; the cap is only touched from the main thread.
-#[cfg(target_os = "macos")]
-unsafe impl Send for MotionArtCap {}
-
-#[cfg(target_os = "macos")]
-fn motion_art_cap() -> &'static std::sync::Mutex<MotionArtCap> {
-    static CAP: std::sync::OnceLock<std::sync::Mutex<MotionArtCap>> = std::sync::OnceLock::new();
-    CAP.get_or_init(|| {
-        std::sync::Mutex::new(MotionArtCap {
-            url: String::new(),
-            layer: std::ptr::null_mut(),
-            player: std::ptr::null_mut(),
-            looper: std::ptr::null_mut(),
-            last: None,
-            hidden: true,
-            paused: true,
-        })
-    })
-}
-
-#[cfg(target_os = "macos")]
-unsafe fn sync_motion_art_macos(spec: Option<&MotionArtSpec>) {
-    use objc2::runtime::AnyObject;
-    use objc2::*;
-
-    let Some(spec) = spec.filter(|s| !s.url.is_empty() && s.w > 1.0 && s.h > 1.0) else {
-        hide_motion_art_macos();
-        return;
-    };
-
-    let mut ns_win: *mut AnyObject = std::ptr::null_mut();
-    for_each_island_window(|w| {
-        if ns_win.is_null() {
-            ns_win = w;
-        }
-    });
-    if ns_win.is_null() {
-        return;
-    }
-    let content: *mut AnyObject = msg_send![ns_win, contentView];
-    if content.is_null() {
-        return;
-    }
-    let _: () = msg_send![content, setWantsLayer: true];
-    let host: *mut AnyObject = msg_send![content, layer];
-    if host.is_null() {
-        return;
-    }
-    let view_frame: CGRect = msg_send![content, bounds];
-    let view_h = view_frame.size.height;
-    let (cx, cy, cw, ch) = cocoa_rect_from_gpui(spec.x, spec.y, spec.w, spec.h, view_h);
-    let rect = CGRect {
-        origin: CGPoint { x: cx, y: cy },
-        size: CGSize {
-            width: cw,
-            height: ch,
-        },
-    };
-
-    let mut cap = motion_art_cap().lock().unwrap_or_else(|e| e.into_inner());
-    if cap.url != spec.url || cap.layer.is_null() {
-        teardown_motion_art_locked(&mut cap);
-        let Some((layer, player, looper)) = create_motion_art_layer(&spec.url, rect, spec.radius)
-        else {
-            return;
-        };
-        let _: () = msg_send![host, addSublayer: layer];
-        cap.url = spec.url.clone();
-        cap.layer = layer;
-        cap.player = player;
-        cap.looper = looper;
-        cap.last = None;
-        cap.hidden = false;
-        cap.paused = true;
-    }
-
-    let frame_key = (cx, cy, cw, ch, spec.radius);
-    if cap.last != Some(frame_key) && !cap.layer.is_null() {
-        let _: () = msg_send![cap.layer, setFrame: rect];
-        let _: () = msg_send![cap.layer, setCornerRadius: spec.radius];
-        cap.last = Some(frame_key);
-    }
-
-    let hide = !spec.playing;
-    if cap.hidden != hide && !cap.layer.is_null() {
-        let _: () = msg_send![cap.layer, setHidden: hide];
-        cap.hidden = hide;
-    }
-    if cap.paused != hide && !cap.player.is_null() {
-        if hide {
-            let _: () = msg_send![cap.player, pause];
-        } else {
-            let _: () = msg_send![cap.player, play];
-        }
-        cap.paused = hide;
+    {
+        let _ = (bundle_id, px);
+        None
     }
 }
-// WP21 — frontmost restore, Spotlight launch, auto-paste.
 
-#[allow(dead_code)]
-pub fn remember_frontmost() {
-    #[cfg(target_os = "macos")]
-    remember_frontmost_macos();
-}
-
-#[allow(dead_code)]
-pub fn restore_frontmost() {
-    #[cfg(target_os = "macos")]
-    restore_frontmost_macos();
-}
-
-#[allow(dead_code)]
-pub fn make_island_key() {
+/// Where an app is installed, by bundle id (for its icon).
+pub fn app_path(bundle_id: &str) -> Option<PathBuf> {
     #[cfg(target_os = "macos")]
     unsafe {
         use objc2::runtime::AnyObject;
-        use objc2::*;
-        for_each_island_window(|ns_win| {
-            if window_title_is(ns_win, "openNook-island") {
-                let _: () =
-                    msg_send![ns_win, makeKeyAndOrderFront: std::ptr::null_mut::<AnyObject>()];
-            }
-        });
-    }
-}
-
-#[allow(dead_code)]
-pub fn launch_path(path: &str) -> bool {
-    #[cfg(target_os = "macos")]
-    {
-        launch_path_macos(path)
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = path;
-        false
-    }
-}
-
-/// Synthesize Cmd-V. Requires Accessibility TCC; returns false when untrusted.
-#[allow(dead_code)]
-pub fn auto_paste_cmd_v() -> bool {
-    #[cfg(target_os = "macos")]
-    {
-        auto_paste_cmd_v_macos()
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        false
-    }
-}
-
-#[cfg(target_os = "macos")]
-#[allow(dead_code)]
-fn remember_frontmost_macos() {
-    use objc2::runtime::AnyObject;
-    use objc2::*;
-    unsafe {
+        use objc2::{class, msg_send};
         let ws: *mut AnyObject = msg_send![class!(NSWorkspace), sharedWorkspace];
-        if ws.is_null() {
-            return;
-        }
-        let app: *mut AnyObject = msg_send![ws, frontmostApplication];
-        if app.is_null() {
-            return;
-        }
-        let pid: i32 = msg_send![app, processIdentifier];
-        if pid as u32 == std::process::id() {
-            return;
-        }
-        *frontmost_pid() = Some(pid);
-    }
-}
-
-#[cfg(target_os = "macos")]
-unsafe fn hide_motion_art_macos() {
-    use objc2::*;
-    let mut cap = motion_art_cap().lock().unwrap_or_else(|e| e.into_inner());
-    if !cap.layer.is_null() && !cap.hidden {
-        let _: () = msg_send![cap.layer, setHidden: true];
-        cap.hidden = true;
-    }
-    if !cap.player.is_null() && !cap.paused {
-        let _: () = msg_send![cap.player, pause];
-        cap.paused = true;
-    }
-}
-
-#[cfg(target_os = "macos")]
-#[allow(dead_code)]
-fn restore_frontmost_macos() {
-    use objc2::runtime::AnyObject;
-    use objc2::*;
-    let Some(pid) = frontmost_pid().take() else {
-        return;
-    };
-    unsafe {
-        let app: *mut AnyObject = msg_send![
-            class!(NSRunningApplication),
-            runningApplicationWithProcessIdentifier: pid
-        ];
-        if app.is_null() {
-            return;
-        }
-        // NSApplicationActivateIgnoringOtherApps
-        let _: bool = msg_send![app, activateWithOptions: 2u64];
-    }
-}
-
-#[cfg(target_os = "macos")]
-unsafe fn teardown_motion_art_locked(cap: &mut MotionArtCap) {
-    use objc2::*;
-    if !cap.player.is_null() {
-        let _: () = msg_send![cap.player, pause];
-        let _: () = msg_send![cap.player, release];
-        cap.player = std::ptr::null_mut();
-    }
-    if !cap.looper.is_null() {
-        let _: () = msg_send![cap.looper, release];
-        cap.looper = std::ptr::null_mut();
-    }
-    if !cap.layer.is_null() {
-        let _: () = msg_send![cap.layer, removeFromSuperlayer];
-        let _: () = msg_send![cap.layer, release];
-        cap.layer = std::ptr::null_mut();
-    }
-    cap.url.clear();
-    cap.last = None;
-    cap.hidden = true;
-    cap.paused = true;
-}
-
-#[cfg(target_os = "macos")]
-unsafe fn create_motion_art_layer(
-    url: &str,
-    rect: CGRect,
-    radius: f64,
-) -> Option<(
-    *mut objc2::runtime::AnyObject,
-    *mut objc2::runtime::AnyObject,
-    *mut objc2::runtime::AnyObject,
-)> {
-    use objc2::runtime::AnyObject;
-    use objc2::*;
-
-    load_avfoundation();
-    let item_cls = av_class(c"AVPlayerItem")?;
-    let player_cls = av_class(c"AVQueuePlayer")?;
-    let layer_cls = av_class(c"AVPlayerLayer")?;
-    let ns_url_cls = class!(NSURL);
-    let url_str = ns_string(url);
-    if url_str.is_null() {
-        return None;
-    }
-    let ns_url: *mut AnyObject = msg_send![ns_url_cls, URLWithString: url_str];
-    if ns_url.is_null() {
-        return None;
-    }
-    let item: *mut AnyObject = msg_send![item_cls, playerItemWithURL: ns_url];
-    if item.is_null() {
-        return None;
-    }
-    let items: *mut AnyObject = msg_send![class!(NSArray), arrayWithObject: item];
-    let player: *mut AnyObject = msg_send![player_cls, queuePlayerWithItems: items];
-    if player.is_null() {
-        return None;
-    }
-    let _: *mut AnyObject = msg_send![player, retain];
-    let _: () = msg_send![player, setMuted: true];
-    let sel = sel!(setPreventsDisplaySleepDuringVideoPlayback:);
-    let can_sleep: bool = msg_send![player, respondsToSelector: sel];
-    if can_sleep {
-        let _: () = msg_send![player, setPreventsDisplaySleepDuringVideoPlayback: false];
-    }
-
-    let looper = if let Some(looper_cls) = av_class(c"AVPlayerLooper") {
-        let looper: *mut AnyObject =
-            msg_send![looper_cls, playerLooperWithPlayer: player, templateItem: item];
-        if looper.is_null() {
-            std::ptr::null_mut()
-        } else {
-            let _: *mut AnyObject = msg_send![looper, retain];
-            looper
-        }
-    } else {
-        std::ptr::null_mut()
-    };
-
-    let layer: *mut AnyObject = msg_send![layer_cls, playerLayerWithPlayer: player];
-    if layer.is_null() {
-        let _: () = msg_send![player, release];
-        if !looper.is_null() {
-            let _: () = msg_send![looper, release];
-        }
-        return None;
-    }
-    let _: *mut AnyObject = msg_send![layer, retain];
-    let gravity = ns_string("AVLayerVideoGravityResizeAspectFill");
-    if !gravity.is_null() {
-        let _: () = msg_send![layer, setVideoGravity: gravity];
-    }
-    let _: () = msg_send![layer, setFrame: rect];
-    let _: () = msg_send![layer, setCornerRadius: radius];
-    let _: () = msg_send![layer, setMasksToBounds: true];
-    Some((layer, player, looper))
-}
-
-#[cfg(target_os = "macos")]
-#[allow(dead_code)]
-fn frontmost_pid() -> std::sync::MutexGuard<'static, Option<i32>> {
-    static PID: std::sync::OnceLock<std::sync::Mutex<Option<i32>>> = std::sync::OnceLock::new();
-    PID.get_or_init(|| std::sync::Mutex::new(None))
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-}
-
-#[cfg(target_os = "macos")]
-#[allow(dead_code)]
-fn launch_path_macos(path: &str) -> bool {
-    use objc2::runtime::AnyObject;
-    use objc2::*;
-    unsafe {
-        let ws: *mut AnyObject = msg_send![class!(NSWorkspace), sharedWorkspace];
-        if ws.is_null() {
-            return false;
-        }
-        let ns: *mut AnyObject = msg_send![class!(NSString), alloc];
-        let ns_path: *mut AnyObject =
-            msg_send![ns, initWithBytes: path.as_ptr(), length: path.len(), encoding: 4u64];
-        if ns_path.is_null() {
-            return false;
-        }
-        let url: *mut AnyObject = msg_send![class!(NSURL), fileURLWithPath: ns_path];
-        let _: () = msg_send![ns_path, release];
+        let url: *mut AnyObject = msg_send![ws, URLForApplicationWithBundleIdentifier: mac::ns_string(bundle_id)];
         if url.is_null() {
-            return false;
+            return None;
         }
-        let ok: bool = msg_send![ws, openURL: url];
-        ok
+        mac::string(msg_send![url, path]).map(PathBuf::from)
     }
-}
-
-#[cfg(target_os = "macos")]
-#[allow(dead_code)]
-fn accessibility_trusted_macos() -> bool {
-    use nook_core::ffi::macos::AXIsProcessTrusted;
-    unsafe { AXIsProcessTrusted() != 0 }
-}
-
-#[cfg(target_os = "macos")]
-#[allow(dead_code)]
-fn auto_paste_cmd_v_macos() -> bool {
-    if !accessibility_trusted_macos() {
-        return false;
-    }
-    use nook_core::ffi::macos::{
-        kCGEventFlagMaskCommand, kCGHIDEventTap, CFRelease, CGEventCreateKeyboardEvent,
-        CGEventPost, CGEventSetFlags,
-    };
-    const KEY_V: u16 = 9;
-    unsafe {
-        let down = CGEventCreateKeyboardEvent(std::ptr::null_mut(), KEY_V, true);
-        let up = CGEventCreateKeyboardEvent(std::ptr::null_mut(), KEY_V, false);
-        if down.is_null() || up.is_null() {
-            if !down.is_null() {
-                CFRelease(down);
-            }
-            if !up.is_null() {
-                CFRelease(up);
-            }
-            return false;
-        }
-        CGEventSetFlags(down, kCGEventFlagMaskCommand);
-        CGEventSetFlags(up, kCGEventFlagMaskCommand);
-        CGEventPost(kCGHIDEventTap, down);
-        CGEventPost(kCGHIDEventTap, up);
-        CFRelease(down);
-        CFRelease(up);
-        true
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = bundle_id;
+        None
     }
 }
 
 #[cfg(all(test, target_os = "macos"))]
 mod tests {
-    use super::*;
+    #[test]
+    fn displays_are_listed() {
+        let all = super::displays();
+        for d in &all {
+            eprintln!("{d:?} fullscreen={}", super::fullscreen_on(d));
+        }
+        assert!(!all.is_empty());
+        assert_eq!(all.iter().filter(|d| d.main).count(), 1);
+    }
 
     #[test]
-    fn media_app_icon_png_is_a_reasonable_png() {
-        let png = app_icon_png(Some("com.spotify.client"), Some("Spotify"))
-            .or_else(|| app_icon_png(Some("com.apple.finder"), Some("Finder")))
-            .expect("NSWorkspace should yield an app icon PNG");
-        assert!(
-            png.starts_with(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]),
-            "app icon must be PNG, got {} bytes",
-            png.len()
-        );
-        assert!(
-            (64..=512 * 1024).contains(&png.len()),
-            "unexpected app icon size {}",
-            png.len()
-        );
-        let decoded = image::load_from_memory(&png).expect("png should decode");
-        assert!(
-            decoded.width() >= 32 && decoded.height() >= 32,
-            "icon too small {}x{}",
-            decoded.width(),
-            decoded.height()
-        );
-        assert!(
-            decoded.width() <= 512 && decoded.height() <= 512,
-            "icon too large {}x{}",
-            decoded.width(),
-            decoded.height()
-        );
+    fn light_icons_have_pixels() {
+        for id in ["com.apple.Music", "com.apple.weather"] {
+            let (w, h, rgba) = super::app_icon_light(id, 64).expect(id);
+            let opaque = rgba.chunks_exact(4).filter(|p| p[3] > 0).count();
+            let mean: u64 = rgba.chunks_exact(4).filter(|p| p[3] > 0).map(|p| (p[0] as u64 + p[1] as u64 + p[2] as u64) / 3).sum::<u64>() / opaque.max(1) as u64;
+            eprintln!("{id}: {w}x{h} opaque={opaque} mean-lum={mean}");
+            assert!(opaque > 1000, "{id} drew nothing");
+        }
+    }
+}
+
+/// A display, in AppKit's global points (origin at the primary display's bottom-left).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Display {
+    /// CGDirectDisplayID (`NSScreenNumber`), what Rune targets an overlay at.
+    pub id: u32,
+    pub x: f64,
+    pub y: f64,
+    pub w: f64,
+    pub h: f64,
+    /// The camera housing's size, when the display has one.
+    pub notch: Option<(f64, f64)>,
+    pub builtin: bool,
+    /// Holds the menu bar's origin (the primary display).
+    pub main: bool,
+}
+
+#[cfg(target_os = "macos")]
+#[link(name = "CoreGraphics", kind = "framework")]
+unsafe extern "C" {
+    fn CGDisplayIsBuiltin(display: u32) -> u32;
+    fn CGMainDisplayID() -> u32;
+    fn CGWindowListCopyWindowInfo(option: u32, relative_to: u32) -> *mut objc2::runtime::AnyObject;
+    // Private (SkyLight, exported through CoreGraphics): the Space a display shows, and its kind.
+    fn CGSMainConnectionID() -> i32;
+    fn CGSManagedDisplayGetCurrentSpace(connection: i32, display_uuid: *const std::ffi::c_void) -> u64;
+    fn CGSSpaceGetType(connection: i32, space: u64) -> i32;
+}
+
+#[cfg(target_os = "macos")]
+#[link(name = "ColorSync", kind = "framework")]
+unsafe extern "C" {
+    fn CGDisplayCreateUUIDFromDisplayID(display: u32) -> *const std::ffi::c_void;
+}
+
+#[cfg(target_os = "macos")]
+#[link(name = "CoreFoundation", kind = "framework")]
+unsafe extern "C" {
+    fn CFUUIDCreateString(alloc: *const std::ffi::c_void, uuid: *const std::ffi::c_void) -> *const std::ffi::c_void;
+    fn CFRelease(cf: *const std::ffi::c_void);
+}
+
+/// Whether `display` shows a full-screen Space (`CGSSpaceGetType` 4). Window bounds can't say:
+/// on a notched display a full-screen app sits below the camera housing, exactly where a
+/// zoomed window sits when the Dock is hidden.
+#[cfg(target_os = "macos")]
+fn fullscreen_space(display: u32) -> bool {
+    const FULLSCREEN_SPACE: i32 = 4;
+    unsafe {
+        let uuid = CGDisplayCreateUUIDFromDisplayID(display);
+        if uuid.is_null() {
+            return false;
+        }
+        let name = CFUUIDCreateString(std::ptr::null(), uuid);
+        CFRelease(uuid);
+        if name.is_null() {
+            return false;
+        }
+        let cid = CGSMainConnectionID();
+        let space = CGSManagedDisplayGetCurrentSpace(cid, name);
+        CFRelease(name);
+        space != 0 && CGSSpaceGetType(cid, space) == FULLSCREEN_SPACE
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+struct NsRect { x: f64, y: f64, w: f64, h: f64 }
+#[cfg(target_os = "macos")]
+unsafe impl objc2::Encode for NsRect {
+    const ENCODING: objc2::Encoding = objc2::Encoding::Struct("CGRect", &[
+        objc2::Encoding::Struct("CGPoint", &[f64::ENCODING, f64::ENCODING]),
+        objc2::Encoding::Struct("CGSize", &[f64::ENCODING, f64::ENCODING]),
+    ]);
+}
+#[cfg(target_os = "macos")]
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+struct NsInsets { top: f64, left: f64, bottom: f64, right: f64 }
+#[cfg(target_os = "macos")]
+unsafe impl objc2::Encode for NsInsets {
+    const ENCODING: objc2::Encoding = objc2::Encoding::Struct("NSEdgeInsets", &[f64::ENCODING, f64::ENCODING, f64::ENCODING, f64::ENCODING]);
+}
+
+/// Every display, with its camera housing measured the way AppKit reports it: the top safe-area
+/// inset and the gap between the menu bar's two auxiliary areas.
+pub fn displays() -> Vec<Display> {
+    #[cfg(target_os = "macos")]
+    unsafe {
+        use objc2::runtime::AnyObject;
+        use objc2::{class, msg_send};
+        let pool: *mut AnyObject = msg_send![class!(NSAutoreleasePool), new];
+        let screens: *mut AnyObject = msg_send![class!(NSScreen), screens];
+        let count: usize = if screens.is_null() { 0 } else { msg_send![screens, count] };
+        let main_id = CGMainDisplayID();
+        let mut out = Vec::new();
+        for i in 0..count {
+            let screen: *mut AnyObject = msg_send![screens, objectAtIndex: i];
+            let frame: NsRect = msg_send![screen, frame];
+            let desc: *mut AnyObject = msg_send![screen, deviceDescription];
+            let number: *mut AnyObject = msg_send![desc, objectForKey: mac::ns_string("NSScreenNumber")];
+            let id: u32 = if number.is_null() { 0 } else { msg_send![number, unsignedIntValue] };
+            let responds: bool = msg_send![screen, respondsToSelector: objc2::sel!(safeAreaInsets)];
+            let notch = if responds {
+                let insets: NsInsets = msg_send![screen, safeAreaInsets];
+                let left: NsRect = msg_send![screen, auxiliaryTopLeftArea];
+                let right: NsRect = msg_send![screen, auxiliaryTopRightArea];
+                let gap = right.x - (left.x + left.w);
+                (insets.top > 0.0 && gap > 80.0).then(|| (gap.clamp(160.0, 280.0), insets.top.max(32.0)))
+            } else {
+                None
+            };
+            out.push(Display { id, x: frame.x, y: frame.y, w: frame.w, h: frame.h, notch, builtin: CGDisplayIsBuiltin(id) != 0, main: id == main_id });
+        }
+        let _: () = msg_send![pool, drain];
+        out
+    }
+    #[cfg(not(target_os = "macos"))]
+    Vec::new()
+}
+
+/// The pointer, in AppKit's global points.
+pub fn pointer() -> (f64, f64) {
+    #[cfg(target_os = "macos")]
+    unsafe {
+        use objc2::{class, msg_send};
+        #[repr(C)]
+        #[derive(Clone, Copy)]
+        struct P { x: f64, y: f64 }
+        unsafe impl objc2::Encode for P {
+            const ENCODING: objc2::Encoding = objc2::Encoding::Struct("CGPoint", &[f64::ENCODING, f64::ENCODING]);
+        }
+        let p: P = msg_send![class!(NSEvent), mouseLocation];
+        (p.x, p.y)
+    }
+    #[cfg(not(target_os = "macos"))]
+    (0.0, 0.0)
+}
+
+/// Whether `display` shows a full-screen Space, or another app's window covers all of it (a
+/// borderless full-screen game or video). Only the current spaces' windows are on screen, so on
+/// an ordinary desktop none does. (Not "the frontmost window decides": a full-screen app often puts its
+/// toolbar in a window of its own in front.) A zoomed window doesn't count: it stays under the
+/// menu bar, clear of the island.
+pub fn fullscreen_on(display: &Display) -> bool {
+    #[cfg(target_os = "macos")]
+    unsafe {
+        use objc2::runtime::AnyObject;
+        use objc2::{class, msg_send};
+        if fullscreen_space(display.id) {
+            return true;
+        }
+        // Window bounds are in CoreGraphics' space: origin at the primary display's top-left.
+        let primary_h = displays().iter().find(|d| d.main).map_or(display.h, |d| d.h);
+        let top = primary_h - (display.y + display.h);
+        let left = display.x;
+        let pool: *mut AnyObject = msg_send![class!(NSAutoreleasePool), new];
+        // kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements: front to back.
+        let list = CGWindowListCopyWindowInfo(1 | (1 << 4), 0);
+        let count: usize = if list.is_null() { 0 } else { msg_send![list, count] };
+        let num = |dict: *mut AnyObject, key: &str| -> f64 {
+            let v: *mut AnyObject = msg_send![dict, objectForKey: mac::ns_string(key)];
+            if v.is_null() { 0.0 } else { msg_send![v, doubleValue] }
+        };
+        let ours = std::process::id() as f64;
+        let mut fills = false;
+        for i in 0..count {
+            let dict: *mut AnyObject = msg_send![list, objectAtIndex: i];
+            if num(dict, "kCGWindowLayer") != 0.0 || num(dict, "kCGWindowOwnerPID") == ours || num(dict, "kCGWindowAlpha") < 0.9 {
+                continue;
+            }
+            let b: *mut AnyObject = msg_send![dict, objectForKey: mac::ns_string("kCGWindowBounds")];
+            if b.is_null() {
+                continue;
+            }
+            let (x, y, w, h) = (num(b, "X"), num(b, "Y"), num(b, "Width"), num(b, "Height"));
+            if (x - left).abs() <= 2.0 && (y - top).abs() <= 2.0 && (w - display.w).abs() <= 2.0 && (h - display.h).abs() <= 2.0 {
+                fills = true;
+                break;
+            }
+        }
+        if !list.is_null() {
+            let _: () = msg_send![list, release];
+        }
+        let _: () = msg_send![pool, drain];
+        fills
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = display;
+        false
     }
 }

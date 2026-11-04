@@ -6,6 +6,7 @@
 pub mod agents;
 pub mod apps;
 pub mod audio;
+pub mod audio_levels;
 pub mod audio_devices;
 pub mod automation;
 pub mod brightness;

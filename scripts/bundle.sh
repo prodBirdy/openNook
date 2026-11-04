@@ -10,10 +10,10 @@ plutil -lint "$ROOT/Info.plist" || exit 1
 PROFILE="${1:-release}"
 if [[ "$PROFILE" == "release" ]]; then
   cargo build -p nook --release
-  BIN="$ROOT/target/release/nook"
+  BIN="$ROOT/target/release/opennook"
 else
   cargo build -p nook
-  BIN="$ROOT/target/debug/nook"
+  BIN="$ROOT/target/debug/opennook"
 fi
 
 APP="$ROOT/target/openNook.app"
@@ -35,14 +35,8 @@ fi
 cp "$BIN" "$APP/Contents/MacOS/openNook"
 chmod +x "$APP/Contents/MacOS/openNook"
 
-# CLI shim: same crate, separate bin. LaunchServices only sees the .app.
-CLI_SRC="$ROOT/target/${PROFILE}/nook-cli"
-if [[ -f "$CLI_SRC" ]]; then
-  cp "$CLI_SRC" "$APP/Contents/MacOS/nook"
-  chmod +x "$APP/Contents/MacOS/nook"
-else
-  echo "warning: nook-cli not built; skip Contents/MacOS/nook" >&2
-fi
+# The same binary is the CLI (`opennook check`, `opennook shot`); link it onto PATH with
+#   ln -s "/Applications/openNook.app/Contents/MacOS/openNook" ~/.local/bin/opennook
 
 # Dev `cargo run` never receives opennook:// — register the bundle.
 LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
