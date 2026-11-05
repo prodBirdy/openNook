@@ -72,26 +72,31 @@ fn control() {
     }
 }
 
-/// Five bands' loudness from mono samples. Each band is normalised against its own recent
-/// peak (so a quiet track moves as much as a loud one, and treble as much as bass), rises at
-/// once and falls over about a tenth of a second.
+/// Five bands' loudness from mono samples. Each band reads against its own average over the
+/// last second or so: steady sound sits at half height and the bars show what moves (a kick,
+/// a snare, a swell), whatever the track's loudness or its balance of bass and treble. Against
+/// a peak instead, mastered music's steady bass and mids pin their bars at the top. Fades and
+/// quiet passages still bring the bars down.
 pub struct Analyzer {
     filters: [Biquad; BANDS],
     energy: [f32; BANDS],
     frames: u32,
-    peak_db: [f32; BANDS],
+    /// Each band's running average, dB; None until it first hears something.
+    mean_db: [Option<f32>; BANDS],
     out: [f32; BANDS],
     rate: f32,
 }
 
 /// The bands: a low-pass for the kick and bass, three band-passes, a high-pass for the air.
 const CENTERS: [f32; BANDS] = [120.0, 400.0, 1200.0, 3200.0, 7000.0];
-/// dB below a band's recent peak that reads as silent.
-const RANGE_DB: f32 = 26.0;
-/// Below this a band is silent whatever its peak (a paused or muted app).
+/// dB above (below) a band's average that fills (empties) its bar.
+const SPREAD_DB: f32 = 9.0;
+/// How long a band's average remembers, seconds.
+const MEAN_S: f32 = 1.2;
+/// Below this a band is silent (a paused or muted app); bars shrink over the next `FADE_DB`.
 const GATE_DB: f32 = -62.0;
-/// How fast a band's remembered peak sinks, dB a second.
-const PEAK_FALL_DB: f32 = 5.0;
+const FADE_DB: f32 = 24.0;
+const ATTACK_S: f32 = 0.015;
 const RELEASE_S: f32 = 0.11;
 
 impl Analyzer {
@@ -102,7 +107,7 @@ impl Analyzer {
             4 => Biquad::high_pass(CENTERS[i], rate),
             _ => Biquad::band_pass(CENTERS[i], 0.9, rate),
         });
-        Self { filters, energy: [0.0; BANDS], frames: 0, peak_db: [GATE_DB + RANGE_DB; BANDS], out: [0.0; BANDS], rate }
+        Self { filters, energy: [0.0; BANDS], frames: 0, mean_db: [None; BANDS], out: [0.0; BANDS], rate }
     }
 
     pub fn push(&mut self, sample: f32) {
@@ -119,13 +124,22 @@ impl Analyzer {
             return self.out;
         }
         let dt = self.frames as f32 / self.rate;
+        let attack = (-dt / ATTACK_S).exp();
         let release = (-dt / RELEASE_S).exp();
+        let remember = (-dt / MEAN_S).exp();
         for i in 0..BANDS {
             let rms = (self.energy[i] / self.frames as f32).sqrt();
             let db = 20.0 * (rms + 1e-9).log10();
-            self.peak_db[i] = db.max(self.peak_db[i] - PEAK_FALL_DB * dt).max(GATE_DB + RANGE_DB);
-            let target = if db < GATE_DB { 0.0 } else { ((db - (self.peak_db[i] - RANGE_DB)) / RANGE_DB).clamp(0.0, 1.0) };
-            self.out[i] = if target > self.out[i] { target } else { target + (self.out[i] - target) * release };
+            let target = if db < GATE_DB {
+                0.0
+            } else {
+                let mean = self.mean_db[i].map_or(db, |m| db + (m - db) * remember);
+                self.mean_db[i] = Some(mean);
+                let moving = (0.5 + 0.5 * (db - mean) / SPREAD_DB).clamp(0.0, 1.0);
+                moving * ((db - GATE_DB) / FADE_DB).clamp(0.0, 1.0)
+            };
+            let keep = if target > self.out[i] { attack } else { release };
+            self.out[i] = target + (self.out[i] - target) * keep;
             self.energy[i] = 0.0;
         }
         self.frames = 0;
@@ -202,6 +216,10 @@ mod macos {
     use objc2_foundation::{NSArray, NSDictionary, NSNumber, NSString, NSUUID};
     use std::ffi::{c_void, CStr};
     use std::ptr::NonNull;
+
+    /// IO callbacks so far and the loudest raw sample, for the probe test.
+    pub static CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    pub static RAW_PEAK: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
     /// A running tap: the process tap, a private aggregate device that reads it, and the IO
     /// callback's analyzer. Dropping it stops and destroys all three.
@@ -368,6 +386,7 @@ mod macos {
                 .map(|b| b.mDataByteSize as usize / 4 / b.mNumberChannels.max(1) as usize)
                 .min()
                 .unwrap_or(0);
+            CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             if frames == 0 || channels == 0 {
                 return;
             }
@@ -380,7 +399,11 @@ mod macos {
                         sum += *data.add(f * ch + c);
                     }
                 }
-                analyzer.push(sum / channels as f32);
+                let s = sum / channels as f32;
+                if s.abs() > f32::from_bits(RAW_PEAK.load(std::sync::atomic::Ordering::Relaxed)) {
+                    RAW_PEAK.store(s.abs().to_bits(), std::sync::atomic::Ordering::Relaxed);
+                }
+                analyzer.push(s);
             }
             publish(&analyzer.finish());
         }
@@ -452,22 +475,43 @@ mod tests {
     }
 
     #[test]
-    fn a_bass_tone_lights_the_bass_band() {
-        let l = tone(60.0, 0.5, 0.5);
-        assert!(l[0] > 0.8, "{l:?}");
-        assert!(l[4] < 0.2, "{l:?}");
+    fn a_steady_bass_tone_sits_mid_height_in_the_bass_band() {
+        let l = tone(60.0, 2.0, 0.5);
+        assert!((0.35..0.65).contains(&l[0]), "{l:?}");
+        assert!(l[4] < 0.05, "{l:?}");
     }
 
     #[test]
-    fn a_high_tone_lights_the_treble_band() {
-        let l = tone(9000.0, 0.5, 0.5);
-        assert!(l[4] > 0.8, "{l:?}");
-        assert!(l[0] < 0.2, "{l:?}");
+    fn a_steady_high_tone_sits_mid_height_in_the_treble_band() {
+        let l = tone(9000.0, 2.0, 0.5);
+        assert!((0.35..0.65).contains(&l[4]), "{l:?}");
+        assert!(l[0] < 0.05, "{l:?}");
     }
 
     #[test]
     fn silence_reads_zero() {
         assert_eq!(tone(1000.0, 0.3, 0.0), [0.0; BANDS]);
+    }
+
+    /// A kick every half second: the bass bar should swing, not sit pinned at the top.
+    #[test]
+    fn beats_swing_the_bar_instead_of_pinning_it() {
+        let rate = 48_000.0;
+        let mut a = Analyzer::new(rate);
+        let (mut lo, mut hi) = (1.0f32, 0.0f32);
+        for i in 0..(rate as usize * 4) {
+            let t = i as f32 / rate;
+            let env = (-(t % 0.5) * 18.0).exp();
+            a.push(0.6 * env * (2.0 * std::f32::consts::PI * 60.0 * t).sin());
+            if i % 512 == 511 {
+                let l = a.finish()[0];
+                if t > 2.0 {
+                    lo = lo.min(l);
+                    hi = hi.max(l);
+                }
+            }
+        }
+        assert!(hi > 0.85 && lo < 0.3, "bass bar swung {lo}..{hi}");
     }
 
     #[test]
@@ -482,6 +526,30 @@ mod tests {
             a.push(0.0);
         }
         let after = a.finish()[0];
-        assert!(loud > 0.8 && after < 0.05, "{loud} → {after}");
+        assert!(loud > 0.3 && after < 0.05, "{loud} → {after}");
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod probe {
+    /// Taps the Mac's audio for four seconds and prints the loudest each band got. Play
+    /// something first. `cargo test -p nook-core live_tap -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn live_tap() {
+        let tap = super::macos::Tap::start();
+        println!("tap: {:?}", tap.as_ref().map(|_| "started"));
+        let mut max = [0.0f32; super::BANDS];
+        for _ in 0..40 {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            let now: [f32; super::BANDS] = std::array::from_fn(|i| f32::from_bits(super::LEVELS[i].load(std::sync::atomic::Ordering::Relaxed)));
+            for (m, v) in max.iter_mut().zip(now) {
+                *m = m.max(v);
+            }
+        }
+        println!("loudest per band: {max:?}");
+        println!("callbacks: {}, raw peak: {}", super::macos::CALLS.load(std::sync::atomic::Ordering::Relaxed),
+            f32::from_bits(super::macos::RAW_PEAK.load(std::sync::atomic::Ordering::Relaxed)));
+        drop(tap);
     }
 }

@@ -1,8 +1,9 @@
-// Weather from Open-Meteo (keyless) for the Mac's location, or props.city. The page is the
+// Weather from Open-Meteo (keyless) for where you are: location(), which is the place set in
+// Settings › General › Location, else the Mac's location. The page is the
 // 1.x card: big temperature, condition · place, high and low, wind / humidity / UV, over an
 // animated sky (scene.wgsl, twelve moods). Closed, it shows the temperature beside the camera
 // when no other mod has something to say.
-// props: { city: "Berlin" | null, units: "celsius" | "fahrenheit", compact: true }
+// props: { units: "celsius" | "fahrenheit", compact: true }
 
 import { View, row, col, div, text, icon, image, shader } from "nook/ui";
 import { location } from "nook";
@@ -27,6 +28,9 @@ function moonPhase(now = Date.now()) {
   const cycles = (now - NEW_MOON) / 86400000 / SYNODIC_DAYS;
   return cycles - Math.floor(cycles);
 }
+
+// Where the forecast is for: as fetched, else what location() calls the place now.
+const placeName = (w) => w.place ?? (location()?.error ? null : location()?.name) ?? null;
 
 // The sky's mood: storm, heat, cold and wind beat the WMO buckets (as 1.x picked them).
 function mood(w) {
@@ -59,31 +63,25 @@ function uv(index) {
 
 export default class Weather extends View {
   init(props, cx) {
-    this.city = props.city || null;
     this.units = props.units === "fahrenheit" ? "fahrenheit" : "celsius";
     this.compact = props.compact !== false;
     this.weather = JSON.parse(localStorage.getItem("weather") ?? "null");
     this.error = null;
     this.busy = false;
     this.nextTry = 0;
-    // Refresh when stale; until the first answer, check each second for a location.
+    // Refresh when stale or the place moved (Settings › General › Location); until the first
+    // answer, check each second for a location.
     cx.timer.every(1000, (cx) => {
-      const due = !this.weather || Date.now() - this.weather.at > STALE_MS || this.weather.units !== this.units;
+      const here = location();
+      // Moved, or the place has a name now that the forecast was fetched without.
+      const moved = here && !here.error && this.weather
+        && (this.weather.lat !== here.latitude || this.weather.lon !== here.longitude || (!this.weather.place && here.name));
+      const due = !this.weather || moved || Date.now() - this.weather.at > STALE_MS || this.weather.units !== this.units;
       if (due && !this.busy && Date.now() >= this.nextTry) cx.spawn((cx) => this.refresh(cx));
     });
   }
 
   async place() {
-    if (this.city) {
-      const cached = JSON.parse(localStorage.getItem("place") ?? "null");
-      if (cached?.query === this.city) return cached;
-      const r = await (await fetch(`https://geocoding-api.open-meteo.com/v1/search?count=1&name=${encodeURIComponent(this.city)}`)).json();
-      const hit = r.results?.[0];
-      if (!hit) throw new Error(`No place called ${this.city}`);
-      const place = { query: this.city, latitude: hit.latitude, longitude: hit.longitude, name: hit.name };
-      localStorage.setItem("place", JSON.stringify(place));
-      return place;
-    }
     const loc = location();
     if (loc === null) return null; // still being found
     if (loc.error) throw new Error(loc.error);
@@ -110,6 +108,7 @@ export default class Weather extends View {
         units: this.units,
         place: place.name ?? null,
         lat: place.latitude ?? null,
+        lon: place.longitude ?? null,
         temperature: c.temperature_2m,
         celsius: f ? (c.temperature_2m - 32) / 1.8 : c.temperature_2m,
         code: c.weather_code,
@@ -137,7 +136,7 @@ export default class Weather extends View {
     return {
       leading: image("app:com.apple.weather").id("app").size(20),
       trailing: text(temp(w.temperature)).text_size(13).font_medium().tabular_nums(),
-      detail: text(`${LABEL[w.code] ?? ""}${w.place ? ` · ${w.place}` : ""}`).text_size(12).text_color("muted").truncate(),
+      detail: text(`${LABEL[w.code] ?? ""}${placeName(w) ? ` · ${placeName(w)}` : ""}`).text_size(12).text_color("muted").truncate(),
       // Below everything: the island is the weather's only when it's otherwise quiet.
       priority: 1,
     };
@@ -146,7 +145,7 @@ export default class Weather extends View {
   expanded() {
     const w = this.weather;
     if (!w) {
-      const waiting = this.error ?? (this.city ? "Loading weather…" : "Finding your location…");
+      const waiting = this.error ?? "Finding your location…";
       return row().id("empty").gap(10).py(14)
         .child(icon(this.error ? "map-pin" : "cloud", 18).color("faint"))
         .child(text(waiting).text_color("muted").truncate().flex_1());
@@ -165,7 +164,7 @@ export default class Weather extends View {
         row().id("face").size_full().p(16).gap(14).items_center()
           .child(col().flex_1().gap(4)
             .child(text(temp(w.temperature)).text_size(26).font_semibold().tabular_nums())
-            .child(text(`${label}${w.place ? ` · ${w.place}` : ""}`).text_size(12).text_color("#ffffffb3").truncate())
+            .child(text(`${label}${placeName(w) ? ` · ${placeName(w)}` : ""}`).text_size(12).text_color("#ffffffb3").truncate())
             .when(w.high != null && w.low != null, (c) => c.child(row().gap(6)
               .child(text(`H ${temp(w.high)}`).text_size(12).text_color("#ffffffd9"))
               .child(text(`L ${temp(w.low)}`).text_size(12).text_color("#ffffff99")))))

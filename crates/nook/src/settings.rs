@@ -3,6 +3,7 @@
 //! edits: every change is written to layout.json, which the island applies live.
 
 use crate::home;
+use nook_core::permissions::Access;
 use rune::tok::TextStyle;
 use rune::{Color, Cx, Drag, El, Phase, PopupMenu, Spring, TextEdit, Tx, col, el, icon, row, text, text_input};
 use serde_json::{Value, json};
@@ -39,13 +40,15 @@ mod c {
 pub enum Page {
     General,
     Mods,
+    Permissions,
     Yours,
     About,
 }
 
-const PAGES: [(Page, &str, &str); 4] = [
+const PAGES: [(Page, &str, &str); 5] = [
     (Page::General, "General", "settings"),
     (Page::Mods, "Mods", "layout-grid"),
+    (Page::Permissions, "Permissions", "shield-check"),
     (Page::Yours, "Make it yours", "pencil"),
     (Page::About, "About", "info"),
 ];
@@ -78,6 +81,17 @@ pub struct Settings {
     herdr: bool,
     note: Option<(String, bool)>,
     refreshed: Option<Instant>,
+    /// The place being typed for Settings › General › Location, the lookup under way, and how
+    /// the last one went.
+    place: TextEdit,
+    finding: Option<std::sync::mpsc::Receiver<Result<Vec<Value>, String>>>,
+    /// Places the lookup found, while the person picks one of several.
+    found: Vec<Value>,
+    place_note: Option<(String, bool)>,
+    audio_access: Access,
+    location_access: Access,
+    /// The app macOS asks on openNook's behalf (a development build's terminal).
+    asked_for: Option<String>,
 }
 
 impl Settings {
@@ -94,6 +108,13 @@ impl Settings {
             herdr: false,
             note: None,
             refreshed: None,
+            place: TextEdit::new(""),
+            finding: None,
+            found: Vec::new(),
+            place_note: None,
+            audio_access: Access::NotAsked,
+            location_access: Access::NotAsked,
+            asked_for: nook_core::permissions::asked_for(),
         };
         s.refresh();
         s
@@ -115,6 +136,8 @@ impl Settings {
         if !self.agents.iter().any(|(c, _)| *c == self.agent) {
             self.agent = self.agents.first().map_or("claude", |a| a.0);
         }
+        self.audio_access = nook_core::permissions::audio_capture();
+        self.location_access = nook_core::permissions::location();
         self.herdr = std::path::Path::new("/Applications/Herdr.app").exists() || path.split(':').any(|d| std::path::Path::new(d).join("herdr-app").is_file());
         self.refreshed = Some(Instant::now());
     }
@@ -146,6 +169,31 @@ impl Settings {
                 v["island"] = json!({});
             }
             v["island"][key] = value;
+        });
+    }
+
+    fn set_location_mode(&mut self, mode: &str) {
+        let mode = mode.to_owned();
+        self.edit_layout(move |v| {
+            if !v["location"].is_object() {
+                v["location"] = json!({});
+            }
+            v["location"]["mode"] = Value::from(mode);
+        });
+    }
+
+    /// Looks the typed place up (Open-Meteo's geocoder, as the mods do) off the main thread;
+    /// [`poll`] saves what it finds.
+    fn find_place(&mut self) {
+        let query = self.place.text.trim().to_owned();
+        if query.is_empty() || self.finding.is_some() {
+            return;
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.finding = Some(rx);
+        self.place_note = Some((format!("Looking up {query}…"), true));
+        std::thread::spawn(move || {
+            let _ = tx.send(geocode(&query));
         });
     }
 
@@ -240,8 +288,75 @@ fn set_up_agents() -> Result<String, String> {
     Ok(if ok_link { "Skill installed for Claude Code, and `opennook` is on your PATH.".into() } else { "Skill installed for Claude Code.".into() })
 }
 
+/// The places Open-Meteo's geocoder finds for `query` (up to five: a name like Sulzberg is a
+/// village in more than one country), each as layout.json's `location` would hold it.
+fn geocode(query: &str) -> Result<Vec<Value>, String> {
+    let url = reqwest::Url::parse_with_params("https://geocoding-api.open-meteo.com/v1/search", &[("count", "5"), ("name", query)]).map_err(|e| e.to_string())?;
+    let body: Value = reqwest::blocking::get(url).and_then(|r| r.json()).map_err(|e| format!("couldn't look it up: {e}"))?;
+    let hits = body.get("results").and_then(Value::as_array).filter(|h| !h.is_empty()).ok_or_else(|| format!("no place called {query}"))?;
+    Ok(hits.iter().map(|hit| {
+        // Where it is, to tell same-named places apart; not saved.
+        let region = [hit.get("admin1"), hit.get("country")].iter().filter_map(|v| v.and_then(Value::as_str)).collect::<Vec<_>>().join(", ");
+        json!({
+            "mode": "set",
+            "name": hit.get("name"),
+            "latitude": hit.get("latitude"),
+            "longitude": hit.get("longitude"),
+            "timezone": hit.get("timezone"),
+            "region": region,
+        })
+    }).collect())
+}
+
+impl Settings {
+    fn use_place(&mut self, mut place: Value) {
+        let name = place.get("name").and_then(Value::as_str).unwrap_or("that place").to_owned();
+        if let Some(p) = place.as_object_mut() {
+            p.remove("region");
+        }
+        self.edit_layout(move |v| v["location"] = place);
+        self.place = TextEdit::new("");
+        self.found.clear();
+        self.place_note = Some((format!("Using {name}."), true));
+    }
+}
+
 pub fn poll(s: &mut Settings, _t: f64, tx: &mut Tx) -> bool {
     tx.wake_after(Duration::from_secs(2));
+    if let Some(found) = s.finding.as_ref().and_then(|rx| rx.try_recv().ok()) {
+        s.finding = None;
+        match found {
+            Ok(mut places) if places.len() == 1 => s.use_place(places.remove(0)),
+            Ok(places) => {
+                // Several by that name: ask which.
+                let label = |p: &Value| {
+                    let name = p.get("name").and_then(Value::as_str).unwrap_or("?");
+                    match p.get("region").and_then(Value::as_str).filter(|r| !r.is_empty()) {
+                        Some(r) => format!("{name} — {r}"),
+                        None => name.to_owned(),
+                    }
+                };
+                let options: Vec<(String, String)> = places.iter().enumerate().map(|(i, p)| (i.to_string(), label(p))).collect();
+                s.found = places;
+                s.place_note = Some(("Which one?".into(), true));
+                tx.popup_menu(PopupMenu::picker(options, ""), "place/set", |s: &mut Settings, picked, _| {
+                    let place = picked.and_then(|i| i.parse::<usize>().ok()).and_then(|i| s.found.get(i).cloned());
+                    match place {
+                        Some(p) => s.use_place(p),
+                        None => {
+                            s.found.clear();
+                            s.place_note = None;
+                        }
+                    }
+                });
+            }
+            Err(e) => s.place_note = Some((format!("Couldn't use that place: {e}"), false)),
+        }
+        return true;
+    }
+    if s.finding.is_some() {
+        tx.wake_after(Duration::from_millis(200));
+    }
     if s.refreshed.is_none_or(|t| t.elapsed() >= Duration::from_secs(2)) {
         s.refresh();
         return true;
@@ -378,6 +493,7 @@ fn mod_icon(m: &ModInfo) -> El {
 
 // Pages ---------------------------------------------------------------------------------
 
+const LOCATION: [(&str, &str); 2] = [("live", "Where this Mac is"), ("set", "A place I choose")];
 const HOVER: [(&str, &str); 3] = [("peek", "Peek"), ("open", "Open"), ("none", "Nothing")];
 const DISPLAY: [(&str, &str); 3] = [("notch", "The MacBook's"), ("main", "Main display"), ("pointer", "Where the pointer is")];
 
@@ -403,12 +519,80 @@ fn general(s: &Settings) -> El {
                 }
             }),
         ]))
+        .child(location(s))
         .child(label("Look", 13.0, 600.0, c::muted()).ml(4.0))
         .child(card(vec![
             toggle("glass", "gem", "Liquid Glass", Some("Glass under the open island (off with Reduce Transparency)"), glass, move |s| s.set_island("glass", Value::from(!glass))),
             setting("tint", "droplets", "Black at the top", Some("How far the black reaches down over the glass"), slider("tint", tint, |s, v, _| s.set_island("glassTint", json!((v * 100.0).round() / 100.0)))),
             setting("width", "grip-vertical", "Open width", Some(&format!("{} points", width.round())), slider("width", (width - 460.0) / 300.0, |s, v, _| s.set_island("width", json!((460.0 + v * 300.0).round())))),
         ]))
+}
+
+/// Where Weather, the World Clock and the ISS map put you: this Mac's location, or a place
+/// typed here.
+fn location(s: &Settings) -> El {
+    let current = s.layout.get("location");
+    let mode = current.and_then(|l| l.get("mode")).and_then(Value::as_str).unwrap_or("live").to_owned();
+    let name = current.and_then(|l| l.get("name")).and_then(Value::as_str).map(str::to_owned);
+    let mut rows = vec![choice("location", "map-pin", "Location", &LOCATION, &mode, |s, id| s.set_location_mode(id))];
+    if mode == "set" {
+        let detail = match &name {
+            Some(n) => format!("Now: {n}"),
+            None => "Type a city, then Set".into(),
+        };
+        let field = text_input(&s.place, font(14.0, 400.0)).key("place").on_edit(|s: &mut Settings| &mut s.place)
+            .on_submit(|s: &mut Settings, _: &mut Tx| s.find_place())
+            .placeholder("City", c::faint())
+            .color(c::fg()).w(180.0).h(32.0).padding(8.0).radius(8.0).fill(c::card()).border(1.0, c::line());
+        rows.push(setting("place", "search", "Place", Some(&detail),
+            row().gap(8.0).items_center().child(field).child(button("place/set", "Set", true, |s| s.find_place()))));
+    }
+    let mut out = col().gap(8.0).child(card(rows));
+    if let Some((msg, ok)) = &s.place_note {
+        out = out.child(label(msg, 12.5, 500.0, if *ok { c::muted() } else { c::red() }).ml(4.0));
+    }
+    out
+}
+
+/// One permission: what it's for, where it stands, and a way to grant it.
+fn permission(key: &str, glyph_name: &str, title: &str, why: &str, access: Option<Access>, ask: Option<fn()>, pane: &'static str) -> El {
+    let (state, color) = match access {
+        Some(Access::Allowed) => ("Allowed", c::green()),
+        Some(Access::Denied) => ("Not allowed", c::red()),
+        Some(Access::NotAsked) => ("Not asked yet", c::muted()),
+        None => ("", c::muted()),
+    };
+    let action = match (access, ask) {
+        (Some(Access::NotAsked), Some(ask)) => button(&format!("{key}/ask"), "Allow…", true, move |_| ask()),
+        _ => button(&format!("{key}/open"), "Open Settings", false, move |_| { let _ = open::that_detached(pane); }),
+    };
+    setting(key, glyph_name, title, Some(why), row().gap(12.0).items_center().child(label(state, 13.0, 500.0, color)).child(action))
+}
+
+fn permissions(s: &Settings) -> El {
+    // A development build can't show macOS's prompt (its terminal has no reason to give), so
+    // it only links to System Settings.
+    let dev = s.asked_for.is_some();
+    let rows = vec![
+        permission("perm/audio", "volume-2", "System Audio Recording", "Moves the music meter with what's playing. Only loudness is read; nothing is recorded.",
+            Some(s.audio_access), (!dev).then_some(nook_core::permissions::request_audio_capture as fn()), nook_core::permissions::AUDIO_CAPTURE_PANE),
+        permission("perm/location", "map-pin", "Location", "Weather, the World Clock and the ISS map where you are, unless you set a place in General.",
+            Some(s.location_access), (!dev).then_some(ask_location as fn()), nook_core::permissions::LOCATION_PANE),
+        permission("perm/automation", "zap", "Automation", "Controls Music and Spotify when the media keys can't reach them.",
+            None, None, nook_core::permissions::AUTOMATION_PANE),
+    ];
+    let mut page = col().gap(14.0).child(card(rows));
+    if let Some(app) = &s.asked_for {
+        page = page.child(label(
+            format!("This is a development build, started by {app}, so macOS gives it {app}'s permissions. To try the meter or Location here, allow {app} in System Settings (System Audio Recording is under Screen & System Audio Recording). openNook.app asks for itself."),
+            12.5, 400.0, c::muted()).max_lines(4).ml(4.0));
+    }
+    page
+}
+
+/// CoreLocation shows its prompt for the first request.
+fn ask_location() {
+    drop(nook_core::location::begin_request());
 }
 
 fn mods(s: &Settings) -> El {
@@ -544,6 +728,7 @@ pub fn view(s: &Settings, _: &mut Cx<Settings>) -> El {
     let (title, body) = match s.page {
         Page::General => ("General", general(s)),
         Page::Mods => ("Mods", mods(s)),
+        Page::Permissions => ("Permissions", permissions(s)),
         Page::Yours => ("Make it yours", yours(s)),
         Page::About => ("About", about(s)),
     };

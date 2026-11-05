@@ -270,8 +270,10 @@ mod macos {
 
     pub fn reverse_geocode(lat: f64, lon: f64, tx: oneshot::Sender<Option<String>>) {
         use block2::RcBlock;
+        // CLGeocoder answers through the run loop of the thread that asked, and only the main
+        // thread's runs: callers on a worker (the location service) hop over.
         if MainThreadMarker::new().is_none() {
-            let _ = tx.send(None);
+            on_main(move || reverse_geocode(lat, lon, tx));
             return;
         }
         unsafe {
@@ -305,6 +307,21 @@ mod macos {
                 completionHandler: &*handler
             ];
         }
+    }
+
+    /// Runs `f` on the main thread (the main dispatch queue), soon.
+    fn on_main(f: impl FnOnce() + Send + 'static) {
+        use std::ffi::c_void;
+        unsafe extern "C" {
+            static _dispatch_main_q: c_void;
+            fn dispatch_async_f(queue: *const c_void, context: *mut c_void, work: extern "C" fn(*mut c_void));
+        }
+        extern "C" fn run(context: *mut c_void) {
+            let f = unsafe { Box::from_raw(context.cast::<Box<dyn FnOnce() + Send>>()) };
+            f();
+        }
+        let f: Box<Box<dyn FnOnce() + Send>> = Box::new(Box::new(f));
+        unsafe { dispatch_async_f(&raw const _dispatch_main_q, Box::into_raw(f).cast(), run) };
     }
 
     /// City of the first placemark: locality, else sub-admin area, else name.

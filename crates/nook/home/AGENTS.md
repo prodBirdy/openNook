@@ -192,9 +192,10 @@ line. The `weather` mod's `scene.wgsl` is a full example (twelve skies).
 - `apps()`, `appRunning(bundleId)`: running apps, menu-bar apps included.
 - `island()`: open or closed, which page, which mod owns the closed island, notch size, the
   page's width.
-- `location()`: the Mac's location `{ latitude, longitude, name }`, `null` while it's found,
-  `{ error }` when it can't be (the first read asks permission; it needs openNook.app). Let
-  people give a city in props instead (geocode it with Open-Meteo, as `weather` does).
+- `location()`: where the person is, `{ latitude, longitude, name, timezone }`: the place set
+  in Settings › General › Location, else the Mac's location. `null` while it's found,
+  `{ error }` when it can't be (the Mac's location asks permission on the first read and
+  needs openNook.app). Use it for "here" rather than a city prop of your own.
 - `exec(cmd, args, { cwd })` → `{ code, stdout, stderr }`, with the user's PATH (Homebrew,
   `~/.local/bin`, …). 30 s and 8 MiB limits.
 - `fetch(url, { method, headers, body })` → `{ status, ok, text(), json() }`.

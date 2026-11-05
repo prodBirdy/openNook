@@ -2,5 +2,5 @@
   "title": "Weather",
   "icon": "app:com.apple.weather",
   "description": "Open-Meteo weather over an animated sky; temperature beside the camera when nothing else is on.",
-  "props": { "city": null, "units": "celsius", "compact": true }
+  "props": { "units": "celsius", "compact": true }
 }

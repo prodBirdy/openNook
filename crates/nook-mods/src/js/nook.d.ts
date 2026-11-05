@@ -63,13 +63,18 @@ export interface Island {
 export interface Location {
   latitude: number;
   longitude: number;
-  /** The place's name (reverse geocoded), when known. */
+  /** The place's name (reverse geocoded, or as set in Settings), when known. */
   name: string | null;
+  /** Its time zone ("Europe/Berlin"), when known. */
+  timezone: string | null;
+  /** True when it's the Mac's own location (so the Mac's clock is its time). */
+  live?: boolean;
 }
 
 export function media(): Media | null;
-/** The Mac's location (reduced accuracy); null until it's found, `{ error }` when it can't be.
- *  The first read asks the person for permission. */
+/** Where the person is: the place they set in Settings › General › Location, else the Mac's
+ *  location (reduced accuracy). null until it's found, `{ error }` when it can't be. The
+ *  first read of the Mac's location asks the person for permission. */
 export function location(): Location | { error: string } | null;
 export function agents(): Agent[];
 export function apps(): App[];

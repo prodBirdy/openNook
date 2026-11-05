@@ -119,6 +119,8 @@ fn prepare() -> (Island, Arc<Store>) {
     let store: Arc<Store> = Arc::default();
     store.publish("layout", raw);
     store.publish("theme", island.theme.to_json());
+    // check and shot never start the overlay that republishes it; mods still need its size.
+    store.publish("island", island.state_json());
     (island, store)
 }
 
@@ -180,8 +182,9 @@ fn run() {
             s.mods = Some(mods);
             s.publish();
         });
+        let store_for_layout = store.clone();
         services::start(store);
-        watch_layout(overlay.clone());
+        watch_layout(overlay.clone(), store_for_layout);
         watch_displays(overlay.clone());
         overlay.show();
         let probe = overlay.clone();
@@ -194,10 +197,11 @@ fn run() {
 }
 
 /// layout.json applies as it's saved; a broken edit keeps the last good layout.
-fn watch_layout(overlay: OverlayHandle<Island>) {
+fn watch_layout(overlay: OverlayHandle<Island>, store: Arc<Store>) {
     std::thread::Builder::new().name("nook-layout".into()).spawn(move || {
         let dir = home::app_dir();
         let mut stamp = home::layout_stamp(&dir);
+        let mut location = home::read_layout(&dir).map(|(l, _)| l.location).unwrap_or_default();
         loop {
             std::thread::sleep(Duration::from_millis(400));
             let now = home::layout_stamp(&dir);
@@ -206,6 +210,12 @@ fn watch_layout(overlay: OverlayHandle<Island>) {
             }
             stamp = now;
             if let Ok((layout, raw)) = home::read_layout(&dir) {
+                if layout.location != location {
+                    location = layout.location.clone();
+                    // On the main thread, where CoreLocation must be asked.
+                    let store = store.clone();
+                    overlay.update(move |_, _| services::location_setting_changed(store));
+                }
                 overlay.update(move |s, _| s.set_layout(layout, raw));
             }
         }
@@ -266,8 +276,10 @@ fn already_running() -> Option<u32> {
 }
 
 /// `check` and `shot` have no main run loop for CoreLocation to answer on.
+/// check and shot never ask CoreLocation; a place set in Settings needs no asking.
 fn no_location(store: &Store) {
-    store.publish("location", serde_json::json!({ "error": "No location in check and shot; give the mod a city (props) to try it here." }));
+    let setting = home::read_layout(&home::app_dir()).map(|(l, _)| l.location).unwrap_or_default();
+    store.publish("location", setting.place().unwrap_or_else(|| serde_json::json!({ "error": "No location in check and shot; set a place in Settings › General › Location to try it here." })));
 }
 
 fn flag(args: &[String], name: &str) -> Option<String> {
@@ -366,6 +378,7 @@ fn shot(args: &[String]) -> i32 {
             Some("mods") => settings::Page::Mods,
             Some("yours") => settings::Page::Yours,
             Some("about") => settings::Page::About,
+            Some("permissions") => settings::Page::Permissions,
             _ => settings::Page::General,
         };
         state.onboarding = flag(args, "--onboarding").and_then(|n| n.parse().ok());

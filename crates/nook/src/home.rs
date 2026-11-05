@@ -151,6 +151,37 @@ pub struct Layout {
     pub mods: Map<String, Value>,
     /// Theme token overrides: `{ "accent": "#ff9f0a" }`.
     pub theme: Map<String, Value>,
+    /// Where mods' `location()` is: this Mac, or a place set in Settings.
+    pub location: LocationSetting,
+}
+
+/// `layout.json`'s `location`: `{ "mode": "live" }`, or `{ "mode": "set", "name": "Berlin",
+/// "latitude": 52.52, "longitude": 13.41, "timezone": "Europe/Berlin" }` (Settings looks the
+/// place up, so mods get it without asking macOS).
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct LocationSetting {
+    pub mode: LocationMode,
+    pub name: Option<String>,
+    pub latitude: Option<f64>,
+    pub longitude: Option<f64>,
+    pub timezone: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum LocationMode {
+    #[default]
+    Live,
+    Set,
+}
+
+impl LocationSetting {
+    /// The set place as mods see it, when one is set.
+    pub fn place(&self) -> Option<Value> {
+        let (latitude, longitude) = (self.latitude?, self.longitude?);
+        (self.mode == LocationMode::Set).then(|| serde_json::json!({ "latitude": latitude, "longitude": longitude, "name": self.name, "timezone": self.timezone }))
+    }
 }
 
 /// Reads layout.json; on error writes `layout.error` and returns the error.

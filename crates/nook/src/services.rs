@@ -44,18 +44,42 @@ pub fn start(store: Arc<Store>) {
     });
 }
 
-/// Asks for the Mac's location (reduced accuracy) and publishes it as `location`. Must run on
-/// the main thread: CoreLocation answers there.
+/// Whether a mod has asked for `location`: a change of the setting publishes again only then.
+static LOCATION_WANTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Publishes `location` again after its setting changed, if any mod reads it.
+pub fn location_setting_changed(store: Arc<Store>) {
+    if LOCATION_WANTED.load(std::sync::atomic::Ordering::Relaxed) {
+        request_location(store);
+    }
+}
+
+/// The system's time zone ("Europe/Berlin"), from /etc/localtime's link into zoneinfo.
+fn local_timezone() -> Option<String> {
+    let target = std::fs::read_link("/etc/localtime").ok()?;
+    let path = target.to_string_lossy();
+    Some(path.split_once("zoneinfo/")?.1.to_owned())
+}
+
+/// Publishes `location`: the place set in Settings, else the Mac's own (reduced accuracy).
+/// Must run on the main thread: CoreLocation answers there.
 pub fn request_location(store: Arc<Store>) {
+    LOCATION_WANTED.store(true, std::sync::atomic::Ordering::Relaxed);
+    let setting = crate::home::read_layout(&crate::home::app_dir()).map(|(l, _)| l.location).unwrap_or_default();
+    if let Some(place) = setting.place() {
+        log::info!("location: set in Settings");
+        store.publish("location", place);
+        return;
+    }
     let fix = nook_core::location::begin_request();
     spawn("nook-location", move || {
         // An unbundled binary (cargo run) gets no answer at all: CoreLocation needs the app's
         // Info.plist. Don't leave mods waiting forever.
         let answer = nook_core::runtime().block_on(async { tokio::time::timeout(Duration::from_secs(15), fix).await });
-        let value = match answer.unwrap_or(Ok(Err("Location didn't answer. It needs openNook.app (scripts/bundle.sh); or give the mod a city.".into()))) {
+        let value = match answer.unwrap_or(Ok(Err("Location didn't answer. It needs openNook.app (scripts/bundle.sh), or set a place in Settings › General › Location.".into()))) {
             Ok(Ok((lat, lon))) => {
                 let name = nook_core::runtime().block_on(nook_core::location::begin_reverse_geocode(lat, lon)).ok().flatten();
-                json!({ "latitude": lat, "longitude": lon, "name": name })
+                json!({ "latitude": lat, "longitude": lon, "name": name, "timezone": local_timezone(), "live": true })
             }
             Ok(Err(e)) => json!({ "error": e }),
             Err(_) => json!({ "error": "Location request ended without an answer." }),

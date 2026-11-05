@@ -1,10 +1,11 @@
 // A world clock: the world in dots, lit where the sun is up right now (map.wgsl), with your
 // cities pinned on it and their local times. Cities come from props (names, geocoded once
-// with Open-Meteo, which also gives their time zones).
+// with Open-Meteo, which also gives their time zones). Where you are (location(): this Mac,
+// or the place set in Settings › General › Location) gets a blue pin of its own.
 // props: { cities: ["Tokyo", "Berlin", …], hours: 24 | 12 }
 
-import { View, row, col, div, text, shader } from "nook/ui";
-import { exec, island } from "nook";
+import { View, row, col, div, text, icon, shader } from "nook/ui";
+import { exec, island, location } from "nook";
 
 // The map's latitudes, top and bottom: past them is ice and ocean.
 const TOP = 78;
@@ -35,6 +36,11 @@ export default class WorldClock extends View {
     cx.spawn((cx) => this.locate(cx));
     // The sun moves a dot every eight minutes; the clocks, every minute.
     cx.timer.every(30_000, (cx) => cx.notify());
+    // A new place (set in Settings) may bring a time zone we haven't looked up yet.
+    cx.timer.every(2000, (cx) => {
+      const tz = this.here()?.tz;
+      if (tz && this.offsets[tz] === undefined && !this.zoning) cx.spawn((cx) => this.zones(cx));
+    });
     cx.timer.every(10 * 60_000, (cx) => cx.spawn((cx) => this.zones(cx)));
   }
 
@@ -57,22 +63,35 @@ export default class WorldClock extends View {
 
   // Each zone's UTC offset now (DST included), from the system's own time zone database.
   async zones(cx) {
-    const tzs = [...new Set(this.cities.map((c) => c.tz).filter(Boolean))];
+    const tzs = [...new Set([...this.cities, this.here()].map((c) => c?.tz).filter(Boolean))];
     if (!tzs.length) return cx.notify();
-    const script = tzs.map((z) => `TZ='${z.replace(/'/g, "")}' date +%z`).join("; ");
-    const r = await exec("/bin/sh", ["-c", script]);
-    r.stdout.trim().split("\n").forEach((line, i) => {
-      const m = line.trim().match(/^([+-])(\d\d)(\d\d)$/);
-      if (m) this.offsets[tzs[i]] = (m[1] === "-" ? -1 : 1) * (Number(m[2]) * 60 + Number(m[3]));
-    });
+    this.zoning = true;
+    try {
+      const script = tzs.map((z) => `TZ='${z.replace(/'/g, "")}' date +%z`).join("; ");
+      const r = await exec("/bin/sh", ["-c", script]);
+      r.stdout.trim().split("\n").forEach((line, i) => {
+        const m = line.trim().match(/^([+-])(\d\d)(\d\d)$/);
+        if (m) this.offsets[tzs[i]] = (m[1] === "-" ? -1 : 1) * (Number(m[2]) * 60 + Number(m[3]));
+      });
+    } finally {
+      this.zoning = false;
+    }
     cx.notify();
   }
 
+  // Where you are, as a city: null until location() knows (or when it can't).
+  here() {
+    const l = location();
+    if (!l || l.error || l.latitude == null) return null;
+    return { query: "here", name: l.name ?? "You", lat: l.latitude, lon: l.longitude, tz: l.timezone ?? null, here: true, live: !!l.live };
+  }
+
   time(city, now) {
-    const offset = this.offsets[city.tz];
-    if (offset === undefined) return "–:––";
-    const local = new Date(now.getTime() + offset * 60000);
-    const h = local.getUTCHours(), m = local.getUTCMinutes();
+    // Where this Mac is, its clock is the time.
+    const offset = city.here && (city.live || !city.tz) ? undefined : this.offsets[city.tz];
+    if (offset === undefined && !(city.here && (city.live || !city.tz))) return "–:––";
+    const local = offset === undefined ? null : new Date(now.getTime() + offset * 60000);
+    const h = local ? local.getUTCHours() : now.getHours(), m = local ? local.getUTCMinutes() : now.getMinutes();
     if (!this.twelve) return `${pad(h)}:${pad(m)}`;
     return `${h % 12 || 12}:${pad(m)} ${h < 12 ? "am" : "pm"}`;
   }
@@ -87,13 +106,17 @@ export default class WorldClock extends View {
     // Labels go beside their pins, moving up or down a row when one would cover another.
     const LABEL_H = 22;
     const at = (c) => [((c.lon + 180) / 360) * w, ((TOP - c.lat) / (TOP - BOTTOM)) * h];
+    // Your place, unless a city of yours is the same place.
+    const here = this.here();
+    const same = (c) => here && (c.name.toLowerCase() === here.name.toLowerCase() || (Math.abs(c.lat - here.lat) < 0.3 && Math.abs(c.lon - here.lon) < 0.3));
+    const cities = here ? [...this.cities.filter((c) => !same(c)), here] : this.cities;
     // Every pin is in the way of every label; placed labels join them.
-    const placed = this.cities.map((c) => { const [x, y] = at(c); return { left: x - 5, top: y - 5 - (LABEL_H - 10), width: 10, pin: true }; });
+    const placed = cities.map((c) => { const [x, y] = at(c); return { left: x - 5, top: y - 5 - (LABEL_H - 10), width: 10, pin: true }; });
     const pins = [];
-    for (const c of [...this.cities].sort((a, b) => a.lon - b.lon)) {
+    for (const c of [...cities].sort((a, b) => a.lon - b.lon)) {
       const [x, y] = at(c);
       const time = this.time(c, now);
-      const width = (c.name.length + time.length) * 6.6 + 22;
+      const width = (c.name.length + time.length) * 6.6 + 22 + (c.here ? 14 : 0);
       const right = x + 7 + width > w - 4;
       const left = right ? x - 7 - width : x + 7;
       let top = y - LABEL_H / 2;
@@ -108,15 +131,16 @@ export default class WorldClock extends View {
       }
       placed.push({ left, top, width });
       const label = row().gap(5).px(7).py(3).rounded(7).bg("#000000b3")
+        .when(c.here, (r) => r.child(icon("map-pin", 10).color("blue")))
         .child(text(c.name).text_size(11).font_semibold())
         .child(text(time).text_size(11).text_color("muted").tabular_nums());
       map.child(label.id(`label-${c.query}`).pin(right ? null : left, top, right ? w - x + 7 : null, null));
-      pins.push(div().id(`pin-${c.query}`).size(7).rounded_full().bg("fg").border(1.5, "#000000").pin(x - 3.5, y - 3.5, null, null));
+      pins.push(div().id(`pin-${c.query}`).size(7).rounded_full().bg(c.here ? "blue" : "fg").border(1.5, "#000000").pin(x - 3.5, y - 3.5, null, null));
     }
     // Pins over labels: a pin always shows.
     map.children(pins);
-    if (!this.names.length) {
-      map.child(text("Add cities: layout.json › mods › world-clock › props › cities").text_size(12).text_color("muted").pin(16, null, null, 14));
+    if (!cities.length) {
+      map.child(text("Add cities in layout.json › mods › world-clock › props, or set your place in Settings › General › Location").text_size(12).text_color("muted").pin(16, null, null, 14));
     }
     return col().id("world-clock").w_full().py(4).child(map);
   }
