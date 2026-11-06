@@ -7,6 +7,39 @@ QuickJS off the UI thread, so a broken one can't stall the notch.
 
 > 2.0 is a rewrite on Rune (the 1.x GPUI app lives in git history). It's alpha: macOS first.
 
+<p align="center"><img src="docs/screens/world-clock.png" width="720" alt="The open island showing the World Clock mod: a dot-matrix world lit where the sun is up, with city times"></p>
+
+<p align="center">
+  <img src="docs/screens/closed.png" width="300" alt="The closed island around the camera, three agents working">
+  <img src="docs/screens/hover.png" width="370" alt="The closed island hovered, peeking out with a detail line">
+</p>
+
+<table>
+  <tr>
+    <td><img src="docs/screens/weather.png" alt="Weather over an animated night sky"></td>
+    <td><img src="docs/screens/iss.png" alt="The ISS over a world map with altitude and speed"></td>
+  </tr>
+  <tr>
+    <td><img src="docs/screens/timer.png" alt="Timer presets and a countdown ring"></td>
+    <td><img src="docs/screens/herdr.png" alt="Coding agents in Herdr and their status"></td>
+  </tr>
+</table>
+
+## Install
+
+Download `openNook-<version>.dmg` from [Releases](https://github.com/prodBirdy/openNook/releases),
+drag openNook to Applications and open it. It lives in the notch only; there's no Dock icon or
+menu-bar item. Settings › Permissions asks for what the shipped mods use: System Audio
+Recording (the music meter reads loudness only), Location (or set a place in General) and
+Automation (Music and Spotify).
+
+The app is also the CLI:
+
+```bash
+ln -s /Applications/openNook.app/Contents/MacOS/openNook ~/.local/bin/opennook
+opennook paths
+```
+
 ## How it works
 
 Closed, the island sits around the camera and shows one thing beside it: the track playing,
@@ -47,8 +80,10 @@ follow log files and watch state files, so integrating another app is usually a 
 The shipped `herdr` mod reads [Herdr](https://github.com/herdrdev/herdr)'s `hc ls --json` and
 jumps to an agent with `herdr-app do agent.focus`.
 
-Shipped mods: **now-playing**, **weather** (an animated WGSL sky), **world-clock** (a
-dot-matrix world lit where the sun is up, with your cities), **herdr**.
+Shipped mods: **now-playing** (with a music meter that follows the sound), **weather** (an
+animated WGSL sky with the real moon phase), **world-clock** (a dot-matrix world lit where the
+sun is up, with your cities), **iss** (where the station is, its next orbit, altitude and
+speed), **timer** (presets, a ring, a chime) and **herdr**.
 
 ## Build and run
 
@@ -57,12 +92,15 @@ cargo run -p nook --release              # the island
 cargo run -p nook -- check <mod folder>  # load a mod, report its views or its error
 cargo run -p nook -- shot island.png     # render the island to a PNG (--open, --mod <name>)
 ./scripts/bundle.sh                      # target/openNook.app
+./scripts/installer.sh                   # target/openNook-<version>.dmg
+./scripts/screens.sh                     # re-render docs/screens
 ```
 
 Now Playing uses [mediaremote-adapter](https://github.com/ungive/mediaremote-adapter) on
 macOS 15.4+: `./scripts/build-mediaremote-adapter.sh` builds it into `third_party/`.
 
-Right-click the island for the mods folder, the guide, and Quit.
+Hover the island to peek, click or swipe down with two fingers to open it, swipe sideways
+to switch pages. Right-click it for the mods folder, the guide, Settings and Quit.
 
 ## Layout
 

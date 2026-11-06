@@ -16,10 +16,8 @@ STAGE="$ROOT/target/dmg"
 
 APP="$ROOT/target/openNook.app"
 
-echo "After copying openNook.app to /Applications:"
-echo "  ln -sf /Applications/openNook.app/Contents/MacOS/nook /usr/local/bin/nook"
-echo "  /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f /Applications/openNook.app"
-echo "Finder Services may need: /System/Library/CoreServices/pbs -update  (or a re-login)"
+echo "After copying openNook.app to /Applications, put the CLI on PATH:"
+echo "  ln -sf /Applications/openNook.app/Contents/MacOS/openNook ~/.local/bin/opennook"
 
 rm -rf "$STAGE" "$DMG"
 mkdir -p "$STAGE"

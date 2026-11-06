@@ -13,9 +13,9 @@
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleVersion</key>
-	<string>1.0.0</string>
+	<string>2.0.0</string>
 	<key>CFBundleShortVersionString</key>
-	<string>1.0.0</string>
+	<string>2.0.0</string>
 	<key>CFBundleIconFile</key>
 	<string>icon.png</string>
 	<key>LSUIElement</key>
@@ -26,34 +26,20 @@
 	<string>Copyright © 2026 prodBirdy. MIT License.</string>
 	<key>NSHighResolutionCapable</key>
 	<true/>
-	<key>NSCalendarsUsageDescription</key>
-	<string>openNook shows upcoming events in the island so you can glance at the next thing on your calendar.</string>
-	<key>NSCalendarsFullAccessUsageDescription</key>
-	<string>openNook shows upcoming events in the island and lets you add events from a quick-add line.</string>
-	<key>NSRemindersUsageDescription</key>
-	<string>openNook shows reminders in the island and lets you mark them complete from there.</string>
-	<key>NSRemindersFullAccessUsageDescription</key>
-	<string>openNook shows reminders in the island and lets you add them from a quick-add line.</string>
-	<key>NSCameraUsageDescription</key>
-	<string>openNook shows a live camera preview in the Mirror control so you can check yourself before a call.</string>
-	<key>NSLocationUsageDescription</key>
-	<string>openNook can use a one-shot city-level location so Weather can show the forecast for where you are. Location is optional — you can enter a city instead. The grant is tied to this build's signature and resets after an ad-hoc re-sign.</string>
 	<key>NSLocationWhenInUseUsageDescription</key>
-	<string>openNook can use a one-shot city-level location so Weather can show the forecast for where you are. Location is optional — you can enter a city instead.</string>
+	<string>openNook asks for a city-level location so Weather, the World Clock and the ISS mod can show where you are. It's optional: you can set a place in Settings instead.</string>
 	<key>NSAppleEventsUsageDescription</key>
-	<string>openNook uses Automation to control Music, Spotify, and Safari when system media controls are unavailable, read the current Safari or Chrome tab URL for artwork, read the Music playlist for Up Next, and send iMessage replies.</string>
-	<key>NSUserNotificationsUsageDescription</key>
-	<string>openNook mirrors island timers into Notification Center so a countdown still fires if the overlay is hidden.</string>
+	<string>openNook uses Automation to control Music and Spotify when the media keys can't reach them, and for scripts your mods run.</string>
 	<key>NSDocumentsFolderUsageDescription</key>
-	<string>openNook runs terminal commands you type that access your Documents folder.</string>
+	<string>A mod you installed runs a program or reads a file in your Documents folder.</string>
 	<key>NSDesktopFolderUsageDescription</key>
-	<string>openNook runs terminal commands you type that access your Desktop folder.</string>
+	<string>A mod you installed runs a program or reads a file in your Desktop folder.</string>
 	<key>NSDownloadsFolderUsageDescription</key>
-	<string>openNook runs terminal commands you type that access your Downloads folder.</string>
+	<string>A mod you installed runs a program or reads a file in your Downloads folder.</string>
 	<key>NSAudioCaptureUsageDescription</key>
 	<string>openNook moves the island's music meter with what you're playing. It reads only how loud the sound is, in a few bands, while the meter is on screen; it never records, saves or sends what you hear.</string>
 	<key>NSLocalNetworkUsageDescription</key>
-	<string>openNook finds nearby LocalSend devices on your network so you can send files from the island tray. Nothing is received unless you turn receive on in Settings.</string>
+	<string>Your mods can fetch from devices on your network (a home server, a printer, a build box). openNook connects only where a mod asks it to.</string>
 	<key>CFBundleURLTypes</key>
 	<array>
 		<dict>
@@ -65,27 +51,5 @@
 			</array>
 		</dict>
 	</array>
-	<key>NSServices</key>
-	<array>
-		<dict>
-			<key>NSMenuItem</key>
-			<dict>
-				<key>default</key>
-				<string>Send to openNook</string>
-			</dict>
-			<key>NSMessage</key>
-			<string>sendToOpenNook</string>
-			<key>NSPortName</key>
-			<string>openNook</string>
-			<key>NSSendFileTypes</key>
-			<array>
-				<string>public.item</string>
-			</array>
-		</dict>
-	</array>
-	<key>NSMicrophoneUsageDescription</key>
-	<string>openNook records voice memos from the island. Audio stays on this Mac.</string>
-	<key>NSSpeechRecognitionUsageDescription</key>
-	<string>openNook transcribes voice memos on-device so you can read them back from the island.</string>
 </dict>
 </plist>

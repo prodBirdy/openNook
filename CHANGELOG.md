@@ -5,7 +5,46 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## Unreleased
+## 2.0.0-alpha.1 - Unreleased
+
+A rewrite. The island renders with [Rune](https://github.com/anomalyco/rune) (wgpu) instead of
+GPUI, and everything it shows is a mod: a folder of JavaScript under `~/.config/opennook/mods`
+that you or a coding agent edit while it runs. macOS only for now.
+
+### Added
+
+- Mods: `main.js` + `mod.json` per folder, run on QuickJS off the UI thread. Saved edits apply
+  within a second; a broken edit keeps the last good version and writes why to
+  `mods/<name>.error`. Mods can ship WGSL shaders and a colour `icon.png`.
+- `layout.json` picks who wins the closed island, page order, props, theme and island size.
+- `~/.config/opennook/AGENTS.md`, `nook.d.ts` and `ui.d.ts`: the guide and exact API a coding
+  agent reads before changing anything. `opennook --skill` prints it as an Agent Skill.
+- CLI: `opennook check <mod>` loads a mod and reports its views or its error;
+  `opennook shot` renders the island or Settings to a PNG; `opennook paths`.
+- Shipped mods: Now Playing (with a live music meter from a Core Audio process tap, macOS
+  14.2+), Weather (an animated WGSL sky with the real moon phase), World Clock (a dot-matrix
+  world lit where the sun is up), ISS (live position, orbit, altitude and speed), Timer
+  (presets, ring, chime) and Herdr (your coding agents; click to jump to one).
+- Settings: General (hover, display, full screen, haptics, launch at login, Liquid Glass, open
+  width, Location), Mods, Permissions (System Audio Recording, Location, Automation), Make it
+  yours, and About, plus a first-run welcome.
+- Gestures: hover to peek, click or two-finger swipe down to open, swipe sideways for pages.
+- Location: this Mac's, or a place set once in Settings; mods read it with `location()`.
+
+### Changed
+
+- Full-screen detection asks for the display's Space type, so the island hides correctly on
+  notched displays.
+- The app asks only for what it uses: System Audio Recording, Location and Automation.
+
+### Removed
+
+- The 1.x widgets (Calendar, Reminders, Files, Notes, Speed, Mirror, Voice, Observe, Lyrics,
+  floating widgets and the rest). Each can come back as a mod.
+
+## 1.x - never released
+
+These landed on the GPUI line after 1.0.0 and were never shipped; 2.0 replaces that app.
 
 ### Added
 
