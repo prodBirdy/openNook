@@ -7,21 +7,21 @@ QuickJS off the UI thread, so a broken one can't stall the notch.
 
 > 2.0 is a rewrite on Rune (the 1.x GPUI app lives in git history). It's alpha: macOS first.
 
-<p align="center"><img src="docs/screens/world-clock.png" width="720" alt="The open island showing the World Clock mod: a dot-matrix world lit where the sun is up, with city times"></p>
+<p align="center"><img src="assets/screens/world-clock.png" width="720" alt="The open island showing the World Clock mod: a dot-matrix world lit where the sun is up, with city times"></p>
 
 <p align="center">
-  <img src="docs/screens/closed.png" width="300" alt="The closed island around the camera, three agents working">
-  <img src="docs/screens/hover.png" width="370" alt="The closed island hovered, peeking out with a detail line">
+  <img src="assets/screens/closed.png" width="300" alt="The closed island around the camera, three agents working">
+  <img src="assets/screens/hover.png" width="370" alt="The closed island hovered, peeking out with a detail line">
 </p>
 
 <table>
   <tr>
-    <td><img src="docs/screens/weather.png" alt="Weather over an animated night sky"></td>
-    <td><img src="docs/screens/iss.png" alt="The ISS over a world map with altitude and speed"></td>
+    <td><img src="assets/screens/weather.png" alt="Weather over an animated night sky"></td>
+    <td><img src="assets/screens/iss.png" alt="The ISS over a world map with altitude and speed"></td>
   </tr>
   <tr>
-    <td><img src="docs/screens/timer.png" alt="Timer presets and a countdown ring"></td>
-    <td><img src="docs/screens/herdr.png" alt="Coding agents in Herdr and their status"></td>
+    <td><img src="assets/screens/timer.png" alt="Timer presets and a countdown ring"></td>
+    <td><img src="assets/screens/herdr.png" alt="Coding agents in Herdr and their status"></td>
   </tr>
 </table>
 
@@ -93,7 +93,7 @@ cargo run -p nook -- check <mod folder>  # load a mod, report its views or its e
 cargo run -p nook -- shot island.png     # render the island to a PNG (--open, --mod <name>)
 ./scripts/bundle.sh                      # target/openNook.app
 ./scripts/installer.sh                   # target/openNook-<version>.dmg
-./scripts/screens.sh                     # re-render docs/screens
+./scripts/screens.sh                     # re-render assets/screens
 ```
 
 Now Playing uses [mediaremote-adapter](https://github.com/ungive/mediaremote-adapter) on

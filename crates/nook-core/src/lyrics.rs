@@ -17,7 +17,7 @@ const LRCLIB_BASE: &str = "https://lrclib.net";
 const CLIENT_ID: &str = concat!(
     "openNook/",
     env!("CARGO_PKG_VERSION"),
-    " (https://github.com/prodBirdy/openNook-gpui)"
+    " (https://github.com/prodBirdy/openNook)"
 );
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(8);
 const MAX_BODY_BYTES: usize = 256 * 1024;

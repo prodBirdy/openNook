@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Renders the README / launch-page screenshots into docs/screens with `opennook shot`.
+# Renders the README / launch-page screenshots into assets/screens with `opennook shot`.
 # Each shot gets its own throwaway OPENNOOK_HOME, so your config is never read or written and
 # shots don't race on a shared workspace. Live data (weather, ISS, Herdr agents, Now Playing)
 # is whatever this Mac sees right now: check the agent list before committing.
@@ -7,7 +7,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 BIN="${BIN:-$ROOT/target/release/opennook}"
-OUT="$ROOT/docs/screens"
+OUT="$ROOT/assets/screens"
 [[ -x "$BIN" ]] || cargo build -p nook --release
 mkdir -p "$OUT"
 
