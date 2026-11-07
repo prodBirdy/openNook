@@ -66,7 +66,13 @@ fi
 # A Developer ID identity, if present, is used instead.
 if security find-identity -v -p codesigning 2>/dev/null | grep -q "Developer ID Application"; then
   IDENTITY="$(security find-identity -v -p codesigning | awk -F'\"' '/Developer ID Application/{print $2; exit}')"
-  codesign --force --options runtime --entitlements "$ENTITLEMENTS" --sign "$IDENTITY" "$APP"
+  # Notarization rejects any nested Mach-O not signed with Developer ID, hardened
+  # runtime and a secure timestamp, so sign the framework before the app seal.
+  FRAMEWORK="$APP/Contents/Resources/MediaRemoteAdapter.framework"
+  if [[ -d "$FRAMEWORK" ]]; then
+    codesign --force --options runtime --timestamp --sign "$IDENTITY" "$FRAMEWORK"
+  fi
+  codesign --force --options runtime --timestamp --entitlements "$ENTITLEMENTS" --sign "$IDENTITY" "$APP"
 else
   codesign --force --deep --sign - "$APP"
 fi

@@ -32,5 +32,15 @@ hdiutil create \
   "$DMG"
 
 rm -rf "$STAGE"
+
+if security find-identity -v -p codesigning 2>/dev/null | grep -q "Developer ID Application"; then
+  IDENTITY="$(security find-identity -v -p codesigning | awk -F'\"' '/Developer ID Application/{print $2; exit}')"
+  codesign --force --timestamp --sign "$IDENTITY" "$DMG"
+  if [[ -n "${NOTARY_PROFILE:-}" ]]; then
+    xcrun notarytool submit "$DMG" --keychain-profile "$NOTARY_PROFILE" --wait
+    xcrun stapler staple "$DMG"
+  fi
+fi
+
 echo "installer: $DMG"
 ls -lh "$DMG"
