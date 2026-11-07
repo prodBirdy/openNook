@@ -92,12 +92,20 @@ export function appHome(): string;
 export function modDir(): string;
 /** "macos", "linux" or "windows". */
 export function platform(): string;
-/** Theme colors by token. */
+/** Theme colors by token, as the current theme resolves them. */
 export function theme(): Record<string, string>;
+/** Every theme `theme.set` can pick: the built-in ones, then `themes/*.json`. `current` is
+ *  the one layout.json names. */
+export function themes(): { name: string; builtin: boolean; current: boolean; colors: Record<string, string> }[];
 
 /**
  * Runs an openNook command (fire and forget):
  * - island.expand, island.collapse, island.toggle, island.select {mod}, island.peek {mod?, ms?}
+ * - theme.set {name?, colors?}: pick a theme (see themes()) and/or override tokens
+ *   (`{ accent: "#ff9f0a", island: null }`, null drops an override). Saved to layout.json.
+ * - layout.patch {patch}: merges `patch` into layout.json (a JSON merge patch: objects merge,
+ *   null deletes, anything else replaces). Saved; a patch that would break the layout is refused
+ *   and logged. `{ patch: { island: { style: { expandedRadius: 24 } } } }`
  * - media.toggle, media.play, media.pause, media.next, media.previous, media.seek {seconds},
  *   media.shuffle, media.repeat
  * - agents.focus {pid}, agents.reveal {cwd}

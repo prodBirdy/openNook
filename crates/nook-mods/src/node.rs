@@ -149,6 +149,65 @@ pub struct Activity {
     pub width: Option<f32>,
 }
 
+/// How the island itself looks: layout.json's `island.style`, and a mod's `style()` over it
+/// while that mod owns the island. Colors are theme tokens or hex; unset fields fall through.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
+#[serde(default, deny_unknown_fields, rename_all = "camelCase")]
+pub struct IslandStyle {
+    /// The body's color (default: the `island` token).
+    pub fill: Option<String>,
+    /// Top and bottom colors, in place of `fill`.
+    pub gradient: Option<(String, String)>,
+    pub border: Option<Stroke>,
+    /// A soft light around the island.
+    pub glow: Option<Glow>,
+    /// Bottom corners of the closed island (default 14) and the open one (default 36).
+    pub compact_radius: Option<f32>,
+    pub expanded_radius: Option<f32>,
+    /// The concave fillets joining the flat top to the screen edge (default 14, 0 for none).
+    pub wings: Option<f32>,
+    /// The open island's drop shadow (default true).
+    pub shadow: Option<bool>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct Stroke {
+    pub width: f32,
+    pub color: String,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct Glow {
+    pub color: String,
+    #[serde(default = "Glow::default_radius")]
+    pub radius: f32,
+}
+
+impl Glow {
+    fn default_radius() -> f32 {
+        18.0
+    }
+}
+
+impl IslandStyle {
+    /// This style with `base` filling what it leaves unset.
+    pub fn over(&self, base: &IslandStyle) -> IslandStyle {
+        IslandStyle {
+            // A fill replaces the base's gradient and a gradient the base's fill.
+            fill: self.fill.clone().or_else(|| if self.gradient.is_some() { None } else { base.fill.clone() }),
+            gradient: self.gradient.clone().or_else(|| if self.fill.is_some() { None } else { base.gradient.clone() }),
+            border: self.border.clone().or_else(|| base.border.clone()),
+            glow: self.glow.clone().or_else(|| base.glow.clone()),
+            compact_radius: self.compact_radius.or(base.compact_radius),
+            expanded_radius: self.expanded_radius.or(base.expanded_radius),
+            wings: self.wings.or(base.wings),
+            shadow: self.shadow.or(base.shadow),
+        }
+    }
+}
+
 impl Node {
     /// Every node in the tree, depth first (for checks and tests).
     pub fn walk(&self, f: &mut impl FnMut(&Node)) {

@@ -11,7 +11,7 @@ mod ops;
 mod store;
 mod watch;
 
-pub use node::{Activity, Node};
+pub use node::{Activity, Glow, IslandStyle, Node, Stroke};
 pub use ops::user_path;
 pub use store::Store;
 
@@ -57,6 +57,8 @@ pub struct Output {
     /// Its page in the open island, if it has one.
     pub expanded: Option<Node>,
     pub has_expanded: bool,
+    /// `style()`: how the island looks while this mod owns it.
+    pub style: Option<IslandStyle>,
     pub error: Option<String>,
 }
 

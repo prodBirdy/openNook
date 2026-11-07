@@ -17,7 +17,8 @@ exactly the parts you have; nothing about them is special.
 |---|---|---|
 | `mods/<name>/main.js` | a mod: what it shows closed (`activity`) and open (`expanded`) | live |
 | `mods/<name>/mod.json` | its title, tab icon (`"app:<bundle id>"` for an app's own icon, or `"./icon.png"`: see Tab icons), default props | live |
-| `layout.json` | which mod wins the closed island, page order, hidden mods, props, theme, island size | live |
+| `layout.json` | which mod wins the closed island, page order, hidden mods, props, theme, the island's size and look | live |
+| `themes/<name>.json` | your own themes: tokens, optionally over a `"base"` theme | live |
 | `nook.d.ts`, `ui.d.ts` | the API, exactly. Read them; they're the truth | — |
 | `mods/<name>.error` | why that mod is broken; present only while it is | written by openNook |
 | `layout.error` | why layout.json was rejected | written by openNook |
@@ -142,9 +143,10 @@ of replacing the element. Ids only need to be unique within the mod.
 .absolute_fill()` (over the parent; earlier children draw under later ones), and
 `.when(cond, el => …)`.
 
-Colors are hex (`"#ff9f0a"`, `"#ffffff80"`) or theme tokens: `fg`, `muted`, `faint`, `bg`,
-`surface`, `raised`, `border`, `accent`, `green`, `yellow`, `orange`, `red`, `blue`, `purple`.
-The island is black; design for dark. Prefer tokens, so a theme change restyles every mod.
+Colors are hex (`"#ff9f0a"`, `"#ffffff80"`) or theme tokens: `island` (the island's own
+body), `fg`, `muted`, `faint`, `bg`, `surface`, `raised`, `border`, `accent`, `green`,
+`yellow`, `orange`, `red`, `blue`, `purple`. Themes are all dark; design for dark. Prefer
+tokens, so a theme change restyles every mod.
 
 Images: `image("https://…")`, an absolute path, `"./cover.png"` (the mod's folder),
 `"data:image/png;base64,…"`, `"app:<bundle id>"` (that app's icon), or `media().artwork`.
@@ -180,6 +182,39 @@ layer it with `.absolute_fill()` under content. `.fps(0)` draws one still frame.
 that doesn't compile draws nothing; `opennook check` prints the compiler's error with the
 line. The `weather` mod's `scene.wgsl` is a full example (twelve skies).
 
+### The island's look
+
+The island itself can change too, not just what's in it: its color or gradient, a border, a
+glow, how round its corners are, the wings that join it to the screen edge, its shadow. Three
+ways, from lasting to momentary:
+
+- **Theme** (`layout.json` `"theme"`): every color token. Built in: `default`, `graphite`,
+  `midnight`, `ember`, `forest`, `rose`; add your own as `themes/<name>.json`
+  (`{ "base": "midnight", "accent": "#c792ea" }`). `"theme": "ember"` picks one;
+  `"theme": { "base": "ember", "accent": "#ffffff" }` overrides tokens over it.
+- **Look** (`layout.json` `island.style`): the island's shape and paint for every mod.
+- **A mod's `style()`**: the same fields, while that mod owns the island (its activity is
+  the closed island's, or its page is open), over `island.style`. A CI mod can turn the
+  closed island red with an orange glow while a build fails, and return `null` once it's fixed.
+
+```js
+style() {
+  return this.failing ? { gradient: ["#000000", "#3a0a0a"], border: { width: 1, color: "red" }, glow: { color: "#ff453a88", radius: 22 } } : null;
+}
+```
+
+Fields (`IslandStyle` in `ui.d.ts`): `fill`, `gradient: [top, bottom]`, `border: { width,
+color }`, `glow: { color, radius }`, `compactRadius` (closed corners, at most the camera's
+height), `expandedRadius` (open, up to 60), `wings` (0–24, 0 for none), `shadow` (the open
+island's drop shadow). The top edge stays flat against the screen's, and the camera housing
+is black whatever the island's color, so keep `island` dark enough to sit around it. A border runs down
+the sides and round the bottom, not along the screen edge. Liquid Glass ignores `fill` and
+`gradient`.
+
+A mod can also change these for good with `run("theme.set", { name, colors })` and
+`run("layout.patch", { patch })` (below); `themes()` lists every theme with its colors.
+Change the look when someone asks for it, not on your own.
+
 ### Data and commands (`nook`, full list in `nook.d.ts`)
 
 - `media()`: the playing track or null. `elapsed` is as of `sampledAt`; advance it yourself
@@ -206,7 +241,10 @@ line. The `weather` mod's `scene.wgsl` is a full example (twelve skies).
 - `run(command, args)`: `island.expand`, `island.collapse`, `island.toggle`,
   `island.select {mod}`, `island.peek {mod?, ms?}` (open briefly, e.g. when something
   finishes), `media.toggle/next/previous/seek {seconds}/shuffle/repeat`, `agents.focus {pid}`,
-  `agents.reveal {cwd}`, `open {target}` (URL, file or folder).
+  `agents.reveal {cwd}`, `open {target}` (URL, file or folder), `theme.set {name?, colors?}`
+  (pick a theme, override tokens; null drops one), `layout.patch {patch}` (a JSON merge patch
+  into layout.json: objects merge, null deletes). Both are saved and apply within a second; a
+  refused one is written to `logs/<name>.log`.
 - `props()`: layout.json's `mods.<name>.props`, else mod.json's `props`.
 - `shared(key)`, `setShared(key, value)`: values every mod sees (setting re-renders readers).
 - Globals: `localStorage` (per mod), `console.log` (to `logs/<name>.log`), `fetch`.
@@ -237,7 +275,7 @@ the closed island belongs to whatever is happening now.
   "expanded": ["now-playing", "weather", "herdr"],
   "hidden": [],
   "mods": { "herdr": { "props": { "peekOnBlocked": false } } },
-  "theme": { "accent": "#ff9f0a" }
+  "theme": { "base": "midnight", "accent": "#ff9f0a" }
 }
 ```
 
@@ -256,6 +294,9 @@ the closed island belongs to whatever is happening now.
 - `island.glass`: Liquid Glass under the open island (always off with Reduce Transparency).
   `glassTint` is how far the black veil reaches down from the camera: 0 bare glass, 0.5 the
   camera band, 1 twice that.
+- `island.style`: the island's look for every mod (see The island's look):
+  `{ "border": { "width": 1, "color": "border" }, "expandedRadius": 24, "wings": 0 }`.
+- `theme`: a theme's name, or `{ "base": "<name>", "<token>": "<color>" }`.
 
 ## Check before you finish
 

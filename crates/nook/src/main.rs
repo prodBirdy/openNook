@@ -117,6 +117,7 @@ fn prepare() -> (Island, Arc<Store>) {
     let mut island = Island::new(Notch::detect(layout.island.display), layout);
     island.notes = notes;
     let store: Arc<Store> = Arc::default();
+    store.publish("themes", theme::list(&home::app_dir(), &layout_theme(&raw)));
     store.publish("layout", raw);
     store.publish("theme", island.theme.to_json());
     // check and shot never start the overlay that republishes it; mods still need its size.
@@ -282,6 +283,10 @@ fn no_location(store: &Store) {
     store.publish("location", setting.place().unwrap_or_else(|| serde_json::json!({ "error": "No location in check and shot; set a place in Settings › General › Location to try it here." })));
 }
 
+fn layout_theme(raw: &Value) -> Value {
+    raw.get("theme").cloned().unwrap_or(Value::Null)
+}
+
 fn flag(args: &[String], name: &str) -> Option<String> {
     args.iter().position(|a| a == name).and_then(|i| args.get(i + 1).cloned())
 }
@@ -295,10 +300,11 @@ fn check(args: &[String]) -> i32 {
     let _ = home::write_workspace();
     services::start_core();
     let store: Arc<Store> = Arc::default();
-    if let Ok((_, raw)) = home::read_layout(&home::app_dir()) {
-        store.publish("layout", raw);
-    }
-    store.publish("theme", theme::Theme::default().to_json());
+    let raw = home::read_layout(&home::app_dir()).map(|(_, raw)| raw).unwrap_or(Value::Null);
+    let (theme, _) = theme::Theme::resolve(&layout_theme(&raw), &home::app_dir());
+    store.publish("theme", theme.to_json());
+    store.publish("themes", theme::list(&home::app_dir(), &layout_theme(&raw)));
+    store.publish("layout", raw);
     services::start(store.clone());
     services::start_agents(store.clone());
     no_location(&store);

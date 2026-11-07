@@ -34,6 +34,7 @@ pub fn config() -> nook_mods::Config {
 pub fn write_workspace() -> std::io::Result<Vec<String>> {
     let dir = app_dir();
     std::fs::create_dir_all(dir.join("mods"))?;
+    std::fs::create_dir_all(dir.join("themes"))?;
     let icons: Vec<&str> = crate::icons::names().collect();
     let guide = AGENTS_MD.replace("{{ICONS}}", &icons.join(", "));
     write_if_changed(&dir.join("AGENTS.md"), guide)?;
@@ -126,11 +127,13 @@ pub struct IslandOptions {
     /// band, 1 twice that.
     #[serde(rename = "glassTint")]
     pub glass_tint: f32,
+    /// The island's own look: fill, gradient, border, glow, corners, wings, shadow.
+    pub style: nook_mods::IslandStyle,
 }
 
 impl Default for IslandOptions {
     fn default() -> Self {
-        Self { width: 560.0, hover: HoverMode::Peek, hover_delay_ms: 120, collapse_delay_ms: 200, glass: true, haptics: true, display: DisplayMode::Notch, hide_in_full_screen: true, glass_tint: 0.5 }
+        Self { width: 560.0, hover: HoverMode::Peek, hover_delay_ms: 120, collapse_delay_ms: 200, glass: true, haptics: true, display: DisplayMode::Notch, hide_in_full_screen: true, glass_tint: 0.5, style: Default::default() }
     }
 }
 
@@ -149,8 +152,9 @@ pub struct Layout {
     pub hidden: Vec<String>,
     /// Per mod: `{ "props": { … } }`.
     pub mods: Map<String, Value>,
-    /// Theme token overrides: `{ "accent": "#ff9f0a" }`.
-    pub theme: Map<String, Value>,
+    /// A theme's name (`"midnight"`, or `themes/<name>.json`'s), or tokens over one:
+    /// `{ "base": "midnight", "accent": "#ff9f0a" }` (no base: over the default).
+    pub theme: Value,
     /// Where mods' `location()` is: this Mac, or a place set in Settings.
     pub location: LocationSetting,
 }
@@ -206,6 +210,81 @@ pub fn read_layout(dir: &Path) -> Result<(Layout, Value), String> {
     result
 }
 
+/// When layout.json or a theme file last changed: either restyles the island.
 pub fn layout_stamp(dir: &Path) -> Option<std::time::SystemTime> {
-    std::fs::metadata(dir.join("layout.json")).and_then(|m| m.modified()).ok()
+    let modified = |p: &Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
+    let themes = std::fs::read_dir(dir.join("themes")).into_iter().flatten().flatten().filter_map(|e| modified(&e.path()));
+    // The folder's own time catches a theme being deleted.
+    modified(&dir.join("layout.json")).into_iter().chain(modified(&dir.join("themes"))).chain(themes).max()
+}
+
+/// Changes layout.json, read fresh so an edit in between isn't lost, and returns what it wrote.
+/// The layout watcher applies it.
+pub fn edit_layout(f: impl FnOnce(&mut Value)) -> Value {
+    let path = app_dir().join("layout.json");
+    let mut v: Value = std::fs::read_to_string(&path).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_else(|| serde_json::json!({}));
+    if !v.is_object() {
+        v = serde_json::json!({});
+    }
+    f(&mut v);
+    let _ = write_if_changed(&path, serde_json::to_string_pretty(&v).unwrap_or_default() + "\n");
+    v
+}
+
+/// A JSON merge patch (RFC 7386): objects merge key by key, null deletes, anything else
+/// replaces.
+pub fn merge_patch(target: &mut Value, patch: &Value) {
+    let Value::Object(patch) = patch else {
+        *target = patch.clone();
+        return;
+    };
+    if !target.is_object() {
+        *target = Value::Object(Map::new());
+    }
+    let map = target.as_object_mut().expect("an object");
+    for (k, v) in patch {
+        if v.is_null() {
+            map.remove(k);
+        } else {
+            merge_patch(map.entry(k.clone()).or_insert(Value::Null), v);
+        }
+    }
+}
+
+/// `layout.patch {patch}` from a mod: the patched layout.json, written, or why not.
+pub fn patch_layout(patch: &Value) -> Result<(), String> {
+    if !patch.is_object() {
+        return Err("layout.patch: `patch` must be an object".into());
+    }
+    let path = app_dir().join("layout.json");
+    let mut v: Value = std::fs::read_to_string(&path).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_else(|| serde_json::json!({}));
+    merge_patch(&mut v, patch);
+    serde_json::from_value::<Layout>(v.clone()).map_err(|e| format!("layout.patch: the result isn't a valid layout.json: {e}"))?;
+    edit_layout(move |l| *l = v);
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn merge_patch_merges_replaces_and_deletes() {
+        let mut v = json!({ "island": { "width": 560, "style": { "wings": 14 } }, "hidden": ["a"], "theme": "ember" });
+        merge_patch(&mut v, &json!({ "island": { "style": { "wings": null, "glow": { "color": "accent" } } }, "hidden": [], "theme": null }));
+        assert_eq!(v, json!({ "island": { "width": 560, "style": { "glow": { "color": "accent" } } }, "hidden": [] }));
+    }
+
+    #[test]
+    fn island_style_and_theme_names_parse() {
+        let l: Layout = serde_json::from_value(json!({
+            "island": { "style": { "fill": "#0a1022", "border": { "width": 1, "color": "accent" }, "compactRadius": 10, "wings": 0 } },
+            "theme": "midnight"
+        })).unwrap();
+        assert_eq!(l.island.style.compact_radius, Some(10.0));
+        assert_eq!(l.island.style.wings, Some(0.0));
+        assert_eq!(l.theme, json!("midnight"));
+        assert!(serde_json::from_value::<Layout>(json!({ "island": { "style": { "radius": 3 } } })).is_err());
+    }
 }

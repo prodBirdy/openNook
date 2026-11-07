@@ -150,6 +150,25 @@ export interface Activity {
   width?: number;
 }
 
+/** How the island itself looks. Colors are theme tokens or hex; what's unset falls through
+ *  to layout.json's `island.style`, then the defaults. */
+export interface IslandStyle {
+  /** The body's color (default: the `island` token). */
+  fill?: string;
+  /** Top and bottom colors, in place of `fill`. */
+  gradient?: [string, string];
+  border?: { width: number; color: string };
+  /** A soft light around the island; radius in points (default 18). */
+  glow?: { color: string; radius?: number };
+  /** Bottom corners: closed (default 14, at most the camera's height) and open (default 36). */
+  compactRadius?: number;
+  expandedRadius?: number;
+  /** The concave fillets into the screen edge (default 14, 0 for none, at most 24). */
+  wings?: number;
+  /** The open island's drop shadow (default true). */
+  shadow?: boolean;
+}
+
 /**
  * Base class of every mod: `export default class X extends View { … }`. All methods are
  * optional.
@@ -165,6 +184,9 @@ export class View {
    *  playing), "./icon.png" (drawn in colour, as an app icon), a built-in name or "./file.svg"
    *  (tinted glyphs). null keeps mod.json's. AGENTS.md › Tab icons says how they should look. */
   icon?(cx: Cx): string | null;
+  /** How the island looks while this mod owns it: its activity is the closed island's, or its
+   *  page is open. null leaves the look alone. Liquid Glass ignores fill and gradient. */
+  style?(cx: Cx): IslandStyle | null;
   /** Before the mod unloads (an edit, or openNook quitting). */
   unmount?(cx: Cx): void;
 }

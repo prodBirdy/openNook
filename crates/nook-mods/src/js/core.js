@@ -88,6 +88,7 @@ function renderSlot(view, slot) {
       if (extra.length) throw new TypeError(`activity() returns { leading, trailing, detail, priority, width }; unknown: ${extra.join(", ")}`);
       return { value: { leading: serialize(leading), trailing: serialize(trailing), detail: serialize(detail), priority: priority ?? 0, width: width ?? null } };
     }
+    if (slot === "style") return { value };
     return { value: serialize(value) };
   } catch (e) {
     return { error: `${slot}(): ${describe(e)}` };
@@ -109,7 +110,7 @@ globalThis.__nook_render = () => {
   if (typeof view.icon === "function") {
     try { icon = view.icon(cx) ?? null; } catch (e) { report("icon()", e); }
   }
-  return JSON.stringify({ activity: renderSlot(view, "activity"), expanded: renderSlot(view, "expanded"), icon: icon === null ? null : String(icon) });
+  return JSON.stringify({ activity: renderSlot(view, "activity"), expanded: renderSlot(view, "expanded"), style: renderSlot(view, "style"), icon: icon === null ? null : String(icon) });
 };
 
 globalThis.__nook_dispatch = (id, payloadJson) => {

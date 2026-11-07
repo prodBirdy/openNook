@@ -293,6 +293,10 @@ impl Engine {
                     Err(e) => errors.push(e),
                 }
                 m.last.has_expanded = !r.expanded.none;
+                match r.style.into_style() {
+                    Ok(v) => m.last.style = v,
+                    Err(e) => errors.push(e),
+                }
                 match r.expanded.into_value::<Node>("expanded") {
                     Ok(v) => m.last.expanded = v,
                     Err(e) => errors.push(e),
@@ -430,6 +434,8 @@ fn interrupted(e: String, budget: Duration) -> String {
 struct Rendered {
     activity: Slot,
     expanded: Slot,
+    #[serde(default = "Slot::absent")]
+    style: Slot,
     /// `icon()`: the tab icon for now, in place of mod.json's.
     #[serde(default)]
     icon: Option<String>,
@@ -446,6 +452,20 @@ struct Slot {
 }
 
 impl Slot {
+    fn absent() -> Self {
+        Self { none: true, value: None, error: None }
+    }
+
+    fn into_style(self) -> Result<Option<crate::IslandStyle>, String> {
+        if let Some(e) = self.error {
+            return Err(e);
+        }
+        match self.value {
+            None | Some(Value::Null) => Ok(None),
+            Some(v) => serde_json::from_value(v).map(Some).map_err(|e| format!("style(): {e}")),
+        }
+    }
+
     /// `Ok(None)`: the mod has no such view, or rendered nothing this time.
     fn into_value<T: serde::de::DeserializeOwned>(self, slot: &str) -> Result<Option<T>, String> {
         if let Some(e) = self.error {

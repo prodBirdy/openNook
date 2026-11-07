@@ -31,10 +31,13 @@ export const modDir = () => call("path", { which: "mod" });
 export const platform = () => call("path", { which: "platform" });
 /** The theme's colors by token. */
 export const theme = () => read("theme") ?? {};
+/** Every theme theme.set can pick: [{ name, builtin, current, colors }]. */
+export const themes = () => read("themes") ?? [];
 
 /**
  * Runs an openNook command (fire and forget):
  *   island.expand, island.collapse, island.toggle, island.select {mod}, island.peek {mod?, ms?}
+ *   theme.set {name?, colors?}, layout.patch {patch}   (saved to layout.json)
  *   media.toggle, media.play, media.pause, media.next, media.previous, media.seek {seconds},
  *   media.shuffle, media.repeat
  *   agents.focus {pid}, agents.reveal {cwd}

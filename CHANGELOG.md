@@ -30,12 +30,18 @@ that you or a coding agent edit while it runs. macOS only for now.
   yours, and About, plus a first-run welcome.
 - Gestures: hover to peek, click or two-finger swipe down to open, swipe sideways for pages.
 - Location: this Mac's, or a place set once in Settings; mods read it with `location()`.
+- The island's look is moddable, as in Herdr: themes (built-in `graphite`, `midnight`,
+  `ember`, `forest`, `rose`, or your own `themes/*.json`, picked in Settings › General),
+  `island.style` in layout.json (fill or gradient, border, glow, corner radii, wings, shadow),
+  and a mod's `style()` that restyles the island while it owns it. Mods can save changes with
+  `run("theme.set")` and `run("layout.patch")`, and list themes with `themes()`.
 
 ### Changed
 
 - Full-screen detection asks for the display's Space type, so the island hides correctly on
   notched displays.
 - The app asks only for what it uses: System Audio Recording, Location and Automation.
+- The open island's drop shadow shows again: the island clipped its own shadows away.
 
 ### Removed
 

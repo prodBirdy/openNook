@@ -220,3 +220,41 @@ fn tail_follows_appended_lines() {
     let out = recorder.outputs.lock().unwrap().last().cloned().unwrap();
     assert_eq!(out.expanded.unwrap().v.as_deref(), Some("a,b"));
 }
+
+#[test]
+fn style_reaches_the_output_and_a_bad_one_is_reported() {
+    let app = temp("style");
+    let dir = write_mod(&app, "glow", r##"
+        import { View, text } from "nook/ui";
+        export default class Glow extends View {
+          activity() { return { trailing: text("!") }; }
+          style() { return { glow: { color: "orange" }, border: { width: 1, color: "#ff9f0a" }, compactRadius: 10 }; }
+        }
+    "##);
+    let out = run_check(&app, dir, Arc::default(), 0).output;
+    assert_eq!(out.error, None);
+    let style = out.style.unwrap();
+    assert_eq!(style.glow.unwrap(), Glow { color: "orange".into(), radius: 18.0 });
+    assert_eq!(style.border.unwrap().width, 1.0);
+    assert_eq!(style.compact_radius, Some(10.0));
+
+    let dir = write_mod(&app, "typo", r#"
+        import { View } from "nook/ui";
+        export default class Typo extends View { style() { return { colour: "red" }; } }
+    "#);
+    let out = run_check(&app, dir, Arc::default(), 0).output;
+    assert!(out.style.is_none());
+    assert!(out.error.unwrap().contains("style(): unknown field `colour`"));
+}
+
+#[test]
+fn a_style_fills_in_from_its_base() {
+    let base = IslandStyle { fill: Some("#111111".into()), compact_radius: Some(14.0), shadow: Some(false), ..Default::default() };
+    let over = IslandStyle { gradient: Some(("blue".into(), "purple".into())), compact_radius: Some(8.0), ..Default::default() };
+    let s = over.over(&base);
+    // A gradient replaces the base's fill rather than sitting beside it.
+    assert_eq!(s.fill, None);
+    assert_eq!(s.gradient, Some(("blue".into(), "purple".into())));
+    assert_eq!(s.compact_radius, Some(8.0));
+    assert_eq!(s.shadow, Some(false));
+}

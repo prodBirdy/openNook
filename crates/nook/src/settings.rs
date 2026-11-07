@@ -152,14 +152,7 @@ impl Settings {
 
     /// Changes layout.json (read fresh, so an agent's edit in between isn't lost).
     fn edit_layout(&mut self, f: impl FnOnce(&mut Value)) {
-        let path = home::app_dir().join("layout.json");
-        let mut v: Value = std::fs::read_to_string(&path).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_else(|| json!({}));
-        if !v.is_object() {
-            v = json!({});
-        }
-        f(&mut v);
-        let _ = nook_mods::files::write_if_changed(&path, serde_json::to_string_pretty(&v).unwrap_or_default() + "\n");
-        self.layout = v;
+        self.layout = home::edit_layout(f);
     }
 
     fn set_island(&mut self, key: &str, value: Value) {
@@ -522,10 +515,39 @@ fn general(s: &Settings) -> El {
         .child(location(s))
         .child(label("Look", 13.0, 600.0, c::muted()).ml(4.0))
         .child(card(vec![
+            theme_choice(s),
             toggle("glass", "gem", "Liquid Glass", Some("Glass under the open island (off with Reduce Transparency)"), glass, move |s| s.set_island("glass", Value::from(!glass))),
             setting("tint", "droplets", "Black at the top", Some("How far the black reaches down over the glass"), slider("tint", tint, |s, v, _| s.set_island("glassTint", json!((v * 100.0).round() / 100.0)))),
             setting("width", "grip-vertical", "Open width", Some(&format!("{} points", width.round())), slider("width", (width - 460.0) / 300.0, |s, v, _| s.set_island("width", json!((460.0 + v * 300.0).round())))),
         ]))
+}
+
+/// The theme layout.json names: the built-in ones and `themes/*.json`. Picking one drops
+/// token overrides, as `theme.set {name}` does.
+fn theme_choice(s: &Settings) -> El {
+    let dir = home::app_dir();
+    let current = crate::theme::current_name(s.layout.get("theme").unwrap_or(&Value::Null));
+    let options: Vec<(String, String)> = crate::theme::names(&dir).into_iter().map(|n| {
+        let mut title = n.replace(['-', '_'], " ");
+        if let Some(first) = title.get_mut(0..1) {
+            first.make_ascii_uppercase();
+        }
+        (n, title)
+    }).collect();
+    let shown = options.iter().find(|(id, _)| *id == current).map_or_else(|| current.clone(), |(_, t)| t.clone());
+    let end = row().key("theme/value").gap(6.0).items_center()
+        .child(label(shown, 14.5, 600.0, c::fg()))
+        .child(glyph("chevron-right", 14.0, c::muted()));
+    setting("theme", "palette", "Theme", Some("Colors for the island and every mod"), end).hover(c::hover())
+        .on_press_tx(move |_: &mut Settings, tx: &mut Tx| {
+            let menu = PopupMenu::picker(options.clone(), &current);
+            tx.popup_menu(menu, "theme/value", |s: &mut Settings, picked, _| {
+                if let Some(name) = picked {
+                    let name = name.to_owned();
+                    s.edit_layout(move |l| l["theme"] = crate::theme::set(&l["theme"], Some(&name), None));
+                }
+            });
+        })
 }
 
 /// Where Weather, the World Clock and the ISS map put you: this Mac's location, or a place

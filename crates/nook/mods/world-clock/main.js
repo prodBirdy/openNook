@@ -103,38 +103,51 @@ export default class WorldClock extends View {
     const h = Math.round((w * (TOP - BOTTOM)) / 360);
     const map = div().id("map").w_full().h(h).rounded(18).clip().bg("#05070b")
       .child(shader("./map.wgsl", [s.dec, s.lon, TOP, BOTTOM]).id("world").absolute_fill().fps(0));
-    // Labels go beside their pins, moving up or down a row when one would cover another.
-    const LABEL_H = 22;
+    // Each label sits against its pin: beside it, above or below it, or off a corner, the
+    // first spot that covers no pin and no label already placed (else the one covering least).
+    const LABEL_H = 20, GAP = 6, EDGE = 4;
     const at = (c) => [((c.lon + 180) / 360) * w, ((TOP - c.lat) / (TOP - BOTTOM)) * h];
     // Your place, unless a city of yours is the same place.
     const here = this.here();
     const same = (c) => here && (c.name.toLowerCase() === here.name.toLowerCase() || (Math.abs(c.lat - here.lat) < 0.3 && Math.abs(c.lon - here.lon) < 0.3));
     const cities = here ? [...this.cities.filter((c) => !same(c)), here] : this.cities;
-    // Every pin is in the way of every label; placed labels join them.
-    const placed = cities.map((c) => { const [x, y] = at(c); return { left: x - 5, top: y - 5 - (LABEL_H - 10), width: 10, pin: true }; });
+    const placed = cities.map((c) => { const [x, y] = at(c); return { x: x - 5, y: y - 5, w: 10, h: 10, of: c }; });
+    const overlap = (a, b) => Math.max(0, Math.min(a.x + a.w, b.x + b.w) - Math.max(a.x, b.x) + 2) * Math.max(0, Math.min(a.y + a.h, b.y + b.h) - Math.max(a.y, b.y) + 2);
     const pins = [];
     for (const c of [...cities].sort((a, b) => a.lon - b.lon)) {
       const [x, y] = at(c);
       const time = this.time(c, now);
-      const width = (c.name.length + time.length) * 6.6 + 22 + (c.here ? 14 : 0);
-      const right = x + 7 + width > w - 4;
-      const left = right ? x - 7 - width : x + 7;
-      let top = y - LABEL_H / 2;
-      for (const shift of [0, -LABEL_H - 2, LABEL_H + 2, -2 * (LABEL_H + 2), 2 * (LABEL_H + 2)]) {
-        const t = Math.min(Math.max(y - LABEL_H / 2 + shift, 4), h - LABEL_H - 4);
-        const clear = (p) => left + width < p.left || left > p.left + p.width || t + LABEL_H < p.top || t > p.top + LABEL_H;
-        // Its own pin sits beside it, never under it.
-        if (placed.every((p) => clear(p) || (p.pin && Math.abs(p.left + 5 - x) < 0.5))) {
-          top = t;
-          break;
-        }
+      // No text measuring here: a generous guess, and the pill inside keeps to its text.
+      const lw = (c.name.length + time.length) * 6.6 + 19 + (c.here ? 15 : 0);
+      const mid = Math.min(Math.max(x - lw / 2, EDGE), w - EDGE - lw);
+      const spots = [
+        { x: x + GAP, y: y - LABEL_H / 2, align: "start" },
+        { x: x - GAP - lw, y: y - LABEL_H / 2, align: "end" },
+        { x: mid, y: y - GAP - LABEL_H, align: "center" },
+        { x: mid, y: y + GAP, align: "center" },
+        { x: x + 2, y: y - 4 - LABEL_H, align: "start" },
+        { x: x + 2, y: y + 4, align: "start" },
+        { x: x - 2 - lw, y: y - 4 - LABEL_H, align: "end" },
+        { x: x - 2 - lw, y: y + 4, align: "end" },
+      ].filter((s) => s.x >= EDGE && s.x + lw <= w - EDGE && s.y >= EDGE && s.y + LABEL_H <= h - EDGE);
+      let best = null, least = Infinity;
+      for (const s of spots) {
+        const box = { x: s.x, y: s.y, w: lw, h: LABEL_H };
+        const cost = placed.reduce((sum, p) => sum + (p.of === c ? 0 : overlap(box, p)), 0);
+        if (cost < least) [best, least] = [s, cost];
+        if (!cost) break;
       }
-      placed.push({ left, top, width });
-      const label = row().gap(5).px(7).py(3).rounded(7).bg("#000000b3")
+      best ??= { x: mid, y: Math.min(Math.max(y - LABEL_H / 2, EDGE), h - EDGE - LABEL_H), align: "center" };
+      placed.push({ x: best.x, y: best.y, w: lw, h: LABEL_H });
+      const pill = row().gap(5).px(7).py(3).rounded(7).bg("#000000b3")
         .when(c.here, (r) => r.child(icon("map-pin", 10).color("blue")))
         .child(text(c.name).text_size(11).font_semibold())
         .child(text(time).text_size(11).text_color("muted").tabular_nums());
-      map.child(label.id(`label-${c.query}`).pin(right ? null : left, top, right ? w - x + 7 : null, null));
+      const slot = row().w(lw).h(LABEL_H).child(pill);
+      if (best.align === "start") slot.justify_start();
+      else if (best.align === "end") slot.justify_end();
+      else slot.justify_center();
+      map.child(slot.id(`label-${c.query}`).pin(best.x, best.y, null, null));
       pins.push(div().id(`pin-${c.query}`).size(7).rounded_full().bg(c.here ? "blue" : "fg").border(1.5, "#000000").pin(x - 3.5, y - 3.5, null, null));
     }
     // Pins over labels: a pin always shows.

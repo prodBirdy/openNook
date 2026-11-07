@@ -9,7 +9,7 @@ use crate::home::{DisplayMode, HoverMode, Layout};
 use crate::images::Images;
 use crate::render::{self, Rcx};
 use crate::theme::Theme;
-use nook_mods::{Mods, Output};
+use nook_mods::{IslandStyle, Mods, Output};
 use rune::tok::TextStyle;
 use rune::{Color, Cx, El, PopupItem, PopupMenu, Spring, SpringPair, SystemMaterial, Transition, Tx, WheelEvent, col, el, icon, row, spacer, text};
 use serde_json::{Value, json};
@@ -31,10 +31,13 @@ const SLIDE_X: f32 = 14.0;
 /// Motion blur on swapping content, in points (1.x smeared up to 7 px along the travel).
 const SWAP_BLUR: f32 = 3.0;
 
-/// The concave fillets joining the island's flat top to the screen edge.
+/// The concave fillets joining the island's flat top to the screen edge: their size by default
+/// and at most (the canvas leaves room for the largest, so a style change never resizes it).
 const WING: f32 = 14.0;
+const MAX_WING: f32 = 24.0;
 const COMPACT_RADIUS: f32 = 14.0;
 const EXPANDED_RADIUS: f32 = 36.0;
+const MAX_EXPANDED_RADIUS: f32 = 60.0;
 /// Hover peek: the closed island leans out this much, and grows a chin under the camera.
 const PEEK_EXTRA: f32 = 88.0;
 const PEEK_CHIN: f32 = 11.0;
@@ -145,7 +148,7 @@ pub struct Island {
 impl Island {
     pub fn new(notch: Notch, layout: Layout) -> Self {
         share_options(&layout.island);
-        let theme = Theme::with_overrides(Some(&layout.theme));
+        let (theme, problem) = Theme::resolve(&layout.theme, &crate::home::app_dir());
         Self {
             mods: None,
             outputs: BTreeMap::new(),
@@ -165,14 +168,14 @@ impl Island {
             compact_choice: None,
             swipe: Swipe::default(),
             reduce_transparency: crate::platform::reduce_transparency(),
-            notes: Vec::new(),
+            notes: problem.into_iter().collect(),
             quit: false,
             open_settings: None,
         }
     }
 
     pub fn canvas_w(&self) -> f32 {
-        self.open_w() + 2.0 * (SHADOW_ROOM + WING)
+        self.open_w() + 2.0 * (SHADOW_ROOM + MAX_WING)
     }
 
     fn open_w(&self) -> f32 {
@@ -336,14 +339,32 @@ impl Island {
 
     pub fn set_layout(&mut self, layout: Layout, raw: Value) {
         share_options(&layout.island);
-        self.theme = Theme::with_overrides(Some(&layout.theme));
-        self.layout = layout;
-        self.reduce_transparency = crate::platform::reduce_transparency();
+        let dir = crate::home::app_dir();
+        let (theme, problem) = Theme::resolve(&layout.theme, &dir);
+        if let Some(p) = problem {
+            log::warn!("{p}");
+            if !self.notes.contains(&p) {
+                self.notes.push(p);
+            }
+        }
+        self.theme = theme;
         if let Some(m) = &self.mods {
             m.publish("layout", raw);
             m.publish("theme", self.theme.to_json());
+            m.publish("themes", crate::theme::list(&dir, &layout.theme));
         }
+        self.layout = layout;
+        self.reduce_transparency = crate::platform::reduce_transparency();
         self.publish();
+    }
+
+    /// The look now: the style of the mod that owns what's shown (the closed island's activity,
+    /// or the open page) over layout.json's, with the defaults under both.
+    pub fn look(&self) -> Look {
+        let owner = if self.expanded { self.page() } else { self.active() };
+        let base = &self.layout.island.style;
+        let style = owner.and_then(|o| o.style.as_ref()).map_or_else(|| base.clone(), |s| s.over(base));
+        Look::of(&style, &self.theme, self.notch.h)
     }
 
     /// The island's state for mods (`island()`).
@@ -395,6 +416,29 @@ impl Island {
                 }
                 self.set_expanded(true);
             }
+            "theme.set" => {
+                let dir = crate::home::app_dir();
+                let name = arg("name");
+                if let Some(n) = name.as_deref().filter(|n| !crate::theme::exists(&dir, n)) {
+                    refused(from, &format!("theme.set: no theme named {n:?} (themes: {})", crate::theme::names(&dir).join(", ")));
+                    return;
+                }
+                let colors = args.get("colors").and_then(Value::as_object);
+                crate::home::edit_layout(|l| {
+                    let next = crate::theme::set(&l["theme"], name.as_deref(), colors);
+                    match next {
+                        Value::Null => {
+                            l.as_object_mut().map(|m| m.remove("theme"));
+                        }
+                        v => l["theme"] = v,
+                    }
+                });
+            }
+            "layout.patch" => {
+                if let Err(e) = crate::home::patch_layout(args.get("patch").unwrap_or(&Value::Null)) {
+                    refused(from, &e);
+                }
+            }
             "app.quit" => {
                 self.quit = true;
                 tx.quit();
@@ -418,6 +462,48 @@ impl Island {
             self.left_at = Some(Instant::now());
             tx.wake_after(Duration::from_millis(self.layout.island.collapse_delay_ms));
         }
+    }
+}
+
+/// A command a mod asked for that can't be done: in the app's log and the mod's, where its
+/// author looks.
+fn refused(from: &str, why: &str) {
+    log::warn!("{from}: {why}");
+    nook_mods::files::log(&crate::home::config().logs, from, "error", why);
+}
+
+/// The island's look, resolved: colors from the theme, sizes within what the canvas holds.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Look {
+    pub fill: Color,
+    pub gradient: Option<(Color, Color)>,
+    pub border: Option<(f32, Color)>,
+    pub glow: Option<(f32, Color)>,
+    pub compact_radius: f32,
+    pub expanded_radius: f32,
+    pub wings: f32,
+    pub shadow: bool,
+}
+
+impl Look {
+    fn of(s: &IslandStyle, t: &Theme, notch_h: f32) -> Self {
+        Self {
+            fill: t.color(s.fill.as_deref().unwrap_or("island")),
+            gradient: s.gradient.as_ref().map(|(top, bottom)| (t.color(top), t.color(bottom))),
+            border: s.border.as_ref().filter(|b| b.width > 0.0).map(|b| (b.width.min(6.0), t.color(&b.color))),
+            // The glow can't reach past the room left for the open island's shadow.
+            glow: s.glow.as_ref().filter(|g| g.radius > 0.0).map(|g| (g.radius.min(SHADOW_ROOM), t.color(&g.color))),
+            // A closed island's corners can't be rounder than it is tall.
+            compact_radius: s.compact_radius.unwrap_or(COMPACT_RADIUS).clamp(0.0, notch_h),
+            expanded_radius: s.expanded_radius.unwrap_or(EXPANDED_RADIUS).clamp(0.0, MAX_EXPANDED_RADIUS),
+            wings: s.wings.unwrap_or(WING).clamp(0.0, MAX_WING),
+            shadow: s.shadow.unwrap_or(true),
+        }
+    }
+
+    /// The color along the top edge, where the wings meet the body.
+    fn top(&self) -> Color {
+        self.gradient.map_or(self.fill, |(top, _)| top)
     }
 }
 
@@ -512,23 +598,28 @@ fn swap(dx: f32, dy: f32) -> Transition {
 /// the left, mirrored on the right): a square, clear inside the quarter circle at its outer
 /// bottom corner. A plain rect with a gradient, so it rides the island's edge exactly while it
 /// springs. Purely paint; it takes no clicks.
-fn wing(left: bool, color: Color) -> El {
+fn wing(left: bool, color: Color, size: f32) -> El {
+    if size <= 0.0 {
+        return el().size(0.0, 0.0);
+    }
     let clear = color.alpha(0.0);
     let center = if left { [0.0, 1.0] } else { [1.0, 1.0] };
     // Half a point of feather on the curve.
-    let edge = 1.0 - 0.5 / WING;
-    el().size(WING, WING).radial_gradient(center, WING, [(0.0, clear), (edge, clear), (1.0, color)])
+    let edge = 1.0 - 0.5 / size;
+    el().size(size, size).radial_gradient(center, size, [(0.0, clear), (edge, clear), (1.0, color)])
 }
 
 pub fn view(s: &Island, cx: &mut Cx<Island>) -> El {
-    let black = s.theme.color("island");
+    let look = s.look();
     let glass = s.expanded && s.glass();
     // Without a camera housing there's nothing to blend into: a resting island would be a
     // black block on the menu bar. It stays clear, a hover target, until it has something.
     let ghost = !s.notch.has && !s.expanded && !s.hover && s.swipe.pull == 0.0 && s.active().is_none();
-    let black = if ghost { black.alpha(0.0) } else { black };
-    let body = if s.expanded { expanded(s) } else { compact(s) };
-    let radius = if s.expanded { EXPANDED_RADIUS } else { COMPACT_RADIUS };
+    let fade = |c: Color| if ghost { c.alpha(0.0) } else { c };
+    let black = fade(look.fill);
+    let top = fade(look.top());
+    let body = if s.expanded { expanded(s, &look) } else { compact(s, &look) };
+    let radius = if s.expanded { look.expanded_radius } else { look.compact_radius };
     // The island is a row: wing, body, wing. The left wing rides the row's left edge (where
     // children ride) and the right one its trailing edge, so both stay attached through every
     // spring; the body moves on the same spring as the row. Beside the island as siblings, or
@@ -538,16 +629,18 @@ pub fn view(s: &Island, cx: &mut Cx<Island>) -> El {
         // The glass is the body's own: its native view follows the body's drawn rect through
         // the morph, under the veil (a separate sheet trailed it on a spring of its own).
         let height = cx.layout_size("island/body").map_or(200.0, |[_, h]| h);
-        body = body.fill(black.alpha(0.0)).linear_gradient(std::f32::consts::PI, veil(s, height));
+        body = body.fill(black.alpha(0.0)).linear_gradient(std::f32::consts::PI, veil(s, height, black));
         if glass {
-            body = body.system_material(SystemMaterial::Glass)
-                .border_gradient(1.0, Color::WHITE.alpha(0.0), Color::WHITE.alpha(RIM_ALPHA));
+            body = body.system_material(SystemMaterial::Glass);
+            if look.border.is_none() {
+                body = body.border_gradient(1.0, Color::WHITE.alpha(0.0), Color::WHITE.alpha(RIM_ALPHA));
+            }
         }
     } else {
         body = body.fill(black);
-    }
-    if s.expanded {
-        body = body.shadow(14.0, 40.0, Color { r: 0.0, g: 0.0, b: 0.0, a: 0.45 });
+        if let Some((t, b)) = look.gradient {
+            body = body.gradient(fade(t), fade(b));
+        }
     }
     let body = body.hit()
         .on_wheel(|s: &mut Island, e, tx| s.wheel(e, tx))
@@ -558,18 +651,34 @@ pub fn view(s: &Island, cx: &mut Cx<Island>) -> El {
             }
         })
         .on_secondary_press(|s: &mut Island, press, tx: &mut Tx| s.menu((press.x, press.y), tx));
+    // The body clips to its own shape, which would clip its outer shadows too: they go on a
+    // clear sheet behind it. Clear, so the glass still shows what's behind the island.
+    let mut shade = el().key("island/shade").motion(MORPH).pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0))
+        .corners([0.0, 0.0, radius, radius]).fill(Color::BLACK.alpha(0.0));
+    if let Some((r, c)) = look.glow.filter(|_| !ghost) {
+        shade = shade.shadow(0.0, r, c);
+    }
+    if s.expanded && look.shadow {
+        shade = shade.shadow(14.0, 40.0, Color { r: 0.0, g: 0.0, b: 0.0, a: 0.45 });
+    }
+    let mut frame = col().key("island/frame").motion(MORPH).child(shade).child(body);
+    if let Some((w, c)) = look.border.filter(|_| !ghost) {
+        // Over the body, and starting above the screen's edge: the flat top has no line, so
+        // the outline runs down the sides and round the bottom.
+        frame = frame.child(el().key("island/border").motion(MORPH).pin(Some(0.0), Some(-w), Some(0.0), Some(0.0))
+            .corners([0.0, 0.0, radius, radius]).border(w, c));
+    }
     let island = row().key("island").motion(MORPH).items_start()
-        .child(wing(true, black).key("wing/left"))
-        .child(body)
-        .child(wing(false, black).key("wing/right").ride_trailing());
+        .child(wing(true, top, look.wings).key("wing/left"))
+        .child(frame)
+        .child(wing(false, top, look.wings).key("wing/right").ride_trailing());
     col().w_full().h_full().items_center().child(island)
 }
 
 /// The veil over the glass, top to bottom: it holds black over the camera band and falls to
 /// clear. Closed it is black all the way down, so as the island opens its stops spring apart
 /// and the glass appears from the bottom up, on the island's own motion.
-fn veil(s: &Island, height: f32) -> [(f32, Color); 3] {
-    let black = s.theme.color("island");
+fn veil(s: &Island, height: f32, black: Color) -> [(f32, Color); 3] {
     if !s.expanded {
         return [(0.0, black), (0.5, black), (1.0, black)];
     }
@@ -578,7 +687,7 @@ fn veil(s: &Island, height: f32) -> [(f32, Color); 3] {
     [(0.0, black), (hold, black), (1.0, black.alpha(0.0))]
 }
 
-fn compact(s: &Island) -> El {
+fn compact(s: &Island, look: &Look) -> El {
     let n = s.notch;
     let peek = s.hover && s.layout.island.hover == HoverMode::Peek;
     let active = s.active();
@@ -587,7 +696,7 @@ fn compact(s: &Island) -> El {
     let side = base_side + if peek { PEEK_EXTRA / 2.0 } else { 0.0 } + s.swipe.pull_width() / 2.0;
     let detail = activity.and_then(|a| a.detail.as_ref()).filter(|_| peek);
     let chin = if !peek { 0.0 } else if detail.is_some() { PEEK_DETAIL_CHIN } else { PEEK_CHIN };
-    let mut island = col().size(n.w + 2.0 * side, n.h + chin + s.swipe.pull).corners([0.0, 0.0, COMPACT_RADIUS, COMPACT_RADIUS]).clip_rounded(0.0);
+    let mut island = col().size(n.w + 2.0 * side, n.h + chin + s.swipe.pull).corners([0.0, 0.0, look.compact_radius, look.compact_radius]).clip_rounded(0.0);
     let (Some(active), Some(activity)) = (active, activity) else {
         // Idle: exactly the camera housing, so it disappears into it (until hovered).
         return island;
@@ -668,7 +777,7 @@ fn settings_button(s: &Island) -> El {
     b
 }
 
-fn expanded(s: &Island) -> El {
+fn expanded(s: &Island, look: &Look) -> El {
     let n = s.notch;
     let w = s.open_w();
     let pages = s.pages();
@@ -697,8 +806,8 @@ fn expanded(s: &Island) -> El {
         }
         None => empty(s),
     };
-    let mut island = col().w(w).corners([0.0, 0.0, EXPANDED_RADIUS, EXPANDED_RADIUS]).pb(16.0)
-        .clip_rounded(EXPANDED_RADIUS);
+    let mut island = col().w(w).corners([0.0, 0.0, look.expanded_radius, look.expanded_radius]).pb(16.0)
+        .clip_rounded(look.expanded_radius);
     island = island.child(top).child(col().w_full().px(16.0).pt(6.0).child(body));
     for note in &s.notes {
         island = island.child(text(note).font(TextStyle::new(11.0, 400.0)).color(s.theme.color("muted")).px(18.0).pt(8.0));
