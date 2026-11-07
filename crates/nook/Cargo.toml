@@ -1,0 +1,33 @@
+[package]
+name = "nook"
+version.workspace = true
+edition = "2024"
+license.workspace = true
+description = "openNook: a moddable Dynamic Island for the notch, on Rune"
+default-run = "opennook"
+
+[[bin]]
+name = "opennook"
+path = "src/main.rs"
+
+[dependencies]
+nook-core.workspace = true
+nook-mods.workspace = true
+rune.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+log.workspace = true
+env_logger.workspace = true
+base64.workspace = true
+reqwest = { workspace = true, features = ["blocking"] }
+open.workspace = true
+tokio.workspace = true
+libc = "0.2"
+image.workspace = true
+# Mods' shaders: drawn in Rune's compositor (same wgpu as Rune), checked with naga first.
+wgpu = { version = "~30.0.1", default-features = false }
+naga = { version = "~30.0.1", features = ["wgsl-in"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+block2 = "0.6"

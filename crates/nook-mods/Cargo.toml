@@ -1,0 +1,13 @@
+[package]
+name = "nook-mods"
+version.workspace = true
+edition = "2024"
+license.workspace = true
+description = "openNook's mod runtime: JavaScript mods on QuickJS that describe the island's views"
+
+[dependencies]
+rquickjs.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+log.workspace = true
+ureq = "3"

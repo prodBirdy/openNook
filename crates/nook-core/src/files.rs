@@ -1,0 +1,354 @@
+use crate::database::{get_connection, log_sql};
+use serde::{Deserialize, Serialize};
+use std::fs;
+use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct FileTrayItem {
+    pub name: String,
+    pub size: i64,
+    pub path: String,
+    #[serde(rename = "type")]
+    pub mime_type: String,
+    #[serde(rename = "lastModified")]
+    pub last_modified: i64,
+}
+
+pub fn save_file_tray(files: Vec<FileTrayItem>) -> Result<(), String> {
+    let conn = get_connection().map_err(|e| e.to_string())?;
+    conn.execute_batch("BEGIN TRANSACTION;")
+        .map_err(|e| e.to_string())?;
+    conn.execute("DELETE FROM file_tray", [])
+        .map_err(|e| e.to_string())?;
+
+    for file in files {
+        let sql = "INSERT INTO file_tray (path, name, size, mime_type, last_modified) VALUES (?1, ?2, ?3, ?4, ?5)";
+        log_sql(&format!("{} [{}]", sql, file.path));
+        conn.execute(
+            sql,
+            rusqlite::params![
+                file.path,
+                file.name,
+                file.size,
+                file.mime_type,
+                file.last_modified
+            ],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+
+    conn.execute_batch("COMMIT;").map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+pub fn load_file_tray() -> Result<Vec<FileTrayItem>, String> {
+    let conn = get_connection().map_err(|e| e.to_string())?;
+    let sql = "SELECT path, name, size, mime_type, last_modified FROM file_tray";
+    log_sql(sql);
+    let mut stmt = conn.prepare(sql).map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok(FileTrayItem {
+                path: row.get(0)?,
+                name: row.get(1)?,
+                size: row.get(2)?,
+                mime_type: row.get(3)?,
+                last_modified: row.get(4)?,
+            })
+        })
+        .map_err(|e| e.to_string())?;
+
+    let mut files = Vec::new();
+    for row in rows {
+        files.push(row.map_err(|e| e.to_string())?);
+    }
+    Ok(files)
+}
+
+pub fn open_file(path: String) -> Result<(), String> {
+    open::that(&path).map_err(|e| e.to_string())
+}
+
+/// Quick Look preview via `qlmanage -p` (spawned, not waited).
+pub fn quick_look(path: &str) -> Result<(), String> {
+    Command::new("/usr/bin/qlmanage")
+        .args(["-p", path])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
+/// Reveal the file in Finder (`open -R`).
+pub fn reveal(path: &str) -> Result<(), String> {
+    Command::new("/usr/bin/open")
+        .args(["-R", path])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
+pub fn resolve_path(path: String) -> Result<String, String> {
+    fs::canonicalize(&path)
+        .map(|p| p.to_string_lossy().into_owned())
+        .map_err(|e| e.to_string())
+}
+
+/// Drag-pasteboard changeCount last seen with no mouse button held, or
+/// [`i64::MIN`] before we have ever observed an idle cursor.
+#[cfg(target_os = "macos")]
+static DRAG_PB_IDLE: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(i64::MIN);
+/// Left button was held on the previous [`file_drag_active`] sample; a release
+/// edge is when the drag-pasteboard baseline gets refreshed.
+static DRAG_PB_WAS_DOWN: AtomicBool = AtomicBool::new(false);
+
+/// One XPC read of the drag pasteboard's change count.
+#[cfg(target_os = "macos")]
+fn drag_pasteboard_change_count() -> i64 {
+    use objc2::runtime::AnyObject;
+    use objc2::*;
+    unsafe {
+        let name: *mut AnyObject = msg_send![
+            class!(NSString),
+            stringWithUTF8String: c"Apple CFPasteboard drag".as_ptr()
+        ];
+        let pb: *mut AnyObject = msg_send![class!(NSPasteboard), pasteboardWithName: name];
+        if pb.is_null() {
+            return i64::MIN;
+        }
+        msg_send![pb, changeCount]
+    }
+}
+
+static OUTBOUND_DRAG: AtomicBool = AtomicBool::new(false);
+static OUTBOUND_PATHS: Mutex<Option<Vec<String>>> = Mutex::new(None);
+static OUTBOUND_DROPPED: AtomicBool = AtomicBool::new(false);
+
+/// True while this process is the drag source (tray → Finder / other apps).
+pub fn outbound_drag_active() -> bool {
+    OUTBOUND_DRAG.load(Ordering::SeqCst)
+}
+
+pub fn begin_outbound_drag(paths: &[String]) {
+    OUTBOUND_DRAG.store(true, Ordering::SeqCst);
+    OUTBOUND_DROPPED.store(false, Ordering::SeqCst);
+    if let Ok(mut guard) = OUTBOUND_PATHS.lock() {
+        *guard = Some(paths.to_vec());
+    }
+}
+
+pub fn finish_outbound_drag(dropped: bool) {
+    OUTBOUND_DROPPED.store(dropped, Ordering::SeqCst);
+    OUTBOUND_DRAG.store(false, Ordering::SeqCst);
+}
+
+/// Consume a finished outbound drag. `None` while the session is still live.
+pub fn take_outbound_drag() -> Option<(Vec<String>, bool)> {
+    if OUTBOUND_DRAG.load(Ordering::SeqCst) {
+        return None;
+    }
+    let mut guard = OUTBOUND_PATHS.lock().ok()?;
+    let paths = guard.take()?;
+    Some((paths, OUTBOUND_DROPPED.load(Ordering::SeqCst)))
+}
+
+#[cfg(target_os = "macos")]
+fn on_main_thread() -> bool {
+    use objc2::*;
+    unsafe { msg_send![class!(NSThread), isMainThread] }
+}
+
+/// True while the user is dragging files (Finder / another app) on macOS.
+/// Used to punch a hole in click-through so the island can receive the drop.
+/// Our own tray → Finder session is excluded so drop-in UI does not arm.
+///
+/// The drag pasteboard is *not* emptied when a drag ends — it keeps the last
+/// drag's types indefinitely — so "the board has types" reports a drag forever
+/// after the first one, which pins the island's hover padding open and leaves
+/// the full-width overlay swallowing every click. Gate on the left button
+/// actually being held, and on the board having changed since it was last seen
+/// idle, so a leftover board plus an unrelated left-drag doesn't count either.
+pub fn file_drag_active() -> bool {
+    if OUTBOUND_DRAG.load(Ordering::SeqCst) {
+        return false;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        use objc2::runtime::AnyObject;
+        use objc2::*;
+        use std::sync::atomic::Ordering;
+
+        // NSPasteboard is main-thread only. A background read can return null
+        // or a stale changeCount, and the release-edge path writes that into
+        // `DRAG_PB_IDLE` — after which inbound Finder drags never arm the tray.
+        if !on_main_thread() {
+            return false;
+        }
+
+        unsafe {
+            // Cheap check first: `pressedMouseButtons` is a shared-memory read,
+            // while `changeCount` is an XPC round-trip to the pasteboard server.
+            // The island UI tick and NSEvent monitors call this on the main
+            // thread; at idle (button up) the pasteboard must not be touched
+            // at all. A drag pasteboard can only change while the left button
+            // is held, so re-baselining once per release keeps the baseline
+            // exactly as fresh as re-reading it every tick did.
+            let buttons: usize = msg_send![class!(NSEvent), pressedMouseButtons];
+            if buttons & 1 == 0 {
+                if DRAG_PB_WAS_DOWN.swap(false, Ordering::Relaxed)
+                    || DRAG_PB_IDLE.load(Ordering::Relaxed) == i64::MIN
+                {
+                    let count = drag_pasteboard_change_count();
+                    DRAG_PB_IDLE.store(count, Ordering::Relaxed);
+                }
+                return false;
+            }
+            DRAG_PB_WAS_DOWN.store(true, Ordering::Relaxed);
+            // Launched mid-press: no baseline to compare against, stay quiet.
+            let idle = DRAG_PB_IDLE.load(Ordering::Relaxed);
+            if idle == i64::MIN {
+                return false;
+            }
+            let name: *mut AnyObject = msg_send![
+                class!(NSString),
+                stringWithUTF8String: c"Apple CFPasteboard drag".as_ptr()
+            ];
+            let pb: *mut AnyObject = msg_send![class!(NSPasteboard), pasteboardWithName: name];
+            if pb.is_null() {
+                return false;
+            }
+            let change_count: i64 = msg_send![pb, changeCount];
+            if change_count == idle {
+                return false;
+            }
+
+            let types: *mut AnyObject = msg_send![pb, types];
+            if types.is_null() {
+                return false;
+            }
+            // Any type on the drag pasteboard means a drag is in progress.
+            // Finder often exposes promised-file / dyn.* UTIs that do not
+            // contain the substring "file", so a name filter misses the drag
+            // and click-through stays on until the cursor is already inside
+            // the overlay — at which point AppKit never sends draggingEntered.
+            let count: usize = msg_send![types, count];
+            count > 0
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        false
+    }
+}
+
+pub fn add_dropped_path(path: &str) -> Result<FileTrayItem, String> {
+    let meta = fs::metadata(path).map_err(|e| e.to_string())?;
+    let name = std::path::Path::new(path)
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.to_string());
+    let mime = mime_from_path(path);
+    let last_modified = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+
+    Ok(FileTrayItem {
+        name,
+        size: meta.len() as i64,
+        path: path.to_string(),
+        mime_type: mime,
+        last_modified,
+    })
+}
+
+pub fn mime_from_path(path: &str) -> String {
+    match std::path::Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|s| s.to_ascii_lowercase())
+        .as_deref()
+    {
+        Some(
+            "png" | "jpg" | "jpeg" | "gif" | "webp" | "heic" | "heif" | "tif" | "tiff" | "bmp",
+        ) => "image".into(),
+        Some("mp4" | "mov" | "m4v" | "mkv" | "webm") => "video".into(),
+        Some("mp3" | "wav" | "aac" | "flac" | "m4a" | "aiff" | "caf" | "alac") => "audio".into(),
+        Some("pdf") => "pdf".into(),
+        Some("zip" | "tar" | "gz") => "archive".into(),
+        _ => "file".into(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mime_from_common_extensions() {
+        assert_eq!(mime_from_path("a.PNG"), "image");
+        assert_eq!(mime_from_path("clip.mp4"), "video");
+        assert_eq!(mime_from_path("clip.m4v"), "video");
+        assert_eq!(mime_from_path("doc.pdf"), "pdf");
+        assert_eq!(mime_from_path("shot.tiff"), "image");
+        assert_eq!(mime_from_path("song.m4a"), "audio");
+        assert_eq!(mime_from_path("noext"), "file");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn background_probe_does_not_write_drag_pasteboard_baseline() {
+        struct Restore;
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                DRAG_PB_IDLE.store(i64::MIN, Ordering::Relaxed);
+                DRAG_PB_WAS_DOWN.store(false, Ordering::Relaxed);
+            }
+        }
+        let _restore = Restore;
+        DRAG_PB_IDLE.store(42, Ordering::Relaxed);
+        // Release-edge is the path that re-baselines. A background thread that
+        // sees it will write whatever NSPasteboard returns off-main — including
+        // `i64::MIN` when the pasteboard call fails — and then inbound Finder
+        // drags never arm the tray.
+        DRAG_PB_WAS_DOWN.store(true, Ordering::Relaxed);
+        let _ = std::thread::spawn(file_drag_active)
+            .join()
+            .expect("probe thread");
+        assert_eq!(
+            DRAG_PB_IDLE.load(Ordering::Relaxed),
+            42,
+            "off-thread pasteboard reads must not move the idle baseline"
+        );
+    }
+
+    #[test]
+    fn outbound_drag_state_excludes_inbound_and_reports_drop() {
+        let _ = take_outbound_drag();
+        begin_outbound_drag(&["/tmp/example.txt".into()]);
+        assert!(outbound_drag_active());
+        assert!(!file_drag_active());
+        assert!(take_outbound_drag().is_none());
+        finish_outbound_drag(true);
+        assert!(!outbound_drag_active());
+        assert_eq!(
+            take_outbound_drag(),
+            Some((vec!["/tmp/example.txt".into()], true))
+        );
+        assert!(take_outbound_drag().is_none());
+
+        begin_outbound_drag(&["/tmp/a.txt".into(), "/tmp/b.txt".into()]);
+        finish_outbound_drag(false);
+        assert_eq!(
+            take_outbound_drag(),
+            Some((vec!["/tmp/a.txt".into(), "/tmp/b.txt".into()], false))
+        );
+    }
+}

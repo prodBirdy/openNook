@@ -1,0 +1,6 @@
+{
+  "title": "Timer",
+  "icon": "./icon.png",
+  "description": "A countdown: pick a length, start it, and the island counts down beside the camera and chimes when it's done.",
+  "props": { "presets": [1, 3, 5, 10, 25, 60], "sound": "Glass" }
+}

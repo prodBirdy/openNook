@@ -1,0 +1,273 @@
+@layer theme, base, components, utilities;
+@import "tailwindcss/theme.css" layer(theme);
+@import "tailwindcss/utilities.css" layer(utilities);
+
+@theme {
+  --font-sans: Inter, system-ui, sans-serif;
+  --font-mono: "Roboto Mono", ui-monospace, monospace;
+}
+
+@layer base {
+  *,
+  ::before,
+  ::after {
+    box-sizing: border-box;
+  }
+
+  html {
+    scroll-behavior: smooth;
+    scroll-padding-top: 76px;
+  }
+
+  body {
+    margin: 0;
+    background: #000;
+    color: #fff;
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+  }
+
+  a {
+    color: inherit;
+    text-decoration: none;
+  }
+}
+
+.screen {
+  background-image: linear-gradient(124deg, #33405c 25%, #1b1d26 53%, #0b0b0e 75%);
+  border: 1px solid #ffffff38;
+}
+
+.screen-tray {
+  background-image: linear-gradient(121deg, #2a3247 25%, #17181e 55%, #0b0b0e 75%);
+  border: 1px solid #ffffff38;
+}
+
+.island {
+  position: relative;
+  background: #000;
+  border-radius: 0 0 36px 36px;
+}
+
+.island-wing {
+  position: absolute;
+  top: 0;
+  width: 14px;
+  height: 14px;
+  pointer-events: none;
+}
+
+.island-wing.left {
+  left: -14px;
+}
+
+.island-wing.right {
+  right: -14px;
+}
+
+.island-glass {
+  background-image: linear-gradient(
+    180deg,
+    #000 0%,
+    #000 30%,
+    #0b0b12d6 60%,
+    #5b5b6e7a 85%,
+    #ffffff4d 100%
+  );
+  backdrop-filter: blur(14px);
+  box-shadow: 0 8px 24px #00000059, 0 1px 1px #ffffff2e;
+}
+
+.tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border-radius: 12px;
+  font-size: 12px;
+  line-height: 15px;
+  color: #ebebf599;
+  white-space: nowrap;
+}
+
+.tab.is-active {
+  background: #ffffff29;
+  color: #fff;
+}
+
+.widget {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  height: 32px;
+  padding: 0 9px;
+  background: #000;
+  border-radius: 0 0 14px 14px;
+  min-width: 0;
+}
+
+.widget-value {
+  font-size: 13px;
+  line-height: 16px;
+  font-weight: 600;
+  letter-spacing: -0.1px;
+  white-space: nowrap;
+}
+
+.wall {
+  background-image: linear-gradient(114deg, #232838 27%, #141519 73%);
+  border: 1px solid #ffffff38;
+}
+
+.cta-white:hover {
+  background: #f2f2f2;
+}
+
+.cta-ghost:hover {
+  background: #ffffff29;
+}
+
+.nav-link:hover,
+.footer-link:hover {
+  color: #fff;
+}
+
+.icon {
+  width: 1em;
+  height: 1em;
+  display: block;
+  flex-shrink: 0;
+}
+
+.hero-island-scale {
+  width: 780px;
+  flex-shrink: 0;
+}
+
+.mode-island-scale {
+  width: min(780px, 100%);
+}
+
+.screen-clip {
+  overflow-x: auto;
+  overflow-y: hidden;
+  -webkit-overflow-scrolling: touch;
+}
+
+.term {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.caret {
+  display: inline-block;
+  width: 7px;
+  height: 14px;
+  background: #30d158;
+  margin-left: 4px;
+  vertical-align: -2px;
+  animation: blink 1s steps(1) infinite;
+}
+
+@keyframes blink {
+  50% {
+    opacity: 0;
+  }
+}
+
+.tip {
+  position: relative;
+}
+
+.tip-card {
+  display: none;
+  position: absolute;
+  left: 50%;
+  top: calc(100% + 10px);
+  transform: translateX(-50%);
+  width: min(280px, 70vw);
+  padding: 12px 14px;
+  background: #0e0f13f2;
+  border: 1px solid #ffffff38;
+  border-radius: 14px;
+  box-shadow: 0 12px 32px #000000a6;
+  z-index: 8;
+  text-align: left;
+}
+
+.tip:hover .tip-card,
+.tip:focus-within .tip-card {
+  display: block;
+}
+
+.wave {
+  display: flex;
+  align-items: flex-end;
+  gap: 2px;
+  height: 14px;
+}
+
+.wave i {
+  display: block;
+  width: 2px;
+  background: #fff;
+  border-radius: 1px;
+}
+
+.ring {
+  width: 16px;
+  height: 16px;
+  border-radius: 999px;
+  background: conic-gradient(#0a84ff 0 62%, #ffffff24 62% 100%);
+  -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 2px), #000 0);
+  mask: radial-gradient(farthest-side, transparent calc(100% - 2px), #000 0);
+}
+
+.batt {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.batt-shell {
+  width: 16px;
+  height: 9px;
+  border: 1.5px solid #30d158;
+  border-radius: 2px;
+  padding: 1px;
+}
+
+.batt-level {
+  width: 82%;
+  height: 100%;
+  background: #30d158;
+  border-radius: 1px;
+}
+
+.batt-nub {
+  width: 2px;
+  height: 5px;
+  background: #30d158;
+  border-radius: 0 1px 1px 0;
+}
+
+.skip-link {
+  position: absolute;
+  left: -999px;
+  top: 8px;
+  background: #fff;
+  color: #000;
+  padding: 8px 12px;
+  border-radius: 999px;
+  z-index: 20;
+}
+
+.skip-link:focus {
+  left: 12px;
+}
+
+.download-glow {
+  background-image: radial-gradient(ellipse 60% 80% at 50% 100%, #0a84ff2e 0%, transparent 100%);
+}

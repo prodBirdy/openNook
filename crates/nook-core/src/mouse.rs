@@ -1,0 +1,574 @@
+//! Global mouse polling for hover-to-expand, independent of GPUI hit testing.
+//!
+//! Click-through is owned by the GPUI window (NSWindow ignoresMouseEvents).
+//! This module only reports enter/exit against the island's UI bounds.
+
+use crate::notch::get_screen_info;
+use crate::settings::get_app_settings;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::RwLock;
+
+#[derive(Debug, Clone, Copy)]
+pub struct UiBounds {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+}
+
+static UI_BOUNDS: std::sync::OnceLock<RwLock<Option<UiBounds>>> = std::sync::OnceLock::new();
+static MOUSE_X: AtomicU64 = AtomicU64::new(0);
+static MOUSE_Y: AtomicU64 = AtomicU64::new(0);
+static DRAG_ACTIVE: AtomicBool = AtomicBool::new(false);
+static DRAG_GEN: AtomicU64 = AtomicU64::new(0);
+static POLL_STARTED: AtomicBool = AtomicBool::new(false);
+
+fn bounds_store() -> &'static RwLock<Option<UiBounds>> {
+    UI_BOUNDS.get_or_init(|| RwLock::new(None))
+}
+
+pub fn update_ui_bounds(x: f64, y: f64, width: f64, height: f64) {
+    if let Ok(mut guard) = bounds_store().write() {
+        *guard = Some(UiBounds {
+            x,
+            y,
+            width,
+            height,
+        });
+    }
+}
+
+pub fn current_mouse_logical() -> (f64, f64) {
+    (
+        f64::from_bits(MOUSE_X.load(Ordering::Relaxed)),
+        f64::from_bits(MOUSE_Y.load(Ordering::Relaxed)),
+    )
+}
+
+pub fn drag_active() -> bool {
+    DRAG_ACTIVE.load(Ordering::Relaxed)
+}
+
+/// Bumped on each `drag_active` edge so observers can detect drag transitions.
+pub fn drag_generation() -> u64 {
+    DRAG_GEN.load(Ordering::Relaxed)
+}
+
+/// Hit-test the cursor against the island activation area.
+///
+/// Drag capture may extend beyond this area, but hovering and expansion must not.
+pub fn hit_test(mouse_x: f64, mouse_y: f64) -> bool {
+    contains(hit_region(0.0), mouse_x, mouse_y)
+}
+
+/// Hit-test the wider region used only to let the overlay receive Finder drags.
+pub fn hit_test_drag_capture(mouse_x: f64, mouse_y: f64) -> bool {
+    contains(hit_region(drag_capture_padding()), mouse_x, mouse_y)
+}
+
+/// Margin used only to let the overlay receive an inbound Finder drag before
+/// the cursor reaches the painted island.
+pub fn drag_capture_padding() -> f64 {
+    if drag_active() || file_drag_needs_capture() {
+        80.0
+    } else {
+        0.0
+    }
+}
+
+fn file_drag_needs_capture() -> bool {
+    // Tests drive padding through `DRAG_ACTIVE` only. On macOS the real
+    // drag pasteboard plus a leftover left-button can otherwise pin padding
+    // at 80 for the whole libtest process.
+    #[cfg(test)]
+    {
+        false
+    }
+    #[cfg(not(test))]
+    {
+        crate::files::file_drag_active()
+    }
+}
+
+/// Strict test against the painted island — no hover tolerance, no drag
+/// widening. The overlay NSWindow spans the full screen width and is far taller
+/// than the island, so this is what decides whether a click belongs to us or
+/// falls through to whatever is underneath.
+pub fn hit_test_exact(mouse_x: f64, mouse_y: f64) -> bool {
+    hit_test(mouse_x, mouse_y)
+}
+
+/// What [`hit_test_drag_capture`] accepts, as a rect. For the debug overlay, so
+/// what gets drawn cannot drift from what gets tested.
+pub fn drag_capture_bounds() -> UiBounds {
+    rect(hit_region(drag_capture_padding()))
+}
+
+/// What [`hit_test_exact`] accepts, as a rect.
+pub fn exact_bounds() -> UiBounds {
+    rect(hit_region(0.0))
+}
+
+/// Whether the cursor is within approach distance of the island. The UI tick
+/// stays at its fast cadence while the pointer could reach the island within
+/// one idle backstop, and parks otherwise. Plain math on the published
+/// bounds — no AppKit calls.
+pub fn hit_test_near(mouse_x: f64, mouse_y: f64) -> bool {
+    const NEAR: f64 = 96.0;
+    let b = exact_bounds();
+    mouse_x >= b.x - NEAR
+        && mouse_x <= b.x + b.width + NEAR
+        && mouse_y >= b.y - NEAR
+        && mouse_y <= b.y + b.height.max(MIN_GRAB_HEIGHT) + NEAR
+}
+
+/// How far outside the painted island (left, right, below) an inbound Finder
+/// drag already opens the tray.
+const DROP_APPROACH: f64 = 80.0;
+
+/// Whether an inbound file drag is close enough to open the tray drop zone.
+///
+/// The compact pill is only ~32pt tall and sits against the top screen edge.
+/// Requiring the cursor to land inside it means shoving the drag into the
+/// edge, which on macOS 26 triggers the Mission Control Spaces bar instead.
+/// So a drag arms from [`DROP_APPROACH`] to the sides and below the island —
+/// never above (`y0` stays), and never the whole top strip like
+/// [`hit_test_drag_capture`]: dragging along the menu bar far from the island
+/// must not open the tray. Always false without an active drag.
+pub fn hit_test_drop_approach(mouse_x: f64, mouse_y: f64) -> bool {
+    if !drag_active() {
+        return false;
+    }
+    let (x0, x1, y0, y1) = hit_region(0.0);
+    contains(
+        (x0 - DROP_APPROACH, x1 + DROP_APPROACH, y0, y1 + DROP_APPROACH),
+        mouse_x,
+        mouse_y,
+    )
+}
+
+fn rect((x0, x1, y0, y1): (f64, f64, f64, f64)) -> UiBounds {
+    UiBounds {
+        x: x0,
+        y: y0,
+        width: x1 - x0,
+        height: y1 - y0,
+    }
+}
+
+/// Without a notch the idle island collapses to a 1px line, which no cursor can
+/// land on. The bottom edge alone is floored to this so the sliver stays
+/// grabbable by shoving the pointer at the top of the screen; the sides stay
+/// flush with the paint.
+const MIN_GRAB_HEIGHT: f64 = 8.0;
+
+/// The island rect in screen-logical, y-down coordinates, grown by `padding` on
+/// every side. Falls back to the physical notch until the first paint reports
+/// real bounds.
+fn hit_region(padding: f64) -> (f64, f64, f64, f64) {
+    if let Ok(guard) = bounds_store().try_read() {
+        if let Some(bounds) = *guard {
+            let y0 = bounds.y - padding;
+            let y1 = (bounds.y + bounds.height).max(MIN_GRAB_HEIGHT) + padding;
+            // Compact island is a short centred pill. A pad around that box
+            // misses Finder drags that come in along the menu bar from the
+            // sides. During a drag, take the whole top strip so click-through
+            // lifts before the cursor reaches the painted island.
+            if padding > 0.0 && bounds.y <= 2.0 {
+                // Attached to the menu bar: a Finder drag along the top
+                // strip has to lift click-through before it reaches the pill.
+                // A moved island is hit through the padded box alone.
+                let (screen_width, _, _, _) = get_screen_info();
+                return (0.0, screen_width, y0.max(0.0), y1);
+            }
+            return (
+                bounds.x - padding,
+                bounds.x + bounds.width + padding,
+                y0,
+                y1,
+            );
+        }
+    }
+
+    let (screen_width, _, notch_height, notch_width) = get_screen_info();
+    let settings = get_app_settings();
+    let effective_notch_width = if settings.non_notch_mode {
+        0.0
+    } else {
+        notch_width
+    };
+    let x_start = (screen_width - effective_notch_width) / 2.0;
+    let y_end = if settings.non_notch_mode {
+        1.0
+    } else {
+        notch_height.max(38.0)
+    };
+
+    (
+        x_start - padding,
+        x_start + effective_notch_width + padding,
+        -padding,
+        y_end + padding,
+    )
+}
+
+fn contains((x0, x1, y0, y1): (f64, f64, f64, f64), x: f64, y: f64) -> bool {
+    x >= x0 && x <= x1 && y >= y0 && y <= y1
+}
+
+/// Sample the cursor. On macOS this is a 1 s backstop — NSEvent monitors
+/// (installed on the main thread from `platform`) write the same atomics on
+/// move/drag and poke the island wake. Monitors can drop during secure input
+/// or some full-screen games; the slow poll is how hover still exits.
+/// Windows/Linux keep the tighter poll (no AppKit monitors).
+pub fn start_polling() {
+    if POLL_STARTED.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    sample_now();
+    let _ = std::thread::Builder::new()
+        .name("nook-mouse".into())
+        .spawn(|| loop {
+            sample_now();
+            let ms = poll_interval_ms();
+            std::thread::sleep(std::time::Duration::from_millis(ms));
+        });
+}
+
+fn poll_interval_ms() -> u64 {
+    #[cfg(target_os = "macos")]
+    {
+        1000
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let inside = {
+            let (mx, my) = current_mouse_logical();
+            hit_test(mx, my)
+        };
+        if inside || DRAG_ACTIVE.load(Ordering::Relaxed) {
+            20
+        } else {
+            33
+        }
+    }
+}
+
+/// Read cursor + drag into the atomics.
+///
+/// Mouse position is safe from the 1 s backstop thread. The drag
+/// pasteboard is not: sample it only on the main thread (NSEvent monitors
+/// and the island UI tick). Off-main, we may clear a finished drag when the
+/// button is up, but we must not arm or disarm one while the button is down.
+///
+/// Pokes [`crate::ui_tick`] when the pointer is near the island or a drag
+/// edge flips — far-away moves update atomics without waking the UI loop.
+pub fn sample_now() {
+    let (x, y) = read_mouse_logical();
+    let prev_x = MOUSE_X.swap(x.to_bits(), Ordering::Relaxed);
+    let prev_y = MOUSE_Y.swap(y.to_bits(), Ordering::Relaxed);
+    let moved = prev_x != x.to_bits() || prev_y != y.to_bits();
+    #[cfg(target_os = "macos")]
+    if !on_main_thread() {
+        let mut drag_edge = false;
+        if !left_button_down() {
+            drag_edge = publish_drag(false);
+        }
+        if drag_edge || (moved && (hit_test_near(x, y) || hit_test(x, y))) {
+            crate::ui_tick::poke();
+        }
+        return;
+    }
+    let drag_edge = publish_drag(crate::files::file_drag_active());
+    if drag_edge || (moved && (hit_test_near(x, y) || hit_test(x, y) || drag_active())) {
+        crate::ui_tick::poke();
+    }
+}
+
+/// Returns true when the drag flag flipped.
+fn publish_drag(drag: bool) -> bool {
+    let was = DRAG_ACTIVE.swap(drag, Ordering::Relaxed);
+    if was != drag {
+        DRAG_GEN.fetch_add(1, Ordering::Relaxed);
+        true
+    } else {
+        false
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn on_main_thread() -> bool {
+    use objc2::*;
+    unsafe { msg_send![class!(NSThread), isMainThread] }
+}
+
+#[cfg(target_os = "macos")]
+fn left_button_down() -> bool {
+    use objc2::*;
+    unsafe {
+        let buttons: usize = msg_send![class!(NSEvent), pressedMouseButtons];
+        buttons & 1 != 0
+    }
+}
+
+fn read_mouse_logical() -> (f64, f64) {
+    #[cfg(target_os = "macos")]
+    {
+        use crate::notch::CGPoint;
+        use objc2::*;
+        unsafe {
+            let mouse_loc: CGPoint = msg_send![class!(NSEvent), mouseLocation];
+            let (_, screen_height, _, _) = get_screen_info();
+            (mouse_loc.x, screen_height - mouse_loc.y)
+        }
+    }
+    #[cfg(target_os = "windows")]
+    {
+        use windows::Win32::Foundation::POINT;
+        use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
+        let mut point = POINT::default();
+        unsafe {
+            let _ = GetCursorPos(&mut point);
+        }
+        (point.x as f64, point.y as f64)
+    }
+    #[cfg(target_os = "linux")]
+    {
+        linux_read_pointer()
+    }
+}
+
+/// X11 `QueryPointer` on the root window. `root_x`/`root_y` are already
+/// screen-logical y-down, matching [`update_ui_bounds`].
+///
+/// Soft-fail: missing `DISPLAY`, X11 connect failure, or Wayland-only
+/// (no XWayland) logs once and keeps returning `(0.0, 0.0)` so the app still runs.
+#[cfg(target_os = "linux")]
+fn linux_read_pointer() -> (f64, f64) {
+    use std::sync::OnceLock;
+    use x11rb::protocol::xproto::ConnectionExt as _;
+    use x11rb::rust_connection::RustConnection;
+
+    static CONN: OnceLock<Option<(RustConnection, u32)>> = OnceLock::new();
+
+    let Some((conn, root)) = CONN
+        .get_or_init(|| match open_x11_pointer() {
+            Ok(pair) => Some(pair),
+            Err(reason) => {
+                log::warn!("linux pointer: {reason}; hover-to-expand disabled");
+                None
+            }
+        })
+        .as_ref()
+    else {
+        return (0.0, 0.0);
+    };
+
+    conn.query_pointer(*root)
+        .ok()
+        .and_then(|cookie| cookie.reply().ok())
+        .map(|reply| x11_root_to_logical(reply.root_x, reply.root_y))
+        .unwrap_or((0.0, 0.0))
+}
+
+#[cfg(target_os = "linux")]
+fn linux_pointer_block_reason(display: Option<&std::ffi::OsStr>) -> Option<&'static str> {
+    if display.is_none() {
+        Some("DISPLAY unset (Wayland-only or headless)")
+    } else {
+        None
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn open_x11_pointer() -> Result<(x11rb::rust_connection::RustConnection, u32), String> {
+    use x11rb::connection::Connection;
+
+    if let Some(reason) = linux_pointer_block_reason(std::env::var_os("DISPLAY").as_deref()) {
+        return Err(reason.into());
+    }
+    let (conn, screen_num) =
+        x11rb::connect(None).map_err(|err| format!("X11 connect failed: {err}"))?;
+    let root = conn
+        .setup()
+        .roots
+        .get(screen_num)
+        .map(|screen| screen.root)
+        .ok_or_else(|| "X11 screen missing".to_string())?;
+    Ok((conn, root))
+}
+
+/// QueryPointer root pixels are already y-down from the root origin.
+/// Do not flip against screen height the way macOS `NSEvent` does.
+#[cfg(target_os = "linux")]
+fn x11_root_to_logical(root_x: i16, root_y: i16) -> (f64, f64) {
+    (f64::from(root_x), f64::from(root_y))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::Ordering;
+    use std::sync::{Mutex, MutexGuard};
+
+    /// `UI_BOUNDS` / `DRAG_ACTIVE` are process-global, so tests that publish
+    /// bounds must not run concurrently or they read each other's island.
+    static BOUNDS: Mutex<()> = Mutex::new(());
+
+    struct BoundsLock {
+        _guard: MutexGuard<'static, ()>,
+    }
+
+    impl Drop for BoundsLock {
+        fn drop(&mut self) {
+            DRAG_ACTIVE.store(false, Ordering::Relaxed);
+        }
+    }
+
+    fn lock() -> BoundsLock {
+        let guard = BOUNDS.lock().unwrap_or_else(|e| e.into_inner());
+        DRAG_ACTIVE.store(false, Ordering::Relaxed);
+        BoundsLock { _guard: guard }
+    }
+
+    #[test]
+    fn hover_region_is_the_painted_box() {
+        let _guard = lock();
+        update_ui_bounds(100.0, 0.0, 200.0, 34.0);
+        assert_eq!(drag_capture_padding(), 0.0);
+        assert!(hit_test(150.0, 10.0));
+        // A pixel out on any side is out — no entry pad, no hysteresis.
+        assert!(!hit_test(99.0, 10.0));
+        assert!(!hit_test(301.0, 10.0));
+        assert!(!hit_test(150.0, 35.0));
+
+        let bounds = drag_capture_bounds();
+        assert_eq!((bounds.x, bounds.width), (100.0, 200.0));
+        assert_eq!((bounds.y, bounds.height), (0.0, 34.0));
+    }
+
+    #[test]
+    fn hover_and_click_regions_agree() {
+        let _guard = lock();
+        update_ui_bounds(100.0, 0.0, 200.0, 34.0);
+        // Hover used to reach further than clicks did; nothing arms from
+        // outside the paint any more.
+        for (x, y) in [(150.0, 10.0), (150.0, 39.0), (95.0, 10.0), (250.0, 33.0)] {
+            assert_eq!(hit_test(x, y), hit_test_exact(x, y), "at ({x}, {y})");
+        }
+        assert!(hit_test_exact(150.0, 10.0));
+        assert!(!hit_test_exact(150.0, 39.0));
+        assert!(!hit_test_exact(95.0, 10.0));
+    }
+
+    #[test]
+    fn sliver_island_keeps_a_grabbable_strip() {
+        let _guard = lock();
+        // What non-notch mode paints when idle: a 1px line.
+        update_ui_bounds(100.0, 0.0, 200.0, 1.0);
+        assert!(hit_test(150.0, 6.0));
+        assert!(!hit_test(150.0, 12.0));
+        // The floor is on the bottom edge only; the sides stay flush.
+        assert!(!hit_test(99.0, 6.0));
+    }
+
+    #[test]
+    fn uses_bounds_origin_not_recomputed_center() {
+        let _guard = lock();
+        update_ui_bounds(10.0, 0.0, 100.0, 34.0);
+        assert!(hit_test(20.0, 10.0));
+        assert!(!hit_test(200.0, 10.0));
+    }
+
+    #[test]
+    fn finder_drag_only_hovers_the_painted_island() {
+        let _guard = lock();
+        update_ui_bounds(790.0, 0.0, 220.0, 38.0);
+        super::DRAG_ACTIVE.store(true, Ordering::Relaxed);
+
+        assert!(hit_test(800.0, 20.0), "the painted island activates");
+        assert!(
+            !hit_test(10.0, 10.0),
+            "a file elsewhere on screen must not open the island"
+        );
+        assert!(
+            hit_test_drag_capture(10.0, 10.0),
+            "the overlay still captures the drag before it reaches the island"
+        );
+        let far_x = (get_screen_info().0 - 10.0).max(0.0);
+        assert!(
+            !hit_test(far_x, 20.0),
+            "the drag capture strip must not count as hover"
+        );
+        assert!(hit_test_drag_capture(far_x, 20.0));
+    }
+
+    #[test]
+    fn finder_drag_arms_the_tray_before_the_top_edge() {
+        let _guard = lock();
+        update_ui_bounds(790.0, 0.0, 220.0, 38.0);
+        super::DRAG_ACTIVE.store(true, Ordering::Relaxed);
+        assert!(
+            hit_test_drop_approach(900.0, 38.0 + 60.0),
+            "60pt below the island is close enough to open the tray"
+        );
+        assert!(
+            !hit_test_drop_approach(900.0 + 400.0, 38.0 + 60.0),
+            "60pt below but far to the side is not"
+        );
+        assert!(
+            !hit_test_drop_approach(10.0, 10.0),
+            "the menu bar away from the island is not an approach"
+        );
+        super::DRAG_ACTIVE.store(false, Ordering::Relaxed);
+        assert!(
+            !hit_test_drop_approach(900.0, 38.0 + 60.0),
+            "no drag, no approach"
+        );
+    }
+
+    #[test]
+    fn off_main_sample_never_arms_a_file_drag() {
+        let _guard = lock();
+        DRAG_ACTIVE.store(false, Ordering::Relaxed);
+        std::thread::spawn(sample_now)
+            .join()
+            .expect("mouse sample thread");
+        assert!(
+            !drag_active(),
+            "the mouse thread must not arm inbound file-drag from NSPasteboard"
+        );
+    }
+
+    #[test]
+    fn finder_drag_does_not_open_a_top_strip_when_the_island_moved() {
+        let _guard = lock();
+        update_ui_bounds(790.0, 200.0, 220.0, 38.0);
+        super::DRAG_ACTIVE.store(true, Ordering::Relaxed);
+        assert!(
+            !hit_test_drag_capture(10.0, 10.0),
+            "a moved island does not steal the menu bar"
+        );
+        assert!(
+            hit_test_drag_capture(800.0, 210.0),
+            "padded capture box around the island still works"
+        );
+        super::DRAG_ACTIVE.store(false, Ordering::Relaxed);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn x11_root_coords_stay_y_down() {
+        assert_eq!(super::x11_root_to_logical(850, 12), (850.0, 12.0));
+        assert_eq!(super::x11_root_to_logical(0, 0), (0.0, 0.0));
+        assert_eq!(super::x11_root_to_logical(-8, 40), (-8.0, 40.0));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_pointer_soft_fails_without_display() {
+        let reason = super::linux_pointer_block_reason(None).expect("headless is a soft-fail");
+        assert!(reason.contains("DISPLAY unset"), "{reason}");
+        assert!(super::linux_pointer_block_reason(Some(std::ffi::OsStr::new(":1"))).is_none());
+    }
+}

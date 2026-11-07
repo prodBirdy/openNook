@@ -1,0 +1,21 @@
+# Retired Tauri ship path.
+#
+# This was the old Tauri pipeline (bun install, tauri-apps/tauri-action). The workspace is
+# Cargo only now, and the macOS DMG is built locally with scripts/installer.sh because CI has
+# no Developer ID. Do not re-enable bun/tauri-action or attach fake AppImage/exe assets.
+#
+# No push/tag triggers, so this cannot fail main.
+name: Release
+
+on:
+  workflow_dispatch:
+
+jobs:
+  retired:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Tauri Release path is retired
+        run: |
+          echo "The Tauri Release workflow is retired."
+          echo "The macOS DMG is built with scripts/installer.sh."
+          echo "Do not publish fake AppImage/exe assets from this job."

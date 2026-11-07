@@ -1,0 +1,6 @@
+{
+  "title": "Herdr",
+  "icon": "app:dev.herdr.app",
+  "description": "Your agents in Herdr: who needs you beside the camera; every agent when open, click to jump to it.",
+  "props": { "peekOnBlocked": true }
+}

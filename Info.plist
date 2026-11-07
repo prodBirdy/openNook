@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleName</key>
+	<string>openNook</string>
+	<key>CFBundleDisplayName</key>
+	<string>openNook</string>
+	<key>CFBundleIdentifier</key>
+	<string>com.jonasvogel.opennook-gpui</string>
+	<key>CFBundleExecutable</key>
+	<string>openNook</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleVersion</key>
+	<string>2.0.0</string>
+	<key>CFBundleShortVersionString</key>
+	<string>2.0.0</string>
+	<key>CFBundleIconFile</key>
+	<string>icon.png</string>
+	<key>LSUIElement</key>
+	<true/>
+	<key>LSMinimumSystemVersion</key>
+	<string>14.0</string>
+	<key>NSHumanReadableCopyright</key>
+	<string>Copyright © 2026 prodBirdy. MIT License.</string>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>openNook asks for a city-level location so Weather, the World Clock and the ISS mod can show where you are. It's optional: you can set a place in Settings instead.</string>
+	<key>NSAppleEventsUsageDescription</key>
+	<string>openNook uses Automation to control Music and Spotify when the media keys can't reach them, and for scripts your mods run.</string>
+	<key>NSDocumentsFolderUsageDescription</key>
+	<string>A mod you installed runs a program or reads a file in your Documents folder.</string>
+	<key>NSDesktopFolderUsageDescription</key>
+	<string>A mod you installed runs a program or reads a file in your Desktop folder.</string>
+	<key>NSDownloadsFolderUsageDescription</key>
+	<string>A mod you installed runs a program or reads a file in your Downloads folder.</string>
+	<key>NSAudioCaptureUsageDescription</key>
+	<string>openNook moves the island's music meter with what you're playing. It reads only how loud the sound is, in a few bands, while the meter is on screen; it never records, saves or sends what you hear.</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Your mods can fetch from devices on your network (a home server, a printer, a build box). openNook connects only where a mod asks it to.</string>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>com.jonasvogel.opennook-gpui</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>opennook</string>
+			</array>
+		</dict>
+	</array>
+</dict>
+</plist>

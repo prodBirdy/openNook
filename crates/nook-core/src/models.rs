@@ -1,0 +1,149 @@
+use serde::{Deserialize, Serialize};
+
+/// Notch and screen information returned to the frontend
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct NotchInfo {
+    /// Whether the screen has a notch (safeAreaInsets.top > 0)
+    pub has_notch: bool,
+    /// Height of the notch/safe area inset from the top (typically 30-40px on notched MacBooks)
+    pub notch_height: f64,
+    /// Width of the notch (the black area at the top center)
+    pub notch_width: f64,
+    /// Full screen width
+    pub screen_width: f64,
+    /// Full screen height
+    pub screen_height: f64,
+}
+
+/// Now Playing track information
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+pub struct NowPlayingData {
+    /// Track title
+    pub title: Option<String>,
+    /// Artist name
+    pub artist: Option<String>,
+    /// Album name
+    pub album: Option<String>,
+    /// Base64 encoded artwork (PNG)
+    pub artwork_base64: Option<String>,
+    /// Track duration in seconds
+    pub duration: Option<f64>,
+    /// Elapsed time in seconds
+    pub elapsed_time: Option<f64>,
+    /// Whether music is currently playing
+    pub is_playing: bool,
+    /// Audio levels for visualizer (6 frequency bands, 0.0-1.0)
+    pub audio_levels: Option<Vec<f64>>,
+    /// Name of the app playing the media (Spotify, Music, Safari)
+    pub app_name: Option<String>,
+    /// Bundle identifier of that app, used to load its icon.
+    #[serde(default)]
+    pub bundle_id: Option<String>,
+    /// Apple Music editorialVideo HLS loop, when the catalog has one.
+    #[serde(default)]
+    pub motion_artwork_url: Option<String>,
+    /// Shuffle on/off from MediaRemote `shuffleMode` (None when the player omits it).
+    #[serde(default)]
+    pub shuffle: Option<bool>,
+    /// Repeat mode from MediaRemote `repeatMode` (None when the player omits it).
+    #[serde(default)]
+    pub repeat: Option<RepeatMode>,
+}
+
+/// MediaRemote repeat mode (`repeatMode` 1=off, 2=one, 3=all).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum RepeatMode {
+    #[default]
+    Off,
+    One,
+    All,
+}
+
+/// One timed line from an LRC file.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LyricLine {
+    pub time_ms: u64,
+    pub text: String,
+}
+
+/// Lyrics for the current track. `lines` is empty when only plain text (or
+/// an instrumental) is available. Text is fetched at runtime and never bundled.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct SyncedLyrics {
+    #[serde(default)]
+    pub lines: Vec<LyricLine>,
+    #[serde(default)]
+    pub plain: Option<String>,
+    #[serde(default)]
+    pub instrumental: bool,
+    #[serde(default)]
+    pub source: String,
+}
+
+/// Where an Up Next row came from. Kept off [`NowPlayingData`] so the hot
+/// now-playing path stays a single track snapshot.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum QueueSource {
+    MusicPlaylist,
+    Spotify,
+    MediaRemote,
+}
+
+/// Why the island hides the upcoming list. Music's real Playing Next queue
+/// is unreadable; shuffle/radio is the honest fallback. Spotify never exposes
+/// a local queue to AppleScript.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum QueueHidden {
+    Shuffle,
+    Radio,
+    /// Streamed Apple Music catalog track (`URL track`) — no local playlist.
+    Streaming,
+    Idle,
+    NeedsSpotifyAuth,
+    PremiumRequired,
+    AutomationDenied,
+    /// Spotify desktop scripting has no playlist/queue list.
+    SpotifyUnavailable,
+}
+
+/// Handle used by [`crate::audio::media_jump_to_queue_item`].
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum QueueJump {
+    /// 1-based `play track i of current playlist` in Music.app.
+    MusicTrack { index: u32 },
+    /// Sequential `POST /v1/me/player/next` count, plus the track uri so we
+    /// can try `PUT /v1/me/player/play` with context+offset first.
+    Spotify { skip_count: u32, uri: String },
+    /// MediaRemote exposes the upcoming list but no play-this-item command.
+    Unavailable,
+}
+
+/// One upcoming row. Artwork stays optional: Spotify uses a 64px URL (lazy),
+/// Music rows may ship without art.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct QueueItem {
+    pub id: String,
+    pub title: String,
+    pub artist: String,
+    pub artwork_url: Option<String>,
+    pub artwork_base64: Option<String>,
+    /// Seconds, when the adapter provided it. AppleScript rows leave this None.
+    #[serde(default)]
+    pub duration: Option<f64>,
+    pub source: QueueSource,
+    pub jump: QueueJump,
+}
+
+/// Separate fetch from now-playing. Empty `items` + no `hidden` means "nothing
+/// to show", not an error.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct PlaybackQueue {
+    pub source: Option<QueueSource>,
+    pub label: String,
+    pub items: Vec<QueueItem>,
+    pub hidden: Option<QueueHidden>,
+    pub context_uri: Option<String>,
+}

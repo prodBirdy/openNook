@@ -1,0 +1,19 @@
+#!/bin/bash
+# GPUI's build.rs calls `xcrun -sdk macosx metal|metallib`.
+# Xcode 26's xcrun stub refuses to run until the official Metal
+# toolchain component is registered; we already have a working
+# compiler at ~/Library/Developer/Metal.xctoolchain.
+set -euo pipefail
+METAL_BIN="${METAL_TOOLCHAIN:-$HOME/Library/Developer/Metal.xctoolchain}/usr/bin"
+args=("$@")
+for i in "${!args[@]}"; do
+  case "${args[$i]}" in
+    metal)
+      exec "$METAL_BIN/metal" "${args[@]:$((i + 1))}"
+      ;;
+    metallib)
+      exec "$METAL_BIN/metallib" "${args[@]:$((i + 1))}"
+      ;;
+  esac
+done
+exec /usr/bin/xcrun "$@"

@@ -1,0 +1,6 @@
+{
+  "title": "ISS",
+  "icon": "./icon.png",
+  "description": "Where the International Space Station is now, its path for the next orbit, and how high and fast it flies.",
+  "props": { "units": "metric" }
+}
