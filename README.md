@@ -83,7 +83,9 @@ jumps to an agent with `herdr-app do agent.focus`.
 Shipped mods: **now-playing** (with a music meter that follows the sound), **weather** (an
 animated WGSL sky with the real moon phase), **world-clock** (a dot-matrix world lit where the
 sun is up, with your cities), **iss** (where the station is, its next orbit, altitude and
-speed), **timer** (presets, a ring, a chime) and **herdr**.
+speed), **timer** (presets, a ring, a chime), **herdr** and **containers** (Apple's
+[container](https://github.com/apple/container) runtime: what's running, CPU and memory, start and
+stop).
 
 ## Build and run
 

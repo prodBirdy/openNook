@@ -24,7 +24,8 @@ that you or a coding agent edit while it runs. macOS only for now.
 - Shipped mods: Now Playing (with a live music meter from a Core Audio process tap, macOS
   14.2+), Weather (an animated WGSL sky with the real moon phase), World Clock (a dot-matrix
   world lit where the sun is up), ISS (live position, orbit, altitude and speed), Timer
-  (presets, ring, chime) and Herdr (your coding agents; click to jump to one).
+  (presets, ring, chime), Herdr (your coding agents; click to jump to one) and Containers
+  (Apple's `container` runtime: what's running, its CPU and memory, start and stop).
 - Settings: General (hover, display, full screen, haptics, launch at login, Liquid Glass, open
   width, Location), Mods, Permissions (System Audio Recording, Location, Automation), Make it
   yours, and About, plus a first-run welcome.

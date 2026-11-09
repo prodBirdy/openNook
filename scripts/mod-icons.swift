@@ -148,3 +148,44 @@ icon("crates/nook/mods/iss/icon.png", top: 0x24357e, bottom: 0x060a20) { cx in
     cx.endTransparencyLayer()
     cx.restoreGState()
 }
+
+// Containers: a shipping container in isometric view, three faces in white at different strengths, so it reads as solid.
+icon("crates/nook/mods/containers/icon.png", top: 0x3aa0ff, bottom: 0x0a4fd6) { cx in
+    let c = CGPoint(x: body.midX, y: body.midY - 10 * grid)
+    let r = 270 * grid              // centre to a side corner
+    let h = r * 0.5                 // half the top face's height (30° isometric)
+    let top = CGPoint(x: c.x, y: c.y + 2 * h)
+    let left = CGPoint(x: c.x - r * 0.866 * 1.15, y: c.y + h)
+    let right = CGPoint(x: c.x + r * 0.866 * 1.15, y: c.y + h)
+    let drop = 300 * grid
+    let mid = c
+    func face(_ pts: [CGPoint], _ a: CGFloat) {
+        cx.setFillColor(rgb(0xffffff, a))
+        cx.addLines(between: pts)
+        cx.closePath()
+        cx.fillPath()
+    }
+    cx.saveGState()
+    glyphShadow(cx)
+    cx.beginTransparencyLayer(auxiliaryInfo: nil)
+    face([top, right, mid, left], 1)                                                               // lid
+    face([left, mid, CGPoint(x: mid.x, y: mid.y - drop), CGPoint(x: left.x, y: left.y - drop)], 0.86)   // front left
+    face([mid, right, CGPoint(x: right.x, y: right.y - drop), CGPoint(x: mid.x, y: mid.y - drop)], 0.68) // front right
+    // Seams: the edges between faces, cut back into the blue.
+    cx.setBlendMode(.clear)
+    cx.setLineWidth(14 * grid)
+    cx.setLineJoin(.round)
+    cx.addLines(between: [left, mid, right])
+    cx.move(to: mid); cx.addLine(to: CGPoint(x: mid.x, y: mid.y - drop))
+    cx.strokePath()
+    // The container's ribs, on the right face.
+    cx.setLineWidth(10 * grid)
+    for k in 1...3 {
+        let t = CGFloat(k) / 4
+        let a = CGPoint(x: mid.x + (right.x - mid.x) * t, y: mid.y + (right.y - mid.y) * t)
+        cx.move(to: CGPoint(x: a.x, y: a.y - 40 * grid)); cx.addLine(to: CGPoint(x: a.x, y: a.y - drop + 40 * grid))
+    }
+    cx.strokePath()
+    cx.endTransparencyLayer()
+    cx.restoreGState()
+}
