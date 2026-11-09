@@ -3,7 +3,10 @@ name: pages
 on:
   push:
     branches: [main]
-    paths: [docs/**]
+    paths: [docs/**, site/gallery/**, crates/nook/mods/**, assets/screens/**]
+  # The gallery picks up newly shared mods (repos with the topic opennook-mod) every hour.
+  schedule:
+    - cron: "17 * * * *"
   workflow_dispatch:
 
 permissions:
@@ -24,6 +27,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # each example's last change, for its "Updated"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      # No dependencies: writes docs/gallery from the GitHub API and crates/nook/mods. A failed
+      # topic search fails the job, so the last good gallery stays up.
+      - run: node site/gallery/build.mjs
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:

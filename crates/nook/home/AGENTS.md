@@ -36,6 +36,30 @@ edit one in place, openNook moves your version to `mods/<name>-edited` before re
 own, so nothing is lost, but the clean way is to copy the folder to a new name, then list the
 new name in `layout.json` and add the old one to `"hidden"`.
 
+## Mods from the gallery
+
+People share mods at <https://prodbirdy.github.io/openNook/gallery/>: public GitHub repos with
+the topic `opennook-mod`. When someone asks for one ("add this mod: <gallery URL>"):
+
+1. Fetch the page. It lists the mod's files and their raw URLs, pinned to a commit.
+2. Read every file before you copy any. A mod is trusted code: `exec` and `fetch` run with the
+   person's permissions. Tell them what it runs, what it fetches and where it writes, and ask
+   before going on if anything looks risky (a download piped to a shell, a secret sent off the
+   Mac, writes outside this folder).
+3. Copy the files into `mods/<name>/`, keeping their paths. If `mods/<name>` exists, ask before
+   replacing it, or use another name.
+4. `opennook check` it, and list it in `layout.json` if they want it somewhere particular.
+
+To share one, put three things in a folder of a public GitHub repo and give the repo the topic
+`opennook-mod` (one repo can hold several mods, each in its own folder); it's in the gallery
+within the hour:
+
+- the mod's own files (`mod.json`, `main.js`, its icon and the rest);
+- `RECIPE.md`: what it does and how, the brief another agent could rebuild it from with an
+  empty folder;
+- `preview.png`: `opennook shot preview.png --mod <name>`. Look at it first: it shows live
+  data, so make sure nothing private is in it.
+
 ## A mod
 
 ```js
