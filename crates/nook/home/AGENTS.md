@@ -8,7 +8,7 @@ working, a dictation); open, it shows pages. Every one of those is a **mod**: a 
 JavaScript in `mods/`. openNook redraws from these files while it runs, within a second of a
 save. When someone asks for something ("show my PRs in the notch", "make the player bigger",
 "put agents first", "show when my build fails"), you do it by editing these files or writing a
-mod. The shipped mods (`now-playing`, `weather`, `world-clock`, `iss`, `timer`, `herdr`, `containers`) are built from
+mod. The shipped mods (`now-playing`, `weather`, `world-clock`, `iss`, `timer`, `herdr`, `containers`, `messages`, `reminders`, `caffeinate`) are built from
 exactly the parts you have; nothing about them is special.
 
 ## The files
@@ -31,7 +31,7 @@ goes to the `.error` file. **Check after every edit.**
 
 ## Shipped mods are openNook's
 
-`now-playing`, `weather`, `world-clock`, `iss`, `timer`, `herdr` and `containers` are replaced with openNook's copy on each start. If you
+`now-playing`, `weather`, `world-clock`, `iss`, `timer`, `herdr`, `containers`, `messages`, `reminders` and `caffeinate` are replaced with openNook's copy on each start. If you
 edit one in place, openNook moves your version to `mods/<name>-edited` before restoring its
 own, so nothing is lost, but the clean way is to copy the folder to a new name, then list the
 new name in `layout.json` and add the old one to `"hidden"`.

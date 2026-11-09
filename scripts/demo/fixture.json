@@ -101,6 +101,438 @@
           }
         ]
       }
+    },
+    {
+      "command": "sqlite3",
+      "contains": "max(ROWID) AS top",
+      "stdout": [
+        {
+          "top": 905
+        }
+      ]
+    },
+    {
+      "command": "sqlite3",
+      "contains": "AS unread",
+      "stdout": [
+        {
+          "id": 905,
+          "at": {
+            "$nowSeconds": -120
+          },
+          "mine": 0,
+          "read": 0,
+          "text": "The landing page looks great. Ship it?",
+          "body": null,
+          "attachments": 0,
+          "sender": "+4915100000001",
+          "failed": 0,
+          "sent": 1,
+          "delivered": 1,
+          "service": "iMessage",
+          "chat": 1,
+          "guid": "iMessage;-;+4915100000001",
+          "chatName": null,
+          "chatId": "+4915100000001",
+          "style": 45,
+          "mime": null,
+          "unread": 2
+        },
+        {
+          "id": 904,
+          "at": {
+            "$nowSeconds": -1800
+          },
+          "mine": 0,
+          "read": 1,
+          "text": "I booked the cabin for Saturday",
+          "body": null,
+          "attachments": 0,
+          "sender": "+4915100000002",
+          "failed": 0,
+          "sent": 1,
+          "delivered": 1,
+          "service": "iMessage",
+          "chat": 2,
+          "guid": "iMessage;+;chat2",
+          "chatName": "Weekend trip",
+          "chatId": "chat2",
+          "style": 43,
+          "mime": null,
+          "unread": 0
+        },
+        {
+          "id": 903,
+          "at": {
+            "$nowSeconds": -10800
+          },
+          "mine": 1,
+          "read": 1,
+          "text": "Sure, see you at 7",
+          "body": null,
+          "attachments": 0,
+          "sender": "+4915100000003",
+          "failed": 0,
+          "sent": 1,
+          "delivered": 1,
+          "service": "iMessage",
+          "chat": 3,
+          "guid": "iMessage;-;+4915100000003",
+          "chatName": null,
+          "chatId": "+4915100000003",
+          "style": 45,
+          "mime": null,
+          "unread": 0
+        },
+        {
+          "id": 902,
+          "at": {
+            "$nowSeconds": -93600
+          },
+          "mine": 0,
+          "read": 1,
+          "text": "Can you send me the slides from today?",
+          "body": null,
+          "attachments": 0,
+          "sender": "+4915100000004",
+          "failed": 0,
+          "sent": 1,
+          "delivered": 1,
+          "service": "iMessage",
+          "chat": 4,
+          "guid": "iMessage;-;+4915100000004",
+          "chatName": null,
+          "chatId": "+4915100000004",
+          "style": 45,
+          "mime": null,
+          "unread": 0
+        },
+        {
+          "id": 901,
+          "at": {
+            "$nowSeconds": -180000
+          },
+          "mine": 0,
+          "read": 1,
+          "text": "",
+          "body": null,
+          "attachments": 1,
+          "sender": "+4915100000005",
+          "failed": 0,
+          "sent": 1,
+          "delivered": 1,
+          "service": "iMessage",
+          "chat": 5,
+          "guid": "iMessage;-;+4915100000005",
+          "chatName": null,
+          "chatId": "+4915100000005",
+          "style": 45,
+          "mime": "image/jpeg",
+          "unread": 0
+        }
+      ]
+    },
+    {
+      "command": "sqlite3",
+      "contains": "ZABCDRECORD",
+      "stdout": [
+        {
+          "name": "Maya Chen",
+          "org": null,
+          "handle": "+4915100000001"
+        },
+        {
+          "name": "Leo Brandt",
+          "org": null,
+          "handle": "+4915100000002"
+        },
+        {
+          "name": "Noah Fischer",
+          "org": null,
+          "handle": "+4915100000003"
+        },
+        {
+          "name": "Sophie Wagner",
+          "org": null,
+          "handle": "+4915100000004"
+        },
+        {
+          "name": "Daniel Park",
+          "org": null,
+          "handle": "+4915100000005"
+        }
+      ]
+    },
+    {
+      "command": "find",
+      "contains": "AddressBook",
+      "stdout": "/demo/AddressBook-v22.abcddb\n"
+    },
+    {
+      "command": "osascript",
+      "contains": "reminders.jxa",
+      "stdout": [
+        {
+          "id": "l1",
+          "name": "openNook",
+          "color": "#0A84FF",
+          "items": [
+            {
+              "id": "r1",
+              "name": "Update the AGENTS.md guide",
+              "priority": 0,
+              "flagged": false,
+              "due": {
+                "$now": -86400
+              },
+              "allDay": false
+            },
+            {
+              "id": "r2",
+              "name": "Record the launch video",
+              "priority": 1,
+              "flagged": true,
+              "due": {
+                "$now": 7200
+              },
+              "allDay": false
+            },
+            {
+              "id": "r3",
+              "name": "Answer the gallery PRs",
+              "priority": 0,
+              "flagged": false,
+              "due": {
+                "$now": 0
+              },
+              "allDay": true
+            },
+            {
+              "id": "r4",
+              "name": "Ship 2.0.0-alpha.3",
+              "priority": 0,
+              "flagged": false,
+              "due": {
+                "$now": 259200
+              },
+              "allDay": false
+            },
+            {
+              "id": "r5",
+              "name": "Write a recipe for Messages",
+              "priority": 0,
+              "flagged": false,
+              "due": null,
+              "allDay": false
+            }
+          ]
+        },
+        {
+          "id": "l2",
+          "name": "Personal",
+          "color": "#FF9F0A",
+          "items": [
+            {
+              "id": "r6",
+              "name": "Call the dentist",
+              "priority": 0,
+              "flagged": false,
+              "due": {
+                "$now": 86400
+              },
+              "allDay": false
+            },
+            {
+              "id": "r7",
+              "name": "Pick up the bike",
+              "priority": 0,
+              "flagged": false,
+              "due": {
+                "$now": 172800
+              },
+              "allDay": false
+            }
+          ]
+        },
+        {
+          "id": "l3",
+          "name": "Groceries",
+          "color": "#30D158",
+          "items": [
+            {
+              "id": "r8",
+              "name": "Oat milk",
+              "priority": 0,
+              "flagged": false,
+              "due": null,
+              "allDay": false
+            },
+            {
+              "id": "r9",
+              "name": "Coffee beans",
+              "priority": 0,
+              "flagged": false,
+              "due": null,
+              "allDay": false
+            },
+            {
+              "id": "r10",
+              "name": "Lemons",
+              "priority": 0,
+              "flagged": false,
+              "due": null,
+              "allDay": false
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "command": "container",
+      "args": [
+        "list"
+      ],
+      "stdout": [
+        {
+          "id": "web",
+          "configuration": {
+            "id": "web",
+            "image": {
+              "reference": "ghcr.io/acme/storefront:latest"
+            },
+            "labels": {},
+            "publishedPorts": [
+              {
+                "hostPort": 3000,
+                "containerPort": 3000
+              }
+            ],
+            "resources": {
+              "memoryInBytes": 2147483648
+            }
+          },
+          "status": {
+            "state": "running",
+            "startedDate": {
+              "$nowIso": -7200
+            },
+            "networks": [
+              {
+                "ipv4Address": "192.168.64.4/24"
+              }
+            ]
+          }
+        },
+        {
+          "id": "postgres",
+          "configuration": {
+            "id": "postgres",
+            "image": {
+              "reference": "docker.io/library/postgres:17"
+            },
+            "labels": {},
+            "publishedPorts": [
+              {
+                "hostPort": 5432,
+                "containerPort": 5432
+              }
+            ],
+            "resources": {
+              "memoryInBytes": 1073741824
+            }
+          },
+          "status": {
+            "state": "running",
+            "startedDate": {
+              "$nowIso": -93600
+            },
+            "networks": [
+              {
+                "ipv4Address": "192.168.64.2/24"
+              }
+            ]
+          }
+        },
+        {
+          "id": "redis",
+          "configuration": {
+            "id": "redis",
+            "image": {
+              "reference": "docker.io/library/redis:7"
+            },
+            "labels": {},
+            "publishedPorts": [
+              {
+                "hostPort": 6379,
+                "containerPort": 6379
+              }
+            ],
+            "resources": {
+              "memoryInBytes": 536870912
+            }
+          },
+          "status": {
+            "state": "running",
+            "startedDate": {
+              "$nowIso": -93600
+            },
+            "networks": [
+              {
+                "ipv4Address": "192.168.64.3/24"
+              }
+            ]
+          }
+        },
+        {
+          "id": "worker",
+          "configuration": {
+            "id": "worker",
+            "image": {
+              "reference": "ghcr.io/acme/storefront:latest"
+            },
+            "labels": {},
+            "publishedPorts": [],
+            "resources": {
+              "memoryInBytes": 1073741824
+            }
+          },
+          "status": {
+            "state": "stopped"
+          }
+        }
+      ]
+    },
+    {
+      "command": "container",
+      "args": [
+        "stats"
+      ],
+      "stdout": [
+        {
+          "id": "web",
+          "cpuUsageUsec": {
+            "$rate": 340000
+          },
+          "memoryUsageBytes": 641728512,
+          "memoryLimitBytes": 2147483648
+        },
+        {
+          "id": "postgres",
+          "cpuUsageUsec": {
+            "$rate": 45000
+          },
+          "memoryUsageBytes": 197132288,
+          "memoryLimitBytes": 1073741824
+        },
+        {
+          "id": "redis",
+          "cpuUsageUsec": {
+            "$rate": 12000
+          },
+          "memoryUsageBytes": 25165824,
+          "memoryLimitBytes": 536870912
+        }
+      ]
     }
   ],
   "fetch": [

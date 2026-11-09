@@ -1,0 +1,6 @@
+{
+  "title": "Caffeinate",
+  "icon": "./icon.png",
+  "description": "Keeps your Mac awake for a while or until you stop it, with the time left beside the camera.",
+  "props": { "presets": [15, 30, 60, 120, 240, 0], "display": true }
+}

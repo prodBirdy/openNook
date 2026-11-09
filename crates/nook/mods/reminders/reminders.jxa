@@ -1,0 +1,34 @@
+// Talks to Reminders for main.js: osascript -l JavaScript reminders.jxa <command> [args…]
+//   lists                      every list with its open reminders, as JSON
+//   complete <id> <true|false> marks a reminder done (or not)
+//   add <listId> <title>       adds a reminder to that list
+function run(argv) {
+  const R = Application("Reminders");
+  const [cmd, a, b] = argv;
+  if (cmd === "lists") {
+    return JSON.stringify(R.lists().map((l) => {
+      const rs = l.reminders.whose({ completed: false });
+      const ids = rs.id(), names = rs.name(), due = rs.dueDate(), allDay = rs.alldayDueDate(),
+        prio = rs.priority(), flagged = rs.flagged();
+      return {
+        id: l.id(), name: l.name(), color: l.color(),
+        items: ids.map((id, i) => ({
+          id, name: names[i], priority: prio[i], flagged: flagged[i],
+          due: due[i] ? due[i].getTime() : allDay[i] ? allDay[i].getTime() : null,
+          allDay: !due[i] && !!allDay[i],
+        })),
+      };
+    }));
+  }
+  if (cmd === "complete") {
+    R.reminders.byId(a).completed = b === "true";
+    return "ok";
+  }
+  if (cmd === "add") {
+    const title = (b ?? "").trim();
+    if (!title) return "empty";
+    R.lists.byId(a).reminders.push(R.Reminder({ name: title }));
+    return "ok";
+  }
+  throw new Error(`unknown command ${cmd}`);
+}

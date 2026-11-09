@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Three more shipped mods: Messages (unread beside the camera, recent conversations with photos,
+  voice messages and link previews, and replies from the island; needs Full Disk Access),
+  Reminders (tick off, add, see what's due; it asks for access only when its page is first
+  opened) and Caffeinate (keep the Mac awake for a while or until stopped).
 - After an hour of use (counted only while someone's at the Mac), the open island asks once
   for a star on GitHub; starring or "Not now" ends it for good.
 - Demo data for screenshots: `opennook shot --demo <fixture.json>` (or `OPENNOOK_DEMO` for the
