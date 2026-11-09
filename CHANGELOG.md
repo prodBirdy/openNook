@@ -5,10 +5,17 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## Unreleased
+## 2.0.0-alpha.3 - 2026-11-10
 
 ### Added
 
+- A mod gallery at https://prodbirdy.github.io/openNook/gallery/: public repos with the topic
+  `opennook-mod`, rebuilt hourly, with the shipped mods as examples. AGENTS.md says how to add
+  one from it and how to share your own.
+- A new website for 2.0, with real captures of the island (Liquid Glass over macOS's wallpaper)
+  and Now Playing, Weather and Herdr as mod examples.
+- The installer opens as a designed window: openNook on the left, Applications on the right,
+  and an arrow between them.
 - Three more shipped mods: Messages (unread beside the camera, recent conversations with photos,
   voice messages and link previews, and replies from the island; needs Full Disk Access),
   Reminders (tick off, add, see what's due; it asks for access only when its page is first
@@ -65,9 +72,6 @@ that you or a coding agent edit while it runs. macOS only for now.
   within a second; a broken edit keeps the last good version and writes why to
   `mods/<name>.error`. Mods can ship WGSL shaders and a colour `icon.png`.
 - `layout.json` picks who wins the closed island, page order, props, theme and island size.
-- A mod gallery at https://prodbirdy.github.io/openNook/gallery/: public repos with the topic
-  `opennook-mod`, rebuilt hourly, with the shipped mods as examples. AGENTS.md says how to add
-  one from it and how to share your own.
 - `~/.config/opennook/AGENTS.md`, `nook.d.ts` and `ui.d.ts`: the guide and exact API a coding
   agent reads before changing anything. `opennook --skill` prints it as an Agent Skill.
 - CLI: `opennook check <mod>` loads a mod and reports its views or its error;

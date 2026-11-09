@@ -5,7 +5,7 @@ then `npm run build` from `site/` to refresh this folder.
 
 https://prodbirdy.github.io/openNook/
 
-- Download: https://github.com/prodBirdy/openNook/releases/download/v2.0.0-alpha.2/openNook-2.0.0-alpha.2.dmg
+- Download: https://github.com/prodBirdy/openNook/releases/download/v2.0.0-alpha.3/openNook-2.0.0-alpha.3.dmg
 - Repo / Star: https://github.com/prodBirdy/openNook
 - Releases: https://github.com/prodBirdy/openNook/releases
 
