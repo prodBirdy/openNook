@@ -262,7 +262,11 @@ impl Compositor<Island> for Shaders {
             // Clip in this pass's pixels, like `frag`; radii and fade offsets are relative to it.
             let clip = [i.clip[0] - site.origin[0], i.clip[1] - site.origin[1], i.clip[2] - site.origin[0], i.clip[3] - site.origin[1]];
             let listens = self.pipelines.get(&(scene.path.clone(), site.format)).is_some_and(|p| p.listens);
-            let l = if listens { nook_core::audio_levels::levels() } else { [0.0; nook_core::audio_levels::BANDS] };
+            let l = match (listens, crate::demo::get().is_some_and(|d| d.levels)) {
+                (true, true) => crate::demo::levels(),
+                (true, false) => nook_core::audio_levels::levels(),
+                _ => [0.0; nook_core::audio_levels::BANDS],
+            };
             let uniforms: [f32; 36] = [
                 rect[0], rect[1], rect[2], rect[3],
                 site.size[0] as f32, site.size[1] as f32, time, if site.srgb_blend { 1.0 } else { 0.0 },

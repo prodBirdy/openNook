@@ -5,6 +5,29 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Added
+
+- Three more shipped mods: Messages (unread beside the camera, recent conversations with photos,
+  voice messages and link previews, and replies from the island; needs Full Disk Access),
+  Reminders (tick off, add, see what's due; it asks for access only when its page is first
+  opened) and Caffeinate (keep the Mac awake for a while or until stopped).
+- Caffeinate can keep the Mac awake with the lid closed too (`pmset disablesleep`, after one
+  administrator password); sleep comes back by itself when the time is up, when it's turned
+  off, or when openNook quits, and the page offers to restore it if a restart got in between.
+- Reminders: a new reminder can have a date, time, priority and flag, from chips under the
+  field or written into the title ("Call Sam tomorrow 9:00 !!").
+- A pill-shaped island for the MacBook Pro with the PROLED XDR display, whose camera sits in a
+  cutout below the screen's edge: closed, a floating pill around it; open, an island rounded
+  all round, without wings. `island.shape` in layout.json: `"auto"` (picks it for a cutout
+  narrower than any notch), `"notch"` or `"pill"`.
+- After an hour of use (counted only while someone's at the Mac), the open island asks once
+  for a star on GitHub; starring or "Not now" ends it for good.
+- Demo data for screenshots: `opennook shot --demo <fixture.json>` (or `OPENNOOK_DEMO` for the
+  island itself) puts a track, coding agents, a music meter and programs' and websites'
+  answers in place of the Mac's own. `scripts/demo/fixture.json` is the website's.
+
 ## 2.0.0-alpha.2 - 2026-11-09
 
 ### Added

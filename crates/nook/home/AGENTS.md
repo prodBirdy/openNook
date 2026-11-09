@@ -8,7 +8,7 @@ working, a dictation); open, it shows pages. Every one of those is a **mod**: a 
 JavaScript in `mods/`. openNook redraws from these files while it runs, within a second of a
 save. When someone asks for something ("show my PRs in the notch", "make the player bigger",
 "put agents first", "show when my build fails"), you do it by editing these files or writing a
-mod. The shipped mods (`now-playing`, `weather`, `world-clock`, `iss`, `timer`, `herdr`, `containers`) are built from
+mod. The shipped mods (`now-playing`, `weather`, `world-clock`, `iss`, `timer`, `herdr`, `containers`, `messages`, `reminders`, `caffeinate`) are built from
 exactly the parts you have; nothing about them is special.
 
 ## The files
@@ -31,7 +31,7 @@ goes to the `.error` file. **Check after every edit.**
 
 ## Shipped mods are openNook's
 
-`now-playing`, `weather`, `world-clock`, `iss`, `timer`, `herdr` and `containers` are replaced with openNook's copy on each start. If you
+`now-playing`, `weather`, `world-clock`, `iss`, `timer`, `herdr`, `containers`, `messages`, `reminders` and `caffeinate` are replaced with openNook's copy on each start. If you
 edit one in place, openNook moves your version to `mods/<name>-edited` before restoring its
 own, so nothing is lost, but the clean way is to copy the folder to a new name, then list the
 new name in `layout.json` and add the old one to `"hidden"`.
@@ -341,6 +341,10 @@ the closed island belongs to whatever is happening now.
   the menu bar), or `"pointer"` (follows the pointer between displays). On a display without a
   camera housing the resting island is invisible; it shows when hovered or when a mod has an
   activity. `island().notch.hasNotch` says which kind the island is on.
+- `island.shape`: `"auto"` (default), `"notch"` or `"pill"`. Under a notch the island grows out
+  of the screen's edge; the MacBook Pro with the PROLED XDR display has a camera cutout below
+  the edge instead, and there the island is a floating pill around it, rounded all round, as
+  on an iPhone. `"auto"` picks the pill on that Mac; `"pill"` asks for it on any display.
 - `island.hideInFullScreen`: out of the way while an app is full screen on its display.
 - `island.haptics`: a tap when a swipe opens the island.
 - `island.glass`: Liquid Glass under the open island (always off with Reduce Transparency).

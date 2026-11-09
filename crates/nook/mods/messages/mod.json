@@ -1,0 +1,12 @@
+{
+  "title": "Messages",
+  "icon": "app:com.apple.MobileSMS",
+  "description": "Your Messages conversations: unread beside the camera, recent chats on the page, and replies from the island.",
+  "props": {
+    "preview": true,
+    "peek": false,
+    "conversations": 30,
+    "thread": 40,
+    "linkPreviews": true
+  }
+}
