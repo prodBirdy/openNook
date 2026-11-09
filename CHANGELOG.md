@@ -13,6 +13,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   voice messages and link previews, and replies from the island; needs Full Disk Access),
   Reminders (tick off, add, see what's due; it asks for access only when its page is first
   opened) and Caffeinate (keep the Mac awake for a while or until stopped).
+- A pill-shaped island for the MacBook Pro with the PROLED XDR display, whose camera sits in a
+  cutout below the screen's edge: closed, a floating pill around it; open, an island rounded
+  all round, without wings. `island.shape` in layout.json: `"auto"` (picks it for a cutout
+  narrower than any notch), `"notch"` or `"pill"`.
 - After an hour of use (counted only while someone's at the Mac), the open island asks once
   for a star on GitHub; starring or "Not now" ends it for good.
 - Demo data for screenshots: `opennook shot --demo <fixture.json>` (or `OPENNOOK_DEMO` for the

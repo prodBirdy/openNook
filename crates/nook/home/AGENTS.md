@@ -341,6 +341,10 @@ the closed island belongs to whatever is happening now.
   the menu bar), or `"pointer"` (follows the pointer between displays). On a display without a
   camera housing the resting island is invisible; it shows when hovered or when a mod has an
   activity. `island().notch.hasNotch` says which kind the island is on.
+- `island.shape`: `"auto"` (default), `"notch"` or `"pill"`. Under a notch the island grows out
+  of the screen's edge; the MacBook Pro with the PROLED XDR display has a camera cutout below
+  the edge instead, and there the island is a floating pill around it, rounded all round, as
+  on an iPhone. `"auto"` picks the pill on that Mac; `"pill"` asks for it on any display.
 - `island.hideInFullScreen`: out of the way while an app is full screen on its display.
 - `island.haptics`: a tap when a swipe opens the island.
 - `island.glass`: Liquid Glass under the open island (always off with Reduce Transparency).

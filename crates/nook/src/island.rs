@@ -6,7 +6,7 @@
 
 use crate::fields::{Fields, Keys};
 use crate::gesture::{self, Action, Swipe};
-use crate::home::{DisplayMode, HoverMode, Layout};
+use crate::home::{DisplayMode, HoverMode, IslandShape, Layout};
 use crate::images::Images;
 use crate::render::{self, Rcx, Scroller};
 use crate::theme::Theme;
@@ -59,13 +59,27 @@ const VEIL_BAND: f32 = 48.0;
 const VEIL_HOLD_CAP: f32 = 0.82;
 const RIM_ALPHA: f32 = 0.38;
 
+/// The camera's place on the island's display: a notch the island grows out of, or a cutout
+/// it wraps as a pill. `w` and `h` are the closed island's own size around it.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Notch {
     pub w: f32,
     pub h: f32,
     pub has: bool,
     pub screen: (f32, f32),
+    /// A pill floating `top` points below the screen's edge, rounded all round, in place of a
+    /// shape joined to the edge.
+    pub pill: bool,
+    pub top: f32,
 }
+
+/// The PROLED MacBook Pro's camera cutout (Apple's bezel: 59 x 31.5 points, 8.5 below the
+/// edge), and the island's margin around it.
+const PILL_CUTOUT: (f32, f32) = (59.0, 31.5);
+const PILL_CUTOUT_TOP: f32 = 8.5;
+const PILL_MARGIN: f32 = 3.0;
+/// A cutout narrower than this is a pill's: every notch is 185 points or more.
+const PILL_MAX_W: f64 = 120.0;
 
 impl Notch {
     /// The camera housing of the display `mode` picks.
@@ -75,18 +89,46 @@ impl Notch {
             Some(d) => Self::of(d),
             None => {
                 let info = nook_core::notch::get_notch_info();
+                let screen = (info.screen_width as f32, info.screen_height as f32);
+                if shape() == IslandShape::Pill {
+                    return Self::pill(info.has_notch, screen);
+                }
                 let (w, h) = if info.has_notch { (info.notch_width as f32, info.notch_height as f32) } else { (200.0, 32.0) };
-                Self { w, h, has: info.has_notch, screen: (info.screen_width as f32, info.screen_height as f32) }
+                Self { w, h, has: info.has_notch, screen, pill: false, top: 0.0 }
             }
         }
     }
 
     pub fn of(d: &crate::platform::Display) -> Self {
-        match d.notch {
-            Some((w, h)) => Self { w: w as f32, h: h as f32, has: true, screen: (d.w as f32, d.h as f32) },
-            // Without a camera housing, a virtual one the size of a MacBook's.
-            None => Self { w: (d.w * 0.1).clamp(180.0, 220.0) as f32, h: 32.0, has: false, screen: (d.w as f32, d.h as f32) },
+        Self::shaped(d, shape())
+    }
+
+    fn shaped(d: &crate::platform::Display, shape: IslandShape) -> Self {
+        let screen = (d.w as f32, d.h as f32);
+        let pill = match shape {
+            IslandShape::Pill => true,
+            IslandShape::Notch => false,
+            IslandShape::Auto => d.notch.is_some_and(|(w, _)| w < PILL_MAX_W),
+        };
+        if pill {
+            return Self::pill(d.notch.is_some(), screen);
         }
+        match d.notch {
+            Some((w, h)) => Self { w: w as f32, h: h as f32, has: true, screen, pill: false, top: 0.0 },
+            // Without a camera housing, a virtual one the size of a MacBook's.
+            None => Self { w: (d.w * 0.1).clamp(180.0, 220.0) as f32, h: 32.0, has: false, screen, pill: false, top: 0.0 },
+        }
+    }
+
+    /// The closed island around the PROLED MacBook Pro's cutout.
+    fn pill(has: bool, screen: (f32, f32)) -> Self {
+        let (w, h) = PILL_CUTOUT;
+        Self { w: w + 2.0 * PILL_MARGIN, h: h + 2.0 * PILL_MARGIN, has, screen, pill: true, top: PILL_CUTOUT_TOP - PILL_MARGIN }
+    }
+
+    /// The island's corners for `radius`: all four on a pill, the bottom two under a notch.
+    pub fn corners(&self, radius: f32) -> [f32; 4] {
+        if self.pill { [radius; 4] } else { [0.0, 0.0, radius, radius] }
     }
 }
 
@@ -105,6 +147,15 @@ pub fn pick(mode: DisplayMode, all: &[crate::platform::Display], pointer: (f64, 
 /// What the display watcher needs from the layout, read off the UI thread.
 pub static DISPLAY_MODE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
 pub static HIDE_IN_FULL_SCREEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+pub static SHAPE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+pub fn shape() -> IslandShape {
+    match SHAPE.load(std::sync::atomic::Ordering::Relaxed) {
+        1 => IslandShape::Notch,
+        2 => IslandShape::Pill,
+        _ => IslandShape::Auto,
+    }
+}
 
 pub fn display_mode() -> DisplayMode {
     match DISPLAY_MODE.load(std::sync::atomic::Ordering::Relaxed) {
@@ -122,6 +173,7 @@ fn share_options(o: &crate::home::IslandOptions) {
         DisplayMode::Pointer => 2,
     };
     DISPLAY_MODE.store(mode, Ordering::Relaxed);
+    SHAPE.store(match o.shape { IslandShape::Auto => 0, IslandShape::Notch => 1, IslandShape::Pill => 2 }, Ordering::Relaxed);
     HIDE_IN_FULL_SCREEN.store(o.hide_in_full_screen, Ordering::Relaxed);
 }
 
@@ -757,6 +809,23 @@ mod display_tests {
         assert_eq!(pick(DisplayMode::Notch, &flat, (0.0, 0.0)).unwrap().id, 3);
         assert!(!Notch::of(&flat[0]).has);
     }
+
+    #[test]
+    fn a_narrow_cutout_gets_a_pill_and_a_notch_keeps_its_shape() {
+        let mut new = d(1, 0.0, true, true);
+        new.notch = Some((59.0, 31.5));
+        let pill = Notch::shaped(&new, IslandShape::Auto);
+        assert!(pill.pill && pill.has);
+        // Around the cutout, 3 points to spare: 65 x 37.5, from 5.5 below the edge.
+        assert_eq!((pill.w, pill.h, pill.top), (65.0, 37.5, 5.5));
+        assert_eq!(pill.corners(10.0), [10.0; 4]);
+        let notch = Notch::shaped(&d(2, 0.0, true, true), IslandShape::Auto);
+        assert!(!notch.pill && notch.w == 220.0 && notch.top == 0.0);
+        assert_eq!(notch.corners(10.0), [0.0, 0.0, 10.0, 10.0]);
+        // Asked for, either way round.
+        assert!(Notch::shaped(&d(3, 0.0, false, true), IslandShape::Pill).pill);
+        assert!(!Notch::shaped(&new, IslandShape::Notch).pill);
+    }
 }
 
 pub fn poll(s: &mut Island, _t: f64, _tx: &mut Tx) -> bool {
@@ -845,12 +914,15 @@ pub fn view(s: &Island, cx: &mut Cx<Island>) -> El {
     s.scrollers_drawn.borrow_mut().clear();
     let body = if s.expanded { expanded(s, &look) } else { compact(s, &look) };
     s.measure_scrollers(cx);
-    let radius = if s.expanded { look.expanded_radius } else { look.compact_radius };
+    let n = s.notch;
+    // A pill is round at its ends closed; open, every corner takes the open radius.
+    let radius = if s.expanded { look.expanded_radius } else if n.pill { n.h / 2.0 } else { look.compact_radius };
+    let corners = n.corners(radius);
     // The island is a row: wing, body, wing. The left wing rides the row's left edge (where
     // children ride) and the right one its trailing edge, so both stay attached through every
     // spring; the body moves on the same spring as the row. Beside the island as siblings, or
     // pinned outside it, they'd move on their own and come apart.
-    let mut body = body.key("island/body").motion(MORPH).corners([0.0, 0.0, radius, radius]);
+    let mut body = body.key("island/body").motion(MORPH).corners(corners);
     if s.glass() {
         // The glass is the body's own: its native view follows the body's drawn rect through
         // the morph, under the veil (a separate sheet trailed it on a spring of its own).
@@ -880,7 +952,7 @@ pub fn view(s: &Island, cx: &mut Cx<Island>) -> El {
     // The body clips to its own shape, which would clip its outer shadows too: they go on a
     // clear sheet behind it. Clear, so the glass still shows what's behind the island.
     let mut shade = el().key("island/shade").motion(MORPH).pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0))
-        .corners([0.0, 0.0, radius, radius]).fill(Color::BLACK.alpha(0.0));
+        .corners(corners).fill(Color::BLACK.alpha(0.0));
     if let Some((r, c)) = look.glow.filter(|_| !ghost) {
         shade = shade.shadow(0.0, r, c);
     }
@@ -889,16 +961,20 @@ pub fn view(s: &Island, cx: &mut Cx<Island>) -> El {
     }
     let mut frame = col().key("island/frame").motion(MORPH).child(shade).child(body);
     if let Some((w, c)) = look.border.filter(|_| !ghost) {
-        // Over the body, and starting above the screen's edge: the flat top has no line, so
-        // the outline runs down the sides and round the bottom.
-        frame = frame.child(el().key("island/border").motion(MORPH).pin(Some(0.0), Some(-w), Some(0.0), Some(0.0))
-            .corners([0.0, 0.0, radius, radius]).border(w, c));
+        // Over the body, and under a notch starting above the screen's edge: the flat top has
+        // no line, so the outline runs down the sides and round the bottom. A pill's goes all
+        // the way round.
+        let top = if n.pill { 0.0 } else { -w };
+        frame = frame.child(el().key("island/border").motion(MORPH).pin(Some(0.0), Some(top), Some(0.0), Some(0.0))
+            .corners(corners).border(w, c));
     }
+    // A pill floats clear of the screen's edge, so it has no wings to join it there.
+    let wings = if n.pill { 0.0 } else { look.wings };
     let island = row().key("island").motion(MORPH).items_start()
-        .child(wing(true, top, look.wings).key("wing/left"))
+        .child(wing(true, top, wings).key("wing/left"))
         .child(frame)
-        .child(wing(false, top, look.wings).key("wing/right").ride_trailing());
-    col().w_full().h_full().items_center().child(island)
+        .child(wing(false, top, wings).key("wing/right").ride_trailing());
+    col().w_full().h_full().items_center().pt(n.top).child(island)
 }
 
 /// The veil over the glass, top to bottom: it holds black over the camera band and falls to
@@ -922,7 +998,8 @@ fn compact(s: &Island, look: &Look) -> El {
     let side = base_side + if peek { PEEK_EXTRA / 2.0 } else { 0.0 } + s.swipe.pull_width() / 2.0;
     let detail = activity.and_then(|a| a.detail.as_ref()).filter(|_| peek);
     let chin = if !peek { 0.0 } else if detail.is_some() { PEEK_DETAIL_CHIN } else { PEEK_CHIN };
-    let mut island = col().size(n.w + 2.0 * side, n.h + chin + s.swipe.pull).corners([0.0, 0.0, look.compact_radius, look.compact_radius]).clip_rounded(0.0);
+    let radius = if n.pill { n.h / 2.0 } else { look.compact_radius };
+    let mut island = col().size(n.w + 2.0 * side, n.h + chin + s.swipe.pull).corners(n.corners(radius)).clip_rounded(0.0);
     let (Some(active), Some(activity)) = (active, activity) else {
         // Idle: exactly the camera housing, so it disappears into it (until hovered).
         return island;
@@ -1041,7 +1118,7 @@ fn expanded(s: &Island, look: &Look) -> El {
         }
         None => empty(s),
     };
-    let mut island = col().w(w).corners([0.0, 0.0, look.expanded_radius, look.expanded_radius]).pb(16.0)
+    let mut island = col().w(w).corners(n.corners(look.expanded_radius)).pb(16.0)
         .clip_rounded(look.expanded_radius);
     island = island.child(top).child(col().w_full().px(16.0).pt(6.0).child(body));
     for note in &s.notes {
@@ -1105,7 +1182,7 @@ mod scroll_tests {
         let page = json!({ "t": "box", "s": { "dir": "col" }, "c": [
             { "t": "box", "k": "list", "s": { "dir": "col", "gap": 4.0, "max_h": 200.0, "scroll": true, "stick_bottom": stick_bottom }, "c": rows },
         ] });
-        let notch = Notch { w: 200.0, h: 32.0, has: true, screen: (1512.0, 982.0) };
+        let notch = Notch { w: 200.0, h: 32.0, has: true, screen: (1512.0, 982.0), pill: false, top: 0.0 };
         let mut island = Island::new(notch, Layout::default());
         island.outputs.insert("t".into(), Output { name: "t".into(), title: "t".into(), has_expanded: true, expanded: Some(serde_json::from_value(page).unwrap()), ..Default::default() });
         island.expanded = true;
@@ -1156,7 +1233,7 @@ mod scroll_tests {
 
     /// The open island with `n` pages, on the first.
     fn island_with_pages(n: usize) -> Runtime<Island> {
-        let notch = Notch { w: 200.0, h: 32.0, has: true, screen: (1512.0, 982.0) };
+        let notch = Notch { w: 200.0, h: 32.0, has: true, screen: (1512.0, 982.0), pill: false, top: 0.0 };
         let mut island = Island::new(notch, Layout::default());
         for i in 0..n {
             let name = format!("p{i:02}");
@@ -1246,6 +1323,26 @@ mod scroll_tests {
             rt.frame(1.0 / 60.0);
         }
         assert!(rt.find("star").is_none(), "closed, the island shows no card");
+    }
+
+    #[test]
+    fn a_pill_floats_below_the_edge_and_wraps_the_camera() {
+        let mut island = Island::new(Notch::pill(true, (1512.0, 993.0)), Layout::default());
+        let page = json!({ "t": "box", "s": { "dir": "col", "h": 40.0 } });
+        island.outputs.insert("p".into(), Output { name: "p".into(), title: "p".into(), has_expanded: true, expanded: Some(serde_json::from_value(page).unwrap()), ..Default::default() });
+        let size = (island.canvas_w(), CANVAS_H);
+        let mut rt = Runtime::new(island, view, size, Env::default());
+        for _ in 0..30 {
+            rt.frame(1.0 / 60.0);
+        }
+        let ([_, y, w, h], _) = rt.presented("island/body").expect("body drawn");
+        assert_eq!((y, w, h), (5.5, 65.0, 37.5), "closed: the pill around the camera");
+        rt.update(|s, _| s.set_expanded(true));
+        for _ in 0..60 {
+            rt.frame(1.0 / 60.0);
+        }
+        let ([_, y, ..], _) = rt.presented("island/body").expect("body drawn");
+        assert_eq!(y, 5.5, "open, it still floats");
     }
 
     #[test]
