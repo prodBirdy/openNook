@@ -65,6 +65,9 @@ that you or a coding agent edit while it runs. macOS only for now.
   within a second; a broken edit keeps the last good version and writes why to
   `mods/<name>.error`. Mods can ship WGSL shaders and a colour `icon.png`.
 - `layout.json` picks who wins the closed island, page order, props, theme and island size.
+- A mod gallery at https://prodbirdy.github.io/openNook/gallery/: public repos with the topic
+  `opennook-mod`, rebuilt hourly, with the shipped mods as examples. AGENTS.md says how to add
+  one from it and how to share your own.
 - `~/.config/opennook/AGENTS.md`, `nook.d.ts` and `ui.d.ts`: the guide and exact API a coding
   agent reads before changing anything. `opennook --skill` prints it as an Agent Skill.
 - CLI: `opennook check <mod>` loads a mod and reports its views or its error;
