@@ -55,24 +55,11 @@
   overflow: hidden;
   border-radius: 20px;
   background: #000;
-  box-shadow: 0 24px 60px -28px #000000b3;
 }
 
 .shot video,
 .shot img {
   background: transparent;
-}
-
-/* Behind the hero: a soft light in the wallpaper's blue, violet and orange. */
-.hero-glow {
-  position: absolute;
-  inset: -12% -8% -18%;
-  background:
-    radial-gradient(40% 55% at 22% 40%, #2f6bff73 0%, transparent 70%),
-    radial-gradient(38% 50% at 58% 30%, #8e4dff66 0%, transparent 70%),
-    radial-gradient(34% 45% at 82% 62%, #ff8a3d59 0%, transparent 70%);
-  filter: blur(40px);
-  pointer-events: none;
 }
 
 /* An icon on a quiet tile. */
