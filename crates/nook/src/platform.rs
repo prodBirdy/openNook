@@ -521,3 +521,18 @@ pub fn fullscreen_on(display: &Display) -> bool {
         false
     }
 }
+
+/// Seconds since the last keyboard, pointer or trackpad input.
+pub fn idle_secs() -> f64 {
+    #[cfg(target_os = "macos")]
+    {
+        #[link(name = "CoreGraphics", kind = "framework")]
+        unsafe extern "C" {
+            fn CGEventSourceSecondsSinceLastEventType(state: i32, event: u32) -> f64;
+        }
+        // The combined session state, any input event.
+        unsafe { CGEventSourceSecondsSinceLastEventType(0, u32::MAX) }
+    }
+    #[cfg(not(target_os = "macos"))]
+    0.0
+}

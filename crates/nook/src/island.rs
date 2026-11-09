@@ -150,6 +150,8 @@ pub struct Island {
     pub reduce_transparency: bool,
     /// Shown once in the open island (edited shipped mods set aside, a broken layout).
     pub notes: Vec<String>,
+    /// The one-time "star it on GitHub" card, after an hour of use (`star`).
+    pub star_prompt: bool,
     pub quit: bool,
     /// Opens the settings window (set once it exists).
     pub open_settings: Option<Box<dyn Fn()>>,
@@ -216,6 +218,7 @@ impl Island {
             swipe: Swipe::default(),
             reduce_transparency: crate::platform::reduce_transparency(),
             notes: problem.into_iter().collect(),
+            star_prompt: false,
             quit: false,
             open_settings: None,
             fields: Fields::default(),
@@ -1044,7 +1047,36 @@ fn expanded(s: &Island, look: &Look) -> El {
     for note in &s.notes {
         island = island.child(text(note).font(TextStyle::new(11.0, 400.0)).color(s.theme.color("muted")).px(18.0).pt(8.0));
     }
+    if s.star_prompt {
+        island = island.child(col().w_full().px(16.0).pt(10.0).child(star_card(s)));
+    }
     island
+}
+
+/// Once, after an hour of use: a star on GitHub, or not. Either answer ends it.
+fn star_card(s: &Island) -> El {
+    let answer = |star: bool| move |s: &mut Island| {
+        s.star_prompt = false;
+        crate::star::answered();
+        if star {
+            let _ = open::that_detached(crate::star::REPO);
+        }
+    };
+    let github = crate::icons::get("github", std::path::Path::new("/"));
+    let mut card = row().key("star").w_full().gap(10.0).padding(10.0).radius(12.0).fill(s.theme.color("surface")).items_center()
+        .transition(swap(0.0, 6.0));
+    if let Some(g) = github {
+        card = card.child(icon(g, 18.0).color(s.theme.color("fg")));
+    }
+    card.child(col().grow(1.0).gap(1.0)
+            .child(text("Enjoying openNook?").font(TextStyle::new(12.0, 600.0)).color(s.theme.color("fg")))
+            .child(text("A star on GitHub helps others find it.").font(TextStyle::new(11.0, 400.0)).color(s.theme.color("muted")).truncate().shrink()))
+        .child(row().key("star/no").px(10.0).py(5.0).radius(999.0).hover(s.theme.color("raised")).cursor(rune::Cursor::Pointer)
+            .on_press(answer(false))
+            .child(text("Not now").font(TextStyle::new(11.5, 500.0)).color(s.theme.color("muted"))))
+        .child(row().key("star/yes").px(12.0).py(5.0).radius(999.0).fill(s.theme.color("fg")).cursor(rune::Cursor::Pointer)
+            .on_press(answer(true))
+            .child(text("Star on GitHub").font(TextStyle::new(11.5, 600.0)).color(s.theme.color("bg"))))
 }
 
 fn problem(s: &Island, name: &str, error: &str) -> El {
@@ -1198,6 +1230,22 @@ mod scroll_tests {
         rt.pointer_up(x, y);
         rt.frame(1.0 / 60.0);
         assert_eq!(selected(&rt), "p02");
+    }
+
+    #[test]
+    fn the_star_card_shows_in_the_open_island_only_when_asked() {
+        let mut rt = island_with_pages(2);
+        assert!(rt.find("star").is_none());
+        rt.update(|s, _| s.star_prompt = true);
+        for _ in 0..20 {
+            rt.frame(1.0 / 60.0);
+        }
+        assert!(rt.find("star/yes").is_some() && rt.find("star/no").is_some());
+        rt.update(|s, _| s.set_expanded(false));
+        for _ in 0..40 {
+            rt.frame(1.0 / 60.0);
+        }
+        assert!(rt.find("star").is_none(), "closed, the island shows no card");
     }
 
     #[test]

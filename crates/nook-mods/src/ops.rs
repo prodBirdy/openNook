@@ -64,6 +64,9 @@ pub fn user_path(home: &Path) -> String {
 }
 
 fn exec(e: Exec, paths: &Paths) -> Result<Value, String> {
+    if let Some(answer) = demo_exec(&e) {
+        return Ok(answer);
+    }
     let mut cmd = Command::new(&e.command);
     cmd.args(&e.args).env("PATH", user_path(&paths.home)).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     cmd.current_dir(e.cwd.as_deref().map(|c| crate::files::expand(c, &paths.home)).unwrap_or_else(|| paths.home.clone()));
@@ -97,6 +100,61 @@ fn exec(e: Exec, paths: &Paths) -> Result<Value, String> {
     }))
 }
 
+/// Demo answers for programs, for screenshots (`OPENNOOK_DEMO`'s `exec`: `[{ command, args,
+/// stdout, code }]`). The first entry whose command matches and whose `args` begin the call's
+/// answers in place of running it. `stdout` is text, or JSON written out as text, in which any
+/// `{ "$rate": n }` becomes a counter going up by `n` a second (a CPU time, say).
+fn demo_exec(e: &Exec) -> Option<Value> {
+    let (list, start) = demo("exec");
+    let args = |d: &Value| d.get("args").and_then(Value::as_array).map_or(true, |a| {
+        a.len() <= e.args.len() && a.iter().zip(&e.args).all(|(x, y)| x.as_str() == Some(y.as_str()))
+    });
+    let d = list.iter().find(|d| d.get("command").and_then(Value::as_str) == Some(e.command.as_str()) && args(d))?;
+    let stdout = match d.get("stdout") {
+        Some(Value::String(s)) => s.clone(),
+        Some(v) => rates(v.clone(), start.elapsed().as_secs_f64()).to_string(),
+        None => String::new(),
+    };
+    Some(json!({ "code": d.get("code").and_then(Value::as_i64).unwrap_or(0), "stdout": stdout, "stderr": "" }))
+}
+
+/// Demo answers for HTTP (`OPENNOOK_DEMO`'s `fetch`: `[{ url, status, body }]`): the first
+/// entry whose `url` begins the request's answers it, `body` text or JSON written out as text.
+fn demo_fetch(f: &Fetch) -> Option<Value> {
+    let (list, _) = demo("fetch");
+    let d = list.iter().find(|d| d.get("url").and_then(Value::as_str).is_some_and(|u| f.url.starts_with(u)))?;
+    let body = match d.get("body") {
+        Some(Value::String(s)) => s.clone(),
+        Some(v) => v.to_string(),
+        None => String::new(),
+    };
+    Some(json!({ "status": d.get("status").and_then(Value::as_u64).unwrap_or(200), "headers": {}, "body": body }))
+}
+
+/// The demo fixture's `key` list, read once, and when it was read.
+fn demo(key: &str) -> (Vec<Value>, Instant) {
+    static FIXTURE: std::sync::OnceLock<(Value, Instant)> = std::sync::OnceLock::new();
+    let (v, start) = FIXTURE.get_or_init(|| {
+        let v = std::env::var_os("OPENNOOK_DEMO")
+            .and_then(|p| std::fs::read_to_string(p).ok())
+            .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+            .unwrap_or(Value::Null);
+        (v, Instant::now())
+    });
+    (v.get(key).and_then(Value::as_array).cloned().unwrap_or_default(), *start)
+}
+
+fn rates(v: Value, secs: f64) -> Value {
+    match v {
+        Value::Object(o) if o.len() == 1 && o.contains_key("$rate") => {
+            json!((o["$rate"].as_f64().unwrap_or(0.0) * secs).round() as u64)
+        }
+        Value::Object(o) => Value::Object(o.into_iter().map(|(k, v)| (k, rates(v, secs))).collect()),
+        Value::Array(a) => Value::Array(a.into_iter().map(|v| rates(v, secs)).collect()),
+        v => v,
+    }
+}
+
 #[derive(Deserialize)]
 struct Fetch {
     url: String,
@@ -112,6 +170,9 @@ fn get() -> String {
 }
 
 fn fetch(f: Fetch) -> Result<Value, String> {
+    if let Some(answer) = demo_fetch(&f) {
+        return Ok(answer);
+    }
     let config = ureq::Agent::config_builder().http_status_as_error(false).timeout_global(Some(EXEC_LIMIT)).build();
     let agent = ureq::Agent::new_with_config(config);
     let mut builder = ureq::http::Request::builder().method(f.method.to_uppercase().as_str()).uri(&f.url);

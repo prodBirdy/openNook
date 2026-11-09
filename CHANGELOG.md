@@ -5,6 +5,16 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Added
+
+- After an hour of use (counted only while someone's at the Mac), the open island asks once
+  for a star on GitHub; starring or "Not now" ends it for good.
+- Demo data for screenshots: `opennook shot --demo <fixture.json>` (or `OPENNOOK_DEMO` for the
+  island itself) puts a track, coding agents, a music meter and programs' and websites'
+  answers in place of the Mac's own. `scripts/demo/fixture.json` is the website's.
+
 ## 2.0.0-alpha.2 - 2026-11-09
 
 ### Added

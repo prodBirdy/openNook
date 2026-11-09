@@ -1,0 +1,131 @@
+{
+  "media": {
+    "title": "Afterglow Drive",
+    "artist": "Neon Harbor",
+    "album": "Coastline",
+    "duration": 236,
+    "elapsed": 84,
+    "playing": true,
+    "app": "Music",
+    "bundleId": "com.apple.Music",
+    "artwork": "cover.png",
+    "shuffle": false,
+    "repeat": "off"
+  },
+  "levels": true,
+  "agents": [
+    {
+      "kind": "Claude",
+      "pid": 4101,
+      "title": "landing page",
+      "project": "openNook",
+      "cwd": "~/code/openNook",
+      "status": "working",
+      "icon": "agent-claude"
+    },
+    {
+      "kind": "Codex",
+      "pid": 4102,
+      "title": "api tests",
+      "project": "storefront",
+      "cwd": "~/code/storefront",
+      "status": "waiting",
+      "icon": "agent-codex"
+    }
+  ],
+  "exec": [
+    {
+      "command": "herdr-app",
+      "args": [
+        "ls"
+      ],
+      "stdout": {
+        "spaces": [
+          {
+            "name": "openNook",
+            "tabs": [
+              {
+                "name": "1",
+                "terminals": [
+                  {
+                    "terminal": "t1",
+                    "status": "working",
+                    "app": "claude-code",
+                    "name": "landing page",
+                    "sub_agents": [
+                      {
+                        "status": "working"
+                      },
+                      {
+                        "status": "working"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "name": "storefront",
+            "tabs": [
+              {
+                "name": "2",
+                "terminals": [
+                  {
+                    "terminal": "t2",
+                    "status": "blocked",
+                    "app": "codex",
+                    "name": "checkout tests",
+                    "sub_agents": []
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "name": "docs",
+            "tabs": [
+              {
+                "name": "1",
+                "terminals": [
+                  {
+                    "terminal": "t3",
+                    "status": "done",
+                    "app": "opencode",
+                    "name": "API reference",
+                    "sub_agents": []
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ],
+  "fetch": [
+    {
+      "url": "https://api.open-meteo.com/v1/forecast",
+      "status": 200,
+      "body": {
+        "current": {
+          "temperature_2m": 21.4,
+          "apparent_temperature": 21.0,
+          "weather_code": 2,
+          "wind_speed_10m": 9.0,
+          "is_day": 1,
+          "relative_humidity_2m": 52,
+          "uv_index": 5.2
+        },
+        "daily": {
+          "temperature_2m_max": [
+            24.0
+          ],
+          "temperature_2m_min": [
+            14.0
+          ]
+        }
+      }
+    }
+  ]
+}
