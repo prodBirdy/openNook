@@ -5,7 +5,32 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## 2.0.0-alpha.1 - Unreleased
+## 2.0.0-alpha.2 - 2026-11-09
+
+### Added
+
+- Containers, a shipped mod for Apple's [`container`](https://github.com/apple/container)
+  runtime: how many are running beside the camera, and a page with each container's image,
+  address, uptime, CPU and memory, and a button to start or stop it.
+- Text fields for mods: `InputState` and `Input` in `nook/ui`, as in herdr's mods. The text
+  lives in openNook, so it survives renders and typing never waits on the mod. Focusing one
+  gives the island the keyboard without bringing openNook forward, and Escape, a click
+  elsewhere or closing the island gives it back. `.on_key_down` hears the keys a field doesn't
+  type (`"escape"`, `"cmd-enter"`, `"up"`).
+- Scrolling in mods: `.overflow_y_scroll()` on a box with a bounded height and an id, and
+  `.stick_bottom()` for a chat that opens at its end and follows it. A two-finger swipe that
+  starts mostly vertical over one scrolls it, momentum included; its edges fade while there's
+  more under them.
+- Remote pictures: `image("https://…")` downloads and decodes the picture (AVIF and HEIC
+  through macOS), and `opennook shot` waits for them.
+
+### Changed
+
+- More tabs than fit beside the camera scroll: a sideways swipe that starts over the tab strip
+  moves it instead of changing the page, its edges fade while tabs hide past them, and the open
+  page's tab slides into view whenever the page changes. Tabs under the camera can't be clicked.
+
+## 2.0.0-alpha.1 - 2026-11-07
 
 A rewrite. The island renders with [Rune](https://github.com/anomalyco/rune) (wgpu) instead of
 GPUI, and everything it shows is a mod: a folder of JavaScript under `~/.config/opennook/mods`
@@ -24,8 +49,7 @@ that you or a coding agent edit while it runs. macOS only for now.
 - Shipped mods: Now Playing (with a live music meter from a Core Audio process tap, macOS
   14.2+), Weather (an animated WGSL sky with the real moon phase), World Clock (a dot-matrix
   world lit where the sun is up), ISS (live position, orbit, altitude and speed), Timer
-  (presets, ring, chime), Herdr (your coding agents; click to jump to one) and Containers
-  (Apple's `container` runtime: what's running, its CPU and memory, start and stop).
+  (presets, ring, chime) and Herdr (your coding agents; click to jump to one).
 - Settings: General (hover, display, full screen, haptics, launch at login, Liquid Glass, open
   width, Location), Mods, Permissions (System Audio Recording, Location, Automation), Make it
   yours, and About, plus a first-run welcome.

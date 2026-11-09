@@ -258,3 +258,112 @@ fn a_style_fills_in_from_its_base() {
     assert_eq!(s.compact_radius, Some(8.0));
     assert_eq!(s.shadow, Some(false));
 }
+
+#[test]
+fn a_text_field_keeps_its_state_in_the_app() {
+    let app = temp("input");
+    let dir = write_mod(&app, "todo", r#"
+        import { View, row, InputState, Input } from "nook/ui";
+        export default class Todo extends View {
+          init() { this.field = InputState.new({ placeholder: "New item", value: "milk" }); }
+          expanded() { return row().child(Input.new(this.field).flex_1().text_size(14).on_key_down(() => {})); }
+        }
+    "#);
+    let checked = run_check(&app, dir, Arc::default(), 0);
+    assert_eq!(checked.output.error, None);
+    let field = &checked.output.expanded.unwrap().c[0];
+    assert_eq!(field.t, node::Kind::Input);
+    assert_eq!(field.s.placeholder.as_deref(), Some("New item"));
+    assert!(field.on.key.is_some());
+    let id: u64 = field.v.as_deref().unwrap().parse().unwrap();
+    assert_eq!(checked.inputs, vec![(id, json!({ "op": "new", "value": "milk" }))]);
+}
+
+#[test]
+fn a_text_field_made_in_a_render_is_an_error() {
+    let app = temp("input-render");
+    let dir = write_mod(&app, "bad", r#"
+        import { View, InputState, Input } from "nook/ui";
+        export default class Bad extends View {
+          expanded() { return Input.new(InputState.new()); }
+        }
+    "#);
+    let out = run_check(&app, dir, Arc::default(), 0).output;
+    assert!(out.error.unwrap().contains("belongs in init()"));
+}
+
+#[test]
+fn text_field_events_reach_the_mod() {
+    let app = temp("input-events");
+    write_mod(&app, "echo", r#"
+        import { View, text, InputState } from "nook/ui";
+        export default class Echo extends View {
+          init() {
+            this.field = InputState.new();
+            this.log = [];
+            this.field.on("change", (e, cx) => { this.log.push(`change:${this.field.value()}`); cx.notify(); });
+            this.field.on("focus", (e, cx) => { this.log.push(`focus:${this.field.is_focused()}`); cx.notify(); });
+            this.field.on("submit", (e, cx) => { this.log.push("submit"); this.field.set_value(""); cx.notify(); });
+          }
+          expanded() { return text(`${this.field.id} ${this.log.join(" ")}`); }
+        }
+    "#);
+    #[derive(Clone, Default)]
+    struct Seen(Arc<std::sync::Mutex<Vec<String>>>, Arc<std::sync::Mutex<Vec<Value>>>);
+    impl Host for Seen {
+        fn output(&self, out: Output) {
+            if let Some(n) = out.expanded {
+                self.0.lock().unwrap().push(n.v.unwrap_or_default());
+            }
+        }
+        fn removed(&self, _: &str) {}
+        fn command(&self, _: &str, _: &str, _: Value) {}
+        fn input(&self, _: &str, _: u64, op: Value) {
+            self.1.lock().unwrap().push(op);
+        }
+    }
+    let seen = Seen::default();
+    let mods = Mods::start(Config::at(app.clone(), app.clone()), Arc::default(), seen.clone());
+    let wait_for = |want: &str| {
+        let until = Instant::now() + Duration::from_secs(3);
+        while Instant::now() < until {
+            if let Some(last) = seen.0.lock().unwrap().last().filter(|l| l.ends_with(want)) {
+                return last.clone();
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        panic!("never rendered {want:?}; saw {:?}", seen.0.lock().unwrap());
+    };
+    let first = wait_for(" ");
+    let id: u64 = first.split(' ').next().unwrap().parse().unwrap();
+    mods.input_event("echo", id, "focus", json!({}));
+    mods.input_event("echo", id, "change", json!({ "value": "eggs" }));
+    mods.input_event("echo", id, "submit", json!({}));
+    // An id the mod never made is nobody's.
+    mods.input_event("echo", id + 1000, "submit", json!({}));
+    wait_for("focus:true change:eggs submit");
+    mods.stop();
+    assert!(seen.1.lock().unwrap().contains(&json!({ "op": "set", "value": "" })));
+}
+
+#[test]
+fn a_scrolling_element_needs_an_id() {
+    let app = temp("scroll-id");
+    let dir = write_mod(&app, "list", r#"
+        import { View, col, text } from "nook/ui";
+        export default class List extends View {
+          expanded() { return col().max_h(100).overflow_y_scroll().child(text("a")); }
+        }
+    "#);
+    assert!(run_check(&app, dir, Arc::default(), 0).output.error.unwrap().contains("needs an .id()"));
+    let ok = write_mod(&app, "list2", r#"
+        import { View, col, text } from "nook/ui";
+        export default class List extends View {
+          expanded() { return col().id("l").max_h(100).stick_bottom().child(text("a")); }
+        }
+    "#);
+    let out = run_check(&app, ok, Arc::default(), 0).output;
+    assert_eq!(out.error, None);
+    let s = out.expanded.unwrap().s;
+    assert!(s.scroll && s.stick_bottom);
+}

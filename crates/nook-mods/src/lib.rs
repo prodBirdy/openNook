@@ -71,6 +71,10 @@ pub trait Host: Send + Sync + 'static {
     /// A mod read a topic nothing has published yet (once per topic): start what produces it,
     /// such as asking for the Mac's location.
     fn wants(&self, _topic: &str) {}
+    /// A mod's text field state changed hands: `{ op: "new", value }`, `{ op: "set", value }`,
+    /// `{ op: "mask", value: "true" | "" }`, `{ op: "focus" }`, `{ op: "blur" }` or `{ op: "drop" }`. Ids are unique across mods and
+    /// reloads; the app keeps the text and reports back through [`Mods::input_event`].
+    fn input(&self, _name: &str, _id: u64, _op: Value) {}
 }
 
 #[derive(Clone)]
@@ -103,6 +107,11 @@ impl Mods {
         let _ = self.tx.send(engine::Msg::Dispatch { name: name.to_owned(), handler, payload });
     }
 
+    /// What happened to a text field (`change` with `{ value }`, `submit`, `focus`, `blur`).
+    pub fn input_event(&self, name: &str, id: u64, event: &str, payload: Value) {
+        let _ = self.tx.send(engine::Msg::Input { name: name.to_owned(), id, event: event.to_owned(), payload });
+    }
+
     pub fn stop(&self) {
         let _ = self.tx.send(engine::Msg::Stop);
     }
@@ -112,12 +121,15 @@ impl Mods {
 pub struct Checked {
     pub output: Output,
     pub commands: Vec<(String, Value)>,
+    /// Text field requests (`Host::input`): id and op.
+    pub inputs: Vec<(u64, Value)>,
 }
 
 #[derive(Default)]
 struct Recorder {
     outputs: std::sync::Mutex<Vec<Output>>,
     commands: std::sync::Mutex<Vec<(String, Value)>>,
+    inputs: std::sync::Mutex<Vec<(u64, Value)>>,
 }
 
 impl Host for Arc<Recorder> {
@@ -127,6 +139,9 @@ impl Host for Arc<Recorder> {
     fn removed(&self, _: &str) {}
     fn command(&self, _: &str, command: &str, args: Value) {
         self.commands.lock().unwrap().push((command.to_owned(), args));
+    }
+    fn input(&self, _: &str, id: u64, op: Value) {
+        self.inputs.lock().unwrap().push((id, op));
     }
 }
 
@@ -164,7 +179,8 @@ pub fn check(config: Config, store: Arc<Store>, dir: PathBuf, settle: Duration) 
     }
     let output = recorder.outputs.lock().unwrap().last().cloned().ok_or("the mod rendered nothing")?;
     let commands = std::mem::take(&mut *recorder.commands.lock().unwrap());
-    Ok(Checked { output, commands })
+    let inputs = std::mem::take(&mut *recorder.inputs.lock().unwrap());
+    Ok(Checked { output, commands, inputs })
 }
 
 #[cfg(test)]

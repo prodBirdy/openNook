@@ -24,6 +24,11 @@ let previous = new Map();
 let nextHandler = 1;
 const timers = new Map();
 const subscriptions = new Map();
+// Text field states by id (`InputState` in nook/ui), for the events the island sends back.
+const inputs = new Map();
+// True while activity()/expanded()/style()/icon() run: state made there would be made again on
+// every render.
+let rendering = false;
 let nextTimer = 1;
 
 function describe(error) {
@@ -59,6 +64,7 @@ function serialize(node) {
   if (typeof node === "string" || typeof node === "number") return { t: "text", v: String(node) };
   if (typeof node.__node !== "function") throw new TypeError(`not an element: ${JSON.stringify(node)?.slice(0, 80)}`);
   const raw = node.__node();
+  if (raw.s.scroll && raw.k === undefined) throw new TypeError("a scrolling element needs an .id(), so it keeps its place between renders");
   const out = { t: raw.t };
   if (raw.k !== undefined) out.k = raw.k;
   if (raw.v !== undefined) out.v = raw.v;
@@ -106,11 +112,16 @@ globalThis.__nook_mount = (Class, propsJson) => {
 globalThis.__nook_render = () => {
   previous = handlers;
   handlers = new Map();
-  let icon = null;
-  if (typeof view.icon === "function") {
-    try { icon = view.icon(cx) ?? null; } catch (e) { report("icon()", e); }
+  rendering = true;
+  try {
+    let icon = null;
+    if (typeof view.icon === "function") {
+      try { icon = view.icon(cx) ?? null; } catch (e) { report("icon()", e); }
+    }
+    return JSON.stringify({ activity: renderSlot(view, "activity"), expanded: renderSlot(view, "expanded"), style: renderSlot(view, "style"), icon: icon === null ? null : String(icon) });
+  } finally {
+    rendering = false;
   }
-  return JSON.stringify({ activity: renderSlot(view, "activity"), expanded: renderSlot(view, "expanded"), style: renderSlot(view, "style"), icon: icon === null ? null : String(icon) });
 };
 
 globalThis.__nook_dispatch = (id, payloadJson) => {
@@ -138,6 +149,12 @@ globalThis.__nook_event = (id, json) => {
   const f = subscriptions.get(id);
   if (!f) return;
   try { f(JSON.parse(json), cx); } catch (e) { report("subscription", e); }
+};
+
+globalThis.__nook_input = (id, event, json) => {
+  const state = inputs.get(id);
+  if (!state) return;
+  try { state.__event(event, JSON.parse(json), cx); } catch (e) { report(`input ${event}`, e); }
 };
 
 globalThis.__nook_unmount = () => {
@@ -175,4 +192,4 @@ globalThis.fetch = async (url, init = {}) => new Response(await start("fetch", {
 }));
 
 // What the `nook` and `nook/ui` modules build on; not for mods.
-globalThis.__nook = { call, start, subscribe };
+globalThis.__nook = { call, start, subscribe, inputs, rendering: () => rendering };

@@ -1,6 +1,7 @@
 //! openNook: a Dynamic Island for the notch whose every part is a mod. `opennook` runs the
 //! island; `opennook check <mod>` and `opennook shot` are for the agents that write mods.
 
+mod fields;
 mod gesture;
 mod home;
 mod icons;
@@ -16,7 +17,7 @@ mod theme;
 
 use island::{CANVAS_H, Island, Notch};
 use nook_mods::{Host, Mods, Output, Store};
-use rune::{App, AppSpec, DisplayTarget, OverlayHandle, OverlayInput, OverlayLevel, OverlayOptions, OverlaySpec, RunOptions, WindowSpec, el};
+use rune::{App, AppSpec, DisplayTarget, KeyPolicy, OverlayHandle, OverlayInput, OverlayLevel, OverlayOptions, OverlaySpec, RunOptions, WindowSpec, el};
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -91,6 +92,10 @@ impl Host for OverlayHost {
             self.0.update(move |_, _| services::request_location(store));
         }
     }
+    fn input(&self, name: &str, id: u64, op: Value) {
+        let name = name.to_owned();
+        self.0.update(move |s, tx| s.input(&name, id, &op, tx));
+    }
 }
 
 fn island_setup(s: &mut Island, waker: rune::Waker) {
@@ -137,22 +142,24 @@ fn run() {
         let mut app = App::new(AppSpec::new("openNook", (1.0, 1.0), || (), |_, _| el())).windowless();
         let start = island::pick(island::display_mode(), &platform::displays(), platform::pointer())
             .map_or(DisplayTarget::Primary, |d| DisplayTarget::Native(rune::NativeDisplayId::MacOS(d.id)));
-        let options = OverlayOptions { display: start, input: OverlayInput::Regions, level: OverlayLevel::AboveStatus, prewarm: true, ..Default::default() };
+        // Keys on demand: a mod's focused text field asks for them; nothing else takes them.
+        let options = OverlayOptions { display: start, input: OverlayInput::Regions, level: OverlayLevel::AboveStatus, prewarm: true, keys: KeyPolicy::OnDemand, ..Default::default() };
         // Scrolls and right-clicks: Rune routes only left presses to an overlay, so the panel's
         // own events are watched once it exists.
         let slot: Arc<std::sync::OnceLock<OverlayHandle<Island>>> = Arc::default();
         let created = slot.clone();
         let overlay = app.overlay(
-            OverlaySpec::new("openNook", canvas, island::view).options(options).poll(island::poll).setup(island_setup)
+            OverlaySpec::new("openNook", canvas, island::view).options(options).poll(island::poll).setup(island_setup).on_focus(island::window_focus)
                 .compositor(shader::Shaders::default())
                 .on_created(move |c| {
                     let Some(window) = c.window_number else { return };
+                    platform::keys_only_on_request(window);
                     platform::watch_island_input(window, move |input| {
                         let Some(handle) = created.get() else { return };
                         match input {
-                            platform::IslandInput::Scroll { dx, dy, phase, momentum } => handle.update(move |s, tx| {
-                                log::debug!("island scroll dx={dx:.1} dy={dy:.1} {phase:?} momentum={momentum}");
-                                s.scroll(dx, dy, phase, momentum, tx);
+                            platform::IslandInput::Scroll { dx, dy, phase, momentum, x, y } => handle.update(move |s, tx| {
+                                log::debug!("island scroll dx={dx:.1} dy={dy:.1} {phase:?} momentum={momentum} at {x:.0},{y:.0}");
+                                s.scroll(dx, dy, phase, momentum, Some((x, y)), tx);
                             }),
                             platform::IslandInput::SecondaryClick { x, y } => handle.update(move |s, tx| s.menu((x, y), tx)),
                         }
@@ -161,6 +168,15 @@ fn run() {
             island,
         );
         let _ = slot.set(overlay.clone());
+        let (ask, give) = (overlay.clone(), overlay.clone());
+        overlay.update(move |s, _| {
+            s.request_keys = Some(Box::new(move || ask.request_keys()));
+            s.release_keys = Some(Box::new(move || {
+                if let Some(window) = give.window_number() {
+                    platform::give_up_keys(window);
+                }
+            }));
+        });
         // Settings (and the first launch's onboarding), hidden until asked for.
         let spec = AppSpec { poll: Some(settings::poll), ..AppSpec::new("openNook", settings::SIZE, settings::Settings::new, settings::view) };
         let window = WindowSpec::new("settings", spec)
@@ -402,7 +418,8 @@ fn shot(args: &[String]) -> i32 {
     let wait = flag(args, "--wait").and_then(|w| w.parse().ok()).unwrap_or(2500);
     let (mut island, store) = prepare();
     let outputs: Arc<Mutex<BTreeMap<String, Output>>> = Arc::default();
-    struct Collect(Arc<Mutex<BTreeMap<String, Output>>>);
+    let inputs: Arc<Mutex<Vec<(String, u64, Value)>>> = Arc::default();
+    struct Collect(Arc<Mutex<BTreeMap<String, Output>>>, Arc<Mutex<Vec<(String, u64, Value)>>>);
     impl Host for Collect {
         fn output(&self, out: Output) {
             self.0.lock().unwrap().insert(out.name.clone(), out);
@@ -411,14 +428,33 @@ fn shot(args: &[String]) -> i32 {
             self.0.lock().unwrap().remove(name);
         }
         fn command(&self, _: &str, _: &str, _: Value) {}
+        fn input(&self, name: &str, id: u64, op: Value) {
+            self.1.lock().unwrap().push((name.to_owned(), id, op));
+        }
     }
     no_location(&store);
-    let mods = Mods::start(home::config(), store.clone(), Collect(outputs.clone()));
+    let mods = Mods::start(home::config(), store.clone(), Collect(outputs.clone(), inputs.clone()));
     services::start_agents(store.clone());
     services::start(store);
     std::thread::sleep(Duration::from_millis(wait));
     mods.stop();
     island.outputs = outputs.lock().unwrap().clone();
+    // Remote pictures, as the island would have them by now.
+    let mut urls = Vec::new();
+    for o in island.outputs.values() {
+        let nodes = o.expanded.iter().chain(o.activity.iter().flat_map(|a| a.leading.iter().chain(a.trailing.iter()).chain(a.detail.iter())));
+        for n in nodes {
+            n.walk(&mut |n| {
+                if n.t == nook_mods::node::Kind::Image && let Some(src) = n.v.as_ref().filter(|v| v.starts_with("http://") || v.starts_with("https://")) {
+                    urls.push(src.clone());
+                }
+            });
+        }
+    }
+    images::preload(&urls);
+    for (name, id, op) in inputs.lock().unwrap().iter() {
+        island.fields.apply(name, *id, op);
+    }
     island.expanded = open;
     island.hover = args.iter().any(|a| a == "--hover");
     if let Some(m) = flag(args, "--mod") {

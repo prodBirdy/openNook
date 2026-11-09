@@ -112,7 +112,80 @@ export interface Element {
 
   on_click(f: (event: {}, cx: Cx) => void): this;
   on_hover(f: (hovered: boolean, cx: Cx) => void): this;
+  /** Keys while this element, or a text field inside it, has the keyboard. Keys a field types
+   *  into itself (letters, arrows, Backspace) stay the field's; Return submits it and Escape
+   *  leaves it. */
+  on_key_down(f: (event: KeyEvent, cx: Cx) => void): this;
+
+  /** Scrolls the children vertically when they're taller than this element. Needs a bounded
+   *  height (`h`, or `max_h` to grow until then) and an `.id()`. A two-finger swipe that starts
+   *  over it scrolls it instead of changing the page. No visible scrollbar. */
+  overflow_y_scroll(): this;
+  /** `overflow_y_scroll()`, as herdr (and GPUI) spell it. */
+  overflow_y_scrollbar(): this;
+  /** A scrolling element that opens at its bottom and follows it as content arrives (a chat). */
+  stick_bottom(): this;
+
+  /** Text fields: the placeholder's color (default "faint"). */
+  placeholder_color(color: Color): this;
 }
+
+/** What an `on_key_down` handler receives. */
+export interface KeyEvent {
+  /** The key: "a", "enter", "escape", "tab", "up", "f5", … */
+  key: string;
+  /** The whole chord, modifiers first: "cmd-shift-s", "escape". */
+  keystroke: string;
+  /** The character this key would type, when it types one. */
+  key_char?: string | null;
+  modifiers: { cmd: boolean; shift: boolean; alt: boolean; ctrl: boolean };
+}
+
+/**
+ * A text field's state, made once and kept on the view: in `init` or a handler, never in a
+ * render (that throws: a render would make a new field every time). The text lives in openNook,
+ * so it survives every render and typing never waits on the mod. Show it with
+ * `Input.new(state)`.
+ *
+ * ```js
+ * init(props, cx) {
+ *   this.field = InputState.new({ placeholder: "New reminder" });
+ *   this.field.on("submit", (_, cx) => { add(this.field.value()); this.field.set_value(""); cx.notify(); });
+ * }
+ * expanded() { return Input.new(this.field).flex_1().h(32).px(10).rounded(8).bg("surface"); }
+ * ```
+ *
+ * Focusing a field (a click, or `focus()`) gives the island the keyboard without bringing
+ * openNook forward; the island stays open while someone types, even with the pointer
+ * elsewhere. Escape, a click in another app, or the island closing takes it away again.
+ */
+export interface InputState {
+  readonly id: number;
+  /** The text now. */
+  value(): string;
+  /** Replaces the text; no `change` follows. */
+  set_value(value: string): void;
+  set_placeholder(text: string): void;
+  /** Draws the text as a password. */
+  set_masked(masked: boolean): void;
+  /** Moves the keyboard onto the field, while its page is open. */
+  focus(): void;
+  /** Takes the keyboard off the field. */
+  blur(): void;
+  is_focused(): boolean;
+  /** `change` on every edit (`{ value }`), `submit` on Return, `focus`, `blur`. */
+  on(event: "change" | "submit" | "focus" | "blur", handler: (event: { value?: string }, cx: Cx) => void): boolean;
+  /** Forgets the field; using it afterwards does nothing. */
+  release(): boolean;
+}
+export const InputState: {
+  new: (options?: { placeholder?: string; value?: string }) => InputState;
+};
+/** A single-line text field over an `InputState`. Style it like any element: its text with
+ *  text_size/text_color/font_*, its box with bg/rounded/border/px/h. */
+export const Input: { new: (state: InputState) => Element };
+/** `Input.new(state)`, in the lower-case style of the other elements. */
+export function input(state: InputState): Element;
 
 /** A box whose children stack vertically. */
 export function div(): Element;

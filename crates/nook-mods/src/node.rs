@@ -30,6 +30,8 @@ pub enum Kind {
     Image,
     /// A Metal fragment shader from the mod's folder, animated.
     Shader,
+    /// A text field over an `InputState`; `v` is the state's id.
+    Input,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
@@ -39,6 +41,9 @@ pub struct Handlers {
     pub click: Option<u64>,
     #[serde(default)]
     pub hover: Option<u64>,
+    /// Keys while this element, or a text field inside it, has the keyboard.
+    #[serde(default)]
+    pub key: Option<u64>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq)]
@@ -130,6 +135,15 @@ pub struct Style {
     pub params: Option<Vec<f32>>,
     /// Shader elements: frames a second (default 30; 0 draws one still frame).
     pub fps: Option<f32>,
+    /// A vertical scroll viewport over the children (needs a bounded height and an id).
+    #[serde(default)]
+    pub scroll: bool,
+    /// Scroll viewports: open at the bottom and follow it as content grows (a chat).
+    #[serde(default)]
+    pub stick_bottom: bool,
+    /// Text fields: shown while empty.
+    pub placeholder: Option<String>,
+    pub placeholder_color: Option<String>,
 }
 
 /// What a mod shows in the closed island: beside the camera, left and right.

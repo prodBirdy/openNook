@@ -4,15 +4,17 @@
 //! concave wings, a hover peek, a snappy morph, content that slides and blurs in, and Liquid
 //! Glass under a black veil when open.
 
+use crate::fields::{Fields, Keys};
 use crate::gesture::{self, Action, Swipe};
 use crate::home::{DisplayMode, HoverMode, Layout};
 use crate::images::Images;
-use crate::render::{self, Rcx};
+use crate::render::{self, Rcx, Scroller};
 use crate::theme::Theme;
 use nook_mods::{IslandStyle, Mods, Output};
 use rune::tok::TextStyle;
 use rune::{Color, Cx, El, PopupItem, PopupMenu, Spring, SpringPair, SystemMaterial, Transition, Tx, WheelEvent, col, el, icon, row, spacer, text};
 use serde_json::{Value, json};
+use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
@@ -42,6 +44,14 @@ const MAX_EXPANDED_RADIUS: f32 = 60.0;
 const PEEK_EXTRA: f32 = 88.0;
 const PEEK_CHIN: f32 = 11.0;
 const PEEK_DETAIL_CHIN: f32 = 24.0;
+
+/// The open island's tab strip, in the shoulder left of the camera: tabs, the space between
+/// them, its insets, and the fade over an edge with tabs past it. More tabs than fit scroll.
+const TAB_W: f32 = 28.0;
+const TAB_GAP: f32 = 4.0;
+const TABS_LEFT: f32 = 14.0;
+const TABS_RIGHT: f32 = 8.0;
+const TABS_FADE: f32 = 18.0;
 
 /// Liquid Glass: the black band kept at the top (the camera's), at the default tint, and the
 /// rim's light at the bottom edge.
@@ -143,6 +153,43 @@ pub struct Island {
     pub quit: bool,
     /// Opens the settings window (set once it exists).
     pub open_settings: Option<Box<dyn Fn()>>,
+    /// Mods' text fields.
+    pub fields: Fields,
+    /// Takes the keyboard for a focused field, and gives it back to the app it came from (set
+    /// once the panel exists; a still from `shot` has neither).
+    pub request_keys: Option<Box<dyn Fn()>>,
+    pub release_keys: Option<Box<dyn Fn()>>,
+    /// Mods' scroll viewports: those the last view drew, where they are and how far each goes,
+    /// and how far each is scrolled. The overlay hears no wheel of its own (the panel's monitor
+    /// takes every scroll for swipes), so the island scrolls them.
+    scrollers_drawn: RefCell<Vec<Scroller>>,
+    scroll_geometry: RefCell<BTreeMap<String, ScrollGeometry>>,
+    scroll_offsets: RefCell<BTreeMap<String, f32>>,
+    /// Who the swipe under way belongs to, decided by its first movement.
+    scroll_lock: Option<(ScrollLock, Instant)>,
+    /// The body's top-left in window points, for wheel events Rune reports in its own.
+    body_origin: Cell<(f32, f32)>,
+    /// How far the tab strip is scrolled, and where it was drawn (window points).
+    tabs_offset: f32,
+    tabs_rect: Cell<Option<[f32; 4]>>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ScrollGeometry {
+    /// `[x, y, w, h]` in window points.
+    rect: [f32; 4],
+    /// How far it scrolls: content less viewport.
+    max: f32,
+    stick_bottom: bool,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum ScrollLock {
+    /// No movement yet (a trackpad's first event often has none).
+    Pending,
+    Swipe,
+    Scroller(String),
+    Tabs,
 }
 
 impl Island {
@@ -171,6 +218,16 @@ impl Island {
             notes: problem.into_iter().collect(),
             quit: false,
             open_settings: None,
+            fields: Fields::default(),
+            request_keys: None,
+            release_keys: None,
+            scrollers_drawn: RefCell::default(),
+            scroll_geometry: RefCell::default(),
+            scroll_offsets: RefCell::default(),
+            scroll_lock: None,
+            body_origin: Cell::new((0.0, 0.0)),
+            tabs_offset: 0.0,
+            tabs_rect: Cell::new(None),
         }
     }
 
@@ -247,12 +304,46 @@ impl Island {
     }
 
     fn wheel(&mut self, e: WheelEvent, tx: &mut Tx) -> bool {
-        self.scroll(e.dx, e.dy, e.phase, e.momentum, tx)
+        let (x, y) = self.body_origin.get();
+        self.scroll(e.dx, e.dy, e.phase, e.momentum, Some((x + e.x, y + e.y)), tx)
     }
 
-    /// A two-finger swipe step, from Rune (headless) or the panel's event monitor (live).
-    pub fn scroll(&mut self, dx: f32, dy: f32, phase: rune::GesturePhase, momentum: bool, tx: &mut Tx) -> bool {
+    /// A two-finger swipe step, from Rune (headless) or the panel's event monitor (live); `at`
+    /// is the pointer in window points. One that starts mostly vertical over a mod's scroll
+    /// viewport scrolls it, momentum included; one that starts mostly sideways over a tab strip
+    /// with more tabs than fit scrolls the strip; any other swipes.
+    pub fn scroll(&mut self, dx: f32, dy: f32, phase: rune::GesturePhase, momentum: bool, at: Option<(f32, f32)>, tx: &mut Tx) -> bool {
         use nook_core::haptics::{HapticConfig, HapticPattern, trigger};
+        let now = Instant::now();
+        let stale = self.scroll_lock.as_ref().is_none_or(|(_, t)| now.duration_since(*t) >= gesture::IDLE);
+        if !momentum && (phase == rune::GesturePhase::Began || stale) {
+            self.scroll_lock = Some((ScrollLock::Pending, now));
+        }
+        if self.scroll_lock.as_ref().is_some_and(|(l, _)| *l == ScrollLock::Pending) && (dx != 0.0 || dy != 0.0) {
+            let lock = match at {
+                Some(p) if self.expanded && dy.abs() >= dx.abs() => self.scroller_at(p).map(ScrollLock::Scroller),
+                Some(p) if self.expanded && self.over_tabs(p) && self.tabs_max() > 0.5 => Some(ScrollLock::Tabs),
+                _ => None,
+            };
+            self.scroll_lock = Some((lock.unwrap_or(ScrollLock::Swipe), now));
+        }
+        if let Some((lock, t)) = &mut self.scroll_lock {
+            *t = now;
+            match lock.clone() {
+                ScrollLock::Scroller(key) => {
+                    self.scroll_by(&key, dy, tx);
+                    return true;
+                }
+                ScrollLock::Tabs => {
+                    // The strip follows the fingers, not a spring behind them.
+                    tx.instant();
+                    let max = self.tabs_max();
+                    self.tabs_offset = (self.tabs_offset.min(max) - dx).clamp(0.0, max);
+                    return true;
+                }
+                _ => {}
+            }
+        }
         // Momentum after the fingers lift reports as a new swipe; it isn't one.
         if momentum {
             return true;
@@ -304,7 +395,31 @@ impl Island {
             self.page_dir = if to >= from { 1.0 } else { -1.0 };
         }
         self.selected = Some(name.to_owned());
+        self.reveal_tab();
         self.publish();
+    }
+
+    /// The tab strip's width: the shoulder left of the camera.
+    fn tabs_w(&self) -> f32 {
+        (self.open_w() - self.notch.w) / 2.0
+    }
+
+    /// How far the tab strip scrolls: its tabs' width less the strip's.
+    fn tabs_max(&self) -> f32 {
+        let n = self.pages().len() as f32;
+        (TABS_LEFT + n * TAB_W + (n - 1.0).max(0.0) * TAB_GAP + TABS_RIGHT - self.tabs_w()).max(0.0)
+    }
+
+    fn over_tabs(&self, (x, y): (f32, f32)) -> bool {
+        self.tabs_rect.get().is_some_and(|r| x >= r[0] && x <= r[0] + r[2] && y >= r[1] && y <= r[1] + r[3])
+    }
+
+    /// Scrolls the tab strip just far enough to show the open page's tab clear of the fades.
+    fn reveal_tab(&mut self) {
+        let Some(at) = self.page().and_then(|p| self.pages().iter().position(|o| o.name == p.name)) else { return };
+        let left = TABS_LEFT + at as f32 * (TAB_W + TAB_GAP);
+        let (lo, hi) = (left + TAB_W + TABS_FADE - self.tabs_w(), left - TABS_FADE);
+        self.tabs_offset = self.tabs_offset.max(lo).min(hi).clamp(0.0, self.tabs_max());
     }
 
     /// Notes which way the closed island's owner changed, for its content's slide.
@@ -367,6 +482,45 @@ impl Island {
         Look::of(&style, &self.theme, self.notch.h)
     }
 
+    /// The innermost scroll viewport under `p` that has somewhere to go.
+    fn scroller_at(&self, (x, y): (f32, f32)) -> Option<String> {
+        self.scroll_geometry.borrow().iter()
+            .filter(|(_, g)| g.max > 0.5 && x >= g.rect[0] && x <= g.rect[0] + g.rect[2] && y >= g.rect[1] && y <= g.rect[1] + g.rect[3])
+            .min_by(|a, b| (a.1.rect[2] * a.1.rect[3]).total_cmp(&(b.1.rect[2] * b.1.rect[3])))
+            .map(|(k, _)| k.clone())
+    }
+
+    /// Moves viewport `key` by a swipe's `dy` (positive moves the content down).
+    fn scroll_by(&mut self, key: &str, dy: f32, tx: &mut Tx) {
+        let Some(g) = self.scroll_geometry.borrow().get(key).copied() else { return };
+        let mut offsets = self.scroll_offsets.borrow_mut();
+        // A viewport not yet scrolled is where Rune opened it: at the bottom when it sticks there.
+        let now = offsets.get(key).copied().unwrap_or(if g.stick_bottom { f32::INFINITY } else { 0.0 });
+        let next = (now.min(g.max) - dy).clamp(0.0, g.max);
+        // At the bottom of a sticking viewport, content that arrives keeps it there: it reads as
+        // "at the end", whatever the end grows to.
+        offsets.insert(key.to_owned(), if g.stick_bottom && next >= g.max - 0.5 { f32::INFINITY } else { next });
+        log::debug!("island: scroll {key} to {next:.0} of {:.0}", g.max);
+        tx.scroll_to_instant(key.to_owned(), 0.0, next);
+    }
+
+    /// Where the viewports the view just drew are, read from the last layout.
+    fn measure_scrollers(&self, cx: &mut Cx<Island>) {
+        let drawn = std::mem::take(&mut *self.scrollers_drawn.borrow_mut());
+        let mut geometry = BTreeMap::new();
+        for s in &drawn {
+            let (Some(rect), Some([_, content])) = (cx.layout(&s.key), cx.layout_size(&s.content_key())) else { continue };
+            geometry.insert(s.key.clone(), ScrollGeometry { rect, max: (content + s.pad - rect[3]).max(0.0), stick_bottom: s.stick_bottom });
+        }
+        // A viewport that went is drawn anew (at its top, or bottom) when it comes back.
+        self.scroll_offsets.borrow_mut().retain(|k, _| drawn.iter().any(|s| s.key == *k));
+        *self.scroll_geometry.borrow_mut() = geometry;
+        if let Some([x, y, _, _]) = cx.layout("island/body") {
+            self.body_origin.set((x, y));
+        }
+        self.tabs_rect.set(if self.expanded { cx.layout("topbar/tabs") } else { None });
+    }
+
     /// The island's state for mods (`island()`).
     pub fn publish(&self) {
         let Some(m) = &self.mods else { return };
@@ -387,12 +541,53 @@ impl Island {
     fn set_expanded(&mut self, open: bool) {
         if self.expanded != open {
             self.expanded = open;
-            if !open {
+            if open {
+                self.reveal_tab();
+            } else {
                 self.peek_until = None;
                 self.left_at = None;
                 self.notes.clear();
+                if self.fields.blur_all(self.mods.as_ref()) {
+                    self.give_keys_back();
+                }
             }
             self.publish();
+        }
+    }
+
+    /// A mod's request about one of its text fields (`Host::input`).
+    pub fn input(&mut self, from: &str, id: u64, op: &Value, tx: &mut Tx) {
+        match self.fields.apply(from, id, op) {
+            // A field takes the keyboard only where it can be seen and typed into.
+            Keys::Request if self.expanded => {
+                if let Some(ask) = &self.request_keys {
+                    ask();
+                }
+            }
+            Keys::Request => {
+                self.fields.blur_all(None);
+            }
+            Keys::Release => {
+                tx.blur();
+                self.field_left(tx);
+            }
+            Keys::None => {}
+        }
+    }
+
+    /// A field gave up the keyboard (Escape, `blur()`): back to the app it came from, and the
+    /// island closes as it would have, had the pointer left while someone typed.
+    pub fn field_left(&mut self, tx: &mut Tx) {
+        self.give_keys_back();
+        if self.expanded && !self.hover {
+            self.left_at = Some(Instant::now());
+            tx.wake_after(Duration::from_millis(self.layout.island.collapse_delay_ms));
+        }
+    }
+
+    fn give_keys_back(&self) {
+        if let Some(release) = &self.release_keys {
+            release();
         }
     }
 
@@ -563,6 +758,9 @@ mod display_tests {
 
 pub fn poll(s: &mut Island, _t: f64, _tx: &mut Tx) -> bool {
     let now = Instant::now();
+    if s.images.as_ref().is_some_and(|i| i.take_arrived()) {
+        return true;
+    }
     if s.swipe.stale(now) {
         return true;
     }
@@ -571,7 +769,8 @@ pub fn poll(s: &mut Island, _t: f64, _tx: &mut Tx) -> bool {
         s.set_expanded(true);
         return true;
     }
-    if s.expanded && !s.hover {
+    // Typing holds the island open, wherever the pointer went.
+    if s.expanded && !s.hover && !s.fields.typing() {
         let peeking = s.peek_until.is_some_and(|t| now < t);
         let left = s.left_at.is_some_and(|t| now.duration_since(t) >= Duration::from_millis(opts.collapse_delay_ms));
         if !peeking && (left || s.peek_until.is_some()) {
@@ -582,8 +781,30 @@ pub fn poll(s: &mut Island, _t: f64, _tx: &mut Tx) -> bool {
     false
 }
 
+/// The panel gained or lost the keyboard. Lost (a click in another app), a field that had it
+/// lets go, so the island can close.
+pub fn window_focus(s: &mut Island, focused: bool, tx: &mut Tx) {
+    if !focused && s.fields.typing() {
+        tx.blur();
+        s.fields.blur_all(s.mods.as_ref());
+        if s.expanded && !s.hover {
+            s.left_at = Some(Instant::now());
+            tx.wake_after(Duration::from_millis(s.layout.island.collapse_delay_ms));
+        }
+    }
+}
+
 fn rcx<'a>(s: &'a Island, o: &'a Output) -> Rcx<'a> {
-    Rcx { name: &o.name, dir: &o.dir, theme: &s.theme, images: s.images.as_ref(), mods: s.mods.as_ref() }
+    Rcx {
+        name: &o.name,
+        dir: &o.dir,
+        theme: &s.theme,
+        images: s.images.as_ref(),
+        mods: s.mods.as_ref(),
+        fields: Some(&s.fields),
+        request_keys: s.request_keys.as_deref(),
+        scrollers: Some(&s.scrollers_drawn),
+    }
 }
 
 /// Content swapping in and out: it travels `(dx, dy)` and blurs as it fades, both ways on the
@@ -618,7 +839,9 @@ pub fn view(s: &Island, cx: &mut Cx<Island>) -> El {
     let fade = |c: Color| if ghost { c.alpha(0.0) } else { c };
     let black = fade(look.fill);
     let top = fade(look.top());
+    s.scrollers_drawn.borrow_mut().clear();
     let body = if s.expanded { expanded(s, &look) } else { compact(s, &look) };
+    s.measure_scrollers(cx);
     let radius = if s.expanded { look.expanded_radius } else { look.compact_radius };
     // The island is a row: wing, body, wing. The left wing rides the row's left edge (where
     // children ride) and the right one its trailing edge, so both stay attached through every
@@ -739,7 +962,7 @@ fn tab(s: &Island, o: &Output, selected: bool) -> El {
     };
     let chosen = o.icon.as_deref().filter(drawable).or(o.manifest_icon.as_deref().filter(drawable));
     let glyph = chosen.and_then(|i| crate::icons::get(i, &o.dir));
-    let mut t = row().key(format!("tab/{}", o.name)).size(28.0, 24.0).radius(7.0).items_center().justify_center()
+    let mut t = row().key(format!("tab/{}", o.name)).size(TAB_W, 24.0).radius(7.0).items_center().justify_center()
         .hover(s.theme.color("raised"))
         .on_press(move |s: &mut Island| s.select(&name));
     if selected {
@@ -782,12 +1005,21 @@ fn expanded(s: &Island, look: &Look) -> El {
     let w = s.open_w();
     let pages = s.pages();
     let page = s.page();
-    let shoulder = (w - n.w) / 2.0;
-    let tabs = pages.iter().fold(row().gap(4.0).pl(14.0), |r, o| r.child(tab(s, o, page.is_some_and(|p| p.name == o.name))));
+    let shoulder = s.tabs_w();
+    // More tabs than fit beside the camera slide under a clip; an edge fades while tabs hide
+    // past it. A page's own tabs list may have shrunk since the strip was scrolled.
+    let (offset, max) = (s.tabs_offset.min(s.tabs_max()), s.tabs_max());
+    let tabs = pages.iter().fold(row().key("topbar/tabs/row").gap(TAB_GAP).pl(TABS_LEFT).pr(TABS_RIGHT).offset(-offset, 0.0), |r, o| {
+        r.child(tab(s, o, page.is_some_and(|p| p.name == o.name)))
+    });
+    let fade = |hidden: bool| if hidden { TABS_FADE } else { 0.0 };
+    let strip = row().key("topbar/tabs").w(shoulder).h_full().items_center()
+        .clip_fade(fade(offset > 0.5), 0.0, fade(offset < max - 0.5), 0.0)
+        .child(tabs);
     let title = page.map(|p| p.title.clone()).unwrap_or_default();
     // The tab bar sits still while pages swap under it; it arrives with the opening island.
     let top = row().key("topbar").h(n.h).w_full().transition(swap(0.0, -SLIDE_Y))
-        .child(row().w(shoulder).h_full().items_center().child(tabs))
+        .child(strip)
         .child(el().w(n.w).h_full())
         .child(row().w(shoulder).h_full().items_center().justify_end().pr(12.0).gap(6.0)
             .child(text(title).font(TextStyle::new(12.0, 600.0)).color(s.theme.color("muted")).truncate().shrink())
@@ -828,4 +1060,160 @@ fn empty(s: &Island) -> El {
         .child(text("No mods yet").font(TextStyle::new(14.0, 600.0)).color(s.theme.color("fg")))
         .child(text("Ask your agent to write one: ~/.config/opennook/AGENTS.md").font(TextStyle::new(12.0, 400.0)).color(s.theme.color("muted")))
         .child(spacer())
+}
+
+#[cfg(test)]
+mod scroll_tests {
+    use super::*;
+    use rune::{Env, GesturePhase, Runtime};
+
+    /// The open island on a page whose list of 20 rows scrolls in 200 points.
+    fn island_with_list(stick_bottom: bool) -> Runtime<Island> {
+        let rows: Vec<Value> = (0..20).map(|i| json!({ "t": "box", "k": format!("r{i}"), "s": { "dir": "row", "h": 30.0 } })).collect();
+        let page = json!({ "t": "box", "s": { "dir": "col" }, "c": [
+            { "t": "box", "k": "list", "s": { "dir": "col", "gap": 4.0, "max_h": 200.0, "scroll": true, "stick_bottom": stick_bottom }, "c": rows },
+        ] });
+        let notch = Notch { w: 200.0, h: 32.0, has: true, screen: (1512.0, 982.0) };
+        let mut island = Island::new(notch, Layout::default());
+        island.outputs.insert("t".into(), Output { name: "t".into(), title: "t".into(), has_expanded: true, expanded: Some(serde_json::from_value(page).unwrap()), ..Default::default() });
+        island.expanded = true;
+        island.select("t");
+        let size = (island.canvas_w(), CANVAS_H);
+        let mut rt = Runtime::new(island, view, size, Env::default());
+        for _ in 0..30 {
+            rt.frame(1.0 / 60.0);
+        }
+        rt
+    }
+
+    fn row_y(rt: &Runtime<Island>, key: &str) -> f32 {
+        rt.presented(key).expect(key).0[1]
+    }
+
+    fn swipe(rt: &mut Runtime<Island>, at: (f32, f32), dx: f32, dy: f32) {
+        rt.update(|s, tx| {
+            s.scroll(dx, dy, GesturePhase::Began, false, Some(at), tx);
+            s.scroll(dx, dy, GesturePhase::Moved, false, Some(at), tx);
+        });
+        for _ in 0..10 {
+            rt.frame(1.0 / 60.0);
+        }
+    }
+
+    #[test]
+    fn a_vertical_swipe_over_a_mod_list_scrolls_it_and_stops_at_its_end() {
+        let mut rt = island_with_list(false);
+        let at = rt.find("m/t/list").expect("list drawn");
+        let top = row_y(&rt, "m/t/r0");
+        swipe(&mut rt, at, 0.0, -50.0);
+        assert!((top - row_y(&rt, "m/t/r0") - 100.0).abs() < 1.0, "scrolled {}", top - row_y(&rt, "m/t/r0"));
+        // 20 rows of 30 with 4 between: 676 points, 476 past the viewport, and no further.
+        swipe(&mut rt, at, 0.0, -1000.0);
+        assert!((top - row_y(&rt, "m/t/r0") - 476.0).abs() < 1.0, "scrolled {}", top - row_y(&rt, "m/t/r0"));
+        assert!(rt.state.expanded, "a swipe up over the list doesn't close the island");
+    }
+
+    #[test]
+    fn a_sideways_swipe_over_a_list_still_changes_nothing_in_it() {
+        let mut rt = island_with_list(false);
+        let at = rt.find("m/t/list").unwrap();
+        let top = row_y(&rt, "m/t/r0");
+        swipe(&mut rt, at, -60.0, -5.0);
+        assert_eq!(row_y(&rt, "m/t/r0"), top);
+    }
+
+    /// The open island with `n` pages, on the first.
+    fn island_with_pages(n: usize) -> Runtime<Island> {
+        let notch = Notch { w: 200.0, h: 32.0, has: true, screen: (1512.0, 982.0) };
+        let mut island = Island::new(notch, Layout::default());
+        for i in 0..n {
+            let name = format!("p{i:02}");
+            let page = json!({ "t": "box", "s": { "dir": "col", "h": 40.0 } });
+            island.outputs.insert(name.clone(), Output { name: name.clone(), title: name, has_expanded: true, expanded: Some(serde_json::from_value(page).unwrap()), ..Default::default() });
+        }
+        island.expanded = true;
+        island.select("p00");
+        let size = (island.canvas_w(), CANVAS_H);
+        let mut rt = Runtime::new(island, view, size, Env::default());
+        for _ in 0..30 {
+            rt.frame(1.0 / 60.0);
+        }
+        rt
+    }
+
+    fn tab_x(rt: &Runtime<Island>, i: usize) -> f32 {
+        rt.presented(&format!("tab/p{i:02}")).expect("tab drawn").0[0]
+    }
+
+    fn selected(rt: &Runtime<Island>) -> String {
+        rt.state.page().unwrap().name.clone()
+    }
+
+    #[test]
+    fn a_sideways_swipe_over_a_full_tab_strip_scrolls_it_and_keeps_the_page() {
+        let mut rt = island_with_pages(12);
+        let at = rt.find("topbar/tabs").expect("strip drawn");
+        let first = tab_x(&rt, 0);
+        swipe(&mut rt, at, -40.0, 2.0);
+        assert!((first - tab_x(&rt, 0) - 80.0).abs() < 1.0, "scrolled {}", first - tab_x(&rt, 0));
+        assert_eq!(selected(&rt), "p00", "the strip scrolled; the page stayed");
+        // 12 tabs: 14 + 12 × 28 + 11 × 4 + 8 = 402 points in a 180-point strip, so 222 and no further.
+        swipe(&mut rt, at, -1000.0, 0.0);
+        assert!((first - tab_x(&rt, 0) - 222.0).abs() < 1.0, "scrolled {}", first - tab_x(&rt, 0));
+        swipe(&mut rt, at, 1000.0, 0.0);
+        assert!((tab_x(&rt, 0) - first).abs() < 1.0, "back at the start");
+    }
+
+    #[test]
+    fn a_sideways_swipe_elsewhere_still_changes_the_page_and_its_tab_comes_into_view() {
+        let mut rt = island_with_pages(12);
+        let strip = rt.state.tabs_rect.get().expect("strip measured");
+        let right = strip[0] + strip[2];
+        assert!(tab_x(&rt, 11) > right, "the last tab starts out of sight");
+        // Backwards from the first page: the last.
+        let body = rt.find("island/body").expect("body drawn");
+        swipe(&mut rt, body, -60.0, 0.0);
+        assert_eq!(selected(&rt), "p11");
+        for _ in 0..40 {
+            rt.frame(1.0 / 60.0);
+        }
+        // At the strip's end: the last tab whole, with no fade over it (nothing hides past it).
+        assert!((tab_x(&rt, 11) + TAB_W + TABS_RIGHT - right).abs() < 0.5, "last tab at {} of {right}", tab_x(&rt, 11));
+        assert_eq!(rt.state.tabs_offset, rt.state.tabs_max());
+    }
+
+    #[test]
+    fn a_tab_scrolled_out_of_the_strip_cant_be_clicked() {
+        let mut rt = island_with_pages(12);
+        let strip = rt.state.tabs_rect.get().unwrap();
+        let (x, y) = (tab_x(&rt, 8) + TAB_W / 2.0, strip[1] + strip[3] / 2.0);
+        assert!(x > strip[0] + strip[2], "tab 8 lies past the strip, under the camera");
+        rt.pointer_down(x, y);
+        rt.pointer_up(x, y);
+        rt.frame(1.0 / 60.0);
+        assert_eq!(selected(&rt), "p00");
+        // One in view can.
+        let x = tab_x(&rt, 2) + TAB_W / 2.0;
+        rt.pointer_down(x, y);
+        rt.pointer_up(x, y);
+        rt.frame(1.0 / 60.0);
+        assert_eq!(selected(&rt), "p02");
+    }
+
+    #[test]
+    fn a_strip_that_fits_doesnt_take_the_swipe() {
+        let mut rt = island_with_pages(3);
+        let at = rt.find("topbar/tabs").expect("strip drawn");
+        swipe(&mut rt, at, 60.0, 0.0);
+        assert_eq!(selected(&rt), "p01", "with nowhere to scroll, a swipe over the tabs changes the page");
+    }
+
+    #[test]
+    fn a_sticking_list_opens_at_its_end_and_scrolls_back_from_there() {
+        let mut rt = island_with_list(true);
+        let at = rt.find("m/t/list").unwrap();
+        let last = row_y(&rt, "m/t/r19");
+        swipe(&mut rt, at, 0.0, 40.0);
+        assert!((row_y(&rt, "m/t/r19") - last - 80.0).abs() < 1.0, "moved {}", row_y(&rt, "m/t/r19") - last);
+    }
 }
