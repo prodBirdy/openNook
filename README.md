@@ -80,12 +80,18 @@ follow log files and watch state files, so integrating another app is usually a 
 The shipped `herdr` mod reads [Herdr](https://github.com/herdrdev/herdr)'s `hc ls --json` and
 jumps to an agent with `herdr-app do agent.focus`.
 
+More mods, made by people and their agents, are in the
+[gallery](https://prodbirdy.github.io/openNook/gallery/). To share yours, push it to a public
+repo with the topic `opennook-mod`; `~/.config/opennook/AGENTS.md` says how.
+
 Shipped mods: **now-playing** (with a music meter that follows the sound), **weather** (an
 animated WGSL sky with the real moon phase), **world-clock** (a dot-matrix world lit where the
 sun is up, with your cities), **iss** (where the station is, its next orbit, altitude and
-speed), **timer** (presets, a ring, a chime), **herdr** and **containers** (Apple's
+speed), **timer** (presets, a ring, a chime), **herdr**, **containers** (Apple's
 [container](https://github.com/apple/container) runtime: what's running, CPU and memory, start and
-stop).
+stop), **messages** (unread beside the camera, recent chats, replies from the island), **reminders**
+(tick things off, add new ones, what's due today) and **caffeinate** (keep the Mac awake for a
+while).
 
 ## Build and run
 

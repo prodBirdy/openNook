@@ -105,6 +105,18 @@ pub enum DisplayMode {
     Pointer,
 }
 
+/// The island's shape: joined to the screen's edge around a notch, or a pill floating around
+/// a camera cutout (the MacBook Pro with the PROLED XDR display).
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum IslandShape {
+    /// The display's own: a pill around a narrow cutout, else the notch's shape.
+    #[default]
+    Auto,
+    Notch,
+    Pill,
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct IslandOptions {
@@ -120,6 +132,7 @@ pub struct IslandOptions {
     /// A tap on the trackpad when a swipe opens the island.
     pub haptics: bool,
     pub display: DisplayMode,
+    pub shape: IslandShape,
     /// Out of the way while an app is full screen on the island's display.
     #[serde(rename = "hideInFullScreen")]
     pub hide_in_full_screen: bool,
@@ -133,7 +146,7 @@ pub struct IslandOptions {
 
 impl Default for IslandOptions {
     fn default() -> Self {
-        Self { width: 560.0, hover: HoverMode::Peek, hover_delay_ms: 120, collapse_delay_ms: 200, glass: true, haptics: true, display: DisplayMode::Notch, hide_in_full_screen: true, glass_tint: 0.5, style: Default::default() }
+        Self { width: 560.0, hover: HoverMode::Peek, hover_delay_ms: 120, collapse_delay_ms: 200, glass: true, haptics: true, display: DisplayMode::Notch, shape: IslandShape::Auto, hide_in_full_screen: true, glass_tint: 0.5, style: Default::default() }
     }
 }
 

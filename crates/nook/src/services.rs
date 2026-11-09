@@ -27,7 +27,20 @@ pub fn start_core() {
 /// The sources every island uses. Agents start on demand (`start_agents`): scanning processes
 /// every two seconds is wasted when no mod reads `agents()`.
 pub fn start(store: Arc<Store>) {
-    let s = store.clone();
+    // Demo data: one track that plays on by itself, no polling.
+    match crate::demo::get().and_then(|d| d.media_json(now_ms())) {
+        Some(m) => {
+            store.publish("media", m);
+        }
+        None => start_media(store.clone()),
+    }
+    spawn("nook-apps", move || loop {
+        store.publish("apps", Value::Array(crate::platform::running_apps()));
+        std::thread::sleep(Duration::from_secs(2));
+    });
+}
+
+fn start_media(s: Arc<Store>) {
     spawn("nook-media", move || {
         let mut anchor = None;
         loop {
@@ -37,10 +50,6 @@ pub fn start(store: Arc<Store>) {
         let cadence = if np.is_playing { Duration::from_secs(1) } else { Duration::from_secs(5) };
         nook_core::runtime().block_on(nook_core::audio::wait_media_or_timeout(cadence));
         }
-    });
-    spawn("nook-apps", move || loop {
-        store.publish("apps", Value::Array(crate::platform::running_apps()));
-        std::thread::sleep(Duration::from_secs(2));
     });
 }
 
@@ -93,6 +102,10 @@ pub fn request_location(store: Arc<Store>) {
 }
 
 pub fn start_agents(store: Arc<Store>) {
+    if let Some(agents) = crate::demo::get().and_then(|d| d.agents.clone()) {
+        store.publish("agents", Value::Array(agents));
+        return;
+    }
     spawn("nook-agents", move || loop {
         let agents: Vec<Value> = nook_core::agents::snapshot().iter().map(agent_json).collect();
         store.publish("agents", Value::Array(agents));

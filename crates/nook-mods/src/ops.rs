@@ -64,6 +64,9 @@ pub fn user_path(home: &Path) -> String {
 }
 
 fn exec(e: Exec, paths: &Paths) -> Result<Value, String> {
+    if let Some(answer) = demo_exec(&e) {
+        return Ok(answer);
+    }
     let mut cmd = Command::new(&e.command);
     cmd.args(&e.args).env("PATH", user_path(&paths.home)).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     cmd.current_dir(e.cwd.as_deref().map(|c| crate::files::expand(c, &paths.home)).unwrap_or_else(|| paths.home.clone()));
@@ -97,6 +100,85 @@ fn exec(e: Exec, paths: &Paths) -> Result<Value, String> {
     }))
 }
 
+/// Demo answers for programs, for screenshots (`OPENNOOK_DEMO`'s `exec`: `[{ command, args,
+/// contains, stdout, code }]`). The first entry whose command matches, whose `args` begin the
+/// call's and whose `contains` is in one of them (an SQL query, say) answers in place of running
+/// it. `stdout` is text, or JSON written out as text, in which `{ "$rate": n }` becomes a counter
+/// going up by `n` a second (a CPU time), and `{ "$now": s }` / `{ "$nowSeconds": s }` the time
+/// `s` seconds from now in milliseconds / seconds since 1970 (a due date, a message's time),
+/// and `{ "$nowIso": s }` the same as an ISO 8601 date (a start time).
+fn demo_exec(e: &Exec) -> Option<Value> {
+    let (list, start) = demo("exec");
+    let args = |d: &Value| d.get("args").and_then(Value::as_array).map_or(true, |a| {
+        a.len() <= e.args.len() && a.iter().zip(&e.args).all(|(x, y)| x.as_str() == Some(y.as_str()))
+    });
+    let contains = |d: &Value| d.get("contains").and_then(Value::as_str).is_none_or(|c| e.args.iter().any(|a| a.contains(c)));
+    let d = list.iter().find(|d| d.get("command").and_then(Value::as_str) == Some(e.command.as_str()) && args(d) && contains(d))?;
+    let stdout = match d.get("stdout") {
+        Some(Value::String(s)) => s.clone(),
+        Some(v) => rates(v.clone(), start.elapsed().as_secs_f64()).to_string(),
+        None => String::new(),
+    };
+    Some(json!({ "code": d.get("code").and_then(Value::as_i64).unwrap_or(0), "stdout": stdout, "stderr": "" }))
+}
+
+/// Demo answers for HTTP (`OPENNOOK_DEMO`'s `fetch`: `[{ url, status, body }]`): the first
+/// entry whose `url` begins the request's answers it, `body` text or JSON written out as text.
+fn demo_fetch(f: &Fetch) -> Option<Value> {
+    let (list, _) = demo("fetch");
+    let d = list.iter().find(|d| d.get("url").and_then(Value::as_str).is_some_and(|u| f.url.starts_with(u)))?;
+    let body = match d.get("body") {
+        Some(Value::String(s)) => s.clone(),
+        Some(v) => v.to_string(),
+        None => String::new(),
+    };
+    Some(json!({ "status": d.get("status").and_then(Value::as_u64).unwrap_or(200), "headers": {}, "body": body }))
+}
+
+/// The demo fixture's `key` list, read once, and when it was read.
+fn demo(key: &str) -> (Vec<Value>, Instant) {
+    static FIXTURE: std::sync::OnceLock<(Value, Instant)> = std::sync::OnceLock::new();
+    let (v, start) = FIXTURE.get_or_init(|| {
+        let v = std::env::var_os("OPENNOOK_DEMO")
+            .and_then(|p| std::fs::read_to_string(p).ok())
+            .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+            .unwrap_or(Value::Null);
+        (v, Instant::now())
+    });
+    (v.get(key).and_then(Value::as_array).cloned().unwrap_or_default(), *start)
+}
+
+/// Seconds since 1970 as "2026-11-09T21:30:00Z" (Howard Hinnant's days-to-civil).
+fn iso_date(secs: i64) -> String {
+    let (days, rem) = (secs.div_euclid(86_400), secs.rem_euclid(86_400));
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + i64::from(m <= 2);
+    format!("{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z", rem / 3600, rem % 3600 / 60, rem % 60)
+}
+
+fn rates(v: Value, secs: f64) -> Value {
+    let now = || std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0);
+    let num = |o: &serde_json::Map<String, Value>, k: &str| o[k].as_f64().unwrap_or(0.0);
+    match v {
+        Value::Object(o) if o.len() == 1 && o.contains_key("$rate") => {
+            json!((num(&o, "$rate") * secs).round() as u64)
+        }
+        Value::Object(o) if o.len() == 1 && o.contains_key("$now") => json!(((now() + num(&o, "$now")) * 1000.0).round() as u64),
+        Value::Object(o) if o.len() == 1 && o.contains_key("$nowSeconds") => json!((now() + num(&o, "$nowSeconds")).round() as u64),
+        Value::Object(o) if o.len() == 1 && o.contains_key("$nowIso") => json!(iso_date((now() + num(&o, "$nowIso")) as i64)),
+        Value::Object(o) => Value::Object(o.into_iter().map(|(k, v)| (k, rates(v, secs))).collect()),
+        Value::Array(a) => Value::Array(a.into_iter().map(|v| rates(v, secs)).collect()),
+        v => v,
+    }
+}
+
 #[derive(Deserialize)]
 struct Fetch {
     url: String,
@@ -112,6 +194,9 @@ fn get() -> String {
 }
 
 fn fetch(f: Fetch) -> Result<Value, String> {
+    if let Some(answer) = demo_fetch(&f) {
+        return Ok(answer);
+    }
     let config = ureq::Agent::config_builder().http_status_as_error(false).timeout_global(Some(EXEC_LIMIT)).build();
     let agent = ureq::Agent::new_with_config(config);
     let mut builder = ureq::http::Request::builder().method(f.method.to_uppercase().as_str()).uri(&f.url);
@@ -154,4 +239,14 @@ fn write(path: &Path, text: &str, paths: &Paths) -> Result<Value, String> {
     }
     crate::files::write_atomic(path, text.as_bytes()).map_err(|e| format!("{}: {e}", path.display()))?;
     Ok(Value::Null)
+}
+
+#[cfg(test)]
+mod demo_tests {
+    #[test]
+    fn iso_dates_are_civil_utc() {
+        assert_eq!(super::iso_date(0), "1970-01-01T00:00:00Z");
+        assert_eq!(super::iso_date(1_794_249_600), "2026-11-09T18:40:00Z");
+        assert_eq!(super::iso_date(951_782_400), "2000-02-29T00:00:00Z");
+    }
 }

@@ -1,6 +1,7 @@
 //! openNook: a Dynamic Island for the notch whose every part is a mod. `opennook` runs the
 //! island; `opennook check <mod>` and `opennook shot` are for the agents that write mods.
 
+mod demo;
 mod fields;
 mod gesture;
 mod home;
@@ -13,6 +14,7 @@ mod render;
 mod services;
 mod settings;
 mod shader;
+mod star;
 mod theme;
 
 use island::{CANVAS_H, Island, Notch};
@@ -36,6 +38,8 @@ usage:
       --hover                     the closed island as hovered (its peek)
       --settings [--page mods|yours|about] [--onboarding 0|1]   the Settings window instead
       --wait <ms>                 how long mods get to settle first (default 2500)
+      --demo <fixture.json>       demo data (a track, agents, programs' answers) in place of
+                                  this Mac's; also OPENNOOK_DEMO for the island itself
       -- <rune flags>             Rune's tooling instead of a still, e.g.
                                   -- --script s.json --strip motion.png --frames 24 --every 2
   opennook paths                print where things are
@@ -203,6 +207,11 @@ fn run() {
         services::start(store);
         watch_layout(overlay.clone(), store_for_layout);
         watch_displays(overlay.clone());
+        let asker = overlay.clone();
+        star::watch(move || asker.update(|s, _| s.star_prompt = true));
+        if demo::get().is_some_and(|d| d.star) {
+            overlay.update(|s, _| s.star_prompt = true);
+        }
         overlay.show();
         let probe = overlay.clone();
         std::thread::spawn(move || {
@@ -394,6 +403,11 @@ fn check(args: &[String]) -> i32 {
 /// Renders the island headless with live mods: what an agent looks at after a change.
 fn shot(args: &[String]) -> i32 {
     let out = args.first().filter(|a| !a.starts_with("--")).cloned().unwrap_or_else(|| "island.png".into());
+    if let Some(fixture) = flag(args, "--demo") {
+        let path = PathBuf::from(&fixture);
+        // SAFETY: set before any thread starts; mods and services read it once, later.
+        unsafe { std::env::set_var("OPENNOOK_DEMO", path.canonicalize().unwrap_or(path)) };
+    }
     if args.iter().any(|a| a == "--settings") {
         let mut state = settings::Settings::new();
         state.page = match flag(args, "--page").as_deref() {
@@ -457,6 +471,7 @@ fn shot(args: &[String]) -> i32 {
     }
     island.expanded = open;
     island.hover = args.iter().any(|a| a == "--hover");
+    island.star_prompt = demo::get().is_some_and(|d| d.star);
     if let Some(m) = flag(args, "--mod") {
         island.select(&m);
     }

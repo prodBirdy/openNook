@@ -23,7 +23,10 @@
     "iss",
     "timer",
     "herdr",
-    "containers"
+    "containers",
+    "messages",
+    "reminders",
+    "caffeinate"
   ],
   "hidden": [],
   "mods": {},

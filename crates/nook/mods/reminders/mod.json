@@ -1,0 +1,6 @@
+{
+  "title": "Reminders",
+  "icon": "app:com.apple.reminders",
+  "description": "Your Reminders lists: tick things off, add new ones, and see beside the camera what's due today.",
+  "props": { "max": 7, "showDue": true }
+}
