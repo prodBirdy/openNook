@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/nook-core", "crates/nook-mods", "crates/nook"]
 
 [workspace.package]
-version = "2.0.0-alpha.1"
+version = "2.0.0-alpha.2"
 edition = "2021"
 license = "MIT"
 authors = ["Jonas Vögel"]

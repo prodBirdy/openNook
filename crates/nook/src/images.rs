@@ -5,10 +5,16 @@ use base64::Engine;
 use rune::{Image, ImageCache};
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 /// Decoded images kept by source; past this the oldest half goes.
 const MAX_IMAGES: usize = 96;
+/// Remote pictures: at most this big a download, decoded to at most this many pixels a side.
+const MAX_DOWNLOAD: u64 = 16 << 20;
+const MAX_REMOTE_SIDE: u32 = 1280;
+/// Some sites send nothing (or a page) to a client they don't know.
+const BROWSER_UA: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15";
 const MAX_ART: usize = 8;
 
 /// Artwork bytes by id, newest last.
@@ -39,11 +45,77 @@ type Loaded = (HashMap<String, (u64, Image)>, u64);
 pub struct Images {
     cache: ImageCache,
     loaded: Mutex<Loaded>,
+    /// A download finished: the island's poll renders again to pick it up.
+    arrived: Arc<AtomicBool>,
+    waker: rune::Waker,
+}
+
+/// Remote pictures by URL. Rune fetches no URLs on native: they're downloaded here, one thread
+/// each, and decoded to RGBA. A failed one stays failed (shown as the empty frame) until the
+/// app restarts.
+enum Remote {
+    Loading,
+    Ready(u32, u32, Arc<[u8]>),
+    Failed,
+}
+
+static REMOTE: OnceLock<Mutex<HashMap<String, Remote>>> = OnceLock::new();
+
+fn remote_map() -> &'static Mutex<HashMap<String, Remote>> {
+    REMOTE.get_or_init(Default::default)
+}
+
+fn fetch_remote(url: &str) -> Remote {
+    match download(url).and_then(|bytes| decode(&bytes)) {
+        Ok((w, h, rgba)) => Remote::Ready(w, h, rgba.into()),
+        Err(e) => {
+            log::warn!("image {url}: {e}");
+            Remote::Failed
+        }
+    }
+}
+
+/// Downloads these pictures now, in parallel, for a still (`opennook shot`) that can't wait
+/// for them the way the island does.
+pub fn preload(urls: &[String]) {
+    let threads: Vec<_> = urls.iter().filter(|u| !remote_map().lock().unwrap().contains_key(*u)).cloned()
+        .map(|url| std::thread::spawn(move || {
+            let state = fetch_remote(&url);
+            remote_map().lock().unwrap().insert(url, state);
+        }))
+        .collect();
+    for t in threads {
+        let _ = t.join();
+    }
 }
 
 impl Images {
     pub fn new(waker: rune::Waker) -> Self {
-        Self { cache: ImageCache::new(waker), loaded: Mutex::default() }
+        Self { cache: ImageCache::new(waker.clone()), loaded: Mutex::default(), arrived: Arc::default(), waker }
+    }
+
+    /// Whether a remote picture has arrived since the last call.
+    pub fn take_arrived(&self) -> bool {
+        self.arrived.swap(false, Ordering::Relaxed)
+    }
+
+    /// A URL's picture once downloaded and decoded; None meanwhile (and when it can't be had).
+    fn remote(&self, url: &str) -> Option<Image> {
+        let mut remote = remote_map().lock().unwrap();
+        match remote.get(url) {
+            Some(Remote::Ready(w, h, rgba)) => return Some(self.cache.rgba(*w, *h, rgba.clone())),
+            Some(_) => return None,
+            None => {}
+        }
+        remote.insert(url.to_owned(), Remote::Loading);
+        let (url, arrived, waker) = (url.to_owned(), self.arrived.clone(), self.waker.clone());
+        std::thread::spawn(move || {
+            let state = fetch_remote(&url);
+            remote_map().lock().unwrap().insert(url, state);
+            arrived.store(true, Ordering::Relaxed);
+            waker();
+        });
+        None
     }
 
     /// The image for a source, loading it on first use; None when the source is unusable.
@@ -88,7 +160,7 @@ impl Images {
             return Some(self.cache.app_icon_scaled(path, size_pt, scale));
         }
         if src.starts_with("https://") || src.starts_with("http://") {
-            return Some(self.cache.url(src, size_pt, scale));
+            return self.remote(src);
         }
         let path = if let Some(rest) = src.strip_prefix("~/") {
             dirs_home().join(rest)
@@ -99,6 +171,49 @@ impl Images {
         };
         Some(self.cache.file(path, size_pt, scale))
     }
+}
+
+fn download(url: &str) -> Result<Vec<u8>, String> {
+    use std::io::Read;
+    let client = reqwest::blocking::Client::builder().user_agent(BROWSER_UA).timeout(std::time::Duration::from_secs(20)).build().map_err(|e| e.to_string())?;
+    let response = client.get(url).header("Accept", "image/avif,image/webp,image/png,image/jpeg,image/*;q=0.8").send().map_err(|e| e.to_string())?;
+    if !response.status().is_success() {
+        return Err(format!("HTTP {}", response.status()));
+    }
+    let mut bytes = Vec::new();
+    response.take(MAX_DOWNLOAD).read_to_end(&mut bytes).map_err(|e| e.to_string())?;
+    Ok(bytes)
+}
+
+/// Straight RGBA at most `MAX_REMOTE_SIDE` a side: PNG, JPEG, GIF, WebP and the rest the
+/// `image` crate reads, else whatever macOS reads (AVIF, HEIC), through `sips`.
+fn decode(bytes: &[u8]) -> Result<(u32, u32, Vec<u8>), String> {
+    let img = match image::load_from_memory(bytes) {
+        Ok(img) => img,
+        Err(e) => image::load_from_memory(&transcode(bytes).ok_or(format!("{e}"))?).map_err(|e| e.to_string())?,
+    };
+    let img = if img.width() > MAX_REMOTE_SIDE || img.height() > MAX_REMOTE_SIDE { img.thumbnail(MAX_REMOTE_SIDE, MAX_REMOTE_SIDE) } else { img };
+    let rgba = img.to_rgba8();
+    Ok((rgba.width(), rgba.height(), rgba.into_raw()))
+}
+
+#[cfg(target_os = "macos")]
+fn transcode(bytes: &[u8]) -> Option<Vec<u8>> {
+    let dir = std::env::temp_dir();
+    let stem = format!("opennook-img-{}-{:x}", std::process::id(), bytes.len() ^ bytes.first().copied().unwrap_or(0) as usize);
+    let (input, output) = (dir.join(&stem), dir.join(format!("{stem}.png")));
+    std::fs::write(&input, bytes).ok()?;
+    let ok = std::process::Command::new("/usr/bin/sips").args(["-s", "format", "png"]).arg(&input).arg("--out").arg(&output)
+        .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status().is_ok_and(|s| s.success());
+    let png = if ok { std::fs::read(&output).ok() } else { None };
+    let _ = std::fs::remove_file(&input);
+    let _ = std::fs::remove_file(&output);
+    png
+}
+
+#[cfg(not(target_os = "macos"))]
+fn transcode(_: &[u8]) -> Option<Vec<u8>> {
+    None
 }
 
 fn dirs_home() -> std::path::PathBuf {

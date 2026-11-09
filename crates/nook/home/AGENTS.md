@@ -8,7 +8,7 @@ working, a dictation); open, it shows pages. Every one of those is a **mod**: a 
 JavaScript in `mods/`. openNook redraws from these files while it runs, within a second of a
 save. When someone asks for something ("show my PRs in the notch", "make the player bigger",
 "put agents first", "show when my build fails"), you do it by editing these files or writing a
-mod. The shipped mods (`now-playing`, `weather`, `world-clock`, `iss`, `timer`, `herdr`) are built from
+mod. The shipped mods (`now-playing`, `weather`, `world-clock`, `iss`, `timer`, `herdr`, `containers`) are built from
 exactly the parts you have; nothing about them is special.
 
 ## The files
@@ -31,7 +31,7 @@ goes to the `.error` file. **Check after every edit.**
 
 ## Shipped mods are openNook's
 
-`now-playing`, `weather`, `world-clock`, `iss`, `timer` and `herdr` are replaced with openNook's copy on each start. If you
+`now-playing`, `weather`, `world-clock`, `iss`, `timer`, `herdr` and `containers` are replaced with openNook's copy on each start. If you
 edit one in place, openNook moves your version to `mods/<name>-edited` before restoring its
 own, so nothing is lost, but the clean way is to copy the folder to a new name, then list the
 new name in `layout.json` and add the old one to `"hidden"`.
@@ -139,9 +139,61 @@ of replacing the element. Ids only need to be unique within the mod.
 .hover_bg(c) .gradient(top, bottom) .text_size(n) .text_color(c) .font_semibold() .font_mono() .tabular_nums()
 .truncate() .line_clamp(n) .color(c)`, motion: `.spring(duration, bounce) .enter("fade" |
 "scale" | "blur" | "slide") .pulse(period) .spin(period) .scale(k) .offset(x, y)`, input:
-`.on_click((event, cx) => …) .on_hover((hovered, cx) => …)`, layering: `.pin(l, t, r, b)
-.absolute_fill()` (over the parent; earlier children draw under later ones), and
-`.when(cond, el => …)`.
+`.on_click((event, cx) => …) .on_hover((hovered, cx) => …) .on_key_down((key, cx) => …)`,
+layering: `.pin(l, t, r, b) .absolute_fill()` (over the parent; earlier children draw under
+later ones), and `.when(cond, el => …)`.
+
+### Scrolling
+
+A page grows with its content, up to the screen. For a long list, give a box a bounded height
+and let it scroll:
+
+```js
+col().id("chats").max_h(260).gap(4).overflow_y_scroll().children(rows)   // a list
+col().id("thread").max_h(240).gap(4).stick_bottom().children(bubbles)     // a chat
+```
+
+- `.overflow_y_scroll()` (or herdr's `.overflow_y_scrollbar()`) on a box with `.h(n)` or
+  `.max_h(n)` and an `.id()` (without one, the render fails: the id keeps its place).
+- `.stick_bottom()`: opens at its end and follows it as content arrives.
+- A two-finger swipe that starts mostly vertical over a box that has somewhere to go scrolls
+  it, momentum included; any other swipe changes the page or closes the island as before.
+  Its edges fade while there's more under them. There's no visible scrollbar.
+
+### Text fields
+
+As in herdr's mods: a field's state is made once, in `init` (never in a render, which throws),
+and an `Input` element shows it. The text lives in openNook, so it survives every render and
+typing never waits on the mod.
+
+```js
+import { View, row, InputState, Input } from "nook/ui";
+
+init(props, cx) {
+  this.field = InputState.new({ placeholder: "New reminder" });
+  this.field.on("submit", (_, cx) => { this.add(this.field.value()); this.field.set_value(""); cx.notify(); });
+}
+expanded() {
+  return row().gap(8).child(Input.new(this.field).flex_1().h(32).px(10).rounded(8).bg("surface").text_size(13));
+}
+```
+
+- `InputState.new({ placeholder, value })`; `.value()`, `.set_value(s)` (no `change`
+  follows), `.focus()`, `.blur()`, `.is_focused()`, `.set_placeholder(s)`,
+  `.set_masked(bool)` (a password), `.release()`.
+- `.on("change" | "submit" | "focus" | "blur", (event, cx) => …)`: `change` on every edit
+  (`event.value`), `submit` on Return, `blur` on Escape, a click in another app, or the
+  island closing.
+- `Input.new(state)` (or `input(state)`) is a single-line field: style its text with
+  `text_size`/`text_color`, its box with `bg`/`rounded`/`border`/`px`/`h`, and the
+  placeholder with `.placeholder_color(c)`.
+- `.on_key_down((key, cx) => …)` on the field or a parent hears the keys the field doesn't
+  type itself: `{ key, keystroke, key_char, modifiers }`, spelled like `"escape"`,
+  `"cmd-enter"`, `"up"`.
+
+Focusing a field (a click, or `focus()`) gives the island the keyboard without bringing
+openNook forward, and keeps the island open while someone types; the keyboard goes back to
+the app it came from on Escape, a click elsewhere, or when the island closes.
 
 Colors are hex (`"#ff9f0a"`, `"#ffffff80"`) or theme tokens: `island` (the island's own
 body), `fg`, `muted`, `faint`, `bg`, `surface`, `raised`, `border`, `accent`, `green`,

@@ -1,0 +1,6 @@
+{
+  "title": "Containers",
+  "icon": "./icon.png",
+  "description": "A quick look at Apple's `container` runtime: what's running, its CPU and memory, with start and stop.",
+  "props": { "showBuilder": true }
+}

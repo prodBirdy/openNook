@@ -109,7 +109,97 @@ class Element {
   // Input. Handlers get (event, cx); call cx.notify() after changing what render reads.
   on_click(f) { this.on = { ...this.on, click: f }; return this.set("cursor", this.s.cursor ?? "pointer"); }
   on_hover(f) { this.on = { ...this.on, hover: f }; return this; }
+  /**
+   * Keys while this element, or a text field inside it, has the keyboard: `f({ key, keystroke,
+   * key_char, modifiers }, cx)`. Keys a field types into itself stay the field's.
+   */
+  on_key_down(f) { this.on = { ...this.on, key: f }; return this; }
+
+  // Scrolling.
+  /**
+   * Scrolls the children vertically when they're taller than this element: give it a bounded
+   * height (`h`, or `max_h` to grow until then) and an `.id()`. A two-finger swipe that
+   * starts over it scrolls it instead of changing the page.
+   */
+  overflow_y_scroll() { return this.set("scroll", true); }
+  /** `overflow_y_scroll()`, as herdr (and GPUI) spell it. There is no visible scrollbar. */
+  overflow_y_scrollbar() { return this.overflow_y_scroll(); }
+  /** A scrolling element that opens at its bottom and follows it as content arrives (a chat). */
+  stick_bottom() { return this.set("scroll", true).set("stick_bottom", true); }
+
+  // Text fields.
+  /** The placeholder's color (default "faint"). */
+  placeholder_color(c) { return this.set("placeholder_color", c); }
 }
+
+/**
+ * A text field's state, made once (in init or a handler, never in a render) and kept on the
+ * view. The text lives in the island, so it survives every render; `on` hears what happens
+ * to it. Show it with `Input.new(state)`.
+ */
+export class InputState {
+  static new(options) { return new InputState(options); }
+  constructor(options = {}) {
+    const n = globalThis.__nook;
+    if (n.rendering()) throw new Error("InputState.new() belongs in init() or a handler: a render would make a new field every time");
+    this.placeholder = String(options.placeholder ?? "");
+    this.masked = false;
+      this._value = String(options.value ?? "");
+    this._focused = false;
+    this._handlers = { change: [], submit: [], focus: [], blur: [] };
+    this.id = n.call("input.new", { value: this._value });
+    n.inputs.set(this.id, this);
+  }
+  /** The text now. */
+  value() { return this._value; }
+  /** Replaces the text (no change event follows). */
+  set_value(value) {
+    this._value = String(value ?? "");
+    globalThis.__nook.call("input", { id: this.id, op: "set", value: this._value });
+  }
+  set_placeholder(text) { this.placeholder = String(text ?? ""); }
+  /** Draws the text as a password. */
+  set_masked(masked) {
+    this.masked = !!masked;
+    globalThis.__nook.call("input", { id: this.id, op: "mask", value: this.masked ? "true" : "" });
+  }
+  /** Moves the keyboard onto the field (while it's on screen). */
+  focus() { globalThis.__nook.call("input", { id: this.id, op: "focus" }); }
+  /** Takes the keyboard off the field. */
+  blur() { globalThis.__nook.call("input", { id: this.id, op: "blur" }); }
+  is_focused() { return this._focused; }
+  /**
+   * `change` (each edit; `{ value }`), `submit` (Return), `focus`, `blur` (Escape, a click
+   * elsewhere, the island closing). Handlers get `(event, cx)`.
+   */
+  on(event, handler) {
+    if (!(event in this._handlers)) throw new TypeError(`InputState.on: no event ${JSON.stringify(event)} (change, submit, focus, blur)`);
+    this._handlers[event].push(handler);
+    return true;
+  }
+  /** Forgets the field. Using it afterwards does nothing. */
+  release() {
+    if (!globalThis.__nook.inputs.delete(this.id)) return false;
+    globalThis.__nook.call("input", { id: this.id, op: "drop" });
+    return true;
+  }
+  __event(event, payload, cx) {
+    if (event === "change") this._value = String(payload.value ?? "");
+    if (event === "focus") this._focused = true;
+    if (event === "blur") this._focused = false;
+    for (const f of this._handlers[event] ?? []) f(payload, cx);
+  }
+}
+
+/** A single-line text field over an `InputState`. Style it like any element: its text with
+ *  text_size/text_color, its box with bg/rounded/border/px/h. */
+export const input = (state) => {
+  if (!(state instanceof InputState)) throw new TypeError("Input.new(state): state must be an InputState (InputState.new() in init)");
+  const e = new Element("input", String(state.id));
+  if (state.placeholder) e.set("placeholder", state.placeholder);
+  return e;
+};
+export const Input = { new: input };
 
 /** A box; children stack vertically. */
 export const div = () => new Element("box").set("dir", "col");

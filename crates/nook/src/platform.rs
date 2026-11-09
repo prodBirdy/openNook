@@ -58,9 +58,47 @@ pub fn running_apps() -> Vec<Value> {
 /// movement there. Scrolls and right-clicks on the island's panel come through here.
 pub enum IslandInput {
     /// Points, positive moving content right and down (the fingers' way with natural scrolling).
-    Scroll { dx: f32, dy: f32, phase: rune::GesturePhase, momentum: bool },
+    /// `x`, `y`: the pointer, in window points from the panel's top-left.
+    Scroll { dx: f32, dy: f32, phase: rune::GesturePhase, momentum: bool, x: f32, y: f32 },
     /// Window points from the panel's top-left.
     SecondaryClick { x: f32, y: f32 },
+}
+
+/// The island's panel becomes key only when asked (`request_keys`, for a focused text field),
+/// never from a click: a press on a button in the island leaves the keyboard where it was.
+pub fn keys_only_on_request(window: u32) {
+    #[cfg(target_os = "macos")]
+    unsafe {
+        use objc2::runtime::AnyObject;
+        use objc2::{class, msg_send};
+        let app: *mut AnyObject = msg_send![class!(NSApplication), sharedApplication];
+        let panel: *mut AnyObject = msg_send![app, windowWithWindowNumber: window as isize];
+        if !panel.is_null() {
+            let _: () = msg_send![panel, setBecomesKeyOnlyIfNeeded: true];
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = window;
+}
+
+/// Gives the keyboard back to the app it came from. The panel never activated openNook, so
+/// that app is still frontmost; once the panel resigns, its key window hears keys again.
+pub fn give_up_keys(window: u32) {
+    #[cfg(target_os = "macos")]
+    unsafe {
+        use objc2::runtime::AnyObject;
+        use objc2::{class, msg_send};
+        let app: *mut AnyObject = msg_send![class!(NSApplication), sharedApplication];
+        let panel: *mut AnyObject = msg_send![app, windowWithWindowNumber: window as isize];
+        if !panel.is_null() {
+            let key: bool = msg_send![panel, isKeyWindow];
+            if key {
+                let _: () = msg_send![panel, resignKeyWindow];
+            }
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = window;
 }
 
 /// Watches the app's own events for ones aimed at the window numbered `window`. Must run on
@@ -81,6 +119,25 @@ pub fn watch_island_input(window: u32, on: impl Fn(IslandInput) + 'static) {
                 return event;
             }
             let kind: usize = msg_send![event, type];
+            #[repr(C)]
+            #[derive(Clone, Copy)]
+            struct Point { x: f64, y: f64 }
+            #[repr(C)]
+            #[derive(Clone, Copy)]
+            struct Rect { origin: Point, size: Point }
+            unsafe impl objc2::Encode for Point {
+                const ENCODING: objc2::Encoding = objc2::Encoding::Struct("CGPoint", &[f64::ENCODING, f64::ENCODING]);
+            }
+            unsafe impl objc2::Encode for Rect {
+                const ENCODING: objc2::Encoding = objc2::Encoding::Struct("CGRect", &[Point::ENCODING, Point::ENCODING]);
+            }
+            // Window points from the panel's top-left (AppKit's run from its bottom-left).
+            let at = || -> (f32, f32) {
+                let at: Point = msg_send![event, locationInWindow];
+                let win: *mut AnyObject = msg_send![event, window];
+                let frame: Rect = if win.is_null() { Rect { origin: Point { x: 0.0, y: 0.0 }, size: Point { x: 0.0, y: 0.0 } } } else { msg_send![win, frame] };
+                (at.x as f32, (frame.size.y - at.y) as f32)
+            };
             if kind == 22 {
                 let precise: bool = msg_send![event, hasPreciseScrollingDeltas];
                 // A notched wheel reports lines; a trackpad, points.
@@ -95,26 +152,13 @@ pub fn watch_island_input(window: u32, on: impl Fn(IslandInput) + 'static) {
                     8 | 16 => rune::GesturePhase::Ended,
                     _ => rune::GesturePhase::Moved,
                 };
-                on(IslandInput::Scroll { dx: dx as f32 * unit, dy: dy as f32 * unit, phase, momentum: momentum != 0 });
+                let (x, y) = at();
+                on(IslandInput::Scroll { dx: dx as f32 * unit, dy: dy as f32 * unit, phase, momentum: momentum != 0, x, y });
                 return std::ptr::null_mut();
             }
             if kind == 3 {
-                #[repr(C)]
-                #[derive(Clone, Copy)]
-                struct Point { x: f64, y: f64 }
-                #[repr(C)]
-                #[derive(Clone, Copy)]
-                struct Rect { origin: Point, size: Point }
-                unsafe impl objc2::Encode for Point {
-                    const ENCODING: objc2::Encoding = objc2::Encoding::Struct("CGPoint", &[f64::ENCODING, f64::ENCODING]);
-                }
-                unsafe impl objc2::Encode for Rect {
-                    const ENCODING: objc2::Encoding = objc2::Encoding::Struct("CGRect", &[Point::ENCODING, Point::ENCODING]);
-                }
-                let at: Point = msg_send![event, locationInWindow];
-                let win: *mut AnyObject = msg_send![event, window];
-                let frame: Rect = if win.is_null() { Rect { origin: Point { x: 0.0, y: 0.0 }, size: Point { x: 0.0, y: 0.0 } } } else { msg_send![win, frame] };
-                on(IslandInput::SecondaryClick { x: at.x as f32, y: (frame.size.y - at.y) as f32 });
+                let (x, y) = at();
+                on(IslandInput::SecondaryClick { x, y });
                 return std::ptr::null_mut();
             }
             event

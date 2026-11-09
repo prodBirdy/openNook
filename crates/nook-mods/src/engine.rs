@@ -34,6 +34,7 @@ pub enum Msg {
     Dispatch { name: String, handler: u64, payload: Value },
     Done { name: String, load: u64, id: u64, result: Result<Value, String> },
     Event { name: String, load: u64, sub: u64, payload: Value },
+    Input { name: String, id: u64, event: String, payload: Value },
     /// Mod folders changed on disk.
     Reload,
     Stop,
@@ -52,7 +53,13 @@ struct State {
     errors: Vec<String>,
     storage: Storage,
     next_op: u64,
+    /// Text field states this copy made (`InputState.new`), dropped with it.
+    inputs: Vec<u64>,
 }
+
+/// Text field ids: unique across mods and reloads, so the app never confuses an old copy's
+/// field with a new one's.
+static NEXT_INPUT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 struct Timer {
     id: u64,
@@ -177,6 +184,14 @@ impl Engine {
                     self.call(&name, CALL_BUDGET, |ctx| {
                         let f: Function = ctx.globals().get("__nook_settle")?;
                         f.call::<_, ()>((id as f64, ok, value.to_string()))
+                    });
+                }
+            }
+            Msg::Input { name, id, event, payload } => {
+                if self.mods.get(&name).is_some_and(|m| m.state.borrow().inputs.contains(&id)) {
+                    self.call(&name, CALL_BUDGET, |ctx| {
+                        let f: Function = ctx.globals().get("__nook_input")?;
+                        f.call::<_, ()>((id as f64, event, payload.to_string()))
                     });
                 }
             }
@@ -371,7 +386,11 @@ impl Engine {
             let f: Function = ctx.globals().get("__nook_unmount")?;
             f.call::<_, ()>(())
         });
-        self.mods.remove(name);
+        if let Some(m) = self.mods.remove(name) {
+            for id in std::mem::take(&mut m.state.borrow_mut().inputs) {
+                self.shared.host.input(name, id, json!({ "op": "drop" }));
+            }
+        }
         // Only this copy's: a reloaded copy has already subscribed under the same name.
         self.shared.watches.lock().unwrap().drop_load(name, load);
     }
@@ -397,6 +416,7 @@ impl Engine {
             errors: Vec::new(),
             storage: Storage::open(&self.shared.config.data, &f.name),
             next_op: 0,
+            inputs: Vec::new(),
         }));
         let ctx = Context::full(&self.rt).map_err(|e| e.to_string())?;
         let main = f.dir.join("main.js");
@@ -598,6 +618,29 @@ fn host_call(state: &Rc<RefCell<State>>, shared: &Shared, op: &str, args: Value)
             };
             let id = shared.watches.lock().unwrap().add(Sub { name: s.name.clone(), load: s.load, path, kind });
             Some(Value::from(id))
+        }
+        "input.new" => {
+            let id = NEXT_INPUT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            s.inputs.push(id);
+            let name = s.name.clone();
+            drop(s);
+            shared.host.input(&name, id, json!({ "op": "new", "value": arg("value") }));
+            Some(Value::from(id))
+        }
+        "input" => {
+            let id = args.get("id").and_then(Value::as_u64).unwrap_or(0);
+            let op = arg("op");
+            if !s.inputs.contains(&id) || !matches!(op.as_str(), "set" | "mask" | "focus" | "blur" | "drop") {
+                s.errors.push(format!("input: no {op:?} for field {id}"));
+                return None;
+            }
+            if op == "drop" {
+                s.inputs.retain(|i| *i != id);
+            }
+            let name = s.name.clone();
+            drop(s);
+            shared.host.input(&name, id, json!({ "op": op, "value": arg("value") }));
+            None
         }
         "unsubscribe" => {
             let id = args.get("id").and_then(Value::as_u64).unwrap_or(0);
