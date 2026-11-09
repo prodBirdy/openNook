@@ -2,6 +2,10 @@
 // tick it again within a few seconds to undo, type a new one into the field under the list
 // (Return adds it and keeps the field for the next). Closed, the island shows how many
 // reminders are due today or overdue, across every list.
+// A new reminder can have a date, a time, a priority and a flag: chips under the field while
+// typing, or written into the title as Reminders' quick entry reads it ("Call Sam tomorrow
+// 9:00 !!", "today", "tonight", "weekend", "next week", "18:00" or "6pm", "!" to "!!!", "flag").
+// With a time, Reminders also alerts then.
 // It asks Reminders for nothing until its page is first opened, so macOS's Automation prompt
 // comes when someone goes to Reminders, not at openNook's first launch; once it has read the
 // lists, it keeps them fresh in the background.
@@ -35,6 +39,52 @@ function dueLabel(r) {
   return `${d.getDate()} ${MONTHS[d.getMonth()]}`;
 }
 
+const DAYS = [["today", "Today"], ["tomorrow", "Tomorrow"], ["weekend", "Weekend"], ["nextweek", "Next week"]];
+const TIMES = ["09:00", "13:00", "18:00"];
+// Reminders' priorities: 1 high, 5 medium, 9 low; the marks a list shows for them.
+const PRIORITIES = [[9, "!"], [5, "!!"], [1, "!!!"]];
+
+// The day `key` names, at midnight: Saturday for the weekend (today, on one), Monday for next week.
+function dayOf(key, now = Date.now()) {
+  const today = startOfDay(now);
+  const weekday = new Date(today).getDay();
+  if (key === "today") return today;
+  if (key === "tomorrow") return today + DAY;
+  if (key === "weekend") return weekday === 6 || weekday === 0 ? today : today + (6 - weekday) * DAY;
+  if (key === "nextweek") return today + ((8 - weekday) % 7 || 7) * DAY;
+  return null;
+}
+
+// Quick entry: the date, time, priority and flag written into a title, and the title without them.
+function parseTitle(raw) {
+  let title = ` ${raw} `;
+  const found = {};
+  const take = (re, f) => { title = title.replace(re, (...m) => { f(...m); return " "; }); };
+  take(/\s(!{1,3})(?=\s)/, (_, marks) => { found.priority = PRIORITIES[marks.length - 1][0]; });
+  take(/\s(flag(?:ged)?|urgent)(?=\s)/i, () => { found.flagged = true; });
+  take(/\snext week(?=\s)/i, () => { found.day = "nextweek"; });
+  take(/\s(today|tomorrow|weekend|this weekend)(?=\s)/i, (_, d) => { found.day = d.toLowerCase().replace("this ", ""); });
+  take(/\stonight(?=\s)/i, () => { found.day = "today"; found.time = "18:00"; });
+  take(/\s(?:at\s)?(\d{1,2}):(\d{2})(?=\s)/, (_, h, m) => { if (+h < 24 && +m < 60) found.time = `${pad(+h)}:${m}`; });
+  take(/\s(?:at\s)?(\d{1,2})\s?(am|pm)(?=\s)/i, (_, h, ap) => {
+    const hour = (+h % 12) + (ap.toLowerCase() === "pm" ? 12 : 0);
+    found.time = `${pad(hour)}:00`;
+  });
+  return { title: title.replace(/\s+/g, " ").trim(), ...found };
+}
+
+// When the draft is due: its day (today, or tomorrow once a time alone has passed) at its time.
+function dueOf(d, now = Date.now()) {
+  if (!d.day && !d.time) return null;
+  if (!d.time) return { due: dayOf(d.day, now), allDay: true };
+  const [h, m] = d.time.split(":").map(Number);
+  let day = d.day ? dayOf(d.day, now) : startOfDay(now);
+  if (!d.day && day + (h * 60 + m) * 60_000 <= now) day += DAY;
+  const at = new Date(day);
+  at.setHours(h, m, 0, 0);
+  return { due: at.getTime(), allDay: false };
+}
+
 // Undated last; then by date, then by priority (1 is high, 0 none).
 const rank = (p) => (p > 0 ? p : 10);
 const byDue = (a, b) => (a.due ?? Infinity) - (b.due ?? Infinity) || rank(a.priority) - rank(b.priority);
@@ -57,7 +107,10 @@ export default class Reminders extends View {
     // Reminders has answered once: background refreshes may ask it without the page open.
     this.connected = localStorage.getItem("connected") === "1";
     this.field = InputState.new({ placeholder: "New reminder" });
+    // What the chips set for the next reminder; the title's own words win over them.
+    this.chips = { day: null, time: null, priority: 0, flagged: false };
     this.field.on("submit", (_, cx) => this.add(cx));
+    // Every edit: the chips follow what the title says.
     this.field.on("change", (_, cx) => cx.notify());
     this.field.on("focus", (_, cx) => cx.notify());
     this.field.on("blur", (_, cx) => cx.notify());
@@ -135,21 +188,39 @@ export default class Reminders extends View {
     }
   }
 
+  // The next reminder as the chips and the title together have it.
+  draft() {
+    const parsed = parseTitle(this.field.value());
+    const d = { ...this.chips };
+    for (const k of ["day", "time", "priority", "flagged"]) if (parsed[k] != null) d[k] = parsed[k];
+    return { ...d, title: parsed.title };
+  }
+
+  chip(cx, key, value) {
+    this.chips[key] = this.chips[key] === value ? (key === "priority" ? 0 : key === "flagged" ? false : null) : value;
+    cx.notify();
+  }
+
   add(cx) {
     const list = this.list();
-    const title = this.field.value().trim();
+    const raw = this.field.value().trim();
+    const d = this.draft();
+    const title = d.title;
     if (!list || !title) return;
     this.field.set_value("");
-    const temp = { id: `pending-${Date.now()}`, name: title, priority: 0, flagged: false, due: null, allDay: false, pending: true };
+    this.chips = { day: null, time: null, priority: 0, flagged: false };
+    const when = dueOf(d);
+    const opts = { priority: d.priority, flagged: d.flagged, due: when?.due ?? null, allDay: when?.allDay ?? false, alert: !!when && !when.allDay };
+    const temp = { id: `pending-${Date.now()}`, name: title, priority: d.priority, flagged: d.flagged, due: opts.due, allDay: opts.allDay, pending: true };
     list.items.push(temp);
     cx.notify();
     cx.spawn(async (cx) => {
-      const { code, stdout, stderr } = await osa("add", list.id, title).catch((e) => ({ code: -1, stdout: "", stderr: String(e?.message ?? e) }));
+      const { code, stdout, stderr } = await osa("add", list.id, title, JSON.stringify(opts)).catch((e) => ({ code: -1, stdout: "", stderr: String(e?.message ?? e) }));
       if (code !== 0 || stdout.trim() !== "ok") {
         this.error = stderr.trim().split("\n").pop() || "Couldn't add that reminder.";
         list.items = list.items.filter((r) => r !== temp);
         // Give the title back, so nothing typed is lost.
-        if (!this.field.value()) this.field.set_value(title);
+        if (!this.field.value()) this.field.set_value(raw);
         cx.notify();
         return;
       }
@@ -197,6 +268,34 @@ export default class Reminders extends View {
     return div().id(id).size(26).rounded_full().items_center().justify_center().bg("surface").hover_bg("raised")
       .on_click((_, cx) => onClick(cx))
       .child(glyph);
+  }
+
+  // Date, time, priority and flag for the next reminder, two rows so a narrow island fits them.
+  options(color) {
+    const d = this.draft();
+    const chip = (id, label, on, onClick, tint = color) => row().id(id).flex_1().px(8).py(5).rounded_full().justify_center()
+      .bg(on ? "raised" : "surface").hover_bg("raised")
+      .border(1, on ? tint : "#00000000")
+      .on_click((_, cx) => onClick(cx))
+      .child(text(label).text_size(11.5).font_semibold().truncate().text_color(on ? tint : "muted"));
+    const days = row().id("opt-days").w_full().gap(6)
+      .children(DAYS.map(([k, label]) => chip(`day-${k}`, label, d.day === k, (cx) => this.chip(cx, "day", k))));
+    const rest = row().id("opt-rest").w_full().gap(6)
+      .children(TIMES.map((t) => chip(`time-${t}`, t, d.time === t, (cx) => this.chip(cx, "time", t))))
+      .child(div().id("opt-gap").w(4))
+      .children(PRIORITIES.map(([p, marks]) => chip(`prio-${p}`, marks, d.priority === p, (cx) => this.chip(cx, "priority", p), "orange")))
+      .child(chip("flag", "Flag", d.flagged, (cx) => this.chip(cx, "flagged", true), "orange"));
+    const when = dueOf(d);
+    const summary = [when ? dueLabel(when) + (when.allDay ? "" : " · alert") : null, d.priority ? PRIORITIES.find(([p]) => p === d.priority)[1] : null, d.flagged ? "flagged" : null]
+      .filter(Boolean).join(" · ");
+    return col().id("options").w_full().gap(6).px(4).enter("fade")
+      .child(days)
+      .child(rest)
+      .when(summary, (c) => c.child(row().id("opt-summary").w_full().px(4).gap(8)
+        .child(text(summary).flex_1().text_size(11).text_color("muted").truncate())
+        .child(row().id("opt-add").px(10).py(4).rounded_full().bg(color).hover_bg(color)
+          .on_click((_, cx) => this.add(cx))
+          .child(text("Add").text_size(11.5).font_semibold().text_color("#000000")))));
   }
 
   pills(lists, current) {
@@ -267,6 +366,8 @@ export default class Reminders extends View {
       .when(lists.length > 1, (p) => p.child(this.pills(lists, list)))
       .child(body)
       .child(composer)
+      .when(typing || this.field.value().trim() || this.chips.day || this.chips.time || this.chips.priority || this.chips.flagged,
+        (p) => p.child(this.options(color)))
       .when(this.error, (p) => p.child(text(this.error).id("error").text_size(11).line_clamp(2).text_color("orange")));
   }
 }
