@@ -220,7 +220,7 @@ function layout({ title, description, up, body }) {
 <meta name="description" content="${esc(description)}">
 <meta property="og:title" content="${esc(title)}">
 <meta property="og:description" content="${esc(description)}">
-<link rel="icon" href="${up}../linux-03-compact.png" type="image/png">
+<link rel="icon" href="${up}../icon.png" type="image/png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Roboto+Mono:wght@400;500&display=swap" rel="stylesheet">
@@ -229,7 +229,7 @@ function layout({ title, description, up, body }) {
 <body>
 <header class="top"><div class="top-in">
 <a class="brand" href="${up}../">openNook</a>
-<nav class="nav"><a href="${up}../#widgets">Widgets</a><a href="${up}" aria-current="page">Gallery</a><a href="https://github.com/${REPO}/releases">Changelog</a></nav>
+<nav class="nav"><a href="${up}../#mods">Mods</a><a href="${up}../#agents">Agents</a><a href="${up}" aria-current="page">Gallery</a><a href="https://github.com/${REPO}/blob/main/CHANGELOG.md">Changelog</a></nav>
 <a class="pill" href="https://github.com/${REPO}/releases">Download</a>
 </div></header>
 <main>

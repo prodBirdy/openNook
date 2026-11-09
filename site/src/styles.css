@@ -31,94 +31,88 @@
     color: inherit;
     text-decoration: none;
   }
+
+  /* No Tailwind preflight here: the layout's gaps do the spacing, not the browser's margins. */
+  h1,
+  h2,
+  h3,
+  p,
+  figure,
+  ol,
+  pre {
+    margin: 0;
+  }
+
+  ol {
+    padding: 0;
+    list-style: none;
+  }
 }
 
-.screen {
-  background-image: linear-gradient(124deg, #33405c 25%, #1b1d26 53%, #0b0b0e 75%);
-  border: 1px solid #ffffff38;
+/* A real screenshot or clip: the top of a MacBook display, island and wallpaper. Until it
+   loads, the wallpaper's own hues stand in. */
+.shot {
+  overflow: hidden;
+  border-radius: 20px;
+  border: 1px solid #ffffff2e;
+  background: linear-gradient(135deg, #1d3b8f 0%, #5b2d9e 55%, #c2622d 100%);
+  box-shadow: 0 24px 60px -24px #3b5bdb80, 0 1px 0 #ffffff1f inset;
 }
 
-.screen-tray {
-  background-image: linear-gradient(121deg, #2a3247 25%, #17181e 55%, #0b0b0e 75%);
-  border: 1px solid #ffffff38;
+.shot video,
+.shot img {
+  background: transparent;
 }
 
-.island {
-  position: relative;
-  background: #000;
-  border-radius: 0 0 36px 36px;
-}
-
-.island-wing {
+/* Behind the hero: a soft light in the wallpaper's blue, violet and orange. */
+.hero-glow {
   position: absolute;
-  top: 0;
-  width: 14px;
-  height: 14px;
+  inset: -12% -8% -18%;
+  background:
+    radial-gradient(40% 55% at 22% 40%, #2f6bff73 0%, transparent 70%),
+    radial-gradient(38% 50% at 58% 30%, #8e4dff66 0%, transparent 70%),
+    radial-gradient(34% 45% at 82% 62%, #ff8a3d59 0%, transparent 70%);
+  filter: blur(40px);
   pointer-events: none;
 }
 
-.island-wing.left {
-  left: -14px;
-}
-
-.island-wing.right {
-  right: -14px;
-}
-
-.island-glass {
-  background-image: linear-gradient(
-    180deg,
-    #000 0%,
-    #000 30%,
-    #0b0b12d6 60%,
-    #5b5b6e7a 85%,
-    #ffffff4d 100%
-  );
-  backdrop-filter: blur(14px);
-  box-shadow: 0 8px 24px #00000059, 0 1px 1px #ffffff2e;
-}
-
-.tab {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 6px 12px;
-  border-radius: 12px;
-  font-size: 12px;
-  line-height: 15px;
-  color: #ebebf599;
-  white-space: nowrap;
-}
-
-.tab.is-active {
-  background: #ffffff29;
+/* An icon on a quiet tile. */
+.tile {
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 10px;
   color: #fff;
-}
-
-.widget {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  height: 32px;
-  padding: 0 9px;
-  background: #000;
-  border-radius: 0 0 14px 14px;
-  min-width: 0;
-}
-
-.widget-value {
-  font-size: 13px;
-  line-height: 16px;
-  font-weight: 600;
-  letter-spacing: -0.1px;
-  white-space: nowrap;
+  background: #ffffff14;
+  border: 1px solid #ffffff1f;
 }
 
 .wall {
   background-image: linear-gradient(114deg, #232838 27%, #141519 73%);
   border: 1px solid #ffffff38;
 }
+
+.code-card {
+  background: #0b0b0e;
+  border: 1px solid #ffffff24;
+}
+
+.code {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  line-height: 20px;
+  color: #ebebf5cc;
+  white-space: pre;
+}
+
+.code .k { color: #ff7ab2; }
+.code .s { color: #ff9f5a; }
+.code .f { color: #64d2ff; }
+.code .t { color: #c5a8ff; }
+.code .n { color: #ffd479; }
+.code .c { color: #ebebf55e; }
 
 .cta-white:hover {
   background: #f2f2f2;
@@ -138,119 +132,6 @@
   height: 1em;
   display: block;
   flex-shrink: 0;
-}
-
-.hero-island-scale {
-  width: 780px;
-  flex-shrink: 0;
-}
-
-.mode-island-scale {
-  width: min(780px, 100%);
-}
-
-.screen-clip {
-  overflow-x: auto;
-  overflow-y: hidden;
-  -webkit-overflow-scrolling: touch;
-}
-
-.term {
-  font-family: var(--font-mono);
-  font-size: 12px;
-  line-height: 18px;
-}
-
-.caret {
-  display: inline-block;
-  width: 7px;
-  height: 14px;
-  background: #30d158;
-  margin-left: 4px;
-  vertical-align: -2px;
-  animation: blink 1s steps(1) infinite;
-}
-
-@keyframes blink {
-  50% {
-    opacity: 0;
-  }
-}
-
-.tip {
-  position: relative;
-}
-
-.tip-card {
-  display: none;
-  position: absolute;
-  left: 50%;
-  top: calc(100% + 10px);
-  transform: translateX(-50%);
-  width: min(280px, 70vw);
-  padding: 12px 14px;
-  background: #0e0f13f2;
-  border: 1px solid #ffffff38;
-  border-radius: 14px;
-  box-shadow: 0 12px 32px #000000a6;
-  z-index: 8;
-  text-align: left;
-}
-
-.tip:hover .tip-card,
-.tip:focus-within .tip-card {
-  display: block;
-}
-
-.wave {
-  display: flex;
-  align-items: flex-end;
-  gap: 2px;
-  height: 14px;
-}
-
-.wave i {
-  display: block;
-  width: 2px;
-  background: #fff;
-  border-radius: 1px;
-}
-
-.ring {
-  width: 16px;
-  height: 16px;
-  border-radius: 999px;
-  background: conic-gradient(#0a84ff 0 62%, #ffffff24 62% 100%);
-  -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 2px), #000 0);
-  mask: radial-gradient(farthest-side, transparent calc(100% - 2px), #000 0);
-}
-
-.batt {
-  display: flex;
-  align-items: center;
-  gap: 2px;
-}
-
-.batt-shell {
-  width: 16px;
-  height: 9px;
-  border: 1.5px solid #30d158;
-  border-radius: 2px;
-  padding: 1px;
-}
-
-.batt-level {
-  width: 82%;
-  height: 100%;
-  background: #30d158;
-  border-radius: 1px;
-}
-
-.batt-nub {
-  width: 2px;
-  height: 5px;
-  background: #30d158;
-  border-radius: 0 1px 1px 0;
 }
 
 .skip-link {
