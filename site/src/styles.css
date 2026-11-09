@@ -49,14 +49,13 @@
   }
 }
 
-/* A real screenshot or clip: the top of a MacBook display, island and wallpaper. Until it
-   loads, the wallpaper's own hues stand in. */
+/* A real screenshot or clip: the top of a MacBook display, island and wallpaper. No frame:
+   the picture's own edge is the card's. */
 .shot {
   overflow: hidden;
   border-radius: 20px;
-  border: 1px solid #ffffff2e;
-  background: linear-gradient(135deg, #1d3b8f 0%, #5b2d9e 55%, #c2622d 100%);
-  box-shadow: 0 24px 60px -24px #3b5bdb80, 0 1px 0 #ffffff1f inset;
+  background: #000;
+  box-shadow: 0 24px 60px -28px #000000b3;
 }
 
 .shot video,
