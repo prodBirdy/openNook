@@ -13,6 +13,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   voice messages and link previews, and replies from the island; needs Full Disk Access),
   Reminders (tick off, add, see what's due; it asks for access only when its page is first
   opened) and Caffeinate (keep the Mac awake for a while or until stopped).
+- Caffeinate can keep the Mac awake with the lid closed too (`pmset disablesleep`, after one
+  administrator password); sleep comes back by itself when the time is up, when it's turned
+  off, or when openNook quits, and the page offers to restore it if a restart got in between.
+- Reminders: a new reminder can have a date, time, priority and flag, from chips under the
+  field or written into the title ("Call Sam tomorrow 9:00 !!").
 - A pill-shaped island for the MacBook Pro with the PROLED XDR display, whose camera sits in a
   cutout below the screen's edge: closed, a floating pill around it; open, an island rounded
   all round, without wings. `island.shape` in layout.json: `"auto"` (picks it for a cutout

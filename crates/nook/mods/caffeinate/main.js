@@ -2,11 +2,37 @@
 // Closed, the island shows a cup and the time left while it's on. caffeinate runs on its own,
 // so a reload or a restart of openNook finds it again; it waits on openNook (-w), so quitting
 // openNook lets the Mac sleep as usual.
+//
+// "Lid closed too" goes further: closing the lid sleeps a Mac whatever caffeinate says, so it
+// turns on `pmset disablesleep`, which needs an administrator's password (macOS's own dialog,
+// once). One small root shell does it and turns it off again by itself when the time is up,
+// when it's turned off here, or when openNook quits or crashes: no second password, which a
+// closed lid couldn't type anyway. If the Mac restarts meanwhile the setting outlives that
+// shell; the page then says so and offers to restore sleep.
 // props: { presets: [15, 30, 60, 120, 240, 0] (minutes; 0 = until stopped), display: true
 //          (keep the display on too; false lets it sleep while the Mac stays up) }
 
 import { View, row, col, div, text, icon } from "nook/ui";
-import { exec, appHome, readTextFile, island } from "nook";
+import { exec, appHome, readTextFile, island, home } from "nook";
+
+// The root shell: sleep off, then wait for the stop file ($0), openNook ($1, 0 for none) or the
+// deadline ($2, seconds since 1970, 0 for none), then sleep on again. It never deletes the stop
+// file (root removing a path the user can swap for a link): the mod clears it before each start.
+const LID_SCRIPT = 'pmset -a disablesleep 1; (while [ ! -e "$0" ] && { [ "$1" = 0 ] || kill -0 "$1" 2>/dev/null; } && { [ "$2" = 0 ] || [ "$(date +%s)" -lt "$2" ]; }; do sleep 5; done; pmset -a disablesleep 0) >/dev/null 2>&1 & echo $!';
+const shellQuote = (s) => `'${String(s).replace(/'/g, "'\\''")}'`;
+const appleQuote = (s) => `"${String(s).replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
+
+// A shell command run as root, through macOS's password dialog. Rejects when it's cancelled.
+async function asAdmin(command, prompt) {
+  const { code, stdout, stderr } = await exec("osascript", ["-e", `do shell script ${appleQuote(command)} with administrator privileges with prompt ${appleQuote(prompt)}`]);
+  if (code !== 0) throw new Error(/-128|cancel/i.test(stderr) ? "cancelled" : stderr.trim() || `osascript exited ${code}`);
+  return stdout.trim();
+}
+
+async function sleepDisabled() {
+  const { stdout } = await exec("pmset", ["-g"]).catch(() => ({ stdout: "" }));
+  return /SleepDisabled\s+1/.test(stdout);
+}
 
 const pad = (n) => String(n).padStart(2, "0");
 
@@ -32,6 +58,11 @@ export default class Caffeinate extends View {
   init(props, cx) {
     this.presets = (Array.isArray(props.presets) ? props.presets : [15, 30, 60, 120, 240, 0]).filter((m) => m >= 0).slice(0, 9);
     this.display = props.display !== false;
+    this.lid = localStorage.getItem("lid") === "1";
+    this.lidError = null;
+    // Sleep is still off from a session that didn't get to turn it back on (the Mac restarted).
+    this.stuck = false;
+    this.stopFile = `${home()}/Library/Caches/openNook/caffeinate-lid.stop`;
     // { pid, endsAt (ms; 0 = until stopped), minutes, display }
     this.on = JSON.parse(localStorage.getItem("on") ?? "null");
     this.busy = false;
@@ -53,12 +84,85 @@ export default class Caffeinate extends View {
   }
 
   async check(cx) {
-    if (!this.on || this.busy) return;
-    if (!(await this.alive(this.on.pid))) {
+    if (this.busy) return;
+    if (this.on && !(await this.alive(this.on.pid))) {
       this.on = null;
       this.save();
       cx.notify();
     }
+    if (this.on?.lid && !(await this.lidAlive(this.on.lid))) {
+      this.on.lid = null;
+      this.save();
+      cx.notify();
+    }
+    // Only sleep this mod turned off counts as stuck: someone's own pmset setting is theirs.
+    const stuck = localStorage.getItem("lidSet") === "1" && !this.on?.lid && (await sleepDisabled());
+    if (localStorage.getItem("lidSet") === "1" && !(await sleepDisabled())) localStorage.removeItem("lidSet");
+    if (stuck !== this.stuck) {
+      this.stuck = stuck;
+      cx.notify();
+    }
+  }
+
+  async lidAlive(pid) {
+    const { stdout } = await exec("ps", ["-p", String(pid), "-o", "comm="]).catch(() => ({ stdout: "" }));
+    return /\bsh$/.test(stdout.trim());
+  }
+
+  // Sleep off until this session ends: the root shell, after one password.
+  async startLid(nook, endsAt) {
+    await exec("mkdir", ["-p", this.stopFile.replace(/\/[^/]+$/, "")]);
+    await exec("rm", ["-f", this.stopFile]);
+    const args = [this.stopFile, /^\d+$/.test(nook ?? "") ? nook : "0", endsAt ? String(Math.ceil(endsAt / 1000)) : "0"];
+    const command = `/bin/sh -c ${shellQuote(LID_SCRIPT)} ${args.map(shellQuote).join(" ")}`;
+    const pid = Number(await asAdmin(command, "openNook needs your password to keep your Mac awake with the lid closed."));
+    if (!pid) throw new Error("the helper didn't start");
+    localStorage.setItem("lidSet", "1");
+    return pid;
+  }
+
+  // The root shell sees the stop file within five seconds and turns sleep back on.
+  async stopLid() {
+    await exec("touch", [this.stopFile]).catch(() => {});
+  }
+
+  setLid(cx, on) {
+    this.lid = on;
+    this.lidError = null;
+    if (on) localStorage.setItem("lid", "1");
+    else localStorage.removeItem("lid");
+    cx.notify();
+    if (!this.on) return;
+    cx.spawn(async (cx) => {
+      try {
+        if (on && !this.on.lid) {
+          const nook = (await readTextFile(`${appHome()}/opennook.pid`))?.trim();
+          this.on.lid = await this.startLid(nook, this.on.endsAt);
+        } else if (!on && this.on.lid) {
+          await this.stopLid();
+          this.on.lid = null;
+        }
+        this.save();
+      } catch (e) {
+        this.lid = false;
+        localStorage.removeItem("lid");
+        this.lidError = e.message === "cancelled" ? null : `Couldn't keep it awake with the lid closed: ${e.message}`;
+      }
+      cx.notify();
+    });
+  }
+
+  restoreSleep(cx) {
+    cx.spawn(async (cx) => {
+      try {
+        await asAdmin("pmset -a disablesleep 0", "openNook needs your password to let your Mac sleep again.");
+        localStorage.removeItem("lidSet");
+        this.stuck = false;
+      } catch (e) {
+        if (e.message !== "cancelled") this.lidError = e.message;
+      }
+      cx.notify();
+    });
   }
 
   tick(cx) {
@@ -91,8 +195,20 @@ export default class Caffeinate extends View {
         const { stdout } = await exec("/bin/sh", ["-c", 'caffeinate "$@" >/dev/null 2>&1 & echo $!', "sh", ...args]);
         const pid = Number(stdout.trim());
         if (!pid) throw new Error("caffeinate didn't start");
-        this.on = { pid, endsAt: minutes ? Date.now() + minutes * 60_000 : 0, minutes, display: this.display };
+        const endsAt = minutes ? Date.now() + minutes * 60_000 : 0;
+        this.on = { pid, endsAt, minutes, display: this.display, lid: null };
         this.save();
+        if (this.lid) {
+          try {
+            this.on.lid = await this.startLid(nook, endsAt);
+            this.save();
+          } catch (e) {
+            // Awake with the lid open still holds; only the lid part is off.
+            this.lid = false;
+            localStorage.removeItem("lid");
+            this.lidError = e.message === "cancelled" ? null : `Couldn't keep it awake with the lid closed: ${e.message}`;
+          }
+        }
       } catch (e) {
         console.error(`start: ${e.message}`);
       } finally {
@@ -112,6 +228,7 @@ export default class Caffeinate extends View {
 
   async kill() {
     const pid = this.on?.pid;
+    if (this.on?.lid) await this.stopLid();
     this.on = null;
     this.save();
     if (pid && (await this.alive(pid))) await exec("kill", [String(pid)]).catch(() => {});
@@ -167,9 +284,30 @@ export default class Caffeinate extends View {
         .when(this.display, (d) => d.items_end())
         .child(div().id("knob").size(16).rounded_full().bg("#ffffff")));
 
+    const lidOn = this.lid;
+    const lid = row().id("lid").w_full().gap(10).px(4).py(2)
+      .on_click((_, cx) => this.setLid(cx, !this.lid))
+      .child(icon("laptop", 14).color(lidOn ? "orange" : "muted"))
+      .child(col().flex_1().gap(1)
+        .child(text("Lid closed too").text_size(12).text_color(lidOn ? "fg" : "muted"))
+        .child(text(on?.lid ? "Sleep is off until this ends" : "Asks for your password; keep it out of a bag").text_size(11).text_color("faint")))
+      .child(div().id("lid-switch").w(34).h(20).rounded_full().bg(lidOn ? "orange" : "raised").p(2)
+        .when(lidOn, (d) => d.items_end())
+        .child(div().id("lid-knob").size(16).rounded_full().bg("#ffffff")));
+
+    const stuck = this.stuck && row().id("stuck").w_full().gap(10).px(12).py(9).rounded(12).bg("#ff9f0a1f")
+      .child(icon("triangle-alert", 14).color("orange"))
+      .child(text("Your Mac still won't sleep, even with the lid closed: the last session ended without turning sleep back on.").flex_1().text_size(12).line_clamp(3))
+      .child(row().id("restore").px(12).py(6).rounded_full().bg("orange").hover_bg("#ffb340")
+        .on_click((_, cx) => this.restoreSleep(cx))
+        .child(text("Restore sleep").text_size(12).font_semibold().text_color("#000000")));
+
     return col().id("caffeinate").w_full().gap(12).px(4).py(8)
+      .child(stuck || null)
       .child(head)
       .child(col().id("presets").w_full().gap(6).children(rows))
-      .child(screen);
+      .child(screen)
+      .child(lid)
+      .when(this.lidError, (c) => c.child(text(this.lidError).id("lid-error").px(4).text_size(11).line_clamp(2).text_color("orange")));
   }
 }
